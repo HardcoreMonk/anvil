@@ -21,3 +21,39 @@ Ephemera is a high-performance, Go-based orchestrator and Model Context Protocol
                                       ⬇️
                          [Firecracker MicroVM] (Hardware Isolated)
                                       └── [Goose AI Agent] (Port 8000)
+```
+## Project Layout
+* `cmd/goose-daemon/`: The main entry point of the daemon.
+* `internal/`: Core business logic modules.
+  + `vm/`: Handles Firecracker processes, socket communication, and VM boots.
+  + `network/`: Manages thread-safe IP allocation and Linux netlink (tap devices).
+  + `storage/`: Manages Golden Image self-building and per-session disk cloning.
+* `scripts/`: Bootstrapping scripts (e.g., build_image.sh for unattended image creation).
+* `artifacts/`: Directory for storing downloaded kernels and base Golden Images.
+
+## Prerequisites
+* **Host OS:** Ubuntu 22.04 LTS (Bare Metal or Cloud Instance with nested virtualization enabled).
+* **Hardware:** `/dev/kvm` access is strictly required.
+* **Runtime:** Go 1.20+
+* **Dependencies:** `firecracker` binary must be installed in `/usr/local/bin/`.
+
+## Getting Started
+1. **Clone the repository:**
+```
+git clone https://github.com/steve-seungeui/ephemera.git
+cd ephemera
+```
+2. **Build the daemon:**
+```
+go build -o ephemera-daemon ./cmd/goose-daemon/main.go
+```
+3. **Run the daemon:**
+```
+sudo ./ephemera-daemon
+```
+*Note: Root privileges are required to interact with `/dev/kvm` and network interfaces.*
+
+*On the first run, Ephemera will automatically initiate the automated build process to generate the Golden Image. This may take a few minutes.*
+
+## Security Posture
+Ephemera ensures that every AI Agent runs within its own KVM-backed hardware boundary. Once a session terminates, the MicroVM is killed, the `tap` interface is deleted, and the isolated `ext4` disk is permanently wiped, leaving zero state behind.
