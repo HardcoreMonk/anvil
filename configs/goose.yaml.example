@@ -1,0 +1,25 @@
+# Goose non-secret configuration injected into each MicroVM at provisioning time.
+#
+# Usage:
+#   cp configs/goose.yaml.example configs/goose.yaml
+#   cp configs/goose-secrets.yaml.example configs/goose-secrets.yaml
+#   # Fill in your values and run the daemon.
+#
+# configs/goose.yaml is gitignored — do not commit.
+
+GOOSE_PROVIDER: google
+GOOSE_MODEL: gemini-2.5-flash
+GOOSE_TELEMETRY_ENABLED: false
+
+# Disable system keyring — MicroVM has no keyring daemon.
+# Goose will read secrets from secrets.yaml in the same directory instead.
+GOOSE_DISABLE_KEYRING: true
+
+# Optional: enable/disable built-in extensions
+extensions:
+  developer:
+    bundled: true
+    enabled: true
+    name: developer
+    timeout: 300
+    type: builtin

@@ -3,35 +3,47 @@ package network
 import (
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
+	"sort"
 	"sync"
 )
 
 type Manager struct {
 	mu         sync.Mutex
-	ipPool     map[string]bool
+	ipList     []string // sorted slice for deterministic allocation order
+	ipInUse    map[string]bool
 	gatewayIP  string
 	subnet     string
 	nextTapID  int
-	bridgeName string // Added bridge name
+	freeTapIDs []int // recycled tap IDs — prefer these over nextTapID
+	bridgeName string
 }
 
 func NewManager(subnet string, gatewayIP string) *Manager {
-	pool := make(map[string]bool)
+	// Build a sorted IP list so allocation order is deterministic.
+	// A map's iteration order is randomized in Go; a slice is not.
+	ips := make([]string, 0, 253)
 	for i := 2; i <= 254; i++ {
-		ip := fmt.Sprintf("%s%d", subnet, i)
-		pool[ip] = false
+		ips = append(ips, fmt.Sprintf("%s%d", subnet, i))
+	}
+	sort.Strings(ips)
+
+	inUse := make(map[string]bool, len(ips))
+	for _, ip := range ips {
+		inUse[ip] = false
 	}
 
 	m := &Manager{
-		ipPool:     pool,
+		ipList:     ips,
+		ipInUse:    inUse,
 		gatewayIP:  gatewayIP,
 		subnet:     subnet,
 		nextTapID:  1,
-		bridgeName: "goose-br0", // Unified virtual switch
+		freeTapIDs: nil,
+		bridgeName: "goose-br0",
 	}
 
-	// Host OS에 가상 스위치(Bridge)를 생성하고 게이트웨이 IP를 부여합니다.
 	if err := m.setupBridge(); err != nil {
 		log.Printf("Warning: Bridge setup note (might already exist): %v", err)
 	}
@@ -42,33 +54,62 @@ func NewManager(subnet string, gatewayIP string) *Manager {
 func (m *Manager) setupBridge() error {
 	exec.Command("ip", "link", "add", "name", m.bridgeName, "type", "bridge").Run()
 	exec.Command("ip", "addr", "add", m.gatewayIP+"/24", "dev", m.bridgeName).Run()
-	return exec.Command("ip", "link", "set", "dev", m.bridgeName, "up").Run()
+	if err := exec.Command("ip", "link", "set", "dev", m.bridgeName, "up").Run(); err != nil {
+		return err
+	}
+
+	// Enable IP forwarding so VM packets can reach the internet via the host.
+	if err := os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1"), 0644); err != nil {
+		log.Printf("Warning: failed to enable ip_forward: %v", err)
+	}
+
+	// NAT masquerade: rewrite source IP of VM packets leaving the internal subnet
+	// so replies are routed back through the host.
+	// -C checks for an existing identical rule; only add with -A when absent.
+	masqArgs := []string{
+		"POSTROUTING", "-s", m.subnet + "0/24", "!", "-d", m.subnet + "0/24", "-j", "MASQUERADE",
+	}
+	if exec.Command("iptables", append([]string{"-t", "nat", "-C"}, masqArgs...)...).Run() != nil {
+		exec.Command("iptables", append([]string{"-t", "nat", "-A"}, masqArgs...)...).Run()
+	}
+
+	return nil
 }
 
 func (m *Manager) Allocate() (tapDevice string, guestIP string, macAddr string, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// Pick the first available IP from the sorted list for deterministic ordering.
 	guestIP = ""
-	for ip, inUse := range m.ipPool {
-		if !inUse {
+	for _, ip := range m.ipList {
+		if !m.ipInUse[ip] {
 			guestIP = ip
-			m.ipPool[ip] = true
+			m.ipInUse[ip] = true
 			break
 		}
 	}
-
 	if guestIP == "" {
 		return "", "", "", fmt.Errorf("no available IP addresses")
 	}
 
-	tapDevice = fmt.Sprintf("tap%d", m.nextTapID)
-	macAddr = fmt.Sprintf("AA:FC:00:00:%02X:%02X", m.nextTapID/256, m.nextTapID%256)
-	m.nextTapID++
+	// Prefer recycled tap IDs over allocating a new one.
+	var tapID int
+	if len(m.freeTapIDs) > 0 {
+		tapID = m.freeTapIDs[0]
+		m.freeTapIDs = m.freeTapIDs[1:]
+	} else {
+		tapID = m.nextTapID
+		m.nextTapID++
+	}
+
+	tapDevice = fmt.Sprintf("tap%d", tapID)
+	macAddr = fmt.Sprintf("AA:FC:00:00:%02X:%02X", tapID/256, tapID%256)
 
 	log.Printf("Creating TAP device: %s for IP: %s...", tapDevice, guestIP)
 	if err := m.createTapDevice(tapDevice); err != nil {
-		m.ipPool[guestIP] = false
+		m.ipInUse[guestIP] = false
+		m.freeTapIDs = append([]int{tapID}, m.freeTapIDs...) // return ID to free-list
 		return "", "", "", fmt.Errorf("failed to create TAP device: %w", err)
 	}
 
@@ -82,8 +123,16 @@ func (m *Manager) Release(tapDevice string, guestIP string) error {
 	if err := m.deleteTapDevice(tapDevice); err != nil {
 		log.Printf("Warning: failed to delete TAP device %s: %v", tapDevice, err)
 	}
-	if _, exists := m.ipPool[guestIP]; exists {
-		m.ipPool[guestIP] = false
+
+	// Return IP to the pool.
+	if _, exists := m.ipInUse[guestIP]; exists {
+		m.ipInUse[guestIP] = false
+	}
+
+	// Return tap ID to the free-list for reuse.
+	var tapID int
+	if _, err := fmt.Sscanf(tapDevice, "tap%d", &tapID); err == nil {
+		m.freeTapIDs = append(m.freeTapIDs, tapID)
 	}
 	return nil
 }
@@ -104,7 +153,7 @@ func (m *Manager) createTapDevice(tapName string) error {
 		m.deleteTapDevice(tapName)
 		return fmt.Errorf("failed to bring up %s: %w", tapName, err)
 	}
-	
+
 	return nil
 }
 
