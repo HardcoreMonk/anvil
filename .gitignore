@@ -3,6 +3,7 @@
 # ==========================================
 
 # 1. Compiled Go binaries
+/ephemera-daemon
 /goose-daemon
 /cmd/goose-daemon/goose-daemon
 *.exe
@@ -25,7 +26,14 @@ vmlinux*
 *.log
 /tmp/*
 
-# 4. OS & Editor generated files
+# 4. Goose runtime config (contains API keys)
+configs/goose.yaml
+configs/goose-secrets.yaml
+
+# 5. Claude Code context file
+CLAUDE.md
+
+# 6. OS & Editor generated files
 .vscode/
 .idea/
 .DS_Store

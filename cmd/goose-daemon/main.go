@@ -1,108 +1,87 @@
 package main
 
 import (
-	"context"
-	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
 
-	// Replace "ephemera" with your actual module name if different
 	"ephemera/internal/network"
 	"ephemera/internal/storage"
-	"ephemera/internal/vm"
 )
 
 func main() {
-	log.Println("Starting Ephemera Control Plane (End-to-End Test)...")
+	log.Println("Starting Ephemera Control Plane...")
+	if len(apiClients) == 0 {
+		log.Println("Warning: no API token configured (EPHEMERA_API_TOKENS / EPHEMERA_API_TOKEN unset) — API is unauthenticated.")
+	}
 
-	// 1. Initialize graceful shutdown context
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	// Resolve Absolute Paths dynamically
 	cwd, err := os.Getwd()
 	if err != nil {
-		log.Fatalf("Fatal error getting current working directory: %v", err)
+		log.Fatalf("Fatal: %v", err)
 	}
-	
-	goldenImagePath := filepath.Join(cwd, "artifacts/ubuntu-22.04-goose.ext4")
-	buildScriptPath := filepath.Join(cwd, "scripts/build_image.sh")
-	kernelPath := filepath.Join(cwd, "artifacts/vmlinux-5.10.bin")
 
-	// 2. Initialize Core Modules with Absolute Paths
-	log.Println("Initializing Storage Provisioner...")
-	provisioner, err := storage.NewProvisioner(
-		goldenImagePath,
-		"/tmp/goose-workspaces",
-		buildScriptPath,
+	goldenImagePath  := filepath.Join(cwd, "artifacts/golden-image.ext4")
+	buildScriptPath  := filepath.Join(cwd, "scripts/build_image.sh")
+	kernelPath       := filepath.Join(cwd, "artifacts/vmlinux.bin")
+	firecrackerPath  := filepath.Join(cwd, "artifacts/firecracker")
+	gooseAgentPath   := filepath.Join(cwd, "artifacts/goose-agent")
+	gooseConfigPath  := filepath.Join(cwd, "configs/goose.yaml")
+	gooseSecretsPath := filepath.Join(cwd, "configs/goose-secrets.yaml")
+
+	const (
+		kernelDownloadURL      = "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/x86_64/vmlinux-6.1.155"
+		firecrackerDownloadURL = "https://github.com/firecracker-microvm/firecracker/releases/download/v1.15.1/firecracker-v1.15.1-x86_64.tgz"
+		firecrackerSHA256      = "d4a32ab2322d887ca1bc4a4e7afa9cc35393e6362dfc2b3becb389d362e4275a"
 	)
-	if err != nil {
-		log.Fatalf("Fatal error initializing storage: %v", err)
+
+	// 1. Build goose-agent (included in the golden image).
+	log.Println("Ensuring goose-agent binary...")
+	if err := storage.EnsureGooseAgent(gooseAgentPath, cwd); err != nil {
+		log.Fatalf("Fatal: %v", err)
 	}
 
+	// 2. Bootstrap storage artifacts.
+	log.Println("Initializing Storage Provisioner...")
+	provisioner, err := storage.NewProvisioner(goldenImagePath, "/tmp/goose-workspaces", buildScriptPath)
+	if err != nil {
+		log.Fatalf("Fatal: %v", err)
+	}
+
+	log.Println("Ensuring kernel binary...")
+	if err := storage.EnsureKernel(kernelPath, kernelDownloadURL); err != nil {
+		log.Fatalf("Fatal: %v", err)
+	}
+
+	log.Println("Ensuring Firecracker binary...")
+	if err := storage.EnsureFirecracker(firecrackerPath, firecrackerDownloadURL, firecrackerSHA256); err != nil {
+		log.Fatalf("Fatal: %v", err)
+	}
+
+	// 3. Network.
 	log.Println("Initializing Network Manager...")
 	netManager := network.NewManager("10.0.1.", "10.0.1.1")
 
-	// ==========================================
-	// [Simulation] Provisioning a new Agent Request
-	// ==========================================
-	vmID := "agent-dynamic-01"
-	log.Printf("Received request to spawn new MicroVM: [%s]", vmID)
+	// 4. Start control plane.
+	cp := NewControlPlane(
+		provisioner, netManager,
+		kernelPath, firecrackerPath, gooseConfigPath, gooseSecretsPath,
+		cwd,
+	)
+	defer cp.DestroyAll()
 
-	// 3. Allocate Network Resources
-	tapDevice, guestIP, macAddr, err := netManager.Allocate()
-	if err != nil {
-		log.Fatalf("Failed to allocate network: %v", err)
-	}
-	// Defer network cleanup to ensure resources are returned on exit
-	defer netManager.Release(tapDevice, guestIP)
-
-	// 4. Provision Storage (Clone Golden Image)
-	diskPath, err := provisioner.CloneDisk(vmID)
-	if err != nil {
-		log.Fatalf("Failed to provision disk: %v", err)
-	}
-	// Defer disk cleanup to ensure file is deleted on exit
-	defer provisioner.CleanupDisk(vmID)
-
-	// 5. Start MicroVM with dynamically allocated resources
-	socketPath := fmt.Sprintf("/tmp/firecracker-%s.sock", vmID)
-	
-	// Clean up stale socket if exists
-	os.Remove(socketPath)
-
-	cfg := vm.VMConfig{
-		VMID:       vmID,
-		SocketPath: socketPath,
-		KernelPath: kernelPath, // Updated to use absolute path
-		RootfsPath: diskPath,
-		TapDevice:  tapDevice,
-		MacAddress: macAddr,
-		GuestIP:    guestIP,
-		GatewayIP:  "10.0.1.1",
-	}
-
-	log.Printf("Booting MicroVM [%s] with IP: %s, TAP: %s...", vmID, guestIP, tapDevice)
-	machine, err := vm.StartMachine(ctx, cfg)
-	if err != nil {
-		log.Fatalf("Fatal error starting MicroVM: %v", err)
-	}
-	
-	// Defer VMM shutdown and socket cleanup
-	defer func() {
-		machine.StopVMM()
-		os.Remove(socketPath)
+	go func() {
+		if err := cp.Start(); err != nil && err != http.ErrServerClosed {
+			log.Printf("Control plane API error: %v", err)
+		}
 	}()
+	defer cp.Shutdown()
 
-	log.Printf("MicroVM [%s] is fully operational at %s. Press Ctrl+C to destroy.", vmID, guestIP)
-
-	// 6. Wait for termination signal (Ctrl+C)
+	// 5. Wait for termination.
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	<-sigChan
-	log.Println("\nReceived termination signal. Executing graceful teardown sequence...")
+	log.Println("Shutting down...")
 }
