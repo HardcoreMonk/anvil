@@ -1,14 +1,14 @@
 ---
 lifecycle_run: 2026-05-11-anvil-redesign
 lifecycle_stage: release
-lifecycle_status: draft
+lifecycle_status: passed
 generated_by: lifecycle-redesign-start
 generated_at: 2026-05-11T00:00:00
 redaction_applied: true
 ---
-# Operation Handoff Draft: anvil
+# Operation Handoff: anvil
 
-## Release Scope Candidate
+## Release Scope
 
 - Documentation-only redesign for anvil project identity, domain glossary, canonical
   document hierarchy, and lifecycle evidence.
@@ -18,10 +18,10 @@ redaction_applied: true
 ## Current Lifecycle Stage
 
 Operate has not been entered. Implementation, code-review, and final verification
-are complete for this documentation-only redesign. Release remains draft until
-explicit release approval.
+are complete for this documentation-only redesign. Release was approved on
+2026-05-11.
 
-## Verification Candidates
+## Verification
 
 - `/data/projects/codex-zone/codex-project-mgmt/scripts/lifecycle-lint.sh anvil --run 2026-05-11-anvil-redesign`
 - `git diff --check`
@@ -42,7 +42,6 @@ explicit release approval.
 
 ## Blockers
 
-- Release approval pending.
 - Operate entry pending.
 
 ## Warnings
@@ -57,12 +56,12 @@ explicit release approval.
 
 ## Next Action
 
-- Request release approval, then update release/operate lifecycle evidence if approved.
+- Request operate entry approval, then update operate lifecycle evidence if approved.
 
 ## Lifecycle Gate Evidence
 
 - Stage: `release`
-- Status: `draft`
-- Approved by: `not-approved`
-- Evidence: Implementation, code-review, and final verification are complete, but
-  release is not approved yet.
+- Status: `passed`
+- Approved by: `user`
+- Evidence: User approved release on 2026-05-11 after implementation, code-review,
+  and final verification completed successfully.
