@@ -1,0 +1,269 @@
+{
+  "artifacts": {
+    "grill": "docs/superpowers/grill-me/2026-05-11-anvil-redesign.md",
+    "handoff": "docs/operations/2026-05-11-anvil-redesign-handoff.md",
+    "plan": "docs/superpowers/plans/2026-05-11-anvil-redesign.md",
+    "spec": "docs/superpowers/specs/2026-05-11-anvil-redesign-design.md"
+  },
+  "created_artifacts": [
+    "docs/superpowers/specs/2026-05-11-anvil-redesign-design.md",
+    "docs/superpowers/grill-me/2026-05-11-anvil-redesign.md",
+    "docs/superpowers/plans/2026-05-11-anvil-redesign.md",
+    "docs/operations/2026-05-11-anvil-redesign-handoff.md",
+    "docs/lifecycle/runs/2026-05-11-anvil-redesign.json"
+  ],
+  "date": "2026-05-11",
+  "generated_at": "2026-05-11T00:00:00",
+  "lint": {
+    "errors": [],
+    "warnings": []
+  },
+  "redactions": {
+    "args": 0,
+    "internal_ref": 79,
+    "local_path": 0,
+    "secret": 0
+  },
+  "run_id": "2026-05-11-anvil-redesign",
+  "scan_summary": {
+    "context_docs": {
+      "CONTEXT-MAP.md": false,
+      "CONTEXT.md": false,
+      "docs/adr": false
+    },
+    "documents": [
+      {
+        "bytes": 3152,
+        "headings": [
+          "Anvil \u2014 Codex project guidance",
+          "Source Of Truth",
+          "Project Shape",
+          "Workflow",
+          "Commands",
+          "Invariants",
+          "Security"
+        ],
+        "path": "AGENTS.md"
+      },
+      {
+        "bytes": 34414,
+        "headings": [
+          "Ephemera",
+          "Architecture",
+          "VM Provisioning Flow",
+          "Snapshot/Restore Flow",
+          "Teardown Flow",
+          "Key Features",
+          "Project Layout",
+          "Prerequisites",
+          "Getting Started",
+          "1. Clone and build",
+          "2. Configure the default LLM",
+          "3. Run"
+        ],
+        "path": "README.md"
+      },
+      {
+        "bytes": 33649,
+        "headings": [
+          "Ephemera \uc18c\uc2a4 \uc904 \ub2e8\uc704 \ubd84\uc11d \ubcf4\uace0\uc11c",
+          "\uc804\uccb4 \uad6c\uc870",
+          "`go.mod`",
+          "`cmd/goose-daemon/main.go`",
+          "`cmd/goose-daemon/config.go`",
+          "`cmd/goose-daemon/api.go`",
+          "`cmd/goose-agent/main.go`",
+          "`[REDACTED_INTERNAL_REF]/storage/provisioner.go`",
+          "`[REDACTED_INTERNAL_REF]/network/manager.go`",
+          "`[REDACTED_INTERNAL_REF]/vm/machine.go`"
+        ],
+        "path": "docs/analysis/01-source-line-analysis.md"
+      },
+      {
+        "bytes": 11933,
+        "headings": [
+          "Ephemera \uc8fc\ub2c8\uc5b4 \uac1c\ubc1c\uc790 \uc2e4\ubb34 \ud22c\uc785 \ubcf4\uace0\uc11c",
+          "\ud55c \ubb38\uc7a5 \uc694\uc57d",
+          "\uc544\ud0a4\ud14d\ucc98 \ubd84\ud574",
+          "\ud504\ub860\ud2b8\uc5d4\ub4dc",
+          "\ubc31\uc5d4\ub4dc",
+          "\ucf54\uc5b4 \ub85c\uc9c1",
+          "\uc2e4\ud589 \ud750\ub984",
+          "daemon \uc2dc\uc791",
+          "VM \uc0dd\uc131",
+          "Task \uc2e4\ud589",
+          "VM \uc0ad\uc81c",
+          "\ud30c\uc77c\ubcc4 \ucc45\uc784"
+        ],
+        "path": "docs/analysis/02-junior-developer-report.md"
+      },
+      {
+        "bytes": 7299,
+        "headings": [
+          "Ephemera \ube44\uc804\uacf5\uc790\uc6a9 \uc124\uba85 \ubcf4\uace0\uc11c",
+          "Ephemera\uac00 \ud558\ub294 \uc77c",
+          "\ub4f1\uc7a5\uc778\ubb3c",
+          "Control Plane",
+          "MicroVM",
+          "goose-agent",
+          "Golden Image",
+          "Goose",
+          "\ud070 \ud750\ub984",
+          "1. \uc2dc\uc2a4\ud15c \uc2dc\uc791",
+          "2. VM \ub9cc\ub4e4\uae30",
+          "3. AI \uc791\uc5c5 \uc2e4\ud589"
+        ],
+        "path": "docs/analysis/03-non-technical-report.md"
+      },
+      {
+        "bytes": 13116,
+        "headings": [
+          "anvil 0.2.0 \ubcc0\uacbd \ubd84\uc11d: 0.1.0 \ub300\ube44",
+          "\uae30\uc900",
+          "\ubcc0\uacbd \uaddc\ubaa8",
+          "\ud575\uc2ec \ubcc0\ud654",
+          "1. Single-host feature complete \uc218\uc900\uc73c\ub85c \ubc94\uc704 \ud655\ub300",
+          "2. guest PID 1 \ub3c4\uc785",
+          "3. VM\ubcc4 agent \uc778\uc99d \ucd94\uac00",
+          "4. daemon agent proxy \ub3c4\uc785",
+          "5. per-VM profile \uc9c0\uc6d0",
+          "6. API token hot reload",
+          "7. snapshot\uacfc restore \ucd94\uac00",
+          "8. diff snapshot\uacfc dirty page tracking"
+        ],
+        "path": "docs/analysis/04-v0.2.0-diff-from-v0.1.0.md"
+      },
+      {
+        "bytes": 14290,
+        "headings": [
+          "anvil 0.2.0 \uc18c\uc2a4 \ubd84\uc11d",
+          "\ubb38\uc11c \ubaa9\uc801",
+          "\uc804\uccb4 \uad6c\uc870",
+          "`cmd/micro-init/main.go`",
+          "\uc5ed\ud560",
+          "\uc8fc\uc694 \ud750\ub984",
+          "\uc758\ubbf8",
+          "\uc8fc\uc758\uc810",
+          "`cmd/goose-agent/main.go`",
+          "agent token \ub85c\ub529",
+          "\uc778\uc99d \ubc29\uc2dd",
+          "vsock IP \ubcc0\uacbd listener"
+        ],
+        "path": "docs/analysis/05-source-line-analysis-v0.2.0.md"
+      },
+      {
+        "bytes": 9382,
+        "headings": [
+          "anvil 0.2.0 \uc8fc\ub2c8\uc5b4 \uac1c\ubc1c\uc790\uc6a9 \ubd84\uc11d \ubcf4\uace0\uc11c",
+          "\ud55c \uc904 \uc694\uc57d",
+          "\uba3c\uc800 \uc54c\uc544\uc57c \ud560 \ubc30\uacbd",
+          "\uaf2d \uc774\ud574\ud574\uc57c \ud558\ub294 \uc0c8 \uad6c\uc131\uc694\uc18c",
+          "micro-init",
+          "agent token",
+          "daemon proxy",
+          "profile",
+          "snapshot",
+          "restore",
+          "\uc911\uc694\ud55c \ud30c\uc77c\ubcc4 \uc124\uba85",
+          "`cmd/goose-daemon/api.go`"
+        ],
+        "path": "docs/analysis/06-junior-developer-report-v0.2.0.md"
+      },
+      {
+        "bytes": 7479,
+        "headings": [
+          "anvil 0.2.0 \ube44\uae30\uc220 \ubcf4\uace0\uc11c",
+          "\uc694\uc57d",
+          "\ubb34\uc5c7\uc774 \ub2ec\ub77c\uc84c\ub098",
+          "1. VM\uc744 \ub354 \uc548\uc804\ud558\uac8c \uc885\ub8cc\ud560 \uc218 \uc788\ub2e4",
+          "2. VM\ub9c8\ub2e4 \ubcc4\ub3c4 \uc778\uc99d\uac12\uc744 \uac00\uc9c4\ub2e4",
+          "3. \uc678\ubd80 \uc2dc\uc2a4\ud15c\uc774 VM\uc5d0 \uc9c1\uc811 \uc811\uadfc\ud558\uc9c0 \uc54a\uc544\ub3c4 \ub41c\ub2e4",
+          "4. VM \uc0c1\ud0dc\ub97c \uc800\uc7a5\ud560 \uc218 \uc788\ub2e4",
+          "5. \uc800\uc7a5 \uacf5\uac04\uc744 \uc544\ub07c\ub294 snapshot \ubc29\uc2dd\uc774 \ub4e4\uc5b4\uac14\ub2e4",
+          "6. \ubcf5\uc6d0 \uc2dc disk \uc804\uccb4\ub97c \ub9e4\ubc88 \ubcf5\uc0ac\ud558\uc9c0 \uc54a\ub294\ub2e4",
+          "7. \uc124\uc815\uacfc \ud14c\uc2a4\ud2b8 \uccb4\uacc4\uac00 \uc88b\uc544\uc84c\ub2e4",
+          "\uc81c\ud488 \uad00\uc810\uc5d0\uc11c\uc758 \uc758\ubbf8",
+          "IronClaw \ud1b5\ud569 \uad00\uc810"
+        ],
+        "path": "docs/analysis/07-non-technical-report-v0.2.0.md"
+      },
+      {
+        "bytes": 1468,
+        "headings": [
+          "anvil \ubd84\uc11d \ubb38\uc11c \uc0c9\uc778",
+          "\uae30\uc900 \uc815\ubcf4",
+          "0.1.0 \ubb38\uc11c",
+          "0.2.0 \ubb38\uc11c",
+          "\uad8c\uc7a5 \uc77d\uae30 \uc21c\uc11c"
+        ],
+        "path": "docs/analysis/README.md"
+      },
+      {
+        "bytes": 42091,
+        "headings": [
+          "anvil IronClaw MCP v1 Implementation Plan",
+          "Source References",
+          "Scope Check",
+          "File Structure",
+          "Task 1: Toolchain And MCP SDK Dependency",
+          "Task 2: Config Loader",
+          "Task 3: Session Store"
+        ],
+        "path": "docs/superpowers/plans/2026-05-11-anvil-ironclaw-mcp-v1.md"
+      },
+      {
+        "bytes": 8415,
+        "headings": [
+          "anvil IronClaw MCP v1 Design",
+          "1. \ubaa9\uc801",
+          "2. \uacb0\uc815 \uc0ac\ud56d",
+          "3. \ube44\ubaa9\ud45c",
+          "4. \uc544\ud0a4\ud14d\ucc98",
+          "4.1 \ucc45\uc784 \uacbd\uacc4",
+          "5. Tool Contract",
+          "5.1 `anvil_spawn_vm`",
+          "5.2 `anvil_run_task`",
+          "5.3 `anvil_get_vm_health`",
+          "5.4 `anvil_stop_vm`",
+          "5.5 `anvil_delete_vm`"
+        ],
+        "path": "docs/superpowers/specs/2026-05-11-anvil-ironclaw-mcp-v1-design.md"
+      }
+    ],
+    "git": {
+      "branch": "main",
+      "dirty_count": 3,
+      "head": "fde3f05"
+    },
+    "packages": [
+      "go.mod"
+    ],
+    "redactions": {
+      "args": 0,
+      "internal_ref": 79,
+      "local_path": 0,
+      "secret": 0
+    }
+  },
+  "schema_version": 1,
+  "stages": {
+    "code-review": "pending",
+    "domain-architecture": "draft",
+    "grill-me": "draft",
+    "implement": "pending",
+    "intake": "draft",
+    "operate": "draft",
+    "plan-design-review": "pending",
+    "plan-eng-review": "pending",
+    "release": "draft",
+    "superpowers:brainstorming": "draft",
+    "superpowers:writing-plans": "draft"
+  },
+  "status": "created",
+  "target": {
+    "path": ".",
+    "project_id": "anvil"
+  },
+  "tool": "lifecycle-redesign-start",
+  "topic": "anvil-redesign"
+}

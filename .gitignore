@@ -3,6 +3,7 @@
 # ==========================================
 
 # 1. Compiled Go binaries
+/anvil-mcp
 /ephemera-daemon
 /goose-daemon
 /cmd/goose-daemon/goose-daemon
@@ -31,12 +32,14 @@ vmlinux*
 /tmp/
 
 # 5. Goose runtime config (contains API keys)
+configs/anvil-mcp.yaml
 configs/goose.yaml
 configs/goose-secrets.yaml
 
 # 6. Claude Code context file
 CLAUDE.md
 Handoff.md
+.superpowers/
 
 # 7. OS & Editor generated files
 .vscode/
