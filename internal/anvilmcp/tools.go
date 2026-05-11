@@ -23,9 +23,16 @@ type Daemon interface {
 	DeleteSnapshot(ctx context.Context, snapshotID string) (*RawDaemonResponse, error)
 }
 
+type sessionStore interface {
+	Exists(sessionName string) bool
+	Bind(sessionName, vmID string) error
+	ResolveIdentity(vmID, sessionName string) (string, error)
+	RemoveVM(vmID string)
+}
+
 type Tools struct {
 	daemon         Daemon
-	sessions       *SessionStore
+	sessions       sessionStore
 	defaultTimeout time.Duration
 }
 
@@ -83,7 +90,28 @@ type SnapshotIdentityInput struct {
 	SnapshotID string `json:"snapshot_id"`
 }
 
+type RestoreSessionBindError struct {
+	SessionName  string
+	RestoredVMID string
+	Err          error
+}
+
+func (e *RestoreSessionBindError) Error() string {
+	return fmt.Sprintf("failed to bind session %q to restored VM %q; restored VM was not deleted: %v", e.SessionName, e.RestoredVMID, e.Err)
+}
+
+func (e *RestoreSessionBindError) Unwrap() error {
+	return e.Err
+}
+
 func NewTools(daemon Daemon, sessions *SessionStore, defaultTimeout time.Duration) *Tools {
+	if sessions == nil {
+		sessions = NewSessionStore()
+	}
+	return newTools(daemon, sessions, defaultTimeout)
+}
+
+func newTools(daemon Daemon, sessions sessionStore, defaultTimeout time.Duration) *Tools {
 	if sessions == nil {
 		sessions = NewSessionStore()
 	}
@@ -263,6 +291,50 @@ func (t *Tools) MCPListSnapshots(ctx context.Context, req *mcp.CallToolRequest, 
 	out, err := t.ListSnapshots(ctx)
 	if err != nil || out == nil {
 		return nil, ListSnapshotsOutput{}, err
+	}
+	return nil, *out, nil
+}
+
+func (t *Tools) RestoreSnapshot(ctx context.Context, input RestoreSnapshotInput) (*RestoreSnapshotOutput, error) {
+	snapshotID := strings.TrimSpace(input.SnapshotID)
+	if snapshotID == "" {
+		return nil, fmt.Errorf("snapshot_id is required")
+	}
+
+	sessionName := strings.TrimSpace(input.SessionName)
+	if sessionName != "" && t.sessions.Exists(sessionName) {
+		return nil, fmt.Errorf("session %q already exists", sessionName)
+	}
+
+	res, err := t.daemon.RestoreSnapshot(ctx, snapshotID)
+	if err != nil {
+		return nil, err
+	}
+
+	if sessionName != "" {
+		if err := t.sessions.Bind(sessionName, res.VMID); err != nil {
+			return nil, &RestoreSessionBindError{
+				SessionName:  sessionName,
+				RestoredVMID: res.VMID,
+				Err:          err,
+			}
+		}
+	}
+
+	return &RestoreSnapshotOutput{
+		VMID:             res.VMID,
+		GuestIP:          res.GuestIP,
+		AgentURL:         res.AgentURL,
+		Profile:          res.Profile,
+		SourceSnapshotID: res.SourceSnapshotID,
+		SessionName:      sessionName,
+	}, nil
+}
+
+func (t *Tools) MCPRestoreSnapshot(ctx context.Context, req *mcp.CallToolRequest, input RestoreSnapshotInput) (*mcp.CallToolResult, RestoreSnapshotOutput, error) {
+	out, err := t.RestoreSnapshot(ctx, input)
+	if err != nil || out == nil {
+		return nil, RestoreSnapshotOutput{}, err
 	}
 	return nil, *out, nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -196,6 +197,71 @@ func (f *fakeDaemon) DeleteSnapshot(_ context.Context, snapshotID string) (*RawD
 		return f.deleteSnapshotResp, nil
 	}
 	return &RawDaemonResponse{StatusCode: 200, Body: `{"status":"deleted","snapshot_id":"snap-1"}`}, nil
+}
+
+type fakeSessionStore struct {
+	sessions map[string]string
+	bindErr  error
+}
+
+func newFakeSessionStore() *fakeSessionStore {
+	return &fakeSessionStore{sessions: make(map[string]string)}
+}
+
+func (s *fakeSessionStore) Bind(sessionName, vmID string) error {
+	sessionName = strings.TrimSpace(sessionName)
+	vmID = strings.TrimSpace(vmID)
+	if s.bindErr != nil {
+		return s.bindErr
+	}
+	if sessionName == "" {
+		return errors.New("session name must be non-empty")
+	}
+	if vmID == "" {
+		return errors.New("vm ID must be non-empty")
+	}
+	if s.sessions == nil {
+		s.sessions = make(map[string]string)
+	}
+	if _, ok := s.sessions[sessionName]; ok {
+		return errors.New("session already exists")
+	}
+	s.sessions[sessionName] = vmID
+	return nil
+}
+
+func (s *fakeSessionStore) Exists(sessionName string) bool {
+	sessionName = strings.TrimSpace(sessionName)
+	if sessionName == "" {
+		return false
+	}
+	_, ok := s.sessions[sessionName]
+	return ok
+}
+
+func (s *fakeSessionStore) ResolveIdentity(vmID, sessionName string) (string, error) {
+	vmID = strings.TrimSpace(vmID)
+	sessionName = strings.TrimSpace(sessionName)
+	if vmID != "" {
+		return vmID, nil
+	}
+	if sessionName == "" {
+		return "", errors.New("vm ID or session name is required")
+	}
+	resolvedVMID, ok := s.sessions[sessionName]
+	if !ok {
+		return "", errors.New("unknown session")
+	}
+	return resolvedVMID, nil
+}
+
+func (s *fakeSessionStore) RemoveVM(vmID string) {
+	vmID = strings.TrimSpace(vmID)
+	for sessionName, mappedVMID := range s.sessions {
+		if mappedVMID == vmID {
+			delete(s.sessions, sessionName)
+		}
+	}
 }
 
 func TestToolsSpawnBindsSession(t *testing.T) {
@@ -530,6 +596,126 @@ func TestToolsDeleteSnapshotRequiresSnapshotID(t *testing.T) {
 	}
 	if daemon.deleteSnapshotCalls != 0 {
 		t.Fatalf("DeleteSnapshot calls = %d, want 0", daemon.deleteSnapshotCalls)
+	}
+}
+
+func TestToolsRestoreSnapshotBindsSession(t *testing.T) {
+	daemon := &fakeDaemon{}
+	store := NewSessionStore()
+	tools := NewTools(daemon, store, time.Second)
+
+	out, err := tools.RestoreSnapshot(context.Background(), RestoreSnapshotInput{
+		SnapshotID:  "snap-1",
+		SessionName: "restored",
+	})
+	if err != nil {
+		t.Fatalf("RestoreSnapshot returned error: %v", err)
+	}
+
+	if daemon.restoreSnapshotCalls != 1 {
+		t.Fatalf("RestoreSnapshot calls = %d, want 1", daemon.restoreSnapshotCalls)
+	}
+	if daemon.restoreSnapshotID != "snap-1" {
+		t.Fatalf("RestoreSnapshot snapshotID = %q, want snap-1", daemon.restoreSnapshotID)
+	}
+	if out.VMID != "vm-restored" {
+		t.Fatalf("VMID = %q, want vm-restored", out.VMID)
+	}
+	if out.SourceSnapshotID != "snap-1" {
+		t.Fatalf("SourceSnapshotID = %q, want snap-1", out.SourceSnapshotID)
+	}
+	if out.SessionName != "restored" {
+		t.Fatalf("SessionName = %q, want restored", out.SessionName)
+	}
+	if vmID, ok := store.Resolve("restored"); !ok || vmID != "vm-restored" {
+		t.Fatalf("session restored resolved to %q, %v; want vm-restored, true", vmID, ok)
+	}
+}
+
+func TestToolsRestoreSnapshotRejectsDuplicateSessionBeforeDaemonCall(t *testing.T) {
+	daemon := &fakeDaemon{}
+	store := NewSessionStore()
+	if err := store.Bind("restored", "vm-existing"); err != nil {
+		t.Fatalf("Bind returned error: %v", err)
+	}
+	tools := NewTools(daemon, store, time.Second)
+
+	_, err := tools.RestoreSnapshot(context.Background(), RestoreSnapshotInput{
+		SnapshotID:  "snap-1",
+		SessionName: "restored",
+	})
+	if err == nil {
+		t.Fatal("RestoreSnapshot returned nil error for duplicate session")
+	}
+	if daemon.restoreSnapshotCalls != 0 {
+		t.Fatalf("RestoreSnapshot calls = %d, want 0", daemon.restoreSnapshotCalls)
+	}
+}
+
+func TestToolsRestoreSnapshotBindFailureDoesNotDeleteRestoredVM(t *testing.T) {
+	bindErr := errors.New("bind race")
+	daemon := &fakeDaemon{}
+	store := newFakeSessionStore()
+	store.bindErr = bindErr
+	tools := newTools(daemon, store, time.Second)
+
+	_, err := tools.RestoreSnapshot(context.Background(), RestoreSnapshotInput{
+		SnapshotID:  "snap-1",
+		SessionName: "restored",
+	})
+	if err == nil {
+		t.Fatal("RestoreSnapshot returned nil error for bind failure")
+	}
+
+	var restoreErr *RestoreSessionBindError
+	if !errors.As(err, &restoreErr) {
+		t.Fatalf("error type = %T, want *RestoreSessionBindError", err)
+	}
+	if restoreErr.RestoredVMID != "vm-restored" {
+		t.Fatalf("RestoredVMID = %q, want vm-restored", restoreErr.RestoredVMID)
+	}
+	if restoreErr.SessionName != "restored" {
+		t.Fatalf("SessionName = %q, want restored", restoreErr.SessionName)
+	}
+	if !strings.Contains(err.Error(), `restored VM "vm-restored"; restored VM was not deleted`) {
+		t.Fatalf("error = %q, want restored VM cleanup guidance", err.Error())
+	}
+	if daemon.deleteCalls != 0 {
+		t.Fatalf("Delete calls = %d, want 0", daemon.deleteCalls)
+	}
+}
+
+func TestToolsRestoreSnapshotOutputOmitsAgentToken(t *testing.T) {
+	daemon := &fakeDaemon{}
+	tools := NewTools(daemon, NewSessionStore(), time.Second)
+
+	out, err := tools.RestoreSnapshot(context.Background(), RestoreSnapshotInput{SnapshotID: "snap-1"})
+	if err != nil {
+		t.Fatalf("RestoreSnapshot returned error: %v", err)
+	}
+
+	data, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal output: %v", err)
+	}
+	if strings.Contains(string(data), "agent_token") {
+		t.Fatalf("restore output JSON exposes agent_token: %s", string(data))
+	}
+	if strings.Contains(string(data), "secret-token") {
+		t.Fatalf("restore output JSON exposes token value: %s", string(data))
+	}
+}
+
+func TestToolsRestoreSnapshotRequiresSnapshotID(t *testing.T) {
+	daemon := &fakeDaemon{}
+	tools := NewTools(daemon, NewSessionStore(), time.Second)
+
+	_, err := tools.RestoreSnapshot(context.Background(), RestoreSnapshotInput{})
+	if err == nil {
+		t.Fatal("RestoreSnapshot returned nil error for empty snapshot_id")
+	}
+	if daemon.restoreSnapshotCalls != 0 {
+		t.Fatalf("RestoreSnapshot calls = %d, want 0", daemon.restoreSnapshotCalls)
 	}
 }
 
