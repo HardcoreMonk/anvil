@@ -10,17 +10,22 @@ redaction_applied: true
 
 ## Release Scope Candidate
 
-- No release scope is accepted yet. Fill this after implementation, code review, and release approval.
+- Documentation-only redesign for anvil project identity, domain glossary, canonical
+  document hierarchy, and lifecycle evidence.
+- Runtime behavior, daemon API, MCP tool contracts, config precedence, session alias
+  semantics, and snapshot/restore behavior are unchanged.
 
 ## Current Lifecycle Stage
 
-Operate has not been entered for this generated redesign run.
+Operate has not been entered. This handoff remains pre-release until implementation,
+code-review, and final verification complete. `plan-eng-review` has passed.
 
 ## Verification Candidates
 
-- Run project-local tests.
-- Run project-local lint/build checks.
-- Run lifecycle lint for this run.
+- `/data/projects/codex-zone/codex-project-mgmt/scripts/lifecycle-lint.sh anvil --run 2026-05-11-anvil-redesign`
+- `git diff --check`
+- `go test ./...`
+- Runtime diff guard against `cmd/`, `internal/`, `go.mod`, and `go.sum`
 
 ## Audit Candidates
 
@@ -29,7 +34,9 @@ Operate has not been entered for this generated redesign run.
 
 ## Blockers
 
-- Release is blocked until accepted gate evidence exists for prerequisite stages.
+- Implementation pending.
+- `code-review` pending.
+- Final verification pending.
 
 ## Warnings
 
