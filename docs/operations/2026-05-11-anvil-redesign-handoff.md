@@ -1,6 +1,6 @@
 ---
 lifecycle_run: 2026-05-11-anvil-redesign
-lifecycle_stage: release
+lifecycle_stage: operate
 lifecycle_status: passed
 generated_by: lifecycle-redesign-start
 generated_at: 2026-05-11T00:00:00
@@ -17,9 +17,9 @@ redaction_applied: true
 
 ## Current Lifecycle Stage
 
-Operate has not been entered. Implementation, code-review, and final verification
-are complete for this documentation-only redesign. Release was approved on
-2026-05-11.
+Operate has been entered. Implementation, code-review, final verification, and
+release approval are complete for this documentation-only redesign. Operate was
+approved on 2026-05-11.
 
 ## Verification
 
@@ -42,7 +42,7 @@ are complete for this documentation-only redesign. Release was approved on
 
 ## Blockers
 
-- Operate entry pending.
+- None.
 
 ## Warnings
 
@@ -56,12 +56,13 @@ are complete for this documentation-only redesign. Release was approved on
 
 ## Next Action
 
-- Request operate entry approval, then update operate lifecycle evidence if approved.
+- Track follow-up release hygiene separately, including public tag and release notes
+  publication if needed.
 
 ## Lifecycle Gate Evidence
 
-- Stage: `release`
+- Stage: `operate`
 - Status: `passed`
 - Approved by: `user`
-- Evidence: User approved release on 2026-05-11 after implementation, code-review,
-  and final verification completed successfully.
+- Evidence: User approved operate entry on 2026-05-11 after release approval and
+  final verification completed successfully.
