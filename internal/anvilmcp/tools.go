@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 const maxTimeoutSeconds = int((24 * time.Hour) / time.Second)
@@ -92,6 +94,14 @@ func (t *Tools) SpawnVM(ctx context.Context, input SpawnVMInput) (*SpawnVMOutput
 	}, nil
 }
 
+func (t *Tools) MCPSpawnVM(ctx context.Context, req *mcp.CallToolRequest, input SpawnVMInput) (*mcp.CallToolResult, SpawnVMOutput, error) {
+	out, err := t.SpawnVM(ctx, input)
+	if err != nil || out == nil {
+		return nil, SpawnVMOutput{}, err
+	}
+	return nil, *out, nil
+}
+
 func (t *Tools) RunTask(ctx context.Context, input RunTaskInput) (*RawDaemonResponse, error) {
 	if strings.TrimSpace(input.Prompt) == "" {
 		return nil, fmt.Errorf("prompt must be non-empty")
@@ -118,6 +128,14 @@ func (t *Tools) RunTask(ctx context.Context, input RunTaskInput) (*RawDaemonResp
 	return t.daemon.RunTask(ctx, vmID, input.Prompt)
 }
 
+func (t *Tools) MCPRunTask(ctx context.Context, req *mcp.CallToolRequest, input RunTaskInput) (*mcp.CallToolResult, RawDaemonResponse, error) {
+	out, err := t.RunTask(ctx, input)
+	if err != nil || out == nil {
+		return nil, RawDaemonResponse{}, err
+	}
+	return nil, *out, nil
+}
+
 func (t *Tools) Health(ctx context.Context, input VMIdentityInput) (*RawDaemonResponse, error) {
 	vmID, err := t.resolveIdentity(input.VMID, input.SessionName)
 	if err != nil {
@@ -126,12 +144,28 @@ func (t *Tools) Health(ctx context.Context, input VMIdentityInput) (*RawDaemonRe
 	return t.daemon.Health(ctx, vmID)
 }
 
+func (t *Tools) MCPHealth(ctx context.Context, req *mcp.CallToolRequest, input VMIdentityInput) (*mcp.CallToolResult, RawDaemonResponse, error) {
+	out, err := t.Health(ctx, input)
+	if err != nil || out == nil {
+		return nil, RawDaemonResponse{}, err
+	}
+	return nil, *out, nil
+}
+
 func (t *Tools) StopVM(ctx context.Context, input VMIdentityInput) (*RawDaemonResponse, error) {
 	vmID, err := t.resolveIdentity(input.VMID, input.SessionName)
 	if err != nil {
 		return nil, err
 	}
 	return t.daemon.Stop(ctx, vmID)
+}
+
+func (t *Tools) MCPStopVM(ctx context.Context, req *mcp.CallToolRequest, input VMIdentityInput) (*mcp.CallToolResult, RawDaemonResponse, error) {
+	out, err := t.StopVM(ctx, input)
+	if err != nil || out == nil {
+		return nil, RawDaemonResponse{}, err
+	}
+	return nil, *out, nil
 }
 
 func (t *Tools) DeleteVM(ctx context.Context, input VMIdentityInput) (*RawDaemonResponse, error) {
@@ -146,6 +180,14 @@ func (t *Tools) DeleteVM(ctx context.Context, input VMIdentityInput) (*RawDaemon
 	}
 	t.sessions.RemoveVM(vmID)
 	return res, nil
+}
+
+func (t *Tools) MCPDeleteVM(ctx context.Context, req *mcp.CallToolRequest, input VMIdentityInput) (*mcp.CallToolResult, RawDaemonResponse, error) {
+	out, err := t.DeleteVM(ctx, input)
+	if err != nil || out == nil {
+		return nil, RawDaemonResponse{}, err
+	}
+	return nil, *out, nil
 }
 
 func (t *Tools) resolveIdentity(vmID, sessionName string) (string, error) {
