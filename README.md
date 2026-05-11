@@ -377,17 +377,19 @@ rate limit에 따라 보통 15-30분 이상 걸릴 수 있다.
 
 모든 daemon 설정은 시작 시 환경 변수에서 읽는다.
 
-| 변수 | 기본값 | 설명 |
-|---|---|---|
-| `EPHEMERA_API_ADDR` | `127.0.0.1:3000` | control plane bind 주소. reverse proxy 뒤에서는 `0.0.0.0:3000`으로 설정할 수 있다. |
-| `EPHEMERA_API_PORT` | `3000` | `EPHEMERA_API_ADDR`가 없을 때 사용하는 port. |
-| `EPHEMERA_API_TOKENS` | unset | named Bearer token 목록. 예: `alice:token1,bob:token2` |
-| `EPHEMERA_API_TOKEN` | unset | 단일 Bearer token fallback. |
-| `EPHEMERA_AGENT_PORT` | `8080` | VM 내부 `goose-agent` listen port. |
-| `EPHEMERA_PUBLIC_URL` | unset | 외부에서 접근 가능한 control plane base URL. 설정 시 `agent_url`이 proxy path가 된다. |
+| Canonical 변수 | Alias 변수 | 기본값 | 설명 |
+|---|---|---|---|
+| `EPHEMERA_API_ADDR` | `ANVIL_API_ADDR` | `127.0.0.1:3000` | control plane bind 주소. reverse proxy 뒤에서는 `0.0.0.0:3000`으로 설정할 수 있다. |
+| `EPHEMERA_API_PORT` | `ANVIL_API_PORT` | `3000` | API addr가 없을 때 사용하는 port. |
+| `EPHEMERA_API_TOKENS` | `ANVIL_API_TOKENS` | unset | named Bearer token 목록. 예: `alice:token1,bob:token2` |
+| `EPHEMERA_API_TOKEN` | `ANVIL_API_TOKEN` | unset | 단일 Bearer token fallback. |
+| `EPHEMERA_AGENT_PORT` | `ANVIL_AGENT_PORT` | `8080` | VM 내부 `goose-agent` listen port. |
+| `EPHEMERA_PUBLIC_URL` | `ANVIL_PUBLIC_URL` | unset | 외부에서 접근 가능한 control plane base URL. 설정 시 `agent_url`이 proxy path가 된다. |
 
-`EPHEMERA_API_ADDR`가 `EPHEMERA_API_PORT`보다 우선한다. token은 `SIGHUP`으로
-daemon 재시작 없이 reload할 수 있다.
+`EPHEMERA_*`는 ephemera runtime의 canonical 변수이고 `ANVIL_*`는 anvil 운영자를
+위한 alias다. 둘 다 설정되어 있으면 `EPHEMERA_*`가 우선한다.
+`EPHEMERA_API_ADDR` 또는 `ANVIL_API_ADDR`가 port 변수보다 우선한다. token은
+`SIGHUP`으로 daemon 재시작 없이 reload할 수 있다.
 
 ---
 
@@ -594,7 +596,7 @@ profile 이름에는 `/` 또는 `\`를 사용할 수 없다.
 
 | 경계 | 메커니즘 |
 |---|---|
-| client -> control plane | `EPHEMERA_API_TOKENS` 또는 `EPHEMERA_API_TOKEN` Bearer token |
+| client -> control plane | `EPHEMERA_API_TOKENS`/`EPHEMERA_API_TOKEN` 또는 `ANVIL_API_TOKENS`/`ANVIL_API_TOKEN` Bearer token |
 | control plane -> guest agent | VM별 Bearer token |
 | guest task isolation | Firecracker MicroVM + KVM boundary |
 | guest network | host-only `10.0.1.0/24`, bridge `goose-br0` |

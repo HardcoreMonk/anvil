@@ -58,15 +58,23 @@ Go 모듈 경로와 기존 API/환경 변수에는 `ephemera` 또는 `goose` 이
 - daemon 기본 bind 주소/포트: `127.0.0.1:3000`
 - VM private network: `10.0.1.0/24`, bridge `goose-br0`
 - guest agent port: `8080`
-- control-plane token 환경 변수: `EPHEMERA_API_TOKENS`,
+- control-plane token canonical 환경 변수: `EPHEMERA_API_TOKENS`,
   `EPHEMERA_API_TOKEN`
-- public agent URL 환경 변수: `EPHEMERA_PUBLIC_URL`
+- control-plane token alias 환경 변수: `ANVIL_API_TOKENS`,
+  `ANVIL_API_TOKEN`
+- public agent URL canonical 환경 변수: `EPHEMERA_PUBLIC_URL`
+- public agent URL alias 환경 변수: `ANVIL_PUBLIC_URL`
+- daemon bind canonical 환경 변수: `EPHEMERA_API_ADDR`,
+  `EPHEMERA_API_PORT`
+- daemon bind alias 환경 변수: `ANVIL_API_ADDR`,
+  `ANVIL_API_PORT`
+- guest agent port canonical 환경 변수: `EPHEMERA_AGENT_PORT`
+- guest agent port alias 환경 변수: `ANVIL_AGENT_PORT`
 - MCP adapter daemon URL 환경 변수: `ANVIL_DAEMON_URL`
 - MCP adapter token 환경 변수: `ANVIL_API_TOKEN`
 
 ## 후속 후보
 
 - 공개 tag/release 정리: Git tag와 GitHub Release page 상태를 함께 관리
-- `EPHEMERA_*` 환경 변수의 `ANVIL_*` alias 추가
 - MCP v2에서 snapshot/restore tool, workspace copy, persistent session 지원
 - multi-host runtime, scheduler, quota, audit storage 추가

@@ -38,6 +38,24 @@ VM 내부의 `goose-agent`는 다음 endpoint를 제공한다.
 외부 caller는 private guest IP에 직접 접근하기보다 control plane proxy endpoint를
 사용해야 한다.
 
+## Runtime 설정 alias
+
+daemon은 기존 `EPHEMERA_*` 환경 변수를 canonical 계약으로 유지하면서 다음
+`ANVIL_*` alias를 fallback으로 인식한다.
+
+| Canonical | Alias |
+|---|---|
+| `EPHEMERA_API_ADDR` | `ANVIL_API_ADDR` |
+| `EPHEMERA_API_PORT` | `ANVIL_API_PORT` |
+| `EPHEMERA_API_TOKENS` | `ANVIL_API_TOKENS` |
+| `EPHEMERA_API_TOKEN` | `ANVIL_API_TOKEN` |
+| `EPHEMERA_AGENT_PORT` | `ANVIL_AGENT_PORT` |
+| `EPHEMERA_PUBLIC_URL` | `ANVIL_PUBLIC_URL` |
+
+각 설정은 canonical 값이 비어 있을 때만 alias 값을 사용한다. 이 규칙은 기존
+ephemera 배포의 동작을 보존하면서 anvil 운영 문서에서 `ANVIL_*` 이름을 사용할 수
+있게 한다.
+
 ## 제어 평면 인증
 
 모든 control-plane route는 `authMiddleware`로 감싼다.
@@ -55,8 +73,21 @@ token 비교는 constant-time comparison을 사용하고 첫 후보에서 멈추
 partial token match가 timing으로 새지 않게 하기 위한 선택이다.
 
 `SIGHUP`은 `ControlPlane.ReloadClients`를 호출한다. daemon 재시작이나 실행 중
-VM 중단 없이 `EPHEMERA_API_TOKENS` 또는 `EPHEMERA_API_TOKEN`을 메모리에 다시
-로드한다.
+VM 중단 없이 `EPHEMERA_API_TOKENS`/`ANVIL_API_TOKENS` 또는
+`EPHEMERA_API_TOKEN`/`ANVIL_API_TOKEN`을 메모리에 다시 로드한다.
+
+환경 변수 precedence:
+
+```text
+EPHEMERA_API_TOKENS
+  -> ANVIL_API_TOKENS
+  -> EPHEMERA_API_TOKEN
+  -> ANVIL_API_TOKEN
+  -> 인증 비활성화
+```
+
+`EPHEMERA_*`는 ephemera runtime의 canonical 설정이고 `ANVIL_*`는 anvil 운영자를
+위한 alias다. canonical 값이 있으면 alias 값보다 우선한다.
 
 ## VM 생성 로직
 
