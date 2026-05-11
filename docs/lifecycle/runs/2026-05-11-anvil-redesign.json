@@ -249,7 +249,7 @@
   "stages": {
     "code-review": "pending",
     "domain-architecture": "passed",
-    "grill-me": "draft",
+    "grill-me": "passed",
     "implement": "pending",
     "intake": "passed",
     "operate": "draft",
