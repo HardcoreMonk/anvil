@@ -8,10 +8,17 @@
 문서 간 설명이 충돌하면 아래 순서를 따른다.
 
 1. `AGENTS.md`
-2. `README.md`
-3. `RELEASE_NOTES.md`
-4. `docs/`
-5. `.superpowers/` 로컬 brainstorming 산출물
+2. `CONTEXT.md`
+3. `README.md`
+4. `RELEASE_NOTES.md`
+5. `docs/analysis/`
+6. `docs/superpowers/`
+7. `docs/lifecycle/`, `docs/operations/`
+8. `.superpowers/` local brainstorming artifacts
+
+`CONTEXT.md` owns domain glossary, module boundary, and legacy naming policy.
+`docs/lifecycle/runs/*.json` is computed lifecycle snapshot output and does not
+override accepted project-local evidence.
 
 Claude Code 호환 `CLAUDE.md`는 현재 운영하지 않는다. 이 repo에서 Codex 기준 문서는
 `AGENTS.md`다.
@@ -33,6 +40,9 @@ Claude Code 호환 `CLAUDE.md`는 현재 운영하지 않는다. 이 repo에서 
 - 신규 runtime/API/MCP 설계는 `brainstorming -> domain-architecture -> grill-me ->
   writing-plans -> plan-eng-review -> implement -> code-review -> release -> operate`
   흐름을 따른다. 실제 spec/plan은 `docs/superpowers/` 아래에 둔다.
+- 문서/아키텍처 정합성 redesign은 runtime code, daemon API, MCP tool contract,
+  snapshot/restore behavior를 변경하지 않는다. 해당 변경이 필요하면 새 spec으로
+  scope를 다시 승인받는다.
 - `.superpowers/`는 로컬 brainstorming runtime 산출물이다. 내부 IP와 임시 server
   metadata가 들어갈 수 있으므로 commit하지 않는다.
 - `docs/analysis/`는 분석 보고서 초안이다. release 문서로 승격할 때만 정리해서
