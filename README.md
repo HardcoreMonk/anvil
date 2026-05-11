@@ -1,7 +1,7 @@
 # anvil
 
 [![CI](https://github.com/HardcoreMonk/ephemera/actions/workflows/ci.yml/badge.svg)](https://github.com/HardcoreMonk/ephemera/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/HardcoreMonk/ephemera)](https://github.com/HardcoreMonk/ephemera/releases)
+[![Latest Tag](https://img.shields.io/github/v/tag/HardcoreMonk/ephemera?sort=semver&label=tag)](https://github.com/HardcoreMonk/ephemera/tags)
 [![Go](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Firecracker](https://img.shields.io/badge/Firecracker-v1.15.1-FF4500?logo=amazonaws&logoColor=white)](https://github.com/firecracker-microvm/firecracker)
@@ -11,6 +11,9 @@
 anvil orchestrates isolated, KVM-backed MicroVM environments for agentic AI workloads. Each VM runs [Goose](https://github.com/aaif-goose/goose) as an autonomous agent inside a minimal Debian guest, fully contained within hardware VM boundaries and wiped on termination.
 
 The repository is still named `ephemera`; the official project and product name is `anvil`.
+
+Versioned source snapshots are published as Git tags. `v0.2.0` is the latest public
+source tag; GitHub Release pages are not currently published.
 
 ---
 
@@ -136,6 +139,7 @@ cmd/
     main.go           Startup, artifact bootstrap, ControlPlane init
     api.go            HTTP API: VM + snapshot CRUD, auth middleware
     config.go         Env-var configuration (ports, tokens, address)
+  anvil-mcp/          Stdio MCP adapter entrypoint for IronClaw
   goose-agent/        In-VM HTTP agent (baked into golden image)
     main.go           /tasks, /health, /stop  (Bearer token auth)
   micro-init/         PID 1 for each MicroVM (baked into golden image)
@@ -143,6 +147,7 @@ cmd/
                       calls poweroff(2) on exit
 
 internal/
+  anvilmcp/           MCP config, daemon client, session aliases, tool handlers
   vm/machine.go       Firecracker SDK wrapper — StartMachine, RestoreMachine
   network/manager.go  IP pool, TAP device lifecycle, AllocateForRestore, bridge, NAT
   storage/
@@ -153,6 +158,7 @@ internal/
                       MergeMemoryDiff (SEEK_DATA/SEEK_HOLE sparse merge)
 
 configs/
+  anvil-mcp.yaml.example        MCP adapter config template
   goose.yaml.example             Default provider/model template
   goose-secrets.yaml.example     API key template
   profiles/                      Per-VM LLM profiles (optional)
@@ -162,6 +168,12 @@ configs/
 
 .github/
   workflows/ci.yml    go build + go vet + go test on push/PR (ubuntu-22.04)
+
+docs/
+  analysis/            Version comparison and source analysis reports
+  lifecycle/runs/      Computed lifecycle status snapshots
+  operations/          Release/operate handoff records
+  superpowers/         Accepted specs, grill-me decisions, and plans
 
 snapshots/            Stored snapshot directories (auto-created, gitignored)
   <snapshot-id>/
@@ -182,6 +194,16 @@ artifacts/            Auto-populated at runtime (gitignored)
   goose-agent         In-VM HTTP agent binary (compiled from source)
   micro-init          PID 1 init binary (compiled from source)
 ```
+
+## Documentation Map
+
+| Document | Purpose |
+|----------|---------|
+| [CONTEXT.md](CONTEXT.md) | Canonical product name, source-of-truth order, domain glossary, and frozen runtime contracts |
+| [AGENTS.md](AGENTS.md) | Codex project guidance, workflow rules, commands, and invariants |
+| [RELEASE_NOTES.md](RELEASE_NOTES.md) | Version notes for `v0.1.0`, `v0.2.0`, and unreleased changes |
+| [docs/analysis/README.md](docs/analysis/README.md) | Index for 0.1.0 and 0.2.0 analysis documents |
+| [docs/operations/2026-05-11-anvil-redesign-handoff.md](docs/operations/2026-05-11-anvil-redesign-handoff.md) | Current redesign release/operate handoff evidence |
 
 ---
 
