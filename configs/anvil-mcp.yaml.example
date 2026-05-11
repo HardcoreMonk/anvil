@@ -1,0 +1,9 @@
+# anvil-mcp configuration.
+# Environment variables override these values:
+# - ANVIL_DAEMON_URL
+# - ANVIL_API_TOKEN
+# - ANVIL_MCP_DEFAULT_TIMEOUT
+
+daemon_url: http://127.0.0.1:3000
+api_token: ""
+default_timeout_seconds: 300

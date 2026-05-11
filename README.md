@@ -365,6 +365,47 @@ All settings are read from environment variables at startup.
 
 ---
 
+## IronClaw MCP Adapter
+
+`cmd/anvil-mcp` exposes the anvil daemon API as a stdio MCP server for IronClaw.
+
+Build the adapter:
+
+```bash
+go build -o anvil-mcp ./cmd/anvil-mcp
+```
+
+Configure it with environment variables:
+
+```bash
+export ANVIL_DAEMON_URL=http://127.0.0.1:3000
+export ANVIL_API_TOKEN="<daemon-bearer-token>"
+export ANVIL_MCP_DEFAULT_TIMEOUT=300
+```
+
+`ANVIL_API_TOKEN` must be set to one daemon bearer token value. This can be one token from `EPHEMERA_API_TOKENS`, or `$EPHEMERA_API_TOKEN` only when the daemon is using legacy single-token mode.
+
+Or use a config file:
+
+```bash
+cp configs/anvil-mcp.yaml.example configs/anvil-mcp.yaml
+export ANVIL_MCP_CONFIG=configs/anvil-mcp.yaml
+```
+
+MCP tools:
+
+| Tool | Meaning |
+|------|---------|
+| `anvil_spawn_vm` | create a VM; accepts optional profile and session_name |
+| `anvil_run_task` | run a prompt in a VM; accepts vm_id or session_name |
+| `anvil_get_vm_health` | check VM agent health |
+| `anvil_stop_vm` | ask the agent to stop gracefully |
+| `anvil_delete_vm` | delete the VM and release its session alias |
+
+v1 is a thin runtime bridge; it does not copy workspace files, create snapshots, restore sessions, or delete VMs automatically.
+
+---
+
 ## API Reference
 
 ### Control Plane API (`localhost:3000`)
