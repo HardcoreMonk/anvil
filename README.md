@@ -428,7 +428,9 @@ curl -X POST http://localhost:3000/vms \
 }
 ```
 
-`agent_token`은 이 응답에만 포함된다.
+daemon API에서는 `POST /vms`와 `POST /snapshots/{id}/restore` 응답에
+`agent_token`이 포함될 수 있다. MCP output은 restore 응답의 `agent_token`을
+노출하지 않는다.
 
 ### VM 목록
 

@@ -262,10 +262,17 @@ func (t *Tools) CreateSnapshot(ctx context.Context, input CreateSnapshotInput) (
 		return nil, err
 	}
 
-	return t.daemon.CreateSnapshot(ctx, vmID, CreateSnapshotRequest{
+	out, err := t.daemon.CreateSnapshot(ctx, vmID, CreateSnapshotRequest{
 		StopAfter: input.StopAfter,
 		Type:      snapshotType,
 	})
+	if err != nil {
+		return nil, err
+	}
+	if input.StopAfter {
+		t.sessions.RemoveVM(vmID)
+	}
+	return out, nil
 }
 
 func (t *Tools) MCPCreateSnapshot(ctx context.Context, req *mcp.CallToolRequest, input CreateSnapshotInput) (*mcp.CallToolResult, SnapshotInfo, error) {

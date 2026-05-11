@@ -502,6 +502,31 @@ func TestToolsCreateSnapshotUsesSession(t *testing.T) {
 	if out.SnapshotID != "snap-1" {
 		t.Fatalf("SnapshotID = %q, want snap-1", out.SnapshotID)
 	}
+	if _, ok := store.Resolve("work"); ok {
+		t.Fatal("session work still exists after successful stop_after snapshot")
+	}
+}
+
+func TestToolsCreateSnapshotKeepsSessionWithoutStopAfter(t *testing.T) {
+	daemon := &fakeDaemon{}
+	store := NewSessionStore()
+	if err := store.Bind("work", "vm-1"); err != nil {
+		t.Fatalf("Bind returned error: %v", err)
+	}
+	tools := NewTools(daemon, store, time.Second)
+
+	_, err := tools.CreateSnapshot(context.Background(), CreateSnapshotInput{
+		SessionName: "work",
+		StopAfter:   false,
+		Type:        "full",
+	})
+	if err != nil {
+		t.Fatalf("CreateSnapshot returned error: %v", err)
+	}
+
+	if _, ok := store.Resolve("work"); !ok {
+		t.Fatal("session work was removed after snapshot without stop_after")
+	}
 }
 
 func TestToolsCreateSnapshotRejectsInvalidTypeBeforeDaemonCall(t *testing.T) {
