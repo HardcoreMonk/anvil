@@ -39,6 +39,26 @@ type fakeDaemon struct {
 	deleteHasDeadline bool
 	deleteResp        *RawDaemonResponse
 	deleteErr         error
+
+	createSnapshotCalls int
+	createSnapshotVMID  string
+	createSnapshotReq   CreateSnapshotRequest
+	createSnapshotResp  *SnapshotInfo
+	createSnapshotErr   error
+
+	listSnapshotCalls int
+	listSnapshotResp  []SnapshotInfo
+	listSnapshotErr   error
+
+	restoreSnapshotCalls int
+	restoreSnapshotID    string
+	restoreSnapshotResp  *RestoreSnapshotResponse
+	restoreSnapshotErr   error
+
+	deleteSnapshotCalls int
+	deleteSnapshotID    string
+	deleteSnapshotResp  *RawDaemonResponse
+	deleteSnapshotErr   error
 }
 
 func (f *fakeDaemon) SpawnVM(_ context.Context, profile string) (*SpawnVMResponse, error) {
@@ -106,6 +126,71 @@ func (f *fakeDaemon) Delete(ctx context.Context, vmID string) (*RawDaemonRespons
 		return f.deleteResp, nil
 	}
 	return &RawDaemonResponse{StatusCode: 200, Body: `{"deleted":true}`}, nil
+}
+
+func (f *fakeDaemon) CreateSnapshot(_ context.Context, vmID string, req CreateSnapshotRequest) (*SnapshotInfo, error) {
+	f.createSnapshotCalls++
+	f.createSnapshotVMID = vmID
+	f.createSnapshotReq = req
+	if f.createSnapshotErr != nil {
+		return nil, f.createSnapshotErr
+	}
+	if f.createSnapshotResp != nil {
+		return f.createSnapshotResp, nil
+	}
+	return &SnapshotInfo{
+		SnapshotID:   "snap-1",
+		SourceVMID:   vmID,
+		SnapshotType: "full",
+		CreatedAt:    time.Date(2026, 5, 11, 0, 0, 0, 0, time.UTC),
+	}, nil
+}
+
+func (f *fakeDaemon) ListSnapshots(_ context.Context) ([]SnapshotInfo, error) {
+	f.listSnapshotCalls++
+	if f.listSnapshotErr != nil {
+		return nil, f.listSnapshotErr
+	}
+	if f.listSnapshotResp != nil {
+		return f.listSnapshotResp, nil
+	}
+	return []SnapshotInfo{{
+		SnapshotID:   "snap-1",
+		SourceVMID:   "vm-1",
+		SnapshotType: "full",
+		CreatedAt:    time.Date(2026, 5, 11, 0, 0, 0, 0, time.UTC),
+	}}, nil
+}
+
+func (f *fakeDaemon) RestoreSnapshot(_ context.Context, snapshotID string) (*RestoreSnapshotResponse, error) {
+	f.restoreSnapshotCalls++
+	f.restoreSnapshotID = snapshotID
+	if f.restoreSnapshotErr != nil {
+		return nil, f.restoreSnapshotErr
+	}
+	if f.restoreSnapshotResp != nil {
+		return f.restoreSnapshotResp, nil
+	}
+	return &RestoreSnapshotResponse{
+		VMID:             "vm-restored",
+		GuestIP:          "10.0.0.9",
+		AgentURL:         "http://10.0.0.9:8080",
+		Profile:          "dev",
+		AgentToken:       "secret-token",
+		SourceSnapshotID: snapshotID,
+	}, nil
+}
+
+func (f *fakeDaemon) DeleteSnapshot(_ context.Context, snapshotID string) (*RawDaemonResponse, error) {
+	f.deleteSnapshotCalls++
+	f.deleteSnapshotID = snapshotID
+	if f.deleteSnapshotErr != nil {
+		return nil, f.deleteSnapshotErr
+	}
+	if f.deleteSnapshotResp != nil {
+		return f.deleteSnapshotResp, nil
+	}
+	return &RawDaemonResponse{StatusCode: 200, Body: `{"status":"deleted","snapshot_id":"snap-1"}`}, nil
 }
 
 func TestToolsSpawnBindsSession(t *testing.T) {
@@ -311,6 +396,111 @@ func TestToolsReturnsDaemonError(t *testing.T) {
 	_, err := tools.Health(context.Background(), VMIdentityInput{VMID: "vm-1"})
 	if !errors.Is(err, daemonErr) {
 		t.Fatalf("Health error = %v, want %v", err, daemonErr)
+	}
+}
+
+func TestToolsCreateSnapshotUsesSession(t *testing.T) {
+	daemon := &fakeDaemon{}
+	store := NewSessionStore()
+	if err := store.Bind("work", "vm-1"); err != nil {
+		t.Fatalf("Bind returned error: %v", err)
+	}
+	tools := NewTools(daemon, store, time.Second)
+
+	out, err := tools.CreateSnapshot(context.Background(), CreateSnapshotInput{
+		SessionName: "work",
+		StopAfter:   true,
+		Type:        "DIFF",
+	})
+	if err != nil {
+		t.Fatalf("CreateSnapshot returned error: %v", err)
+	}
+
+	if daemon.createSnapshotCalls != 1 {
+		t.Fatalf("CreateSnapshot calls = %d, want 1", daemon.createSnapshotCalls)
+	}
+	if daemon.createSnapshotVMID != "vm-1" {
+		t.Fatalf("CreateSnapshot vmID = %q, want vm-1", daemon.createSnapshotVMID)
+	}
+	if !daemon.createSnapshotReq.StopAfter {
+		t.Fatal("StopAfter = false, want true")
+	}
+	if daemon.createSnapshotReq.Type != "diff" {
+		t.Fatalf("Type = %q, want diff", daemon.createSnapshotReq.Type)
+	}
+	if out.SnapshotID != "snap-1" {
+		t.Fatalf("SnapshotID = %q, want snap-1", out.SnapshotID)
+	}
+}
+
+func TestToolsCreateSnapshotRejectsInvalidTypeBeforeDaemonCall(t *testing.T) {
+	daemon := &fakeDaemon{}
+	tools := NewTools(daemon, NewSessionStore(), time.Second)
+
+	_, err := tools.CreateSnapshot(context.Background(), CreateSnapshotInput{
+		VMID: "vm-1",
+		Type: "base",
+	})
+	if err == nil {
+		t.Fatal("CreateSnapshot returned nil error for invalid type")
+	}
+	if daemon.createSnapshotCalls != 0 {
+		t.Fatalf("CreateSnapshot calls = %d, want 0", daemon.createSnapshotCalls)
+	}
+}
+
+func TestToolsListSnapshotsWrapsDaemonList(t *testing.T) {
+	daemon := &fakeDaemon{listSnapshotResp: []SnapshotInfo{{
+		SnapshotID:   "snap-1",
+		SourceVMID:   "vm-1",
+		SnapshotType: "full",
+		CreatedAt:    time.Date(2026, 5, 11, 0, 0, 0, 0, time.UTC),
+	}}}
+	tools := NewTools(daemon, NewSessionStore(), time.Second)
+
+	out, err := tools.ListSnapshots(context.Background())
+	if err != nil {
+		t.Fatalf("ListSnapshots returned error: %v", err)
+	}
+
+	if daemon.listSnapshotCalls != 1 {
+		t.Fatalf("ListSnapshots calls = %d, want 1", daemon.listSnapshotCalls)
+	}
+	if len(out.Snapshots) != 1 {
+		t.Fatalf("snapshot count = %d, want 1", len(out.Snapshots))
+	}
+	if out.Snapshots[0].SnapshotID != "snap-1" {
+		t.Fatalf("SnapshotID = %q, want snap-1", out.Snapshots[0].SnapshotID)
+	}
+}
+
+func TestToolsDeleteSnapshotPreservesDaemonError(t *testing.T) {
+	daemonErr := &DaemonError{StatusCode: 409, Body: `{"error":"base snapshot is referenced"}`}
+	daemon := &fakeDaemon{deleteSnapshotErr: daemonErr}
+	tools := NewTools(daemon, NewSessionStore(), time.Second)
+
+	_, err := tools.DeleteSnapshot(context.Background(), SnapshotIdentityInput{SnapshotID: "snap-1"})
+	if !errors.Is(err, daemonErr) {
+		t.Fatalf("DeleteSnapshot error = %v, want %v", err, daemonErr)
+	}
+	if daemon.deleteSnapshotCalls != 1 {
+		t.Fatalf("DeleteSnapshot calls = %d, want 1", daemon.deleteSnapshotCalls)
+	}
+	if daemon.deleteSnapshotID != "snap-1" {
+		t.Fatalf("DeleteSnapshot snapshotID = %q, want snap-1", daemon.deleteSnapshotID)
+	}
+}
+
+func TestToolsDeleteSnapshotRequiresSnapshotID(t *testing.T) {
+	daemon := &fakeDaemon{}
+	tools := NewTools(daemon, NewSessionStore(), time.Second)
+
+	_, err := tools.DeleteSnapshot(context.Background(), SnapshotIdentityInput{})
+	if err == nil {
+		t.Fatal("DeleteSnapshot returned nil error for empty snapshot_id")
+	}
+	if daemon.deleteSnapshotCalls != 0 {
+		t.Fatalf("DeleteSnapshot calls = %d, want 0", daemon.deleteSnapshotCalls)
 	}
 }
 

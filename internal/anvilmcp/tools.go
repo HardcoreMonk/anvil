@@ -17,6 +17,10 @@ type Daemon interface {
 	Health(ctx context.Context, vmID string) (*RawDaemonResponse, error)
 	Stop(ctx context.Context, vmID string) (*RawDaemonResponse, error)
 	Delete(ctx context.Context, vmID string) (*RawDaemonResponse, error)
+	CreateSnapshot(ctx context.Context, vmID string, req CreateSnapshotRequest) (*SnapshotInfo, error)
+	ListSnapshots(ctx context.Context) ([]SnapshotInfo, error)
+	RestoreSnapshot(ctx context.Context, snapshotID string) (*RestoreSnapshotResponse, error)
+	DeleteSnapshot(ctx context.Context, snapshotID string) (*RawDaemonResponse, error)
 }
 
 type Tools struct {
@@ -48,6 +52,35 @@ type RunTaskInput struct {
 type VMIdentityInput struct {
 	VMID        string `json:"vm_id,omitempty"`
 	SessionName string `json:"session_name,omitempty"`
+}
+
+type CreateSnapshotInput struct {
+	VMID        string `json:"vm_id,omitempty"`
+	SessionName string `json:"session_name,omitempty"`
+	StopAfter   bool   `json:"stop_after"`
+	Type        string `json:"type,omitempty"`
+}
+
+type ListSnapshotsOutput struct {
+	Snapshots []SnapshotInfo `json:"snapshots"`
+}
+
+type RestoreSnapshotInput struct {
+	SnapshotID  string `json:"snapshot_id"`
+	SessionName string `json:"session_name,omitempty"`
+}
+
+type RestoreSnapshotOutput struct {
+	VMID             string `json:"vm_id"`
+	GuestIP          string `json:"guest_ip"`
+	AgentURL         string `json:"agent_url"`
+	Profile          string `json:"profile,omitempty"`
+	SourceSnapshotID string `json:"source_snapshot_id"`
+	SessionName      string `json:"session_name,omitempty"`
+}
+
+type SnapshotIdentityInput struct {
+	SnapshotID string `json:"snapshot_id"`
 }
 
 func NewTools(daemon Daemon, sessions *SessionStore, defaultTimeout time.Duration) *Tools {
@@ -188,6 +221,76 @@ func (t *Tools) MCPDeleteVM(ctx context.Context, req *mcp.CallToolRequest, input
 		return nil, RawDaemonResponse{}, err
 	}
 	return nil, *out, nil
+}
+
+func (t *Tools) CreateSnapshot(ctx context.Context, input CreateSnapshotInput) (*SnapshotInfo, error) {
+	snapshotType, err := normalizeSnapshotType(input.Type)
+	if err != nil {
+		return nil, err
+	}
+
+	vmID, err := t.resolveIdentity(input.VMID, input.SessionName)
+	if err != nil {
+		return nil, err
+	}
+
+	return t.daemon.CreateSnapshot(ctx, vmID, CreateSnapshotRequest{
+		StopAfter: input.StopAfter,
+		Type:      snapshotType,
+	})
+}
+
+func (t *Tools) MCPCreateSnapshot(ctx context.Context, req *mcp.CallToolRequest, input CreateSnapshotInput) (*mcp.CallToolResult, SnapshotInfo, error) {
+	out, err := t.CreateSnapshot(ctx, input)
+	if err != nil || out == nil {
+		return nil, SnapshotInfo{}, err
+	}
+	return nil, *out, nil
+}
+
+func (t *Tools) ListSnapshots(ctx context.Context) (*ListSnapshotsOutput, error) {
+	snapshots, err := t.daemon.ListSnapshots(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if snapshots == nil {
+		snapshots = []SnapshotInfo{}
+	}
+	return &ListSnapshotsOutput{Snapshots: snapshots}, nil
+}
+
+func (t *Tools) MCPListSnapshots(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, ListSnapshotsOutput, error) {
+	out, err := t.ListSnapshots(ctx)
+	if err != nil || out == nil {
+		return nil, ListSnapshotsOutput{}, err
+	}
+	return nil, *out, nil
+}
+
+func (t *Tools) DeleteSnapshot(ctx context.Context, input SnapshotIdentityInput) (*RawDaemonResponse, error) {
+	snapshotID := strings.TrimSpace(input.SnapshotID)
+	if snapshotID == "" {
+		return nil, fmt.Errorf("snapshot_id is required")
+	}
+	return t.daemon.DeleteSnapshot(ctx, snapshotID)
+}
+
+func (t *Tools) MCPDeleteSnapshot(ctx context.Context, req *mcp.CallToolRequest, input SnapshotIdentityInput) (*mcp.CallToolResult, RawDaemonResponse, error) {
+	out, err := t.DeleteSnapshot(ctx, input)
+	if err != nil || out == nil {
+		return nil, RawDaemonResponse{}, err
+	}
+	return nil, *out, nil
+}
+
+func normalizeSnapshotType(value string) (string, error) {
+	snapshotType := strings.ToLower(strings.TrimSpace(value))
+	switch snapshotType {
+	case "", "full", "diff":
+		return snapshotType, nil
+	default:
+		return "", fmt.Errorf("type must be empty, full, or diff")
+	}
 }
 
 func (t *Tools) resolveIdentity(vmID, sessionName string) (string, error) {
