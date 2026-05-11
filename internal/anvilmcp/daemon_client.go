@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 )
 
 type DaemonClient struct {
@@ -30,6 +31,29 @@ type SpawnVMResponse struct {
 	AgentURL   string `json:"agent_url"`
 	Profile    string `json:"profile,omitempty"`
 	AgentToken string `json:"agent_token,omitempty"`
+}
+
+type SnapshotInfo struct {
+	SnapshotID     string    `json:"snapshot_id"`
+	SourceVMID     string    `json:"source_vm_id"`
+	Profile        string    `json:"profile,omitempty"`
+	SnapshotType   string    `json:"snapshot_type"`
+	BaseSnapshotID string    `json:"base_snapshot_id,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+type CreateSnapshotRequest struct {
+	StopAfter bool   `json:"stop_after"`
+	Type      string `json:"type,omitempty"`
+}
+
+type RestoreSnapshotResponse struct {
+	VMID             string `json:"vm_id"`
+	GuestIP          string `json:"guest_ip"`
+	AgentURL         string `json:"agent_url"`
+	Profile          string `json:"profile,omitempty"`
+	AgentToken       string `json:"agent_token,omitempty"`
+	SourceSnapshotID string `json:"source_snapshot_id"`
 }
 
 type RawDaemonResponse struct {
@@ -80,6 +104,49 @@ func (c *DaemonClient) Stop(ctx context.Context, vmID string) (*RawDaemonRespons
 
 func (c *DaemonClient) Delete(ctx context.Context, vmID string) (*RawDaemonResponse, error) {
 	return c.raw(ctx, http.MethodDelete, "/vms/"+vmID, nil)
+}
+
+func (c *DaemonClient) CreateSnapshot(ctx context.Context, vmID string, req CreateSnapshotRequest) (*SnapshotInfo, error) {
+	_, body, err := c.do(ctx, http.MethodPost, "/vms/"+vmID+"/snapshot", req)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp SnapshotInfo
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		return nil, fmt.Errorf("decode create snapshot response: %w", err)
+	}
+	return &resp, nil
+}
+
+func (c *DaemonClient) ListSnapshots(ctx context.Context) ([]SnapshotInfo, error) {
+	_, body, err := c.do(ctx, http.MethodGet, "/snapshots", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp []SnapshotInfo
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		return nil, fmt.Errorf("decode list snapshots response: %w", err)
+	}
+	return resp, nil
+}
+
+func (c *DaemonClient) RestoreSnapshot(ctx context.Context, snapshotID string) (*RestoreSnapshotResponse, error) {
+	_, body, err := c.do(ctx, http.MethodPost, "/snapshots/"+snapshotID+"/restore", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp RestoreSnapshotResponse
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		return nil, fmt.Errorf("decode restore snapshot response: %w", err)
+	}
+	return &resp, nil
+}
+
+func (c *DaemonClient) DeleteSnapshot(ctx context.Context, snapshotID string) (*RawDaemonResponse, error) {
+	return c.raw(ctx, http.MethodDelete, "/snapshots/"+snapshotID, nil)
 }
 
 func (c *DaemonClient) raw(ctx context.Context, method, path string, payload any) (*RawDaemonResponse, error) {
