@@ -706,6 +706,27 @@ func TestToolsRestoreSnapshotOutputOmitsAgentToken(t *testing.T) {
 	}
 }
 
+func TestToolsMCPRestoreSnapshotOutputOmitsAgentToken(t *testing.T) {
+	daemon := &fakeDaemon{}
+	tools := NewTools(daemon, NewSessionStore(), time.Second)
+
+	_, out, err := tools.MCPRestoreSnapshot(context.Background(), nil, RestoreSnapshotInput{SnapshotID: "snap-1"})
+	if err != nil {
+		t.Fatalf("MCPRestoreSnapshot returned error: %v", err)
+	}
+
+	data, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal output: %v", err)
+	}
+	if strings.Contains(string(data), "agent_token") {
+		t.Fatalf("MCP restore output JSON exposes agent_token: %s", string(data))
+	}
+	if strings.Contains(string(data), "secret-token") {
+		t.Fatalf("MCP restore output JSON exposes token value: %s", string(data))
+	}
+}
+
 func TestToolsRestoreSnapshotRequiresSnapshotID(t *testing.T) {
 	daemon := &fakeDaemon{}
 	tools := NewTools(daemon, NewSessionStore(), time.Second)
