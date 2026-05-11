@@ -274,6 +274,8 @@ The repository is still named `ephemera`; the official project and product name 
 In current-facing README prose and diagrams, replace human-facing `Ephemera` product
 labels with `anvil`. Do not rename environment variables such as
 `EPHEMERA_PUBLIC_URL`, `EPHEMERA_API_TOKEN`, or `EPHEMERA_API_TOKENS`.
+Do not rename the repository directory `ephemera` or the Go module. Do update local
+example binary names from `ephemera-daemon` to `anvil-daemon`.
 
 Required replacements:
 
@@ -282,6 +284,7 @@ Ephemera Control Plane -> anvil Control Plane
 Ephemera will -> anvil will
 Ephemera has -> anvil has
 Ephemera uses -> anvil uses
+ephemera-daemon -> anvil-daemon
 ```
 
 - [ ] **Step 3: Update clone/build commands**
@@ -299,7 +302,7 @@ go build -o anvil-daemon ./cmd/goose-daemon/
 Run:
 
 ```bash
-rg -n "steve-seungeui|# Ephemera|\\*\\*Ephemera\\*\\*|Ephemera orchestrates" README.md
+rg -n "\\bEphemera\\b|steve-seungeui|ephemera-daemon" README.md
 ```
 
 Expected: no output.
@@ -407,11 +410,9 @@ git commit -m "docs: clarify anvil release naming"
 
 - [ ] **Step 1: Update operation handoff release scope**
 
-Replace `## Release Scope Candidate` content with:
+Keep the `## Release Scope Candidate` heading and replace only its content with:
 
 ```markdown
-## Release Scope
-
 - Documentation-only redesign for anvil project identity, domain glossary, canonical
   document hierarchy, and lifecycle evidence.
 - Runtime behavior, daemon API, MCP tool contracts, config precedence, session alias
@@ -420,16 +421,18 @@ Replace `## Release Scope Candidate` content with:
 
 - [ ] **Step 2: Update handoff verification section**
 
-Replace `## Verification Candidates` content with:
+Keep the `## Verification Candidates` heading and replace only its content with:
 
 ```markdown
-## Verification
-
 - `/data/projects/codex-zone/codex-project-mgmt/scripts/lifecycle-lint.sh anvil --run 2026-05-11-anvil-redesign`
 - `git diff --check`
 - `go test ./...`
 - Runtime diff guard against `cmd/`, `internal/`, `go.mod`, and `go.sum`
 ```
+
+Do not introduce exact `## Release Scope` or `## Verification` headings in this task.
+The lifecycle linter treats those headings as release evidence, which must wait until
+after implementation, code review, and final verification.
 
 - [ ] **Step 3: Update handoff blockers and current stage**
 
@@ -437,13 +440,13 @@ Set `## Current Lifecycle Stage` to:
 
 ```markdown
 Operate has not been entered. This handoff remains pre-release until implementation,
-plan-eng-review, code-review, and final verification complete.
+code-review, and final verification complete. `plan-eng-review` has passed.
 ```
 
 Set `## Blockers` to:
 
 ```markdown
-- `plan-eng-review` pending.
+- Implementation pending.
 - `code-review` pending.
 - Final verification pending.
 ```
@@ -453,13 +456,13 @@ Set `## Blockers` to:
 In `docs/lifecycle/runs/2026-05-11-anvil-redesign.json`, set:
 
 ```json
-"superpowers:writing-plans": "passed"
+"superpowers:writing-plans": "passed",
+"plan-eng-review": "passed"
 ```
 
 Keep these stages pending or draft:
 
 ```json
-"plan-eng-review": "pending",
 "implement": "pending",
 "code-review": "pending",
 "release": "draft",
@@ -503,7 +506,7 @@ Run:
 
 ```bash
 START=$(cat /tmp/anvil-redesign-start.sha)
-git diff --name-only "$START"..HEAD -- cmd internal go.mod go.sum configs/*.example | tee /tmp/anvil-redesign-runtime-diff.txt
+git diff --name-only "$START"..HEAD -- cmd internal go.mod go.sum 'configs/*.example' | tee /tmp/anvil-redesign-runtime-diff.txt
 test ! -s /tmp/anvil-redesign-runtime-diff.txt
 ```
 
@@ -553,7 +556,7 @@ ok or [no test files] for all packages
 Run:
 
 ```bash
-rg -n "steve-seungeui|# Ephemera|\\*\\*Ephemera\\*\\*" README.md RELEASE_NOTES.md
+rg -n "\\bEphemera\\b|steve-seungeui|ephemera-daemon" README.md RELEASE_NOTES.md
 rg -n "Project naming note|Domain Glossary|Frozen Runtime Contracts" RELEASE_NOTES.md CONTEXT.md
 ```
 
@@ -568,7 +571,9 @@ Second command finds the naming note and CONTEXT sections.
 
 If the operation handoff needs final verification output, edit only
 `docs/operations/2026-05-11-anvil-redesign-handoff.md` and
-`docs/lifecycle/runs/2026-05-11-anvil-redesign.json`, then run:
+`docs/lifecycle/runs/2026-05-11-anvil-redesign.json`. Keep release/verification
+headings in candidate form until code-review and release approval are complete, then
+run:
 
 ```bash
 git add docs/operations/2026-05-11-anvil-redesign-handoff.md docs/lifecycle/runs/2026-05-11-anvil-redesign.json
@@ -597,6 +602,36 @@ Scope check:
 - This plan remains documentation-only. Runtime code and public API changes are
   explicitly forbidden and verified in Task 6.
 
+## Plan Eng Review
+
+Result: passed, no unresolved blockers.
+
+Review focus:
+
+- Architecture boundary: documentation-only. No runtime package, daemon API, MCP tool,
+  config, or snapshot behavior changes are allowed.
+- Data flow: documentation source-of-truth flows from `AGENTS.md` to `CONTEXT.md` to
+  README/release notes, while lifecycle JSON remains computed snapshot output.
+- Failure modes: accidental runtime edits, premature release gate evidence, stale
+  product naming, missing `CONTEXT.md`, and private/local artifact leakage.
+- Verification: lifecycle lint, markdown diff check, Go tests, runtime diff guard, and
+  product naming checks.
+- Rollback: all planned changes are documentation commits and can be reverted without
+  guest/runtime state migration.
+
+Findings fixed in this review:
+
+1. Handoff headings originally risked creating release evidence before code-review.
+   The plan now keeps `Release Scope Candidate` and `Verification Candidates` headings
+   until release approval.
+2. README identity checks were too narrow. The plan now checks for remaining
+   `Ephemera`, `steve-seungeui`, and `ephemera-daemon` current-facing references.
+3. Runtime diff guard now quotes the `configs/*.example` pathspec so shell expansion
+   cannot alter the intended git pathspec.
+
+No ADR is required because this review does not introduce a hard-to-reverse runtime,
+API, or data model decision.
+
 ## Lifecycle Gate Evidence
 
 - Stage: `superpowers:writing-plans`
@@ -605,3 +640,7 @@ Scope check:
   grill-me Q1-Q3 decisions, and plan-design-review.
 - Evidence: This implementation plan is complete and ready for `plan-eng-review`
   before execution.
+- Stage: `plan-eng-review`
+- Status: `passed`
+- Approved by: engineering review completed in this session.
+- Evidence: Plan Eng Review section above.

@@ -254,7 +254,7 @@
     "intake": "passed",
     "operate": "draft",
     "plan-design-review": "passed",
-    "plan-eng-review": "pending",
+    "plan-eng-review": "passed",
     "release": "draft",
     "superpowers:brainstorming": "passed",
     "superpowers:writing-plans": "passed"
