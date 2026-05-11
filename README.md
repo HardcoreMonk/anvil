@@ -189,7 +189,7 @@ artifacts/            Auto-populated at runtime (gitignored)
 |-------------|--------|
 | **Host OS** | Ubuntu 22.04 or 24.04 (bare metal, or VM with nested virtualization) |
 | **CPU** | `/dev/kvm` accessible |
-| **Go** | 1.18+ |
+| **Go** | 1.25+ |
 | **Packages** | `curl`, `debootstrap`, `e2fsprogs`, `util-linux` |
 | **Privileges** | `sudo` at runtime (KVM + network interface management) |
 
@@ -210,6 +210,8 @@ git clone https://github.com/steve-seungeui/ephemera.git
 cd ephemera
 go build -o ephemera-daemon ./cmd/goose-daemon/
 ```
+
+`cmd/anvil-mcp` uses the official MCP Go SDK, which requires Go 1.25 or newer.
 
 ### 2. Configure the default LLM
 
