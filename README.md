@@ -390,6 +390,8 @@ decode할 수 있지만 MCP output에는 노출하지 않는다. Restore 후 `se
 bind가 실패하면 adapter는 restored VM을 자동 삭제하지 않고 error에 restored VM ID를
 포함한다.
 
+정확한 입력/출력 계약은 `docs/architecture/mcp-architecture.md`를 참조한다.
+
 ---
 
 ## API 참조
