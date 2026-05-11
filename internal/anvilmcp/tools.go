@@ -1,0 +1,153 @@
+package anvilmcp
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"time"
+)
+
+const maxTimeoutSeconds = int((24 * time.Hour) / time.Second)
+
+type Daemon interface {
+	SpawnVM(ctx context.Context, profile string) (*SpawnVMResponse, error)
+	RunTask(ctx context.Context, vmID, prompt string) (*RawDaemonResponse, error)
+	Health(ctx context.Context, vmID string) (*RawDaemonResponse, error)
+	Stop(ctx context.Context, vmID string) (*RawDaemonResponse, error)
+	Delete(ctx context.Context, vmID string) (*RawDaemonResponse, error)
+}
+
+type Tools struct {
+	daemon         Daemon
+	sessions       *SessionStore
+	defaultTimeout time.Duration
+}
+
+type SpawnVMInput struct {
+	Profile     string `json:"profile,omitempty"`
+	SessionName string `json:"session_name,omitempty"`
+}
+
+type SpawnVMOutput struct {
+	VMID        string `json:"vm_id"`
+	GuestIP     string `json:"guest_ip"`
+	AgentURL    string `json:"agent_url"`
+	Profile     string `json:"profile,omitempty"`
+	SessionName string `json:"session_name,omitempty"`
+}
+
+type RunTaskInput struct {
+	VMID           string `json:"vm_id,omitempty"`
+	SessionName    string `json:"session_name,omitempty"`
+	Prompt         string `json:"prompt"`
+	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
+}
+
+type VMIdentityInput struct {
+	VMID        string `json:"vm_id,omitempty"`
+	SessionName string `json:"session_name,omitempty"`
+}
+
+func NewTools(daemon Daemon, sessions *SessionStore, defaultTimeout time.Duration) *Tools {
+	if sessions == nil {
+		sessions = NewSessionStore()
+	}
+	if defaultTimeout <= 0 {
+		defaultTimeout = time.Duration(DefaultTimeoutSeconds) * time.Second
+	}
+	return &Tools{
+		daemon:         daemon,
+		sessions:       sessions,
+		defaultTimeout: defaultTimeout,
+	}
+}
+
+func (t *Tools) SpawnVM(ctx context.Context, input SpawnVMInput) (*SpawnVMOutput, error) {
+	profile := strings.TrimSpace(input.Profile)
+	sessionName := strings.TrimSpace(input.SessionName)
+	if sessionName != "" && t.sessions.Exists(sessionName) {
+		return nil, fmt.Errorf("session %q already exists", sessionName)
+	}
+
+	res, err := t.daemon.SpawnVM(ctx, profile)
+	if err != nil {
+		return nil, err
+	}
+
+	if sessionName != "" {
+		if err := t.sessions.Bind(sessionName, res.VMID); err != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancel()
+			_, _ = t.daemon.Delete(cleanupCtx, res.VMID)
+			return nil, err
+		}
+	}
+
+	return &SpawnVMOutput{
+		VMID:        res.VMID,
+		GuestIP:     res.GuestIP,
+		AgentURL:    res.AgentURL,
+		Profile:     res.Profile,
+		SessionName: sessionName,
+	}, nil
+}
+
+func (t *Tools) RunTask(ctx context.Context, input RunTaskInput) (*RawDaemonResponse, error) {
+	if strings.TrimSpace(input.Prompt) == "" {
+		return nil, fmt.Errorf("prompt must be non-empty")
+	}
+	if input.TimeoutSeconds < 0 {
+		return nil, fmt.Errorf("timeout_seconds must be non-negative")
+	}
+	if input.TimeoutSeconds > maxTimeoutSeconds {
+		return nil, fmt.Errorf("timeout_seconds must be <= %d", maxTimeoutSeconds)
+	}
+
+	vmID, err := t.resolveIdentity(input.VMID, input.SessionName)
+	if err != nil {
+		return nil, err
+	}
+
+	timeout := t.defaultTimeout
+	if input.TimeoutSeconds > 0 {
+		timeout = time.Duration(input.TimeoutSeconds) * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	return t.daemon.RunTask(ctx, vmID, input.Prompt)
+}
+
+func (t *Tools) Health(ctx context.Context, input VMIdentityInput) (*RawDaemonResponse, error) {
+	vmID, err := t.resolveIdentity(input.VMID, input.SessionName)
+	if err != nil {
+		return nil, err
+	}
+	return t.daemon.Health(ctx, vmID)
+}
+
+func (t *Tools) StopVM(ctx context.Context, input VMIdentityInput) (*RawDaemonResponse, error) {
+	vmID, err := t.resolveIdentity(input.VMID, input.SessionName)
+	if err != nil {
+		return nil, err
+	}
+	return t.daemon.Stop(ctx, vmID)
+}
+
+func (t *Tools) DeleteVM(ctx context.Context, input VMIdentityInput) (*RawDaemonResponse, error) {
+	vmID, err := t.resolveIdentity(input.VMID, input.SessionName)
+	if err != nil {
+		return nil, err
+	}
+
+	res, err := t.daemon.Delete(ctx, vmID)
+	if err != nil {
+		return nil, err
+	}
+	t.sessions.RemoveVM(vmID)
+	return res, nil
+}
+
+func (t *Tools) resolveIdentity(vmID, sessionName string) (string, error) {
+	return t.sessions.ResolveIdentity(vmID, sessionName)
+}
