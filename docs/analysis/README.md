@@ -9,7 +9,7 @@
 
 ## 0.1.0 문서
 
-0.1.0 문서는 초기 소스 분석 결과다. 문서 제목과 일부 표현에는 당시 코드베이스 명칭인 Ephemera가 남아 있다.
+0.1.0 문서는 초기 소스 분석 결과다. 문서 제목과 일부 표현에는 당시 코드베이스 명칭인 Ephemera가 남아 있다. 이 표현은 historical evidence로 보존하며, 현재 공식 제품명은 `anvil`이다.
 
 - `01-source-line-analysis.md`: 0.1.0 소스 구조와 파일별 분석
 - `02-junior-developer-report.md`: 주니어 개발자용 진입 보고서

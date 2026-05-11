@@ -1,5 +1,8 @@
 # Unreleased
 
+Project naming note: `anvil` is the official product/project name. `ephemera` remains
+the GitHub repository and Go module name.
+
 ## Added
 
 - `cmd/anvil-mcp`: Go stdio MCP server for IronClaw integration.
@@ -13,7 +16,7 @@
 
 # v0.2.0 — Single-Host Feature Complete
 
-**Ephemera** completes the single-host feature set. Every limitation noted in v0.1.0 is resolved: guests shut down gracefully, agent authentication is enforced, tokens reload without a restart, and VMs can be snapshotted and restored in seconds. A new control plane proxy makes goose-agent accessible from external clients without direct access to the private VM subnet.
+**anvil** completes the single-host feature set. Every limitation noted in v0.1.0 is resolved: guests shut down gracefully, agent authentication is enforced, tokens reload without a restart, and VMs can be snapshotted and restored in seconds. A new control plane proxy makes goose-agent accessible from external clients without direct access to the private VM subnet.
 
 ---
 
@@ -97,7 +100,7 @@
 
 # v0.1.0 — Initial Implementation
 
-**Ephemera** is an enterprise control plane for running ephemeral AI agents inside Firecracker MicroVMs. This first release delivers a fully working end-to-end implementation: from spinning up an isolated KVM-backed VM to executing Goose AI tasks via HTTP and cleaning up all host resources on teardown.
+**anvil** is an enterprise control plane for running ephemeral AI agents inside Firecracker MicroVMs. This first release delivers a fully working end-to-end implementation: from spinning up an isolated KVM-backed VM to executing Goose AI tasks via HTTP and cleaning up all host resources on teardown.
 
 ---
 
