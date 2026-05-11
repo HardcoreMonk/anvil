@@ -2,6 +2,7 @@ package anvilmcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -46,9 +47,10 @@ type fakeDaemon struct {
 	createSnapshotResp  *SnapshotInfo
 	createSnapshotErr   error
 
-	listSnapshotCalls int
-	listSnapshotResp  []SnapshotInfo
-	listSnapshotErr   error
+	listSnapshotCalls     int
+	listSnapshotResp      []SnapshotInfo
+	listSnapshotReturnNil bool
+	listSnapshotErr       error
 
 	restoreSnapshotCalls int
 	restoreSnapshotID    string
@@ -150,6 +152,9 @@ func (f *fakeDaemon) ListSnapshots(_ context.Context) ([]SnapshotInfo, error) {
 	f.listSnapshotCalls++
 	if f.listSnapshotErr != nil {
 		return nil, f.listSnapshotErr
+	}
+	if f.listSnapshotReturnNil {
+		return nil, nil
 	}
 	if f.listSnapshotResp != nil {
 		return f.listSnapshotResp, nil
@@ -471,6 +476,30 @@ func TestToolsListSnapshotsWrapsDaemonList(t *testing.T) {
 	}
 	if out.Snapshots[0].SnapshotID != "snap-1" {
 		t.Fatalf("SnapshotID = %q, want snap-1", out.Snapshots[0].SnapshotID)
+	}
+}
+
+func TestToolsListSnapshotsConvertsNilDaemonSliceToEmptyJSONList(t *testing.T) {
+	daemon := &fakeDaemon{listSnapshotReturnNil: true}
+	tools := NewTools(daemon, NewSessionStore(), time.Second)
+
+	out, err := tools.ListSnapshots(context.Background())
+	if err != nil {
+		t.Fatalf("ListSnapshots returned error: %v", err)
+	}
+
+	if out.Snapshots == nil {
+		t.Fatal("Snapshots = nil, want empty non-nil slice")
+	}
+	if len(out.Snapshots) != 0 {
+		t.Fatalf("snapshot count = %d, want 0", len(out.Snapshots))
+	}
+	data, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("json.Marshal returned error: %v", err)
+	}
+	if string(data) != `{"snapshots":[]}` {
+		t.Fatalf("json = %s, want %s", data, `{"snapshots":[]}`)
 	}
 }
 
