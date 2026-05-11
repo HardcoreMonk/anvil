@@ -1,14 +1,16 @@
-# Ephemera
+# anvil
 
-[![CI](https://github.com/steve-seungeui/ephemera/actions/workflows/ci.yml/badge.svg)](https://github.com/steve-seungeui/ephemera/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/steve-seungeui/ephemera)](https://github.com/steve-seungeui/ephemera/releases)
+[![CI](https://github.com/HardcoreMonk/ephemera/actions/workflows/ci.yml/badge.svg)](https://github.com/HardcoreMonk/ephemera/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/HardcoreMonk/ephemera)](https://github.com/HardcoreMonk/ephemera/releases)
 [![Go](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Firecracker](https://img.shields.io/badge/Firecracker-v1.15.1-FF4500?logo=amazonaws&logoColor=white)](https://github.com/firecracker-microvm/firecracker)
 
 **Enterprise Control Plane for Ephemeral AI Agents via Firecracker MicroVMs**
 
-Ephemera orchestrates isolated, KVM-backed MicroVM environments for agentic AI workloads. Each VM runs [Goose](https://github.com/aaif-goose/goose) as an autonomous agent inside a minimal Debian guest, fully contained within hardware VM boundaries and completely wiped on termination.
+anvil orchestrates isolated, KVM-backed MicroVM environments for agentic AI workloads. Each VM runs [Goose](https://github.com/aaif-goose/goose) as an autonomous agent inside a minimal Debian guest, fully contained within hardware VM boundaries and wiped on termination.
+
+The repository is still named `ephemera`; the official project and product name is `anvil`.
 
 ---
 
@@ -21,7 +23,7 @@ External Client
 Reverse Proxy  :443                   ← Caddy / Nginx (TLS termination)
       │  HTTP (Bearer token, encrypted inside TLS tunnel)
       ▼
-Ephemera Control Plane  :3000         ← VM lifecycle + snapshot management
+anvil Control Plane  :3000           ← VM lifecycle + snapshot management
   POST   /vms                         → spawn VM → returns {vm_id, agent_url, agent_token}
   GET    /vms                         → list running VMs
   DELETE /vms/{vm_id}                 → stop & destroy VM
@@ -206,9 +208,9 @@ Firecracker, the Linux kernel, and the golden image are **downloaded and built a
 ### 1. Clone and build
 
 ```bash
-git clone https://github.com/steve-seungeui/ephemera.git
+git clone https://github.com/HardcoreMonk/ephemera.git
 cd ephemera
-go build -o ephemera-daemon ./cmd/goose-daemon/
+go build -o anvil-daemon ./cmd/goose-daemon/
 ```
 
 `cmd/anvil-mcp` uses the official MCP Go SDK, which requires Go 1.25 or newer.
@@ -240,10 +242,10 @@ Supported providers: `google` · `anthropic` · `openai` · `ollama` · [others 
 ### 3. Run
 
 ```bash
-sudo ./ephemera-daemon
+sudo ./anvil-daemon
 ```
 
-On first run, Ephemera will:
+On first run, anvil will:
 1. Compile `micro-init` and `goose-agent` binaries
 2. Build the golden image via `debootstrap` (~5–8 minutes)
 3. Download the Firecracker kernel and binary
@@ -254,7 +256,7 @@ Subsequent starts skip these steps if artifacts already exist.
 
 ## Testing
 
-Ephemera has two levels of testing.
+anvil has two levels of testing.
 
 ### Unit tests (CI)
 
@@ -272,7 +274,7 @@ A full integration test that boots a real daemon, spawns actual Firecracker Micr
 
 ```bash
 # Build first
-go build -o ephemera-daemon ./cmd/goose-daemon/
+go build -o anvil-daemon ./cmd/goose-daemon/
 
 # Run (takes ~15–30 minutes depending on API rate limits)
 sudo bash e2e_test.sh
@@ -675,7 +677,7 @@ POST /snapshots/{diff-id}/restore
   → os.Remove(merged.bin)        ← temp file cleaned up after VM starts
 ```
 
-> **Disk space during restore**: the merge step writes a temporary 2 GB `merged.bin` alongside the existing base and diff files. Ensure the host has at least 2 GB of free space in the Ephemera working directory before restoring a diff snapshot. The file is removed as soon as Firecracker has opened it.
+> **Disk space during restore**: the merge step writes a temporary 2 GB `merged.bin` alongside the existing base and diff files. Ensure the host has at least 2 GB of free space in the anvil working directory before restoring a diff snapshot. The file is removed as soon as Firecracker has opened it.
 
 ### Dependency rule
 
@@ -708,7 +710,7 @@ curl -X POST http://localhost:3000/vms/$VMID/snapshot \
 
 ## COW Rootfs Restore
 
-When restoring a VM from a snapshot, Ephemera uses Linux **device mapper snapshot** (dm-snapshot) to create a block-level copy-on-write view of the snapshot's `rootfs.ext4`. This eliminates the ~700 MB full disk copy that was previously required per restore.
+When restoring a VM from a snapshot, anvil uses Linux **device mapper snapshot** (dm-snapshot) to create a block-level copy-on-write view of the snapshot's `rootfs.ext4`. This eliminates the ~700 MB full disk copy that was previously required per restore.
 
 ### How it works
 
@@ -772,7 +774,7 @@ ALICE_TOKEN=$(openssl rand -hex 32)
 BOB_TOKEN=$(openssl rand -hex 32)
 
 export EPHEMERA_API_TOKENS="alice:$ALICE_TOKEN,bob:$BOB_TOKEN"
-sudo -E ./ephemera-daemon
+sudo -E ./anvil-daemon
 ```
 
 Startup log:
@@ -790,7 +792,7 @@ Each request is logged with the authenticated client name:
 
 ```bash
 export EPHEMERA_API_TOKEN=$(openssl rand -hex 32)
-sudo -E ./ephemera-daemon
+sudo -E ./anvil-daemon
 ```
 
 Treated as a single client named `default`.
@@ -804,7 +806,7 @@ API tokens can be updated without restarting the daemon or interrupting running 
 ```bash
 # Update the environment variable and send SIGHUP
 export EPHEMERA_API_TOKENS="alice:$NEW_ALICE,carol:$CAROL_TOKEN"
-kill -HUP $(pgrep ephemera-daemon)
+kill -HUP $(pgrep anvil-daemon)
 ```
 
 The daemon re-reads `EPHEMERA_API_TOKENS` / `EPHEMERA_API_TOKEN` and swaps the in-memory client list. All running VMs continue unaffected.
@@ -835,7 +837,7 @@ By default the control plane binds to `127.0.0.1:3000` (localhost only). Place a
 
 ```bash
 export EPHEMERA_API_ADDR=0.0.0.0:3000
-sudo -E ./ephemera-daemon
+sudo -E ./anvil-daemon
 ```
 
 #### Step 2 — configure a reverse proxy
@@ -856,14 +858,14 @@ sudo systemctl restart caddy
 
 **Nginx** (manual certificate):
 
-`/etc/nginx/sites-available/ephemera`:
+`/etc/nginx/sites-available/anvil`:
 ```nginx
 server {
     listen 443 ssl;
     server_name api.example.com;
 
-    ssl_certificate     /etc/ssl/certs/ephemera.crt;
-    ssl_certificate_key /etc/ssl/private/ephemera.key;
+    ssl_certificate     /etc/ssl/certs/anvil.crt;
+    ssl_certificate_key /etc/ssl/private/anvil.key;
     ssl_protocols       TLSv1.2 TLSv1.3;
 
     location / {
@@ -882,7 +884,7 @@ server {
 ```
 
 ```bash
-sudo ln -s /etc/nginx/sites-available/ephemera /etc/nginx/sites-enabled/
+sudo ln -s /etc/nginx/sites-available/anvil /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl restart nginx
 ```
 

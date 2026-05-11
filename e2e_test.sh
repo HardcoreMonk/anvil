@@ -1,6 +1,6 @@
 #!/bin/bash
-# Ephemera simple end-to-end test scenario
-# Run with: sudo bash simple_test_scenario.sh
+# anvil simple end-to-end test scenario
+# Run with: sudo bash e2e_test.sh
 set -euo pipefail
 
 API="http://localhost:3000"
@@ -24,7 +24,7 @@ rm -rf snapshots/snap-* 2>/dev/null || true
 step "1. Start daemon"
 echo "  Working directory: $(pwd)"
 echo "  Log file: $LOG"
-./ephemera-daemon >>"$LOG" 2>&1 &
+./anvil-daemon >>"$LOG" 2>&1 &
 DAEMON_PID=$!
 echo "  Daemon PID: $DAEMON_PID"
 
@@ -625,7 +625,7 @@ check_http "$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/vms/$PROXY_
 # ── 48. Restart daemon with EPHEMERA_PUBLIC_URL ──────────────────
 step "48. Restart daemon with EPHEMERA_PUBLIC_URL=http://localhost:3000"
 kill "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null || true
-EPHEMERA_PUBLIC_URL=http://localhost:3000 ./ephemera-daemon >>"$LOG" 2>&1 &
+EPHEMERA_PUBLIC_URL=http://localhost:3000 ./anvil-daemon >>"$LOG" 2>&1 &
 DAEMON_PID=$!
 for i in $(seq 1 30); do
     curl -s -o /dev/null "$API/vms" 2>/dev/null && break
