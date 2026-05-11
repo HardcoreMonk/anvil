@@ -6,97 +6,147 @@ generated_by: lifecycle-redesign-start
 generated_at: 2026-05-11T00:00:00
 redaction_applied: true
 ---
-# Existing Project Redesign Design Brief Draft: anvil
+# anvil Project Redesign Design
 
-## Context
+## Summary
 
-This artifact starts an existing-project redesign lifecycle from a bounded repository scan. It is not an approved redesign spec; it is a draft brief that must be completed with human-reviewed domain architecture, grill-me decisions, and plan reviews before implementation.
+This redesign aligns the anvil project documentation and architecture language after
+the 0.2.0 runtime expansion and the IronClaw MCP v1 adapter work. It is a
+documentation and architecture consistency pass only. It does not change daemon
+behavior, MCP tool behavior, snapshot/restore behavior, API schemas, or runtime code.
 
-## Problem
+The official product/project name is `anvil`. The GitHub repository and local path may
+remain `ephemera`, but that name is treated as a repository name, not the product name.
 
-- Existing projects often contain current guidance, legacy notes, generated lifecycle records, and code facts in the same tree.
-- A file list alone does not decide which source is canonical, which facts are stale, or which domain terms should shape code boundaries.
-- Generated artifacts must stay draft until their lifecycle gate evidence is explicitly accepted.
+## Approved Scope
 
-## Goals
+The redesign scope is **documentation plus architecture consistency**.
 
-- Create a reviewable redesign starting point with current document, package, and context signals.
-- Force `domain-architecture` before `grill-me` so domain language can constrain folders, modules, and public interfaces.
-- Separate candidate evidence from approved decisions, release criteria, and operate handoff.
+In scope:
 
-## Non-Goals
+- Define the canonical document hierarchy for anvil.
+- Add a project-level domain context document.
+- Normalize official current-facing docs to use `anvil`.
+- Preserve legacy `Ephemera` wording only as historical evidence in older analysis
+  documents.
+- Record lifecycle evidence for the redesign run.
+- Keep verification focused on documentation consistency and existing Go tests.
 
-- No runtime feature, schema, deployment, or API behavior changes are implied by this generated draft.
-- No FE/BE skill refactoring is in scope unless a later approved plan adds it explicitly.
-- No generated artifact becomes canonical project truth without human review and gate evidence.
+Out of scope:
 
-## Evidence From Current Repo
+- Runtime code changes.
+- Daemon API changes.
+- MCP tool contract changes.
+- Snapshot/restore behavior changes.
+- Release/tag policy cleanup.
+- New v2 feature design such as workspace sync, snapshot MCP tools, or HTTP MCP
+  transport.
 
-### Document Signals
+## Canonical Document Hierarchy
 
-- `AGENTS.md`: Anvil — Codex project guidance, Source Of Truth, Project Shape, Workflow
-- `README.md`: Ephemera, Architecture, VM Provisioning Flow, Snapshot/Restore Flow
-- `docs/analysis/01-source-line-analysis.md`: Ephemera 소스 줄 단위 분석 보고서, 전체 구조, `go.mod`, `cmd/goose-daemon/main.go`
-- `docs/analysis/02-junior-developer-report.md`: Ephemera 주니어 개발자 실무 투입 보고서, 한 문장 요약, 아키텍처 분해, 프론트엔드
-- `docs/analysis/03-non-technical-report.md`: Ephemera 비전공자용 설명 보고서, Ephemera가 하는 일, 등장인물, Control Plane
-- `docs/analysis/04-v0.2.0-diff-from-v0.1.0.md`: anvil 0.2.0 변경 분석: 0.1.0 대비, 기준, 변경 규모, 핵심 변화
-- `docs/analysis/05-source-line-analysis-v0.2.0.md`: anvil 0.2.0 소스 분석, 문서 목적, 전체 구조, `cmd/micro-init/main.go`
-- `docs/analysis/06-junior-developer-report-v0.2.0.md`: anvil 0.2.0 주니어 개발자용 분석 보고서, 한 줄 요약, 먼저 알아야 할 배경, 꼭 이해해야 하는 새 구성요소
-- `docs/analysis/07-non-technical-report-v0.2.0.md`: anvil 0.2.0 비기술 보고서, 요약, 무엇이 달라졌나, 1. VM을 더 안전하게 종료할 수 있다
-- `docs/analysis/README.md`: anvil 분석 문서 색인, 기준 정보, 0.1.0 문서, 0.2.0 문서
-- `docs/superpowers/plans/2026-05-11-anvil-ironclaw-mcp-v1.md`: anvil IronClaw MCP v1 Implementation Plan, Source References, Scope Check, File Structure
-- `docs/superpowers/specs/2026-05-11-anvil-ironclaw-mcp-v1-design.md`: anvil IronClaw MCP v1 Design, 1. 목적, 2. 결정 사항, 3. 비목표
+Project documentation follows this source-of-truth order:
 
-### Package And Automation Signals
+1. `AGENTS.md` - Codex work rules, source-of-truth order, approval rules, and safety
+   constraints.
+2. `CONTEXT.md` - anvil domain glossary, module boundary map, and legacy term policy.
+3. `README.md` - external user and developer entrypoint for product overview, build,
+   run, API, and MCP usage.
+4. `RELEASE_NOTES.md` - release-by-release change history.
+5. `docs/analysis/` - evidence and analysis reports. These can preserve historical
+   terms when they describe older states.
+6. `docs/superpowers/` - lifecycle evidence such as specs, grill-me records, plans,
+   and reviews.
+7. `docs/lifecycle/` and `docs/operations/` - lifecycle run snapshots and operation
+   handoffs.
 
-- `go.mod`
+When documents conflict, current-facing product docs use `anvil` as the product name.
+`ephemera` is allowed when referring to the Git repository, Go module, local directory,
+or historical source material.
 
-### Context Document Signals
+## Domain Architecture Boundary
 
-- `CONTEXT.md`: missing
-- `CONTEXT-MAP.md`: missing
-- `docs/adr`: missing
+`CONTEXT.md` will become the canonical domain architecture document for this redesign.
+It should define the following terms and boundaries.
 
-## Redaction Summary
-
-- Redactions: `{"args": 0, "internal_ref": 79, "local_path": 0, "secret": 0}`
-
-## Lifecycle Contract
-
-- Reference: `docs/codex-lifecycle-control-plane.md` or the target project's equivalent contract.
-
-## Evidence-Based Design Boundaries
-
-| Boundary | Candidate Evidence | Required Design Output |
+| Term | Meaning | Owning Area |
 |---|---|---|
-| Project guidance | `AGENTS.md`, `CONTEXT.md`, `CONTEXT-MAP.md` when present | Current rules, legacy rules, and unknowns separated |
-| Long-lived decisions | `docs/adr/` when present | ADR candidates for any irreversible redesign decision |
-| Runtime facts | Code, migrations, API docs, package manifests | Facts referenced by path rather than duplicated as new truth |
-| Lifecycle records | `docs/superpowers/`, `docs/operations/`, `docs/lifecycle/runs/` | Process evidence, not canonical runtime state |
+| `anvil` | Official product/project name | Project-wide |
+| `ephemera` | Repository/path/module legacy name | Repository metadata |
+| Core runtime | Firecracker MicroVM based isolated agent runtime | `cmd/goose-daemon/`, `internal/storage/`, `internal/network/`, `internal/vm/` |
+| Control plane daemon | Host daemon that manages VM lifecycle, snapshots, restore, and agent proxying | `cmd/goose-daemon/` |
+| Guest agent | VM-side task runner exposed over HTTP inside the guest | `cmd/goose-agent/` |
+| Guest init | VM-side PID 1 process that prepares mounts and supervises the guest agent | `cmd/micro-init/` |
+| MCP adapter | Thin stdio bridge used by IronClaw to call the anvil daemon | `cmd/anvil-mcp/`, `internal/anvilmcp/` |
+| Session alias | In-memory `session_name -> vm_id` convenience mapping in the MCP adapter | `internal/anvilmcp/` |
+| Snapshot/restore | Daemon runtime capability for VM state persistence and restore | `cmd/goose-daemon/`, `internal/storage/`, `internal/vm/` |
+| Profile | VM creation-time LLM config and secret selection | `configs/profiles/`, daemon VM create flow |
 
-## Domain Architecture Draft
+Boundary rules:
 
-- Extract domain terms from current project guidance, context docs, ADRs, API docs, and model/schema code.
-- Map each accepted term to owning folder, module boundary, public function/API signature, persistence boundary, and adapter boundary.
-- Mark ambiguous synonyms, legacy terms, and rejected terms before `grill-me` questions begin.
-- Record accepted new terms in `CONTEXT.md` or an ADR only after approval.
+- `docs/analysis/` is evidence, not canonical product truth.
+- `docs/superpowers/` is lifecycle evidence, not runtime state.
+- `configs/*.example` files are non-secret examples only.
+- Secret config files remain local and ignored.
+- MCP v1 remains a thin runtime bridge. Workspace sync, snapshot MCP tools,
+  persistent sessions, and automatic VM cleanup stay out of scope for this redesign.
 
-## Required Human Synthesis
+## Planned Documentation Changes
 
-- Replace candidate evidence with an approved information architecture and domain boundary map.
-- Answer open decisions one at a time through `grill-me`, including Codex's recommended answer and evidence.
-- Add `plan-design-review` and `plan-eng-review` conclusions before treating the plan as executable.
-- Keep this run in `draft` until the lifecycle gate evidence names the approver and accepted evidence.
+The implementation plan for this redesign should update only documentation and
+governance artifacts:
 
-## Open Decisions
+- Add `CONTEXT.md`.
+- Update `AGENTS.md` to include `CONTEXT.md` in the source-of-truth hierarchy and keep
+  the redesign constraints explicit.
+- Update `README.md` so the current product name and product description are `anvil`.
+  Repository references can continue to point at `HardcoreMonk/ephemera`.
+- Update `RELEASE_NOTES.md` so current release notes use `anvil` while historical
+  release notes remain understandable.
+- Update `docs/analysis/README.md` to state that legacy `Ephemera` terms are preserved
+  as historical evidence.
+- Update this redesign run's lifecycle artifacts with accepted decisions and review
+  evidence.
 
-- Confirm whether this redesign is documentation-only, architecture-only, or runtime-affecting. Recommended default: documentation and architecture evidence only.
-- Confirm which files are canonical sources of domain language. Recommended default: `AGENTS.md`, `CONTEXT.md`, `docs/adr/`, and code/schema paths.
-- Confirm release and operate criteria before any implementation work starts.
+## Verification
+
+Required verification for the implementation plan:
+
+```bash
+/data/projects/codex-zone/codex-project-mgmt/scripts/lifecycle-lint.sh anvil --run 2026-05-11-anvil-redesign
+git diff --check
+go test ./...
+```
+
+The final summary must state that no runtime behavior was intentionally changed. If any
+runtime file changes become necessary, this redesign scope must be re-approved before
+implementation.
+
+## Follow-Up Runs
+
+These are explicit follow-up candidates, not part of this redesign:
+
+- Release/tag hygiene for the public GitHub repository.
+- MCP v2 design for workspace copy-in/out.
+- MCP snapshot/restore tools.
+- HTTP MCP transport.
+- Runtime module refactoring.
+
+## Approved Brainstorming Decisions
+
+- Scope: documentation plus architecture consistency only.
+- Canonical structure: role-separated docs with `CONTEXT.md` as domain glossary and
+  boundary map.
+- Naming policy: current-facing docs use `anvil`; `ephemera` remains repository/path
+  metadata and historical evidence.
+- Completion criteria: `AGENTS.md`, `CONTEXT.md`, `README.md`, lifecycle artifacts, and
+  analysis index are consistent; runtime code is unchanged; verification commands pass.
+- Approach: Canonical Docs First.
 
 ## Lifecycle Gate Evidence
 
 - Stage: `superpowers:brainstorming`
 - Status: `draft`
-- Approved by: `not-approved`
-- Evidence: Generated draft artifact. This gate is not passed yet.
+- Approved by: user approved scope, canonical document structure, domain architecture
+  boundary, completion criteria, and Canonical Docs First approach in conversation.
+- Evidence: This written spec is pending final user file review before implementation
+  planning begins.
