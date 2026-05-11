@@ -1,7 +1,8 @@
 # anvil — Codex 프로젝트 지침
 
-이 저장소의 공식 프로젝트명은 `anvil`이다. GitHub 저장소와 Go 모듈 경로는
-호환성 때문에 아직 `ephemera` 이름을 유지한다.
+`anvil`은 IronClaw와 ephemera를 결합하는 새 프로젝트다. 이 저장소는
+`https://github.com/HardcoreMonk/ephemera/`이며, ephemera 0.1.0/0.2.0 기반
+runtime과 anvil 통합 문서를 함께 담고 있다.
 
 ## 진실 기준 문서 순서
 
@@ -16,7 +17,7 @@
 
 ## 프로젝트 구조
 
-- 호스트 제어 평면: `cmd/goose-daemon`, `internal/storage`,
+- ephemera 호스트 제어 평면: `cmd/goose-daemon`, `internal/storage`,
   `internal/network`, `internal/vm`
 - 게스트 구성 요소: `cmd/goose-agent`, `cmd/micro-init`
 - IronClaw 연동 MCP 어댑터: `cmd/anvil-mcp`, `internal/anvilmcp`
@@ -31,9 +32,11 @@
   `RELEASE_NOTES.md` 중 영향을 받는 문서를 함께 갱신한다.
 - 로컬 비밀 파일(`configs/goose-secrets.yaml`, profile별 secrets)은 절대
   커밋하지 않는다.
-- `anvil`이라는 제품명을 우선 사용하되, 실제 API/환경 변수/경로가 아직
-  `EPHEMERA_*` 또는 `goose-*` 이름을 쓰는 경우에는 코드의 현재 계약을
-  그대로 유지한다.
+- `anvil`은 IronClaw+ephemera 결합 프로젝트를 가리킨다.
+- `ephemera`는 이미 릴리즈된 Firecracker runtime을 가리킨다. ephemera
+  릴리즈 분석 문서의 제목을 anvil로 바꾸지 않는다.
+- 실제 API/환경 변수/경로가 `EPHEMERA_*` 또는 `goose-*` 이름을 쓰는 경우에는
+  코드의 현재 계약을 그대로 유지한다.
 
 ## 명령어
 
@@ -62,7 +65,8 @@ LLM API 키가 들어 있는 로컬 `configs/goose-secrets.yaml`이 필요하다
   sparse COW 파일을 정리해야 한다.
 - 실행 중인 원본 VM의 snapshot은 restore하지 않는다.
 - diff snapshot이 참조 중인 full snapshot은 삭제하지 않는다.
-- MCP v1은 얇은 stdio 어댑터다. VM 수명주기 의미는 daemon API가 소유한다.
+- MCP v1은 얇은 stdio 어댑터다. VM 수명주기 의미는 ephemera daemon API가
+  소유한다.
 
 ## 보안
 

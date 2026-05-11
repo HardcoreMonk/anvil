@@ -75,14 +75,15 @@ blocker가 필요하다.
 
 **권장 답변:** 다음 중 하나라도 발생하면 release 또는 operate 진입을
 막는다. runtime code diff 발생, `CONTEXT.md` 누락 또는 domain boundary 공란,
-현재 사용자-facing 문서가 제품명을 `anvil`로 쓰지 않음, lifecycle lint 실패,
+README가 anvil 결합 프로젝트 관점을 반영하지 않음, ephemera 분석 문서가
+ephemera 릴리즈 문서임을 드러내지 않음, lifecycle lint 실패,
 `git diff --check` 실패, `go test ./...` 실패, secret/token/private config/local
 brainstorming metadata가 commit set에 포함됨.
 
 **사용자 답변:** 승인됨.
 
 **결정:** 재설계는 문서 전용 범위를 유지하고, 비어 있지 않은 `CONTEXT.md`
-domain boundary를 갖고, 현재 제품명을 `anvil`로 정규화하며, lifecycle lint,
+domain boundary를 갖고, anvil/ephemera/IronClaw 경계를 정규화하며, lifecycle lint,
 markdown/whitespace diff check, 기존 Go test를 통과하고, private/local artifact를
 제외해야 release/operate에 진입할 수 있다.
 

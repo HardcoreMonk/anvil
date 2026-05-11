@@ -1,14 +1,15 @@
-# anvil MCP 아키텍처
+# anvil IronClaw MCP 아키텍처
 
 ## 상태
 
 - 기준 버전: `v0.2.0`
 - MCP 버전: v1 stdio adapter
 - Entrypoint: `cmd/anvil-mcp`
-- 런타임 대상: anvil control plane daemon HTTP API
+- 런타임 대상: ephemera control plane daemon HTTP API
 
-MCP v1은 얇은 bridge다. VM lifecycle의 의미를 직접 소유하지 않고, MCP tool
-call을 daemon API로 매핑한다. adapter process 안에는 작은 in-memory
+MCP v1은 IronClaw와 ephemera runtime을 연결하는 얇은 bridge다. VM lifecycle의
+의미를 직접 소유하지 않고, MCP tool call을 ephemera daemon API로 매핑한다.
+adapter process 안에는 작은 in-memory
 `session_name` alias map만 유지한다.
 
 ## 시스템 관점
@@ -26,7 +27,7 @@ internal/anvilmcp.DaemonClient
   |
   | HTTP + optional Bearer token
   v
-anvil control plane daemon
+ephemera control plane daemon
   |
   | Firecracker, guest agent proxy, snapshots
   v

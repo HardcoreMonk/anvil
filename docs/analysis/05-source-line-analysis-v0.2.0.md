@@ -1,4 +1,4 @@
-# anvil 0.2.0 소스 분석
+# ephemera 0.2.0 소스 분석
 
 ## 문서 목적
 
@@ -476,7 +476,7 @@ client
 
 ## 개발자 관점 결론
 
-0.2.0은 anvil의 core runtime을 크게 전진시켰다. 이제 daemon은 단순 VM launcher가 아니라 single-host execution control plane에 가깝다.
+0.2.0은 ephemera core runtime을 크게 전진시켰다. 이제 daemon은 단순 VM launcher가 아니라 single-host execution control plane에 가깝다.
 
 가장 중요한 구현 변화는 세 가지다.
 

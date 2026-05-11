@@ -1,7 +1,8 @@
 # 미릴리즈
 
-프로젝트 공식 명칭은 `anvil`이다. 저장소와 일부 기존 API/환경 변수 이름은
-호환성 때문에 아직 `ephemera` 또는 `goose-*`를 유지한다.
+`anvil`은 IronClaw와 ephemera를 결합하는 새 프로젝트다. 이 저장소의 공개
+릴리즈 `v0.1.0`, `v0.2.0`은 ephemera runtime 릴리즈이며, 미릴리즈 항목은
+ephemera runtime을 IronClaw에서 사용할 수 있게 하는 anvil 통합 작업을 포함한다.
 
 ## 추가됨
 
@@ -23,9 +24,9 @@
 - 로컬 빌드 산출물 `anvil-daemon`이 git에 들어가지 않도록 ignore 규칙을
   정리했다.
 
-# v0.2.0 — 단일 호스트 기능 완성
+# ephemera v0.2.0 — 단일 호스트 기능 완성
 
-`v0.2.0`은 v0.1.0의 기본 VM 생성/작업 실행 모델에 snapshot, restore,
+ephemera `v0.2.0`은 v0.1.0의 기본 VM 생성/작업 실행 모델에 snapshot, restore,
 인증, proxy, profile, COW rootfs, diff snapshot을 추가한 릴리즈다.
 
 ## 새 기능
@@ -174,9 +175,9 @@
 - control-plane auth 환경 변수를 설정하지 않으면 API 인증이 비활성화된다.
 - GitHub tag는 공개되어 있지만 GitHub Release page는 아직 게시하지 않았다.
 
-# v0.1.0 — 초기 구현
+# ephemera v0.1.0 — 초기 구현
 
-`v0.1.0`은 anvil의 초기 proof-of-concept 릴리즈다. 단일 host에서
+ephemera `v0.1.0`은 초기 proof-of-concept 릴리즈다. 단일 host에서
 Firecracker MicroVM을 만들고, 그 안에서 Goose task를 실행하는 기본
 경로를 제공했다.
 

@@ -1,10 +1,10 @@
-# anvil 런타임 아키텍처
+# ephemera 런타임 아키텍처
 
 ## 상태
 
 - 기준 버전: `v0.2.0`
-- 제품명: `anvil`
-- 저장소/모듈 legacy 이름: `ephemera`
+- anvil 관점: ephemera runtime은 IronClaw 결합 프로젝트의 기반 실행 계층
+- 저장소/모듈 이름: `ephemera`
 - 런타임 소유 파일:
   - `cmd/goose-daemon/`
   - `cmd/goose-agent/`
@@ -13,7 +13,7 @@
   - `internal/network/`
   - `internal/vm/`
 
-이 문서는 런타임 구조만 설명한다. 요청별 서비스 흐름은
+이 문서는 ephemera runtime 구조만 설명한다. 요청별 서비스 흐름은
 [service-logic.md](service-logic.md), IronClaw MCP 연동은
 [mcp-architecture.md](mcp-architecture.md)에 정리한다.
 
@@ -28,7 +28,7 @@ Reverse proxy
   |
   | HTTP + control-plane Bearer token
   v
-anvil control plane daemon :3000
+ephemera control plane daemon :3000
   |
   | Firecracker SDK, KVM, TAP, rootfs, snapshot files
   v

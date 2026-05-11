@@ -10,13 +10,14 @@ redaction_applied: true
 
 ## 요약
 
-이 재설계는 0.2.0 runtime 확장과 IronClaw MCP v1 adapter 작업 이후 anvil
-프로젝트 문서와 아키텍처 언어를 정렬한다. 범위는 문서와 아키텍처 일관성에만
-한정한다. daemon 동작, MCP tool 동작, snapshot/restore 동작, API schema,
-runtime code는 변경하지 않는다.
+이 재설계는 ephemera 0.2.0 runtime 확장과 IronClaw MCP v1 adapter 작업 이후
+anvil 프로젝트 문서와 아키텍처 언어를 정렬한다. 범위는 문서와 아키텍처
+일관성에만 한정한다. daemon 동작, MCP tool 동작, snapshot/restore 동작,
+API schema, runtime code는 변경하지 않는다.
 
-공식 제품명과 프로젝트명은 `anvil`이다. GitHub 저장소와 로컬 경로는
-`ephemera`를 유지할 수 있지만, 이는 제품명이 아니라 저장소 이름으로 취급한다.
+`anvil`은 IronClaw와 ephemera를 결합하는 새 프로젝트다. `ephemera`는
+이미 0.1.0/0.2.0이 릴리즈된 기반 runtime이며, GitHub 저장소와 Go 모듈 이름도
+`ephemera`를 유지한다.
 
 ## 승인된 범위
 
@@ -24,10 +25,11 @@ runtime code는 변경하지 않는다.
 
 범위에 포함:
 
-- anvil의 공식 문서 계층 정의.
+- anvil/ephemera/IronClaw 경계를 반영한 공식 문서 계층 정의.
 - project-level domain context 문서 추가.
-- 현재 사용자-facing 문서의 공식 제품명 `anvil` 정규화.
-- 과거 분석 문서에서 legacy `ephemera` 코드 경로 표현은 historical evidence로 보존 가능.
+- README는 anvil 결합 프로젝트 관점으로 정리.
+- ephemera 0.1.0/0.2.0 분석 문서는 ephemera runtime 문서임을 제목과 설명에
+  명시.
 - 재설계 run의 lifecycle evidence 기록.
 - 문서 일관성과 기존 Go test 중심의 검증 유지.
 
@@ -45,17 +47,16 @@ runtime code는 변경하지 않는다.
 프로젝트 문서는 다음 source-of-truth 순서를 따른다.
 
 1. `AGENTS.md`: Codex 작업 규칙, source-of-truth 순서, 승인 규칙, 안전 제약.
-2. `CONTEXT.md`: anvil domain glossary, module boundary map, legacy term policy.
-3. `README.md`: 외부 사용자/개발자를 위한 제품 개요, build, run, API, MCP 사용법.
-4. `RELEASE_NOTES.md`: release별 변경 이력.
-5. `docs/analysis/`: 근거와 분석 보고서. 오래된 상태를 설명할 때 historical term을
-   보존할 수 있다.
+2. `CONTEXT.md`: anvil/ephemera/IronClaw 경계, module boundary map, legacy term policy.
+3. `README.md`: anvil 결합 프로젝트 개요, build, run, API, MCP 사용법.
+4. `RELEASE_NOTES.md`: ephemera release와 anvil 통합 변경 이력.
+5. `docs/analysis/`: ephemera 0.1.0/0.2.0 근거와 분석 보고서.
 6. `docs/superpowers/`: spec, grill-me record, plan, review 등 lifecycle evidence.
 7. `docs/lifecycle/`, `docs/operations/`: lifecycle run snapshot과 operation handoff.
 
-문서가 충돌하면 현재 사용자-facing 제품 문서는 제품명을 `anvil`로 사용한다.
-`ephemera`는 Git repository, Go module, local directory, historical source
-material을 가리킬 때 허용한다.
+문서가 충돌하면 `anvil`은 IronClaw+ephemera 결합 프로젝트, `ephemera`는 기반
+runtime 릴리즈로 구분한다. ephemera 릴리즈 분석 문서의 제목과 본문을 anvil로
+덮어쓰지 않는다.
 
 ## 도메인 아키텍처 경계
 
@@ -64,20 +65,20 @@ material을 가리킬 때 허용한다.
 
 | 용어 | 의미 | 소유 영역 |
 |---|---|---|
-| `anvil` | 공식 제품/프로젝트 이름 | project-wide |
-| `ephemera` | repository/path/module legacy 이름 | repository metadata |
+| `anvil` | IronClaw와 ephemera를 결합하는 새 프로젝트 이름 | project-wide |
+| `ephemera` | Firecracker MicroVM 기반 격리 runtime. 0.1.0/0.2.0 릴리즈 기준 구현 | `cmd/goose-daemon/`, `internal/*` |
 | Core runtime | Firecracker MicroVM 기반 격리 agent runtime | `cmd/goose-daemon/`, `internal/storage/`, `internal/network/`, `internal/vm/` |
 | Control plane daemon | VM lifecycle, snapshot, restore, agent proxy를 관리하는 host daemon | `cmd/goose-daemon/` |
 | Guest agent | VM 내부 HTTP task runner | `cmd/goose-agent/` |
 | Guest init | mount 준비와 guest agent 감시를 담당하는 VM 내부 PID 1 | `cmd/micro-init/` |
-| MCP adapter | IronClaw가 anvil daemon을 호출하는 얇은 stdio bridge | `cmd/anvil-mcp/`, `internal/anvilmcp/` |
+| MCP adapter | IronClaw가 ephemera daemon을 호출하는 얇은 stdio bridge | `cmd/anvil-mcp/`, `internal/anvilmcp/` |
 | Session alias | MCP adapter의 in-memory `session_name -> vm_id` 편의 mapping | `internal/anvilmcp/` |
 | Snapshot/restore | VM state persistence와 restore를 담당하는 daemon runtime capability | `cmd/goose-daemon/`, `internal/storage/`, `internal/vm/` |
 | Profile | VM 생성 시 LLM config/secret을 선택하는 단위 | `configs/profiles/`, daemon VM create flow |
 
 경계 규칙:
 
-- `docs/analysis/`는 evidence이며 공식 제품 truth가 아니다.
+- `docs/analysis/`는 ephemera 릴리즈 evidence이며 anvil 프로젝트 문서와 역할이 다르다.
 - `docs/superpowers/`는 lifecycle evidence이며 runtime state가 아니다.
 - `configs/*.example` 파일은 secret이 없는 예시다.
 - secret config file은 local에 남기고 git에서 제외한다.
@@ -92,8 +93,8 @@ run에서 package 이동을 만들지 않는다.
 
 승인된 경계:
 
-- 제품 정체성은 `anvil`이고, repository 정체성은 `ephemera`로 남을 수 있다.
-- core runtime은 daemon, storage, network, VM package가 소유한다.
+- anvil은 IronClaw+ephemera 결합 프로젝트이고, ephemera는 기반 runtime이다.
+- core runtime은 ephemera daemon, storage, network, VM package가 소유한다.
 - guest runtime은 `goose-agent`와 `micro-init`이 소유한다.
 - IronClaw 통합은 MCP adapter package가 소유한다.
 - session alias는 MCP adapter process memory이며 persistent session state가 아니다.
@@ -111,12 +112,11 @@ run에서 package 이동을 만들지 않는다.
 - `CONTEXT.md` 추가.
 - `AGENTS.md`에 `CONTEXT.md`를 source-of-truth hierarchy에 포함하고 재설계
   제약을 명시.
-- `README.md`에서 현재 제품명과 제품 설명을 `anvil`로 정리. repository link는
-  `HardcoreMonk/ephemera` 유지 가능.
-- `RELEASE_NOTES.md`에서 현재 release note는 `anvil`을 사용하고 historical note는
-  이해 가능한 형태로 유지.
-- `docs/analysis/README.md`에 legacy `ephemera` term은 historical evidence로
-  보존된다는 점 명시.
+- `README.md`에서 anvil을 IronClaw+ephemera 결합 프로젝트로 설명. repository
+  link는 `HardcoreMonk/ephemera` 유지 가능.
+- `RELEASE_NOTES.md`에서 ephemera release와 anvil 통합 미릴리즈 변경을 구분.
+- `docs/analysis/README.md`에 분석 문서가 ephemera 0.1.0/0.2.0 runtime 분석임을
+  명시.
 - 이 redesign run의 lifecycle artifact에 승인 decision과 review evidence 기록.
 
 ## 검증

@@ -1,10 +1,10 @@
-# anvil 0.1.0 주니어 개발자 실무 투입 보고서
+# ephemera 0.1.0 주니어 개발자 실무 투입 보고서
 
 분석 기준 커밋: `157753fb5234679ca7cbebb6658e431c6a748ef6`
 
 ## 한 문장 요약
 
-anvil은 호스트에서 Firecracker MicroVM을 만들고, 각 VM 안에서 Goose AI agent를 실행하게 해, 작업이 끝나면 VM 디스크/네트워크를 지워 격리된 AI 작업 환경을 제공하는 Go 백엔드 프로젝트다. 이 0.1.0 문서에서는 당시 저장소/모듈 이름인 `ephemera`가 코드 경로에 남아 있다.
+ephemera는 호스트에서 Firecracker MicroVM을 만들고, 각 VM 안에서 Goose AI agent를 실행하게 해, 작업이 끝나면 VM 디스크/네트워크를 지워 격리된 AI 작업 환경을 제공하는 Go 백엔드 프로젝트다. anvil은 이 ephemera runtime을 IronClaw와 결합하는 상위 프로젝트다.
 
 ## 아키텍처 분해
 

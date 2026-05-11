@@ -14,8 +14,8 @@ redaction_applied: true
 
 ## 목표
 
-runtime 동작을 변경하지 않고 anvil의 공식 문서, 도메인 언어, lifecycle
-artifact를 정렬한다.
+runtime 동작을 변경하지 않고 anvil/ephemera/IronClaw 경계, 공식 문서, 도메인
+언어, lifecycle artifact를 정렬한다.
 
 ## 아키텍처
 
@@ -72,11 +72,11 @@ runtime file 변경이 필요해지면 중단하고 사용자에게 scope 재승
 
 - `AGENTS.md`: `CONTEXT.md`를 source-of-truth order에 추가하고 문서 전용
   재설계 guardrail 명시.
-- `README.md`: 현재 제품명을 `anvil`로 정리하고 repository link는
-  `HardcoreMonk/ephemera` 유지.
+- `README.md`: anvil을 IronClaw+ephemera 결합 프로젝트로 설명하고 repository
+  link는 `HardcoreMonk/ephemera` 유지.
 - `RELEASE_NOTES.md`: 현재 release wording은 `anvil`로 정리하고 historical
   readability 유지.
-- `docs/analysis/README.md`: 0.1.0의 `ephemera` 코드 경로 표현은 historical evidence임을
+- `docs/analysis/README.md`: 0.1.0/0.2.0 문서가 ephemera runtime 분석임을
   명시.
 - `docs/superpowers/plans/2026-05-11-anvil-redesign.md`: 완료된 plan evidence 기록.
 - `docs/operations/2026-05-11-anvil-redesign-handoff.md`: release/operate 인계 기록.
@@ -138,9 +138,9 @@ rg -n "anvil|HardcoreMonk/ephemera|EPHEMERA_PUBLIC_URL|anvil-mcp" README.md
 
 ### 작업 4. Release note와 analysis index 정렬
 
-- `RELEASE_NOTES.md` current-facing wording을 `anvil`로 정리한다.
-- historical release 정보는 이해 가능한 형태로 유지한다.
-- `docs/analysis/README.md`에 legacy naming policy를 명시한다.
+- `RELEASE_NOTES.md`에서 ephemera release와 anvil 통합 미릴리즈 변경을 구분한다.
+- historical release 정보는 ephemera 릴리즈로 유지한다.
+- `docs/analysis/README.md`에 ephemera runtime 분석임을 명시한다.
 
 검증:
 
@@ -182,8 +182,11 @@ git status --short
 ## 완료 기준
 
 - `CONTEXT.md`가 존재하고 domain boundary와 frozen runtime contract를 포함한다.
-- `AGENTS.md`, `README.md`, `RELEASE_NOTES.md`가 공식 제품명 `anvil`을 사용한다.
-- legacy `ephemera`는 repository/path/module/historical context로만 사용된다.
+- `README.md`는 anvil 결합 프로젝트 관점을 사용한다.
+- `docs/analysis/`는 ephemera 0.1.0/0.2.0 runtime 분석임을 제목과 설명에
+  명시한다.
+- `ephemera`는 repository/path/module뿐 아니라 기반 runtime과 릴리즈 이름으로
+  정확히 사용된다.
 - lifecycle artifact와 handoff가 승인 상태를 반영한다.
 - runtime code 변경 없이 검증이 통과한다.
 

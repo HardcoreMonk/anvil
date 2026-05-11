@@ -1,9 +1,9 @@
-# anvil 서비스 로직
+# ephemera 서비스 로직
 
 ## 상태
 
 - 기준 버전: `v0.2.0`
-- 범위: daemon HTTP 동작, VM lifecycle, agent proxy, snapshot lifecycle,
+- 범위: ephemera daemon HTTP 동작, VM lifecycle, agent proxy, snapshot lifecycle,
   guest agent 동작
 - 제외 범위: IronClaw MCP client 동작. 해당 내용은
   [mcp-architecture.md](mcp-architecture.md)를 참조한다.

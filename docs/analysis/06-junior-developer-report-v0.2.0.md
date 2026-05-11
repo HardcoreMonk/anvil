@@ -1,12 +1,12 @@
-# anvil 0.2.0 주니어 개발자용 분석 보고서
+# ephemera 0.2.0 주니어 개발자용 분석 보고서
 
 ## 한 줄 요약
 
-0.2.0은 anvil이 "VM을 띄우는 도구"에서 "VM을 띄우고, 명령을 실행하고, 상태를 저장하고, 다시 복원하는 단일 호스트 실행 플랫폼"으로 바뀐 릴리즈다.
+0.2.0은 ephemera가 "VM을 띄우는 도구"에서 "VM을 띄우고, 명령을 실행하고, 상태를 저장하고, 다시 복원하는 단일 호스트 실행 플랫폼"으로 바뀐 릴리즈다.
 
 ## 먼저 알아야 할 배경
 
-anvil은 Firecracker MicroVM을 사용해 격리된 실행 환경을 만든다. 각 VM 안에는 `goose-agent`가 실행되고, host에서는 `goose-daemon`이 VM을 만들고 관리한다.
+ephemera는 Firecracker MicroVM을 사용해 격리된 실행 환경을 만든다. 각 VM 안에는 `goose-agent`가 실행되고, host에서는 `goose-daemon`이 VM을 만들고 관리한다. anvil은 이 runtime을 IronClaw와 결합한다.
 
 0.1.0에서는 주로 다음이 중요했다.
 
@@ -351,7 +351,7 @@ restore할 때 disk 전체를 복사하면 느리고 공간을 많이 쓴다. CO
 
 ## 결론
 
-0.2.0은 anvil의 구조를 크게 확장한 릴리즈다. 초보 개발자는 먼저 daemon, agent, micro-init의 역할을 구분하고, 그 다음 snapshot/restore 흐름을 따라가면 된다.
+0.2.0은 ephemera의 구조를 크게 확장한 릴리즈다. 초보 개발자는 먼저 daemon, agent, micro-init의 역할을 구분하고, 그 다음 snapshot/restore 흐름을 따라가면 된다.
 
 가장 중요한 관점은 다음이다.
 

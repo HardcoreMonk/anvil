@@ -6,7 +6,7 @@
 
 ## 목표
 
-`cmd/anvil-mcp`를 구현한다. 이 binary는 IronClaw가 anvil 0.2.0 daemon API를
+`cmd/anvil-mcp`를 구현한다. 이 binary는 IronClaw가 ephemera 0.2.0 daemon API를
 통해 VM 생성, task 실행, health 조회, agent stop, VM 삭제를 수행할 수 있게 하는
 Go stdio MCP server다.
 
@@ -17,7 +17,7 @@ Go stdio MCP server다.
 - IronClaw는 stdio MCP로 Go binary와 통신한다.
 - adapter는 config를 load한다.
 - optional in-memory `session_name -> vm_id` map을 유지한다.
-- anvil daemon에는 HTTP JSON으로 요청한다.
+- ephemera daemon에는 HTTP JSON으로 요청한다.
 - v1은 workspace copy-in/out, snapshot tool, persistent session, HTTP MCP
   transport, quota, automatic cleanup을 의도적으로 제외한다.
 
@@ -27,7 +27,7 @@ Go stdio MCP server다.
 - `github.com/modelcontextprotocol/go-sdk/mcp`
 - standard `net/http`
 - `gopkg.in/yaml.v2`
-- anvil daemon 0.2.0 HTTP API
+- ephemera daemon 0.2.0 HTTP API
 - Go `testing`
 - `net/http/httptest`
 
@@ -64,7 +64,7 @@ Go stdio MCP server다.
 - `internal/anvilmcp/session_store.go`: concurrency-safe optional
   `session_name -> vm_id` alias map.
 - `internal/anvilmcp/session_store_test.go`: bind, duplicate, resolve, remove test.
-- `internal/anvilmcp/daemon_client.go`: anvil daemon 0.2.0 endpoint용 작은 HTTP client.
+- `internal/anvilmcp/daemon_client.go`: ephemera daemon 0.2.0 endpoint용 작은 HTTP client.
 - `internal/anvilmcp/daemon_client_test.go`: request shape, auth header, daemon error
   preservation, timeout context propagation test.
 - `internal/anvilmcp/tools.go`: MCP input/output struct와 tool handler.
@@ -214,7 +214,7 @@ git diff --check
 real Firecracker 환경에서 다음 순서로 확인한다.
 
 ```text
-start anvil daemon
+start ephemera daemon
 start anvil-mcp
 call anvil_spawn_vm
 call anvil_run_task

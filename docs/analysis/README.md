@@ -1,15 +1,17 @@
-# anvil 분석 문서 색인
+# ephemera 분석 문서 색인
 
 ## 기준 정보
 
-- 공식 프로젝트 명칭: `anvil`
+- 분석 대상: `ephemera` runtime
+- anvil 관점: ephemera runtime은 IronClaw 결합 프로젝트의 기반 실행 계층
 - 공식 저장소: `https://github.com/HardcoreMonk/ephemera/`
 - 0.1.0 기준 커밋: `157753fb5234679ca7cbebb6658e431c6a748ef6`
 - 0.2.0 기준 커밋: `abcaa86`
 
 ## 0.1.0 문서
 
-0.1.0 문서는 초기 소스 분석 결과다. 현재 문서 제목과 설명은 공식 제품명 `anvil`로 정리했으며, 코드 경로와 모듈명에는 당시 코드베이스 명칭인 `ephemera`가 남아 있을 수 있다.
+0.1.0 문서는 ephemera 초기 소스 분석 결과다. 코드 경로와 모듈명에는
+`ephemera`가 그대로 남아 있으며, 이 표현은 anvil로 바꾸지 않는다.
 
 - `01-source-line-analysis.md`: 0.1.0 소스 구조와 파일별 분석
 - `02-junior-developer-report.md`: 주니어 개발자용 진입 보고서
