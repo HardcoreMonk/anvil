@@ -358,6 +358,39 @@ Response 동작:
 adapter는 daemon URL과 API token을 신뢰된 local/operator configuration으로
 가정한다.
 
+## Smoke test
+
+문서 기준 smoke test는 IronClaw 본체 설치를 전제로 하지 않는다. Go MCP SDK
+client가 `cmd/anvil-mcp`를 stdio MCP server로 실행하고, 실제 ephemera daemon을
+대상으로 tool call을 순서대로 수행한다.
+
+```bash
+sudo ANVIL_API_ADDR=127.0.0.1:3000 ./anvil-daemon
+```
+
+다른 터미널:
+
+```bash
+go run scripts/anvil-mcp-smoke.go -session smoke
+```
+
+검증 순서:
+
+```text
+start ephemera daemon
+start anvil-mcp through MCP CommandTransport
+call anvil_spawn_vm
+call anvil_run_task
+call anvil_get_vm_health
+call anvil_stop_vm
+call anvil_delete_vm
+```
+
+기본 smoke test는 `anvil_run_task` 응답에 `anvil-smoke-ok`가 포함되는지 확인한다.
+LLM provider credential이 유효하지 않은 환경에서 MCP lifecycle transport만
+확인하려면 `-expect-output ""`를 사용한다. 이 경우 `anvil_run_task`가 provider
+error를 반환해도 MCP tool path, VM lifecycle, cleanup 경로를 확인할 수 있다.
+
 ## 실패 동작
 
 | 실패 | 결과 |
@@ -393,4 +426,5 @@ MCP v1은 의도적으로 다음을 구현하지 않는다.
 - `internal/anvilmcp/session_store.go`
 - `internal/anvilmcp/tools.go`
 - `configs/anvil-mcp.yaml.example`
+- `scripts/anvil-mcp-smoke.go`
 - `docs/superpowers/specs/2026-05-11-anvil-ironclaw-mcp-v1-design.md`
