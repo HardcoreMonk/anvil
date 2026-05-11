@@ -372,16 +372,23 @@ export ANVIL_MCP_CONFIG=configs/anvil-mcp.yaml
 
 MCP tool:
 
-| Tool | 의미 |
+| Tool | 역할 |
 |---|---|
-| `anvil_spawn_vm` | VM을 만들고 optional `session_name` alias를 연결한다. |
+| `anvil_spawn_vm` | ephemera VM을 만들고 optional `session_name` alias를 연결한다. |
 | `anvil_run_task` | `vm_id` 또는 `session_name`으로 VM에 prompt를 실행한다. |
 | `anvil_get_vm_health` | VM agent health를 확인한다. |
 | `anvil_stop_vm` | guest agent에 graceful stop을 요청한다. |
 | `anvil_delete_vm` | host VM 리소스를 삭제하고 session alias를 해제한다. |
+| `anvil_create_snapshot` | `vm_id` 또는 `session_name`으로 VM snapshot을 생성한다. |
+| `anvil_list_snapshots` | daemon이 알고 있는 snapshot 목록을 조회한다. |
+| `anvil_restore_snapshot` | `snapshot_id`에서 새 VM을 restore하고 optional `session_name` alias를 연결한다. |
+| `anvil_delete_snapshot` | `snapshot_id`로 snapshot을 삭제한다. |
 
-MCP v1은 얇은 runtime bridge다. workspace copy, snapshot tool, restore tool,
-persistent session database, 자동 VM cleanup은 v1 범위가 아니다.
+MCP v1은 얇은 runtime bridge다. workspace copy, snapshot alias, session alias 영속화,
+HTTP MCP transport는 제공하지 않는다. Restore 응답은 daemon의 `agent_token`을
+decode할 수 있지만 MCP output에는 노출하지 않는다. Restore 후 `session_name`
+bind가 실패하면 adapter는 restored VM을 자동 삭제하지 않고 error에 restored VM ID를
+포함한다.
 
 ---
 
@@ -558,7 +565,7 @@ profile 이름에는 `/` 또는 `\`를 사용할 수 없다.
 - diff snapshot은 memory만 diff다. rootfs는 snapshot마다 full copy다.
 - diff restore는 임시 merged memory file을 만들 disk space가 필요하다.
 - control-plane token 환경 변수를 설정하지 않으면 API 인증이 비활성화된다.
-- MCP v1은 snapshot/restore tool을 제공하지 않는다.
+- MCP v1은 snapshot/restore tool을 제공하지만 snapshot alias와 session alias 영속화는 제공하지 않는다.
 
 ---
 
