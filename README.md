@@ -170,6 +170,7 @@ configs/
   workflows/ci.yml    go build + go vet + go test on push/PR (ubuntu-22.04)
 
 docs/
+  architecture/        Runtime, service logic, and MCP architecture docs
   analysis/            Version comparison and source analysis reports
   lifecycle/runs/      Computed lifecycle status snapshots
   operations/          Release/operate handoff records
@@ -202,6 +203,9 @@ artifacts/            Auto-populated at runtime (gitignored)
 | [CONTEXT.md](CONTEXT.md) | Canonical product name, source-of-truth order, domain glossary, and frozen runtime contracts |
 | [AGENTS.md](AGENTS.md) | Codex project guidance, workflow rules, commands, and invariants |
 | [RELEASE_NOTES.md](RELEASE_NOTES.md) | Version notes for `v0.1.0`, `v0.2.0`, and unreleased changes |
+| [docs/architecture/runtime-architecture.md](docs/architecture/runtime-architecture.md) | Runtime architecture for the daemon, MicroVM, storage, network, and guest components |
+| [docs/architecture/service-logic.md](docs/architecture/service-logic.md) | Control-plane API, VM lifecycle, snapshot/restore, and guest agent service flows |
+| [docs/architecture/mcp-architecture.md](docs/architecture/mcp-architecture.md) | IronClaw MCP adapter architecture, tool contracts, config, and session alias behavior |
 | [docs/analysis/README.md](docs/analysis/README.md) | Index for 0.1.0 and 0.2.0 analysis documents |
 | [docs/operations/2026-05-11-anvil-redesign-handoff.md](docs/operations/2026-05-11-anvil-redesign-handoff.md) | Current redesign release/operate handoff evidence |
 

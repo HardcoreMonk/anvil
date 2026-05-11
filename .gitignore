@@ -3,6 +3,7 @@
 # ==========================================
 
 # 1. Compiled Go binaries
+/anvil-daemon
 /anvil-mcp
 /ephemera-daemon
 /goose-daemon
