@@ -1,7 +1,7 @@
-# Ephemera 소스 줄 단위 분석 보고서
+# anvil 0.1.0 소스 줄 단위 분석 보고서
 
 분석 기준:
-- 대상 저장소: `https://github.com/steve-seungeui/ephemera`
+- 대상 저장소: `https://github.com/HardcoreMonk/ephemera/`
 - 분석 커밋: `157753fb5234679ca7cbebb6658e431c6a748ef6`
 - 로컬 브랜치: `main`
 - 원격 HEAD 확인: 위 커밋과 동일
@@ -11,7 +11,7 @@
 
 ## 전체 구조
 
-Ephemera는 Firecracker MicroVM 위에서 Goose AI agent를 격리 실행하는 Go 기반 백엔드 시스템이다. 웹 프론트엔드 코드는 없다. 외부 사용자는 HTTP API 또는 `simple_test_scenario.sh` 같은 CLI 스크립트를 통해 제어 평면에 접근한다.
+anvil은 Firecracker MicroVM 위에서 Goose AI agent를 격리 실행하는 Go 기반 백엔드 시스템이다. 이 0.1.0 분석 당시 저장소/모듈에는 `ephemera` 이름이 남아 있었다. 웹 프론트엔드 코드는 없다. 외부 사용자는 HTTP API 또는 `simple_test_scenario.sh` 같은 CLI 스크립트를 통해 제어 평면에 접근한다.
 
 구성:
 - `cmd/goose-daemon`: 호스트에서 실행되는 control plane. VM 생성, 목록 조회, 삭제를 담당한다.

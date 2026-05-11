@@ -6,63 +6,63 @@ generated_by: lifecycle-redesign-start
 generated_at: 2026-05-11T00:00:00
 redaction_applied: true
 ---
-# Operation Handoff: anvil
+# 운영 인계: anvil
 
-## Release Scope
+## 릴리즈 범위
 
-- Documentation-only redesign for anvil project identity, domain glossary, canonical
-  document hierarchy, and lifecycle evidence.
-- Runtime behavior, daemon API, MCP tool contracts, config precedence, session alias
-  semantics, and snapshot/restore behavior are unchanged.
+- anvil 프로젝트 정체성, 도메인 용어집, 공식 문서 계층, lifecycle 근거를
+  정리하는 문서 전용 재설계.
+- runtime 동작, daemon API, MCP tool 계약, config 우선순위, session alias
+  의미, snapshot/restore 동작은 변경하지 않는다.
 
-## Current Lifecycle Stage
+## 현재 lifecycle 단계
 
-Operate has been entered. Implementation, code-review, final verification, and
-release approval are complete for this documentation-only redesign. Operate was
-approved on 2026-05-11.
+`operate` 단계에 진입했다. 이 문서 전용 재설계는 구현, code review, 최종
+검증, release 승인을 완료했다. `operate` 진입은 2026-05-11에 승인되었다.
 
-## Verification
+## 검증
 
 - `/data/projects/codex-zone/codex-project-mgmt/scripts/lifecycle-lint.sh anvil --run 2026-05-11-anvil-redesign`
 - `git diff --check`
 - `go test ./...`
-- Runtime diff guard against `cmd/`, `internal/`, `go.mod`, and `go.sum`
+- `cmd/`, `internal/`, `go.mod`, `go.sum`에 대한 runtime diff guard
 
-## Code Review Result
+## 코드 review 결과
 
-- No blocking issues found in the final branch review.
-- The reviewed change set is limited to documentation, lifecycle evidence, and the
-  `e2e_test.sh` binary-name alignment needed to keep README instructions runnable.
-- Protected runtime and config contract paths remain unchanged.
+- 최종 branch review에서 blocking issue는 발견되지 않았다.
+- 검토된 변경 범위는 문서, lifecycle 근거, README 명령과 맞추기 위한
+  `e2e_test.sh` binary name 정렬로 제한되었다.
+- 보호 대상 runtime path와 config 계약 path는 변경되지 않았다.
 
-## Audit Candidates
+## 감사 후보
 
-- Confirm generated artifacts do not contain secrets or stale internal references.
-- Confirm canonical docs and computed snapshots are clearly separated.
+- 생성 artifact에 secret 또는 오래된 내부 참조가 없는지 확인한다.
+- 공식 문서와 계산된 snapshot이 명확히 분리되어 있는지 확인한다.
 
-## Blockers
+## 차단 항목
 
-- None.
+- 없음.
 
-## Warnings
+## 경고
 
-- Scan summaries are bounded and redacted.
-- Generated drafts may omit project-specific decisions until manually completed.
+- scan summary는 범위가 제한되어 있고 redaction이 적용되어 있다.
+- 생성 draft는 수동 완료 전까지 project-specific decision을 일부 생략할 수
+  있다.
 
-## Residual Risk Candidates
+## 잔여 위험 후보
 
-- Legacy docs may be stale.
-- Scan summaries are bounded and redacted.
+- legacy 문서가 stale 상태일 수 있다.
+- scan summary는 범위가 제한되어 있고 redaction이 적용되어 있다.
 
-## Next Action
+## 다음 작업
 
-- Track follow-up release hygiene separately, including public tag and release notes
-  publication if needed.
+- public tag, release note 게시 등 release hygiene은 별도 follow-up으로
+  추적한다.
 
-## Lifecycle Gate Evidence
+## 생명주기 gate 근거
 
 - Stage: `operate`
-- Status: `passed`
+- 상태: `passed`
 - Approved by: `user`
-- Evidence: User approved operate entry on 2026-05-11 after release approval and
-  final verification completed successfully.
+- 근거: 사용자는 release 승인과 최종 검증 완료 뒤 2026-05-11에
+  operate 진입을 승인했다.

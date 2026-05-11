@@ -6,131 +6,122 @@ generated_by: lifecycle-redesign-start
 generated_at: 2026-05-11T00:00:00
 redaction_applied: true
 ---
-# anvil Project Redesign Design
+# anvil 프로젝트 재설계 설계서
 
-## Summary
+## 요약
 
-This redesign aligns the anvil project documentation and architecture language after
-the 0.2.0 runtime expansion and the IronClaw MCP v1 adapter work. It is a
-documentation and architecture consistency pass only. It does not change daemon
-behavior, MCP tool behavior, snapshot/restore behavior, API schemas, or runtime code.
+이 재설계는 0.2.0 runtime 확장과 IronClaw MCP v1 adapter 작업 이후 anvil
+프로젝트 문서와 아키텍처 언어를 정렬한다. 범위는 문서와 아키텍처 일관성에만
+한정한다. daemon 동작, MCP tool 동작, snapshot/restore 동작, API schema,
+runtime code는 변경하지 않는다.
 
-The official product/project name is `anvil`. The GitHub repository and local path may
-remain `ephemera`, but that name is treated as a repository name, not the product name.
+공식 제품명과 프로젝트명은 `anvil`이다. GitHub 저장소와 로컬 경로는
+`ephemera`를 유지할 수 있지만, 이는 제품명이 아니라 저장소 이름으로 취급한다.
 
-## Approved Scope
+## 승인된 범위
 
-The redesign scope is **documentation plus architecture consistency**.
+재설계 범위는 **문서와 아키텍처 일관성**이다.
 
-In scope:
+범위에 포함:
 
-- Define the canonical document hierarchy for anvil.
-- Add a project-level domain context document.
-- Normalize official current-facing docs to use `anvil`.
-- Preserve legacy `Ephemera` wording only as historical evidence in older analysis
-  documents.
-- Record lifecycle evidence for the redesign run.
-- Keep verification focused on documentation consistency and existing Go tests.
+- anvil의 공식 문서 계층 정의.
+- project-level domain context 문서 추가.
+- 현재 사용자-facing 문서의 공식 제품명 `anvil` 정규화.
+- 과거 분석 문서에서 legacy `ephemera` 코드 경로 표현은 historical evidence로 보존 가능.
+- 재설계 run의 lifecycle evidence 기록.
+- 문서 일관성과 기존 Go test 중심의 검증 유지.
 
-Out of scope:
+범위에서 제외:
 
-- Runtime code changes.
-- Daemon API changes.
-- MCP tool contract changes.
-- Snapshot/restore behavior changes.
-- Release/tag policy cleanup.
-- New v2 feature design such as workspace sync, snapshot MCP tools, or HTTP MCP
-  transport.
+- runtime code 변경.
+- daemon API 변경.
+- MCP tool contract 변경.
+- snapshot/restore 동작 변경.
+- release/tag policy cleanup.
+- workspace sync, snapshot MCP tool, HTTP MCP transport 같은 v2 기능 설계.
 
-## Canonical Document Hierarchy
+## 공식 문서 계층
 
-Project documentation follows this source-of-truth order:
+프로젝트 문서는 다음 source-of-truth 순서를 따른다.
 
-1. `AGENTS.md` - Codex work rules, source-of-truth order, approval rules, and safety
-   constraints.
-2. `CONTEXT.md` - anvil domain glossary, module boundary map, and legacy term policy.
-3. `README.md` - external user and developer entrypoint for product overview, build,
-   run, API, and MCP usage.
-4. `RELEASE_NOTES.md` - release-by-release change history.
-5. `docs/analysis/` - evidence and analysis reports. These can preserve historical
-   terms when they describe older states.
-6. `docs/superpowers/` - lifecycle evidence such as specs, grill-me records, plans,
-   and reviews.
-7. `docs/lifecycle/` and `docs/operations/` - lifecycle run snapshots and operation
-   handoffs.
+1. `AGENTS.md`: Codex 작업 규칙, source-of-truth 순서, 승인 규칙, 안전 제약.
+2. `CONTEXT.md`: anvil domain glossary, module boundary map, legacy term policy.
+3. `README.md`: 외부 사용자/개발자를 위한 제품 개요, build, run, API, MCP 사용법.
+4. `RELEASE_NOTES.md`: release별 변경 이력.
+5. `docs/analysis/`: 근거와 분석 보고서. 오래된 상태를 설명할 때 historical term을
+   보존할 수 있다.
+6. `docs/superpowers/`: spec, grill-me record, plan, review 등 lifecycle evidence.
+7. `docs/lifecycle/`, `docs/operations/`: lifecycle run snapshot과 operation handoff.
 
-When documents conflict, current-facing product docs use `anvil` as the product name.
-`ephemera` is allowed when referring to the Git repository, Go module, local directory,
-or historical source material.
+문서가 충돌하면 현재 사용자-facing 제품 문서는 제품명을 `anvil`로 사용한다.
+`ephemera`는 Git repository, Go module, local directory, historical source
+material을 가리킬 때 허용한다.
 
-## Domain Architecture Boundary
+## 도메인 아키텍처 경계
 
-`CONTEXT.md` will become the canonical domain architecture document for this redesign.
-It should define the following terms and boundaries.
+`CONTEXT.md`는 이 재설계의 공식 domain architecture 문서다. 다음 term과 경계를
+정의한다.
 
-| Term | Meaning | Owning Area |
+| 용어 | 의미 | 소유 영역 |
 |---|---|---|
-| `anvil` | Official product/project name | Project-wide |
-| `ephemera` | Repository/path/module legacy name | Repository metadata |
-| Core runtime | Firecracker MicroVM based isolated agent runtime | `cmd/goose-daemon/`, `internal/storage/`, `internal/network/`, `internal/vm/` |
-| Control plane daemon | Host daemon that manages VM lifecycle, snapshots, restore, and agent proxying | `cmd/goose-daemon/` |
-| Guest agent | VM-side task runner exposed over HTTP inside the guest | `cmd/goose-agent/` |
-| Guest init | VM-side PID 1 process that prepares mounts and supervises the guest agent | `cmd/micro-init/` |
-| MCP adapter | Thin stdio bridge used by IronClaw to call the anvil daemon | `cmd/anvil-mcp/`, `internal/anvilmcp/` |
-| Session alias | In-memory `session_name -> vm_id` convenience mapping in the MCP adapter | `internal/anvilmcp/` |
-| Snapshot/restore | Daemon runtime capability for VM state persistence and restore | `cmd/goose-daemon/`, `internal/storage/`, `internal/vm/` |
-| Profile | VM creation-time LLM config and secret selection | `configs/profiles/`, daemon VM create flow |
+| `anvil` | 공식 제품/프로젝트 이름 | project-wide |
+| `ephemera` | repository/path/module legacy 이름 | repository metadata |
+| Core runtime | Firecracker MicroVM 기반 격리 agent runtime | `cmd/goose-daemon/`, `internal/storage/`, `internal/network/`, `internal/vm/` |
+| Control plane daemon | VM lifecycle, snapshot, restore, agent proxy를 관리하는 host daemon | `cmd/goose-daemon/` |
+| Guest agent | VM 내부 HTTP task runner | `cmd/goose-agent/` |
+| Guest init | mount 준비와 guest agent 감시를 담당하는 VM 내부 PID 1 | `cmd/micro-init/` |
+| MCP adapter | IronClaw가 anvil daemon을 호출하는 얇은 stdio bridge | `cmd/anvil-mcp/`, `internal/anvilmcp/` |
+| Session alias | MCP adapter의 in-memory `session_name -> vm_id` 편의 mapping | `internal/anvilmcp/` |
+| Snapshot/restore | VM state persistence와 restore를 담당하는 daemon runtime capability | `cmd/goose-daemon/`, `internal/storage/`, `internal/vm/` |
+| Profile | VM 생성 시 LLM config/secret을 선택하는 단위 | `configs/profiles/`, daemon VM create flow |
 
-Boundary rules:
+경계 규칙:
 
-- `docs/analysis/` is evidence, not canonical product truth.
-- `docs/superpowers/` is lifecycle evidence, not runtime state.
-- `configs/*.example` files are non-secret examples only.
-- Secret config files remain local and ignored.
-- MCP v1 remains a thin runtime bridge. Workspace sync, snapshot MCP tools,
-  persistent sessions, and automatic VM cleanup stay out of scope for this redesign.
+- `docs/analysis/`는 evidence이며 공식 제품 truth가 아니다.
+- `docs/superpowers/`는 lifecycle evidence이며 runtime state가 아니다.
+- `configs/*.example` 파일은 secret이 없는 예시다.
+- secret config file은 local에 남기고 git에서 제외한다.
+- MCP v1은 얇은 runtime bridge다. workspace sync, snapshot MCP tool,
+  persistent session, automatic VM cleanup은 이 재설계 범위 밖이다.
 
-## Domain Architecture Pass
+## 도메인 아키텍처 통과
 
-The accepted domain boundary is documentation-facing and does not require runtime code
-changes. Domain terms determine documentation ownership and future planning boundaries,
-not new package moves in this run.
+승인된 domain boundary는 문서-facing 경계이며 runtime code 변경을 요구하지
+않는다. domain term은 문서 ownership과 향후 planning boundary를 정하며, 이번
+run에서 package 이동을 만들지 않는다.
 
-Accepted boundaries:
+승인된 경계:
 
-- Product identity is `anvil`; repository identity can remain `ephemera`.
-- Core runtime remains owned by the daemon, storage, network, and VM packages.
-- Guest runtime remains owned by `goose-agent` and `micro-init`.
-- IronClaw integration remains owned by the MCP adapter packages.
-- Session alias means MCP adapter process memory only; it is not persistent session
-  state.
-- Snapshot/restore remains a daemon capability; it is not part of MCP v1.
-- `docs/analysis/` remains evidence and does not override `AGENTS.md`, `CONTEXT.md`,
-  README, or accepted lifecycle specs.
+- 제품 정체성은 `anvil`이고, repository 정체성은 `ephemera`로 남을 수 있다.
+- core runtime은 daemon, storage, network, VM package가 소유한다.
+- guest runtime은 `goose-agent`와 `micro-init`이 소유한다.
+- IronClaw 통합은 MCP adapter package가 소유한다.
+- session alias는 MCP adapter process memory이며 persistent session state가 아니다.
+- snapshot/restore는 daemon capability이며 MCP v1 범위가 아니다.
+- `docs/analysis/`는 evidence이며 `AGENTS.md`, `CONTEXT.md`, README, 승인된
+  lifecycle spec을 덮어쓰지 않는다.
 
-No ADR is required for this pass because the redesign does not introduce a
-hard-to-reverse runtime or public API decision.
+이번 재설계는 되돌리기 어려운 runtime 또는 public API 결정을 도입하지 않으므로
+별도 ADR은 필요하지 않다.
 
-## Planned Documentation Changes
+## 계획된 문서 변경
 
-The implementation plan for this redesign should update only documentation and
-governance artifacts:
+구현 plan은 문서와 governance artifact만 갱신한다.
 
-- Add `CONTEXT.md`.
-- Update `AGENTS.md` to include `CONTEXT.md` in the source-of-truth hierarchy and keep
-  the redesign constraints explicit.
-- Update `README.md` so the current product name and product description are `anvil`.
-  Repository references can continue to point at `HardcoreMonk/ephemera`.
-- Update `RELEASE_NOTES.md` so current release notes use `anvil` while historical
-  release notes remain understandable.
-- Update `docs/analysis/README.md` to state that legacy `Ephemera` terms are preserved
-  as historical evidence.
-- Update this redesign run's lifecycle artifacts with accepted decisions and review
-  evidence.
+- `CONTEXT.md` 추가.
+- `AGENTS.md`에 `CONTEXT.md`를 source-of-truth hierarchy에 포함하고 재설계
+  제약을 명시.
+- `README.md`에서 현재 제품명과 제품 설명을 `anvil`로 정리. repository link는
+  `HardcoreMonk/ephemera` 유지 가능.
+- `RELEASE_NOTES.md`에서 현재 release note는 `anvil`을 사용하고 historical note는
+  이해 가능한 형태로 유지.
+- `docs/analysis/README.md`에 legacy `ephemera` term은 historical evidence로
+  보존된다는 점 명시.
+- 이 redesign run의 lifecycle artifact에 승인 decision과 review evidence 기록.
 
-## Verification
+## 검증
 
-Required verification for the implementation plan:
+구현 plan에 필요한 검증:
 
 ```bash
 /data/projects/codex-zone/codex-project-mgmt/scripts/lifecycle-lint.sh anvil --run 2026-05-11-anvil-redesign
@@ -138,78 +129,76 @@ git diff --check
 go test ./...
 ```
 
-The final summary must state that no runtime behavior was intentionally changed. If any
-runtime file changes become necessary, this redesign scope must be re-approved before
-implementation.
+최종 summary는 runtime 동작을 의도적으로 바꾸지 않았다고 명시해야 한다. runtime
+file 변경이 필요해지면 구현 전에 redesign scope를 다시 승인받아야 한다.
 
-## Follow-Up Runs
+## 후속 실행
 
-These are explicit follow-up candidates, not part of this redesign:
+다음은 이번 재설계 범위 밖의 명시적 follow-up 후보이다.
 
-- Release/tag hygiene for the public GitHub repository.
-- MCP v2 design for workspace copy-in/out.
-- MCP snapshot/restore tools.
+- public GitHub repository release/tag hygiene.
+- workspace copy-in/out을 위한 MCP v2 설계.
+- MCP snapshot/restore tool.
 - HTTP MCP transport.
-- Runtime module refactoring.
+- runtime module refactoring.
 
-## Plan Design Review
+## 계획 설계 검토
 
-Result: passed, no blocking issues.
+결과: 통과, blocking issue 없음.
 
-This redesign has no UI scope: no screens, pages, components, frontend framework
-changes, or visual design system changes are planned. No mockups were generated.
-`DESIGN.md` is absent and not required because the Codex zone registry marks this
-project as `design_md: false`.
+이 재설계에는 UI 범위가 없다. screen, page, component, frontend framework 변경,
+visual design system 변경을 계획하지 않았다. mockup도 생성하지 않았다.
+Codex zone registry에서 이 project는 `design_md: false`이므로 `DESIGN.md`는
+없고 필요하지 않다.
 
-Design review was reduced to information architecture, document discoverability, and
-lifecycle gate clarity.
+design review는 information architecture, document discoverability,
+lifecycle gate clarity로 축소했다.
 
-| Pass | Rating | Result |
+| 항목 | 점수 | 결과 |
 |---|---:|---|
-| Information Architecture | 10/10 | Canonical document order is explicit and puts `CONTEXT.md` in the right role. |
-| Interaction State Coverage | 9/10 | Lifecycle gate states are explicit; computed lifecycle JSON is identified as snapshot output. |
-| User Journey | 9/10 | Developer readers enter through README, Codex enters through `AGENTS.md`, and design/planning enters through `docs/superpowers/`. |
-| AI Slop Risk | 10/10 | No generated UI or generic visual pattern is in scope. |
-| Design System Alignment | 9/10 | No project visual design system is required for this backend/docs redesign. Markdown conventions are sufficient. |
-| Responsive And Accessibility | 9/10 | Markdown headings, tables, and fenced commands are scan-friendly across terminal and web renderers. |
-| Unresolved Design Decisions | 10/10 | No unresolved IA or gate decisions remain before implementation planning. |
+| 정보 구조 | 10/10 | canonical document order가 명확하며 `CONTEXT.md`가 적절한 역할을 맡는다. |
+| 상태 범위 | 9/10 | lifecycle gate state가 명확하고 computed lifecycle JSON이 snapshot output임을 표시한다. |
+| 사용자 흐름 | 9/10 | 개발자는 README, Codex는 `AGENTS.md`, design/planning은 `docs/superpowers/`로 진입한다. |
+| AI 일반화 위험 | 10/10 | 생성 UI나 generic visual pattern이 범위에 없다. |
+| 디자인 시스템 정렬 | 9/10 | backend/docs 재설계에 별도 visual design system은 필요 없고 Markdown convention으로 충분하다. |
+| 반응형과 접근성 | 9/10 | Markdown heading, table, fenced command는 terminal과 web renderer에서 scan하기 쉽다. |
+| 미해결 설계 결정 | 10/10 | 구현 planning 전 unresolved IA 또는 gate decision이 없다. |
 
-Not in scope for this design review:
+Design review 범위 밖:
 
-- Visual mockups or product UI.
-- `DESIGN.md` creation.
-- Runtime behavior, daemon API, or MCP tool changes.
-- Public release/tag hygiene.
+- visual mockup 또는 product UI.
+- `DESIGN.md` 생성.
+- runtime behavior, daemon API, MCP tool 변경.
+- public release/tag hygiene.
 
-What already exists:
+이미 존재하는 근거:
 
 - `AGENTS.md` project guidance.
 - `docs/analysis/` evidence documents.
-- Accepted MCP v1 spec and plan under `docs/superpowers/`.
-- Redesign spec, grill-me record, lifecycle snapshot, and handoff draft.
+- `docs/superpowers/` 아래 승인된 MCP v1 spec과 plan.
+- redesign spec, grill-me record, lifecycle snapshot, handoff draft.
 
-No `TODOS.md` update is needed because no deferred design debt was found.
+deferred design debt가 없으므로 `TODOS.md` 갱신은 필요하지 않다.
 
-## Approved Brainstorming Decisions
+## 승인된 브레인스토밍 결정
 
-- Scope: documentation plus architecture consistency only.
-- Canonical structure: role-separated docs with `CONTEXT.md` as domain glossary and
-  boundary map.
-- Naming policy: current-facing docs use `anvil`; `ephemera` remains repository/path
-  metadata and historical evidence.
-- Completion criteria: `AGENTS.md`, `CONTEXT.md`, `README.md`, lifecycle artifacts, and
-  analysis index are consistent; runtime code is unchanged; verification commands pass.
-- Approach: Canonical Docs First.
+- 범위: 문서와 아키텍처 일관성만.
+- 공식 구조: `CONTEXT.md`를 domain glossary와 boundary map으로 둔 역할 분리 문서.
+- naming policy: 현재 사용자-facing 문서는 `anvil` 사용. `ephemera`는
+  repository/path metadata와 historical evidence로 유지.
+- 완료 기준: `AGENTS.md`, `CONTEXT.md`, `README.md`, lifecycle artifact,
+  analysis index가 일관되고 runtime code는 변경되지 않으며 검증 명령이 통과.
+- 접근: Canonical Docs First.
 
-## Lifecycle Gate Evidence
+## 생명주기 gate 근거
 
 - Stage: `superpowers:brainstorming`
-- Status: `passed`
-- Approved by: user approved scope, canonical document structure, domain architecture
-  boundary, completion criteria, and Canonical Docs First approach in conversation.
-- Evidence: User reviewed and approved this written spec in conversation.
+- 상태: `passed`
+- Approved by: 사용자가 scope, canonical document structure, domain architecture
+  boundary, completion criteria, Canonical Docs First 접근을 대화에서 승인했다.
+- 근거: 사용자가 대화에서 이 written spec을 검토하고 승인했다.
 - Stage: `domain-architecture`
-- Status: `passed`
-- Approved by: user approved `CONTEXT.md` as the domain glossary and boundary map and
-  approved the accepted domain terms above.
-- Evidence: Domain Architecture Pass section in this spec.
+- 상태: `passed`
+- Approved by: 사용자가 `CONTEXT.md`를 domain glossary와 boundary map으로 승인했고
+  위 accepted domain term을 승인했다.
+- 근거: 이 spec의 Domain Architecture Pass section.

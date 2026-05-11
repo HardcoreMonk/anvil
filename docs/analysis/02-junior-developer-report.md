@@ -1,10 +1,10 @@
-# Ephemera 주니어 개발자 실무 투입 보고서
+# anvil 0.1.0 주니어 개발자 실무 투입 보고서
 
 분석 기준 커밋: `157753fb5234679ca7cbebb6658e431c6a748ef6`
 
 ## 한 문장 요약
 
-Ephemera는 호스트에서 Firecracker MicroVM을 만들고, 각 VM 안에서 Goose AI agent를 실행하게 해, 작업이 끝나면 VM 디스크/네트워크를 지워 격리된 AI 작업 환경을 제공하는 Go 백엔드 프로젝트다.
+anvil은 호스트에서 Firecracker MicroVM을 만들고, 각 VM 안에서 Goose AI agent를 실행하게 해, 작업이 끝나면 VM 디스크/네트워크를 지워 격리된 AI 작업 환경을 제공하는 Go 백엔드 프로젝트다. 이 0.1.0 문서에서는 당시 저장소/모듈 이름인 `ephemera`가 코드 경로에 남아 있다.
 
 ## 아키텍처 분해
 
@@ -59,7 +59,7 @@ Ephemera는 호스트에서 Firecracker MicroVM을 만들고, 각 VM 안에서 G
 7. `waitForAgent()`가 `http://{guestIP}:8080/health`를 polling한다.
 8. 준비되면 `{vm_id, guest_ip, agent_url}` JSON을 반환한다.
 
-### Task 실행
+### 작업 실행
 
 1. client가 `agent_url`의 `/tasks`로 prompt를 보낸다.
 2. `goose-agent`가 busy flag를 확인한다.

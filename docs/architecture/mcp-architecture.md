@@ -1,19 +1,20 @@
-# anvil MCP Architecture
+# anvil MCP 아키텍처
 
-## Status
+## 상태
 
-- Baseline: `v0.2.0`
-- MCP version: v1 stdio adapter
+- 기준 버전: `v0.2.0`
+- MCP 버전: v1 stdio adapter
 - Entrypoint: `cmd/anvil-mcp`
-- Runtime target: anvil control plane daemon HTTP API
+- 런타임 대상: anvil control plane daemon HTTP API
 
-MCP v1 is a thin bridge. It does not own VM lifecycle semantics; it maps MCP tool
-calls to the daemon API and keeps a small in-memory session alias map.
+MCP v1은 얇은 bridge다. VM lifecycle의 의미를 직접 소유하지 않고, MCP tool
+call을 daemon API로 매핑한다. adapter process 안에는 작은 in-memory
+`session_name` alias map만 유지한다.
 
-## System View
+## 시스템 관점
 
 ```text
-IronClaw or other MCP client
+IronClaw 또는 다른 MCP client
   |
   | stdio MCP transport
   v
@@ -32,31 +33,31 @@ anvil control plane daemon
 MicroVM runtime
 ```
 
-The adapter is intentionally process-local and stateless except for optional
-`session_name` aliases.
+adapter는 optional `session_name` alias를 제외하면 process-local stateless
+component로 동작한다.
 
-## Component Responsibilities
+## 구성 요소 책임
 
-| Component | Files | Responsibility |
+| 구성 요소 | 파일 | 책임 |
 |---|---|---|
-| MCP server entrypoint | `cmd/anvil-mcp/main.go` | Load config, create daemon client, create tool handlers, register MCP tools, run stdio transport |
-| Config loader | `internal/anvilmcp/config.go` | Load defaults, optional YAML config, and environment overrides |
-| Daemon client | `internal/anvilmcp/daemon_client.go` | Call the control plane daemon over HTTP and preserve daemon response bodies |
-| Tool layer | `internal/anvilmcp/tools.go` | Validate MCP input, resolve VM identity, apply task timeout, map tools to daemon client methods |
-| Session store | `internal/anvilmcp/session_store.go` | Maintain in-memory `session_name -> vm_id` aliases for one adapter process |
-| Config example | `configs/anvil-mcp.yaml.example` | File-based adapter configuration template |
+| MCP server entrypoint | `cmd/anvil-mcp/main.go` | config load, daemon client 생성, tool handler 생성, MCP tool 등록, stdio transport 실행 |
+| Config loader | `internal/anvilmcp/config.go` | 기본값, optional YAML config, 환경 변수 override load |
+| Daemon client | `internal/anvilmcp/daemon_client.go` | control plane daemon HTTP 호출, daemon response body 보존 |
+| Tool layer | `internal/anvilmcp/tools.go` | MCP input validation, VM identity resolve, task timeout 적용, tool을 daemon client method로 매핑 |
+| Session store | `internal/anvilmcp/session_store.go` | 한 adapter process 안에서 `session_name -> vm_id` alias 유지 |
+| Config example | `configs/anvil-mcp.yaml.example` | 파일 기반 adapter 설정 template |
 
-## Config Model
+## 설정 모델
 
-Default values:
+기본값:
 
-| Field | Default |
+| Field | 기본값 |
 |---|---|
 | `daemon_url` | `http://127.0.0.1:3000` |
 | `default_timeout_seconds` | `300` |
 | Config file path | `configs/anvil-mcp.yaml` |
 
-Load order:
+Load 순서:
 
 ```text
 defaults
@@ -64,36 +65,36 @@ defaults
   -> environment variables
 ```
 
-Environment variables:
+환경 변수:
 
-| Variable | Meaning |
+| 변수 | 의미 |
 |---|---|
-| `ANVIL_MCP_CONFIG` | Override config file path |
-| `ANVIL_DAEMON_URL` | Override daemon base URL |
-| `ANVIL_API_TOKEN` | Bearer token used for daemon requests |
-| `ANVIL_MCP_DEFAULT_TIMEOUT` | Default timeout for `anvil_run_task` in seconds |
+| `ANVIL_MCP_CONFIG` | config file path override |
+| `ANVIL_DAEMON_URL` | daemon base URL override |
+| `ANVIL_API_TOKEN` | daemon request에 사용할 Bearer token |
+| `ANVIL_MCP_DEFAULT_TIMEOUT` | `anvil_run_task` 기본 timeout, 초 단위 |
 
 Validation:
 
-- `daemon_url` must be non-empty.
-- `daemon_url` must use `http` or `https`.
-- `daemon_url` must include a host.
-- `default_timeout_seconds` must be positive.
-- `ANVIL_MCP_DEFAULT_TIMEOUT` must parse as a positive integer.
+- `daemon_url`은 비어 있으면 안 된다.
+- `daemon_url` scheme은 `http` 또는 `https`여야 한다.
+- `daemon_url`에는 host가 있어야 한다.
+- `default_timeout_seconds`는 양수여야 한다.
+- `ANVIL_MCP_DEFAULT_TIMEOUT`은 양의 정수로 parse되어야 한다.
 
-## Tool Contract
+## 도구 계약
 
-| MCP tool | Daemon call | Purpose |
+| MCP tool | Daemon call | 목적 |
 |---|---|---|
-| `anvil_spawn_vm` | `POST /vms` | Create a VM and optionally bind a `session_name` alias |
-| `anvil_run_task` | `POST /vms/{vm_id}/tasks` | Run a prompt in a VM through the daemon agent proxy |
-| `anvil_get_vm_health` | `GET /vms/{vm_id}/health` | Return guest agent health through the daemon proxy |
-| `anvil_stop_vm` | `POST /vms/{vm_id}/stop` | Ask the guest agent to stop gracefully |
-| `anvil_delete_vm` | `DELETE /vms/{vm_id}` | Destroy VM resources and release matching session aliases |
+| `anvil_spawn_vm` | `POST /vms` | VM 생성 및 optional `session_name` alias binding |
+| `anvil_run_task` | `POST /vms/{vm_id}/tasks` | daemon agent proxy를 통해 VM에서 prompt 실행 |
+| `anvil_get_vm_health` | `GET /vms/{vm_id}/health` | daemon proxy를 통해 guest agent health 반환 |
+| `anvil_stop_vm` | `POST /vms/{vm_id}/stop` | guest agent에 graceful stop 요청 |
+| `anvil_delete_vm` | `DELETE /vms/{vm_id}` | VM resource 삭제 및 관련 session alias 해제 |
 
 ### `anvil_spawn_vm`
 
-Input:
+입력:
 
 ```json
 {
@@ -102,7 +103,7 @@ Input:
 }
 ```
 
-Output:
+출력:
 
 ```json
 {
@@ -114,17 +115,18 @@ Output:
 }
 ```
 
-Behavior:
+동작:
 
-- Rejects duplicate `session_name` before calling the daemon.
-- Calls `POST /vms`.
-- If alias binding fails after daemon spawn, attempts best-effort daemon cleanup
-  with `DELETE /vms/{vm_id}`.
-- Does not expose `agent_token` in MCP output. The daemon proxy owns guest token use.
+- daemon 호출 전에 duplicate `session_name`을 거부한다.
+- `POST /vms`를 호출한다.
+- daemon spawn 이후 alias binding이 실패하면 best-effort로
+  `DELETE /vms/{vm_id}` cleanup을 시도한다.
+- MCP output에는 `agent_token`을 노출하지 않는다. guest token 사용은 daemon
+  proxy가 소유한다.
 
 ### `anvil_run_task`
 
-Input:
+입력:
 
 ```json
 {
@@ -135,17 +137,17 @@ Input:
 }
 ```
 
-Behavior:
+동작:
 
-- Requires non-empty `prompt`.
-- Rejects negative timeouts.
-- Rejects timeouts above 24 hours.
-- Resolves VM identity.
-- `vm_id` takes priority over `session_name`.
-- Uses `timeout_seconds` when provided, otherwise the configured default timeout.
-- Calls `POST /vms/{vm_id}/tasks`.
+- 비어 있지 않은 `prompt`를 요구한다.
+- 음수 timeout을 거부한다.
+- 24시간을 초과하는 timeout을 거부한다.
+- VM identity를 resolve한다.
+- `vm_id`와 `session_name`이 모두 있으면 `vm_id`가 우선한다.
+- `timeout_seconds`가 있으면 그 값을, 없으면 config 기본 timeout을 사용한다.
+- `POST /vms/{vm_id}/tasks`를 호출한다.
 
-Output:
+출력:
 
 ```json
 {
@@ -156,7 +158,7 @@ Output:
 
 ### `anvil_get_vm_health`
 
-Input:
+입력:
 
 ```json
 {
@@ -165,15 +167,15 @@ Input:
 }
 ```
 
-Behavior:
+동작:
 
-- Resolves VM identity.
-- Calls `GET /vms/{vm_id}/health`.
-- Returns daemon status code and raw response body.
+- VM identity를 resolve한다.
+- `GET /vms/{vm_id}/health`를 호출한다.
+- daemon status code와 raw response body를 반환한다.
 
 ### `anvil_stop_vm`
 
-Input:
+입력:
 
 ```json
 {
@@ -182,19 +184,19 @@ Input:
 }
 ```
 
-Behavior:
+동작:
 
-- Resolves VM identity.
-- Calls `POST /vms/{vm_id}/stop`.
-- Does not remove the session alias.
-- Does not delete host-side VM resources.
+- VM identity를 resolve한다.
+- `POST /vms/{vm_id}/stop`을 호출한다.
+- session alias는 제거하지 않는다.
+- host-side VM resource도 삭제하지 않는다.
 
-This distinction matters: stop asks the guest agent HTTP server to shut down.
-Delete destroys the VM resource from the host control plane.
+이 구분이 중요하다. stop은 guest agent HTTP server의 종료 요청이고, delete는
+control plane의 VM resource 삭제다.
 
 ### `anvil_delete_vm`
 
-Input:
+입력:
 
 ```json
 {
@@ -203,96 +205,96 @@ Input:
 }
 ```
 
-Behavior:
+동작:
 
-- Resolves VM identity.
-- Calls `DELETE /vms/{vm_id}`.
-- Removes all local aliases that point to the deleted VM after a successful daemon
-  response.
+- VM identity를 resolve한다.
+- `DELETE /vms/{vm_id}`를 호출한다.
+- daemon response가 성공이면 삭제된 VM을 가리키는 모든 local alias를 제거한다.
 
-## Session Alias Model
+## 세션 alias 모델
 
-`SessionStore` is an in-memory convenience map:
+`SessionStore`는 in-memory convenience map이다.
 
 ```text
 session_name -> vm_id
 ```
 
-Rules:
+규칙:
 
-- Empty session names are invalid.
-- Empty VM IDs are invalid.
-- Duplicate session names are rejected.
-- `vm_id` takes priority when both `vm_id` and `session_name` are provided.
-- Unknown session names are rejected before a daemon call.
-- `anvil_delete_vm` removes aliases for the deleted VM.
-- `anvil_stop_vm` does not remove aliases.
-- Aliases are lost when the `anvil-mcp` process exits.
+- 빈 session name은 invalid다.
+- 빈 VM ID는 invalid다.
+- duplicate session name은 거부한다.
+- `vm_id`와 `session_name`이 모두 제공되면 `vm_id`가 우선한다.
+- 알 수 없는 session name은 daemon call 전에 거부한다.
+- `anvil_delete_vm`은 삭제된 VM의 alias를 제거한다.
+- `anvil_stop_vm`은 alias를 제거하지 않는다.
+- `anvil-mcp` process가 종료되면 alias는 사라진다.
 
-The adapter does not persist session state to disk.
+adapter는 session state를 disk에 저장하지 않는다.
 
-## Daemon Client Behavior
+## Daemon client 동작
 
-`DaemonClient` builds HTTP requests from the configured base URL and tool-specific
-paths.
+`DaemonClient`는 설정된 base URL과 tool별 path로 HTTP request를 만든다.
 
-Request behavior:
+Request 동작:
 
-- Adds `Authorization: Bearer <ANVIL_API_TOKEN>` when a token is configured.
-- Adds `Content-Type: application/json` for requests with JSON bodies.
-- Uses the incoming MCP call context, including task timeout when set.
+- token이 설정되어 있으면 `Authorization: Bearer <ANVIL_API_TOKEN>`을 추가한다.
+- JSON body가 있는 request에는 `Content-Type: application/json`을 추가한다.
+- MCP call context를 사용하며, task timeout이 설정되면 context deadline에
+  반영한다.
 
-Response behavior:
+Response 동작:
 
-- For 2xx responses, returns status code and body.
-- For non-2xx responses, returns `DaemonError` with the daemon status code and raw
-  body.
-- The tool layer does not rewrite daemon errors into a new domain model.
+- 2xx response는 status code와 body를 반환한다.
+- non-2xx response는 daemon status code와 raw body를 담은 `DaemonError`를
+  반환한다.
+- tool layer는 daemon error를 새 domain model로 다시 쓰지 않는다.
 
-This keeps the adapter thin and makes daemon behavior visible to the MCP client.
+이 선택은 adapter를 얇게 유지하고 daemon 동작을 MCP client에 그대로 보이게
+한다.
 
-## Security Model
+## 보안 모델
 
-| Concern | Current behavior |
+| 관심사 | 현재 동작 |
 |---|---|
-| Daemon authentication | Adapter uses `ANVIL_API_TOKEN` as the daemon Bearer token |
-| Guest agent token | Not exposed by MCP output; daemon proxy injects it |
-| Session aliases | Process-local memory only |
-| Secrets | Config file can contain `api_token`; local config files should stay out of git |
-| Transport | MCP v1 uses stdio between client and adapter |
+| Daemon 인증 | adapter가 `ANVIL_API_TOKEN`을 daemon Bearer token으로 사용 |
+| Guest agent token | MCP output에는 노출하지 않고 daemon proxy가 주입 |
+| Session alias | process-local memory에만 저장 |
+| Secrets | config file은 `api_token`을 담을 수 있으므로 local config를 git에 넣지 않는다. |
+| Transport | MCP v1은 client와 adapter 사이에서 stdio를 사용 |
 
-The adapter assumes the daemon URL and API token are trusted local/operator
-configuration.
+adapter는 daemon URL과 API token을 신뢰된 local/operator configuration으로
+가정한다.
 
-## Failure Behavior
+## 실패 동작
 
-| Failure | Result |
+| 실패 | 결과 |
 |---|---|
-| Missing explicit config file | Config load error |
-| Missing default config file | Allowed, defaults/env are used |
-| Invalid daemon URL | Config load error |
-| Duplicate session name | Tool validation error before daemon call |
-| Unknown session name | Tool validation error before daemon call |
-| Daemon 4xx/5xx | `DaemonError` with status and body |
-| Daemon connection failure | Send request error |
-| Spawn succeeds but alias binding fails | Best-effort VM delete, then return error |
+| 명시 config file 없음 | config load error |
+| 기본 config file 없음 | 허용. defaults/env 사용 |
+| invalid daemon URL | config load error |
+| duplicate session name | daemon call 전 tool validation error |
+| unknown session name | daemon call 전 tool validation error |
+| daemon 4xx/5xx | status와 body를 포함한 `DaemonError` |
+| daemon connection failure | request 전송 error |
+| spawn 성공 후 alias binding 실패 | best-effort VM delete 후 error 반환 |
 
-## v1 Non-Goals
+## v1 비목표
 
-MCP v1 intentionally does not implement:
+MCP v1은 의도적으로 다음을 구현하지 않는다.
 
-- Workspace copy-in/copy-out.
-- Snapshot creation tools.
-- Snapshot restore tools.
-- Persistent session database.
-- Automatic VM cleanup on adapter exit.
-- HTTP MCP transport.
-- Multi-daemon routing.
-- Long-running async task orchestration.
+- workspace copy-in/copy-out
+- snapshot 생성 tool
+- snapshot restore tool
+- persistent session database
+- adapter exit 시 automatic VM cleanup
+- HTTP MCP transport
+- multi-daemon routing
+- long-running async task orchestration
 
-These are candidates for future MCP v2 design work, not hidden behavior in v1.
+위 항목은 v1의 숨은 동작이 아니라 향후 MCP v2 설계 후보로 남긴다.
 
-## Source References
+## 소스 참조
 
 - `cmd/anvil-mcp/main.go`
 - `internal/anvilmcp/config.go`

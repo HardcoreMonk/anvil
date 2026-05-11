@@ -1,86 +1,72 @@
-# Anvil — Codex project guidance
+# anvil — Codex 프로젝트 지침
 
-이 repo는 Firecracker MicroVM 기반 ephemeral AI agent runtime과 Anvil MCP adapter를
-관리한다. GitHub repository 이름은 `ephemera`지만 Codex zone의 프로젝트 이름은
-`Anvil`로 취급한다.
+이 저장소의 공식 프로젝트명은 `anvil`이다. GitHub 저장소와 Go 모듈 경로는
+호환성 때문에 아직 `ephemera` 이름을 유지한다.
 
-## Source Of Truth
-문서 간 설명이 충돌하면 아래 순서를 따른다.
+## 진실 기준 문서 순서
 
-1. `AGENTS.md`
-2. `CONTEXT.md`
-3. `README.md`
-4. `RELEASE_NOTES.md`
-5. `docs/analysis/`
-6. `docs/superpowers/`
-7. `docs/lifecycle/`, `docs/operations/`
-8. `.superpowers/` local brainstorming artifacts
+작업 중 문서가 서로 충돌하면 아래 순서로 판단한다.
 
-`CONTEXT.md` owns domain glossary, module boundary, and legacy naming policy.
-`docs/lifecycle/runs/*.json` is computed lifecycle snapshot output and does not
-override accepted project-local evidence.
+1. `CONTEXT.md`
+2. `README.md`
+3. `RELEASE_NOTES.md`
+4. `docs/architecture/*.md`
+5. `docs/analysis/*.md`
+6. 과거 업로드 문서와 초안
 
-Claude Code 호환 `CLAUDE.md`는 현재 운영하지 않는다. 이 repo에서 Codex 기준 문서는
-`AGENTS.md`다.
+## 프로젝트 구조
 
-## Project Shape
-| 경로 | 역할 |
-|---|---|
-| `cmd/goose-daemon/` | host control plane daemon |
-| `cmd/goose-agent/` | guest VM 안에서 task를 실행하는 agent |
-| `cmd/micro-init/` | guest init process |
-| `cmd/anvil-mcp/` | stdio MCP adapter entrypoint |
-| `internal/anvilmcp/` | MCP config, daemon client, session alias, tool handlers |
-| `internal/storage/`, `internal/network/`, `internal/vm/` | VM provisioning support |
-| `configs/*.example` | non-secret example configs only |
-| `docs/superpowers/` | accepted spec/plan artifacts |
+- 호스트 제어 평면: `cmd/goose-daemon`, `internal/storage`,
+  `internal/network`, `internal/vm`
+- 게스트 구성 요소: `cmd/goose-agent`, `cmd/micro-init`
+- IronClaw 연동 MCP 어댑터: `cmd/anvil-mcp`, `internal/anvilmcp`
+- 설정 예시: `configs/*.example`, `configs/profiles/*`
+- 런타임 산출물: `artifacts/`, `snapshots/`, `/tmp/goose-workspaces/`
 
-## Workflow
-- 한국어로 작업하되 코드, 명령어, API field, file path는 영문을 유지한다.
-- 신규 runtime/API/MCP 설계는 `brainstorming -> domain-architecture -> grill-me ->
-  writing-plans -> plan-eng-review -> implement -> code-review -> release -> operate`
-  흐름을 따른다. 실제 spec/plan은 `docs/superpowers/` 아래에 둔다.
-- 문서/아키텍처 정합성 redesign은 runtime code, daemon API, MCP tool contract,
-  snapshot/restore behavior를 변경하지 않는다. 해당 변경이 필요하면 새 spec으로
-  scope를 다시 승인받는다.
-- `.superpowers/`는 로컬 brainstorming runtime 산출물이다. 내부 IP와 임시 server
-  metadata가 들어갈 수 있으므로 commit하지 않는다.
-- `docs/analysis/`는 분석 보고서 초안이다. release 문서로 승격할 때만 정리해서
-  commit한다.
-- commit, push, VM 실행, sudo가 필요한 Firecracker smoke는 사용자가 명시적으로
-  요청했을 때만 수행한다.
+## 작업 흐름
 
-## Commands
-기본 검증:
+- 문서는 한국어로 작성한다. 코드 식별자, API 경로, 환경 변수, 명령어,
+  파일명처럼 번역하면 계약이 깨지는 값은 원문을 유지한다.
+- 기존 동작을 바꾸기 전에는 `README.md`, `docs/architecture/`,
+  `RELEASE_NOTES.md` 중 영향을 받는 문서를 함께 갱신한다.
+- 로컬 비밀 파일(`configs/goose-secrets.yaml`, profile별 secrets)은 절대
+  커밋하지 않는다.
+- `anvil`이라는 제품명을 우선 사용하되, 실제 API/환경 변수/경로가 아직
+  `EPHEMERA_*` 또는 `goose-*` 이름을 쓰는 경우에는 코드의 현재 계약을
+  그대로 유지한다.
+
+## 명령어
+
+일반 검증:
 
 ```bash
 go test ./...
-go vet ./...
-go build ./...
-```
-
-Anvil MCP adapter만 빠르게 확인:
-
-```bash
-go test ./internal/anvilmcp
+go build ./cmd/goose-daemon
 go build ./cmd/anvil-mcp
 ```
 
-Firecracker/daemon end-to-end smoke는 KVM, root 권한, host networking 상태에 영향을
-줄 수 있으므로 별도 승인 후 실행한다.
+전체 통합 검증:
 
-## Invariants
-- MCP adapter v1은 thin runtime bridge다. workspace copy-in/out, snapshot/restore
-  tool, persistent session DB, automatic VM cleanup은 v1 범위 밖이다.
-- `anvil_delete_vm`만 VM 삭제와 session alias 해제를 수행한다.
-- `anvil_stop_vm`은 graceful stop 요청이며 VM resource 삭제로 해석하지 않는다.
-- daemon HTTP status/body는 가능한 한 그대로 보존한다.
-- config precedence는 default < config file < environment variable 순서를 유지한다.
+```bash
+go build -o anvil-daemon ./cmd/goose-daemon/
+sudo bash e2e_test.sh
+```
 
-## Security
-- secrets, API token, SSH key, private config를 commit하지 않는다.
-- `configs/anvil-mcp.yaml`, `configs/goose.yaml`, `configs/goose-secrets.yaml`은 로컬
-  secret config로 취급한다.
-- private IP, host-specific endpoint, local brainstorming server metadata는 문서로
-  승격하기 전에 공개 가능성을 검토한다.
-- daemon/control-plane token과 guest agent token은 역할을 섞지 않는다.
+통합 테스트는 `/dev/kvm`, root 권한, Firecracker 실행 가능 호스트,
+LLM API 키가 들어 있는 로컬 `configs/goose-secrets.yaml`이 필요하다.
+
+## 불변 조건
+
+- `POST /vms` 응답 외에는 `agent_token`을 노출하지 않는다.
+- VM 삭제 실패 경로에서도 TAP/IP, dm-snapshot, loop device, bind mount,
+  sparse COW 파일을 정리해야 한다.
+- 실행 중인 원본 VM의 snapshot은 restore하지 않는다.
+- diff snapshot이 참조 중인 full snapshot은 삭제하지 않는다.
+- MCP v1은 얇은 stdio 어댑터다. VM 수명주기 의미는 daemon API가 소유한다.
+
+## 보안
+
+- 공개 노출은 TLS 종료 reverse proxy 뒤에서 수행한다.
+- `EPHEMERA_API_TOKENS`가 설정된 운영 모드를 우선한다.
+- 채팅, 문서, 커밋 메시지에 실제 API 키를 남기지 않는다.
+- 런타임 산출물과 비밀 설정은 `.gitignore`에 남겨 둔다.

@@ -1,73 +1,64 @@
-# anvil Context
+# anvil 컨텍스트
 
-## Purpose
+## 목적
 
-`anvil` is the official product and project name for this repository. It provides a
-Firecracker MicroVM based runtime for isolated AI agent execution and a thin MCP
-adapter for IronClaw integration.
+`anvil`은 Firecracker MicroVM을 이용해 AI agent 작업을 하드웨어 가상화
+경계 안에서 실행하고, 작업이 끝나면 VM 상태를 폐기하거나 snapshot으로
+보존하는 단일 호스트 제어 평면이다.
 
-The GitHub repository and local directory can remain named `ephemera`. In current-facing
-documentation, `ephemera` means repository identity, path identity, or historical source
-material. It is not the product name.
+GitHub 저장소는 `https://github.com/HardcoreMonk/ephemera/`이고, Go 모듈
+경로와 일부 기존 API/환경 변수에는 `ephemera` 또는 `goose` 이름이 남아
+있다. 제품명과 문서상의 공식 명칭은 `anvil`로 통일한다.
 
-## Source Of Truth
+## 진실 기준 문서 순서
 
-For documentation conflicts, use this order:
+1. `CONTEXT.md`: 제품명, 경계 규칙, 변경 불가 계약
+2. `README.md`: 현재 사용법, 공개 API, 운영 절차
+3. `RELEASE_NOTES.md`: 버전별 기능 변화
+4. `docs/architecture/*.md`: 런타임, 서비스 로직, MCP 설계
+5. `docs/analysis/*.md`: 버전 분석과 보조 설명
+6. 업로드된 과거 문서와 초안: 참고 자료
 
-1. `AGENTS.md`
-2. `CONTEXT.md`
-3. `README.md`
-4. `RELEASE_NOTES.md`
-5. `docs/analysis/`
-6. `docs/superpowers/`
-7. `docs/lifecycle/` and `docs/operations/`
+## 도메인 용어집
 
-Runtime behavior is controlled by implementation and accepted lifecycle specs. The
-computed lifecycle JSON files under `docs/lifecycle/runs/` do not override accepted
-project-local evidence.
-
-## Domain Glossary
-
-| Term | Meaning | Owning Area |
+| 용어 | 의미 | 담당 영역 |
 |---|---|---|
-| `anvil` | Official product/project name | Project-wide |
-| `ephemera` | Repository/path/module legacy name | Repository metadata |
-| Core runtime | Firecracker MicroVM based isolated agent runtime | `cmd/goose-daemon/`, `internal/storage/`, `internal/network/`, `internal/vm/` |
-| Control plane daemon | Host daemon that manages VM lifecycle, snapshots, restore, and agent proxying | `cmd/goose-daemon/` |
-| Guest agent | VM-side task runner exposed over HTTP inside the guest | `cmd/goose-agent/` |
-| Guest init | VM-side PID 1 process that prepares mounts and supervises the guest agent | `cmd/micro-init/` |
-| MCP adapter | Thin stdio bridge used by IronClaw to call the anvil daemon | `cmd/anvil-mcp/`, `internal/anvilmcp/` |
-| Session alias | In-memory `session_name -> vm_id` convenience mapping in the MCP adapter | `internal/anvilmcp/` |
-| Snapshot/restore | Daemon runtime capability for VM state persistence and restore | `cmd/goose-daemon/`, `internal/storage/`, `internal/vm/` |
-| Profile | VM creation-time LLM config and secret selection | `configs/profiles/`, daemon VM create flow |
+| anvil control plane | VM 생성, 삭제, snapshot, restore, proxy를 담당하는 호스트 daemon | `cmd/goose-daemon` |
+| MicroVM | Firecracker + KVM으로 실행되는 격리 실행 환경 | `internal/vm` |
+| goose-agent | VM 안에서 prompt 실행, health, stop API를 제공하는 HTTP agent | `cmd/goose-agent` |
+| micro-init | VM의 PID 1. 가상 파일시스템 mount, agent 실행, clean poweroff 담당 | `cmd/micro-init` |
+| Full snapshot | guest RAM 전체와 rootfs 사본, Firecracker state를 저장한 기준 snapshot | `internal/storage` |
+| Diff snapshot | 기준 Full snapshot 이후 dirty memory page만 sparse file로 저장한 snapshot | `internal/storage` |
+| COW restore | snapshot rootfs를 read-only base로 두고 per-VM sparse exception store에 쓰기를 기록하는 restore 방식 | `internal/storage` |
+| IronClaw MCP adapter | IronClaw 같은 MCP client가 anvil daemon API를 호출하게 해 주는 stdio bridge | `cmd/anvil-mcp` |
 
-## Boundary Rules
+## 경계 규칙
 
-- `docs/analysis/` is evidence, not canonical product truth.
-- `docs/superpowers/` is lifecycle evidence, not runtime state.
-- `docs/lifecycle/runs/*.json` is computed lifecycle snapshot output.
-- `configs/*.example` files are non-secret examples only.
-- Secret config files remain local and ignored.
-- MCP v1 remains a thin runtime bridge.
+- `docs/analysis/`는 근거 자료이며, 현재 설계의 최종 계약은
+  `docs/architecture/`와 `README.md`가 담당한다.
+- 코드 식별자, API 경로, 환경 변수, 파일 경로는 실제 구현과 호환성이
+  더 중요하므로 임의로 한국어화하지 않는다.
+- `ephemera`라는 이름이 남아 있는 API/환경 변수는 당장 깨지지 않는
+  호환 계약으로 취급한다.
+- 공개 운영 URL은 reverse proxy/TLS 계층에서 결정한다. 현재 로컬 검증
+  환경에서는 사용자가 지정한 `192.168.3.73` 주소를 기준으로 한다.
 
-## Frozen Runtime Contracts
+## 고정된 런타임 계약
 
-This redesign must not change:
+이번 문서 재작성과 프로젝트 재설계는 다음 계약을 임의로 변경하지 않는다.
 
-- daemon endpoint semantics, including `POST /vms`, `DELETE /vms/{vm_id}`,
-  `POST /vms/{vm_id}/tasks`, `GET /vms/{vm_id}/health`,
-  `POST /vms/{vm_id}/stop`, snapshot, and restore endpoints.
-- the five MCP v1 tools: `anvil_spawn_vm`, `anvil_run_task`,
-  `anvil_get_vm_health`, `anvil_stop_vm`, and `anvil_delete_vm`.
-- config precedence: defaults, config file, then environment variables.
-- session alias semantics: process-memory `session_name -> vm_id` mapping only.
-- `anvil_stop_vm` and `anvil_delete_vm` distinction.
-- snapshot/restore behavior.
+- daemon 기본 bind 주소/포트: `127.0.0.1:3000`
+- VM private network: `10.0.1.0/24`, bridge `goose-br0`
+- guest agent port: `8080`
+- control-plane token 환경 변수: `EPHEMERA_API_TOKENS`,
+  `EPHEMERA_API_TOKEN`
+- public agent URL 환경 변수: `EPHEMERA_PUBLIC_URL`
+- MCP adapter daemon URL 환경 변수: `ANVIL_DAEMON_URL`
+- MCP adapter token 환경 변수: `ANVIL_API_TOKEN`
 
-## Follow-Up Candidates
+## 후속 후보
 
-- Public release and tag hygiene.
-- MCP v2 workspace copy-in/out design.
-- MCP snapshot/restore tools.
-- HTTP MCP transport.
-- Runtime module refactoring.
+- 공개 tag/release 정리: Git tag와 GitHub Release page 상태를 함께 관리
+- `EPHEMERA_*` 환경 변수의 `ANVIL_*` alias 추가
+- MCP v2에서 snapshot/restore tool, workspace copy, persistent session 지원
+- multi-host runtime, scheduler, quota, audit storage 추가

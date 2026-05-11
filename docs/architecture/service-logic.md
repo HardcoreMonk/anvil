@@ -1,68 +1,68 @@
-# anvil Service Logic
+# anvil 서비스 로직
 
-## Status
+## 상태
 
-- Baseline: `v0.2.0`
-- Scope: daemon HTTP behavior, VM lifecycle, agent proxying, snapshot lifecycle,
-  guest agent behavior
-- Out of scope: IronClaw MCP client behavior. See
-  [mcp-architecture.md](mcp-architecture.md).
+- 기준 버전: `v0.2.0`
+- 범위: daemon HTTP 동작, VM lifecycle, agent proxy, snapshot lifecycle,
+  guest agent 동작
+- 제외 범위: IronClaw MCP client 동작. 해당 내용은
+  [mcp-architecture.md](mcp-architecture.md)를 참조한다.
 
-This document explains what each service operation does and which invariants it
-must preserve. File-level architecture is documented in
-[runtime-architecture.md](runtime-architecture.md).
+이 문서는 각 service operation이 수행하는 일과 반드시 지켜야 할 invariant를
+설명한다. 파일 수준 런타임 구조는
+[runtime-architecture.md](runtime-architecture.md)에 정리한다.
 
-## Service Boundary
+## 서비스 경계
 
-The control plane daemon exposes one HTTP service:
+control plane daemon은 하나의 HTTP service를 노출한다.
 
-| API group | Owner | Purpose |
+| API group | 소유자 | 목적 |
 |---|---|---|
-| `/vms` | `cmd/goose-daemon/api.go` | Create/list/delete VMs |
-| `/vms/{vm_id}/tasks` | `cmd/goose-daemon/api.go` | Proxy task execution to the guest agent |
-| `/vms/{vm_id}/health` | `cmd/goose-daemon/api.go` | Proxy guest health |
-| `/vms/{vm_id}/stop` | `cmd/goose-daemon/api.go` | Ask the guest agent to stop |
-| `/vms/{vm_id}/snapshot` | `cmd/goose-daemon/api.go` | Create full or diff VM snapshots |
-| `/snapshots` | `cmd/goose-daemon/api.go` | List stored snapshots |
-| `/snapshots/{id}/restore` | `cmd/goose-daemon/api.go` | Restore a VM from snapshot |
-| `/snapshots/{id}` | `cmd/goose-daemon/api.go` | Delete a snapshot |
+| `/vms` | `cmd/goose-daemon/api.go` | VM 생성, 목록, 삭제 |
+| `/vms/{vm_id}/tasks` | `cmd/goose-daemon/api.go` | guest agent로 task 실행 proxy |
+| `/vms/{vm_id}/health` | `cmd/goose-daemon/api.go` | guest health proxy |
+| `/vms/{vm_id}/stop` | `cmd/goose-daemon/api.go` | guest agent에 stop 요청 |
+| `/vms/{vm_id}/snapshot` | `cmd/goose-daemon/api.go` | full 또는 diff VM snapshot 생성 |
+| `/snapshots` | `cmd/goose-daemon/api.go` | 저장된 snapshot 목록 |
+| `/snapshots/{id}/restore` | `cmd/goose-daemon/api.go` | snapshot에서 VM restore |
+| `/snapshots/{id}` | `cmd/goose-daemon/api.go` | snapshot 삭제 |
 
-Inside the VM, `goose-agent` exposes:
+VM 내부의 `goose-agent`는 다음 endpoint를 제공한다.
 
-| Endpoint | Auth | Purpose |
+| Endpoint | Auth | 목적 |
 |---|---|---|
-| `POST /tasks` | Per-VM Bearer token | Run a Goose prompt |
-| `GET /health` | None | Return `idle` or `busy` |
-| `POST /stop` | Per-VM Bearer token | Gracefully stop the agent HTTP server |
+| `POST /tasks` | VM별 Bearer token | Goose prompt 실행 |
+| `GET /health` | 없음 | `idle` 또는 `busy` 반환 |
+| `POST /stop` | VM별 Bearer token | agent HTTP server graceful stop |
 
-External callers should use the control plane proxy endpoints rather than calling
-the private guest IP directly.
+외부 caller는 private guest IP에 직접 접근하기보다 control plane proxy endpoint를
+사용해야 한다.
 
-## Control-Plane Authentication
+## 제어 평면 인증
 
-All control-plane routes are wrapped by `authMiddleware`.
+모든 control-plane route는 `authMiddleware`로 감싼다.
 
 ```text
 incoming request
-  -> load current API client list through cp.getClients()
-  -> if no clients are configured, allow request
-  -> compare Authorization header with every registered token
-  -> reject unauthorized requests with 401 and JSON body
-  -> log matched client name and pass request to route handler
+  -> cp.getClients()로 현재 API client list 읽기
+  -> client가 설정되어 있지 않으면 요청 허용
+  -> Authorization header를 모든 등록 token과 비교
+  -> 인증 실패 시 401 JSON body 반환
+  -> matched client name을 log에 남기고 route handler 호출
 ```
 
-Token comparison uses constant-time comparison and does not stop after the first
-candidate. This avoids leaking partial token matches through timing.
+token 비교는 constant-time comparison을 사용하고 첫 후보에서 멈추지 않는다.
+partial token match가 timing으로 새지 않게 하기 위한 선택이다.
 
-`SIGHUP` triggers `ControlPlane.ReloadClients`, which reloads
-`EPHEMERA_API_TOKENS` or `EPHEMERA_API_TOKEN` into memory without restarting the
-daemon or interrupting running VMs.
+`SIGHUP`은 `ControlPlane.ReloadClients`를 호출한다. daemon 재시작이나 실행 중
+VM 중단 없이 `EPHEMERA_API_TOKENS` 또는 `EPHEMERA_API_TOKEN`을 메모리에 다시
+로드한다.
 
-## VM Spawn Logic
+## VM 생성 로직
 
 Route: `POST /vms`
 
-Input:
+입력:
 
 ```json
 {
@@ -70,85 +70,81 @@ Input:
 }
 ```
 
-Flow:
+흐름:
 
 ```text
 spawnVM()
-  -> decode optional JSON body
-  -> trim profile name
-  -> resolve config/secrets paths
+  -> optional JSON body decode
+  -> profile name trim
+  -> config/secrets path 해석
        empty profile -> configs/goose.yaml + configs/goose-secrets.yaml
        named profile -> configs/profiles/<name>/{goose.yaml,goose-secrets.yaml}
-       reject profile names with slash or backslash
-  -> generate 32-byte random agent token
-  -> allocate TAP, guest IP, and MAC
-  -> clone golden image to /tmp/goose-workspaces/<vm_id>.ext4
-  -> mount the disk once and inject config, secrets, token, timezone
-  -> create Firecracker API socket and vsock UDS path
-  -> start Firecracker through vm.StartMachine()
-  -> register VM in cp.vms
-  -> poll http://<guest_ip>:8080/health for up to 60 seconds
-  -> return VMSpawnResult with vm_id, guest_ip, agent_url, profile, agent_token
+       slash/backslash가 있는 profile name 거부
+  -> 32-byte random agent token 생성
+  -> TAP, guest IP, MAC 할당
+  -> golden image를 /tmp/goose-workspaces/<vm_id>.ext4로 clone
+  -> disk를 한 번 mount해 config, secrets, token, timezone 주입
+  -> Firecracker API socket과 vsock UDS path 생성
+  -> vm.StartMachine()으로 Firecracker 시작
+  -> cp.vms에 VM 등록
+  -> 최대 60초 동안 http://<guest_ip>:8080/health poll
+  -> vm_id, guest_ip, agent_url, profile, agent_token 반환
 ```
 
-Failure cleanup:
+실패 cleanup:
 
-| Failure point | Cleanup |
+| 실패 지점 | Cleanup |
 |---|---|
-| Network allocation fails | Return `500` |
-| Disk clone fails | Release TAP/IP |
-| Disk preparation fails | Remove cloned disk, release TAP/IP |
-| Firecracker start fails | Remove cloned disk, release TAP/IP |
-| Agent readiness fails | Destroy the VM through `cp.destroyVM` |
+| Network allocation 실패 | `500` 반환 |
+| Disk clone 실패 | TAP/IP 반환 |
+| Disk preparation 실패 | cloned disk 삭제, TAP/IP 반환 |
+| Firecracker start 실패 | cloned disk 삭제, TAP/IP 반환 |
+| Agent readiness 실패 | `cp.destroyVM`으로 VM 제거 |
 
-The returned `agent_token` is sensitive. It is also held in memory by the control
-plane so the proxy can call guest endpoints on the caller's behalf.
+응답의 `agent_token`은 민감 정보다. control plane은 proxy 호출을 위해 token을
+메모리에 보관한다.
 
-## VM List Logic
+## VM 목록 로직
 
 Route: `GET /vms`
 
-Flow:
-
 ```text
 listVMs()
-  -> read cp.vms under lock
-  -> return []VMInfo
+  -> cp.vms를 lock 아래에서 읽기
+  -> []VMInfo 반환
 ```
 
-The list response does not include `agent_token`.
+목록 응답에는 `agent_token`을 포함하지 않는다.
 
-## VM Delete Logic
+## VM 삭제 로직
 
 Route: `DELETE /vms/{vm_id}`
 
-Flow:
-
 ```text
 stopVM()
-  -> verify vm_id exists
+  -> vm_id 존재 확인
   -> cp.destroyVM(vm_id)
-  -> return {"status":"stopped","vm_id":"..."}
+  -> {"status":"stopped","vm_id":"..."} 반환
 ```
 
-`destroyVM` performs the actual teardown:
+실제 teardown은 `destroyVM`이 수행한다.
 
 ```text
 destroyVM()
-  -> remove VM from cp.vms under lock
+  -> cp.vms lock 아래에서 VM 제거
   -> StopVMM()
-       Firecracker sends SIGTERM
-       micro-init catches it
-       micro-init asks goose-agent to exit
-       micro-init calls poweroff(2)
-  -> remove Firecracker socket/log/vsock files
-  -> if COW-restored VM: TeardownDMSnapshot()
-  -> else if legacy bind restore: TeardownBindMount()
-  -> else remove cloned ext4 disk
-  -> release TAP and IP back to network.Manager
+       Firecracker가 SIGTERM 전송
+       micro-init이 signal 수신
+       micro-init이 goose-agent 종료 요청
+       micro-init이 poweroff(2) 호출
+  -> Firecracker socket/log/vsock file 삭제
+  -> COW-restored VM이면 TeardownDMSnapshot()
+  -> legacy bind restore이면 TeardownBindMount()
+  -> 일반 VM이면 cloned ext4 disk 삭제
+  -> TAP/IP를 network.Manager로 반환
 ```
 
-## Agent Proxy Logic
+## Agent proxy 로직
 
 Routes:
 
@@ -156,42 +152,40 @@ Routes:
 - `GET /vms/{vm_id}/health`
 - `POST /vms/{vm_id}/stop`
 
-Flow:
-
 ```text
 proxyAgentEndpoint()
-  -> find running VM by vm_id
-  -> build private target URL http://<guest_ip>:8080/<agent_path>
-  -> create request with incoming context and body
-  -> preserve Content-Type
-  -> inject "Authorization: Bearer <agent_token>" except for /health
-  -> send request through cp.agentHTTPClient
-  -> copy response headers, status code, and body back to caller
+  -> vm_id로 실행 중인 VM 찾기
+  -> private target URL http://<guest_ip>:8080/<agent_path> 구성
+  -> incoming context와 body로 새 request 생성
+  -> Content-Type 보존
+  -> /health가 아니면 "Authorization: Bearer <agent_token>" 주입
+  -> cp.agentHTTPClient로 request 전송
+  -> response header, status code, body를 caller에게 복사
 ```
 
-The proxy keeps external callers on one auth model: they authenticate to the
-control plane only. The daemon injects the private agent token when needed.
+proxy는 외부 caller에게 하나의 인증 모델만 노출한다. caller는 control plane에만
+인증하고, daemon이 필요한 guest agent token을 내부적으로 주입한다.
 
-## Snapshot Type Selection
+## Snapshot 유형 선택
 
-`resolveSnapshotType(req.Type, vmID)` applies these rules:
+`resolveSnapshotType(req.Type, vmID)`는 다음 규칙을 적용한다.
 
-| Request type | Result |
+| 요청 type | 결과 |
 |---|---|
-| `"full"` | Create a full snapshot |
-| `"diff"` with an existing full base | Create a diff snapshot referencing the latest full snapshot |
-| `"diff"` without a full base | Return an error |
-| Empty or unknown value with no full base | Create a full snapshot |
-| Empty or unknown value with a full base | Create a diff snapshot referencing the latest full snapshot |
+| `"full"` | full snapshot 생성 |
+| `"diff"`이고 기존 full base 있음 | latest full snapshot을 참조하는 diff snapshot 생성 |
+| `"diff"`이지만 full base 없음 | error 반환 |
+| 비어 있거나 unknown이고 full base 없음 | full snapshot 생성 |
+| 비어 있거나 unknown이고 full base 있음 | latest full snapshot을 참조하는 diff snapshot 생성 |
 
-The latest full snapshot is selected by `CreatedAt` among snapshots with the same
-`source_vm_id`.
+latest full snapshot은 같은 `source_vm_id`를 가진 snapshot 중 `CreatedAt` 기준으로
+선택한다.
 
-## Snapshot Create Logic
+## Snapshot 생성 로직
 
 Route: `POST /vms/{vm_id}/snapshot`
 
-Input:
+입력:
 
 ```json
 {
@@ -200,158 +194,152 @@ Input:
 }
 ```
 
-Flow:
+흐름:
 
 ```text
 createSnapshot()
-  -> parse optional body
-  -> find running VM
-  -> resolve full/diff type and base snapshot ID
-  -> create snapshots/<snapshot_id>/
-  -> pause VM
+  -> optional body parse
+  -> 실행 중인 VM 찾기
+  -> full/diff type과 base snapshot ID 결정
+  -> snapshots/<snapshot_id>/ 생성
+  -> VM pause
   -> CreateSnapshot(memory.bin, state.bin)
-       diff snapshots pass Firecracker SnapshotType="Diff"
-  -> copy /tmp/goose-workspaces/<vm_id>.ext4 to rootfs.ext4 while paused
-  -> if stop_after=false: resume VM
-  -> if stop_after=true: destroy source VM
-  -> write metadata.json
-  -> add metadata to cp.snapshots
-  -> return public SnapshotInfo
+       diff snapshot은 Firecracker SnapshotType="Diff" 전달
+  -> pause 상태에서 /tmp/goose-workspaces/<vm_id>.ext4를 rootfs.ext4로 copy
+  -> stop_after=false이면 VM resume
+  -> stop_after=true이면 source VM destroy
+  -> metadata.json 작성
+  -> cp.snapshots에 metadata 추가
+  -> public SnapshotInfo 반환
 ```
 
-Important invariants:
+중요 invariant:
 
-- Disk copy happens while the VM is paused.
-- Diff snapshots still copy the full rootfs. Only memory is sparse/diff.
-- `metadata.json` preserves the original TAP name, MAC, vsock path, agent token,
-  disk path, memory path, state path, and base snapshot ID.
-- Snapshot API responses do not expose `agent_token`.
+- disk copy는 VM이 pause된 상태에서 수행한다.
+- diff snapshot도 rootfs는 full copy한다. memory만 sparse/diff다.
+- `metadata.json`은 original TAP name, MAC, vsock path, agent token, disk path,
+  memory path, state path, base snapshot ID를 보존한다.
+- snapshot API response에는 `agent_token`을 노출하지 않는다.
 
-## Snapshot Restore Logic
+## Snapshot restore 로직
 
 Route: `POST /snapshots/{id}/restore`
 
-Flow:
-
 ```text
 restoreSnapshot()
-  -> load snapshot metadata from cp.snapshots
-  -> reject restore if source VM is still running
-  -> allocate a new VM ID
-  -> remove stale Firecracker socket
-  -> remove original vsock UDS path from snapshot metadata
+  -> cp.snapshots에서 snapshot metadata load
+  -> source VM이 아직 실행 중이면 reject
+  -> 새 VM ID 할당
+  -> stale Firecracker socket 제거
+  -> snapshot metadata의 original vsock UDS path 제거
   -> AllocateForRestore(original TAP, original MAC)
-       returns original TAP name + any free guest IP
-  -> lock cp.restoreMu
-  -> try SetupDMSnapshot(rootfs.ext4, <new_vm_id>.cow, original disk path)
-       creates read-only loop for base rootfs
-       creates sparse exception store
-       creates dm-snapshot device
-       bind-mounts it over original disk path
-  -> if dm-snapshot fails:
-       release and fall back to restoreLegacyBindMount()
-  -> if snapshot is diff:
-       load base snapshot metadata
-       MergeMemoryDiff(base.memory.bin, diff.memory.bin, tmp/<new_vm_id>-merged.bin)
+       original TAP name + 사용 가능한 guest IP 반환
+  -> cp.restoreMu lock
+  -> SetupDMSnapshot(rootfs.ext4, <new_vm_id>.cow, original disk path) 시도
+       read-only loop for base rootfs 생성
+       sparse exception store 생성
+       dm-snapshot device 생성
+       original disk path 위로 bind mount
+  -> dm-snapshot 실패 시 network release 후 restoreLegacyBindMount() fallback
+  -> snapshot이 diff이면 base snapshot metadata load
+  -> MergeMemoryDiff(base.memory.bin, diff.memory.bin, tmp/<new_vm_id>-merged.bin)
   -> RestoreMachine(memory file, state.bin)
-  -> unlock cp.restoreMu after Firecracker has opened the disk path
-  -> remove temporary merged memory file
+  -> Firecracker가 disk path를 연 뒤 cp.restoreMu unlock
+  -> 임시 merged memory file 삭제
   -> ReconfigureGuestIP(original vsock path, new IP, gateway)
-  -> register restored VM in cp.vms
-  -> wait for guest agent health for up to 30 seconds
-  -> return VMRestoreResult with source_snapshot_id and agent_token
+  -> restored VM을 cp.vms에 등록
+  -> 최대 30초 동안 guest agent health 대기
+  -> source_snapshot_id와 agent_token을 포함한 VMRestoreResult 반환
 ```
 
-The restored VM keeps the original agent token from the snapshot metadata. This
-preserves caller access across snapshot/restore cycles.
+restore된 VM은 snapshot metadata의 original agent token을 유지한다. 따라서
+caller는 snapshot/restore cycle 뒤에도 같은 agent token으로 접근할 수 있다.
 
-Failure cleanup:
+실패 cleanup:
 
-| Failure point | Cleanup |
+| 실패 지점 | Cleanup |
 |---|---|
-| Network allocation fails | Return `409` |
-| dm-snapshot setup fails | Release network, then attempt bind-mount fallback |
-| Diff base missing | Tear down COW, release network, return `409` |
-| Diff merge fails | Tear down COW, release network |
-| Firecracker restore fails | Tear down COW, release network |
-| Guest IP reconfiguration fails | Stop VMM, tear down COW, release network |
-| Agent readiness fails | Destroy restored VM |
+| Network allocation 실패 | `409` 반환 |
+| dm-snapshot setup 실패 | network release 후 bind-mount fallback 시도 |
+| Diff base 없음 | COW teardown, network release, `409` 반환 |
+| Diff merge 실패 | COW teardown, network release |
+| Firecracker restore 실패 | COW teardown, network release |
+| Guest IP reconfiguration 실패 | Stop VMM, COW teardown, network release |
+| Agent readiness 실패 | restored VM destroy |
 
-## Legacy Bind-Mount Restore Fallback
+## 기존 bind-mount restore fallback
 
-If `SetupDMSnapshot` fails, the daemon restores through `restoreLegacyBindMount`.
-This path:
+`SetupDMSnapshot`이 실패하면 daemon은 `restoreLegacyBindMount`로 복원한다.
 
 ```text
-  -> copies snapshot rootfs.ext4 to /tmp/goose-workspaces/<new_vm_id>.ext4
-  -> bind-mounts that file over the original disk path from state.bin
-  -> merges diff memory when needed
+  -> snapshot rootfs.ext4를 /tmp/goose-workspaces/<new_vm_id>.ext4로 copy
+  -> state.bin의 original disk path 위로 해당 file bind mount
+  -> 필요 시 diff memory merge
   -> RestoreMachine()
   -> ReconfigureGuestIP()
-  -> registers VM with bindMountTarget for later teardown
+  -> later teardown을 위해 bindMountTarget이 있는 VM 등록
 ```
 
-This fallback is slower and uses more disk than COW restore, but keeps restore
-functional on hosts without working dm-snapshot support.
+이 fallback은 COW restore보다 느리고 disk를 더 많이 사용하지만,
+dm-snapshot을 사용할 수 없는 host에서도 restore 기능을 유지한다.
 
-## Snapshot Delete Logic
+## Snapshot 삭제 로직
 
 Route: `DELETE /snapshots/{id}`
 
-Flow:
-
 ```text
 deleteSnapshot()
-  -> scan cp.snapshots for diffs whose base_snapshot_id == requested ID
-  -> if any exist, return 409
-  -> remove snapshot metadata from cp.snapshots
-  -> remove snapshots/<id>/ from disk
-  -> return {"status":"deleted","snapshot_id":"..."}
+  -> cp.snapshots에서 base_snapshot_id == requested ID인 diff 검색
+  -> 있으면 409 반환
+  -> cp.snapshots에서 snapshot metadata 제거
+  -> snapshots/<id>/를 disk에서 삭제
+  -> {"status":"deleted","snapshot_id":"..."} 반환
 ```
 
-This prevents deleting a full snapshot that a diff snapshot still needs.
+이 규칙은 diff snapshot이 아직 필요로 하는 full snapshot을 삭제하지 못하게
+막는다.
 
-## Guest Agent Logic
+## Guest agent 로직
 
-`goose-agent` runs inside each VM.
+`goose-agent`는 각 VM 내부에서 실행된다.
 
 Startup:
 
 ```text
 main()
-  -> read /root/.ephemera-agent-token
-  -> start vsock CHANGE_IP listener
-  -> register /tasks, /stop, /health
-  -> listen on :8080 by default
+  -> /root/.ephemera-agent-token 읽기
+  -> vsock CHANGE_IP listener 시작
+  -> /tasks, /stop, /health 등록
+  -> 기본 :8080 listen
 ```
 
-Task execution:
+Task 실행:
 
 ```text
 POST /tasks
-  -> require method POST
-  -> decode {"prompt":"..."}
-  -> reject empty prompt
-  -> if busy, return 503
-  -> set busy=true
-  -> run /usr/local/bin/goose run -i - with prompt on stdin
-  -> return {"output":"..."} or {"output":"...","error":"..."}
-  -> set busy=false
+  -> POST method 요구
+  -> {"prompt":"..."} decode
+  -> 빈 prompt 거부
+  -> busy이면 503 반환
+  -> busy=true
+  -> prompt를 stdin으로 넘겨 /usr/local/bin/goose run -i - 실행
+  -> {"output":"..."} 또는 {"output":"...","error":"..."} 반환
+  -> busy=false
 ```
 
 Health:
 
 ```text
 GET /health
-  -> return {"status":"idle"} or {"status":"busy"}
+  -> {"status":"idle"} 또는 {"status":"busy"} 반환
 ```
 
 Stop:
 
 ```text
 POST /stop
-  -> return {"status":"stopping"}
-  -> after 200 ms, gracefully shut down the HTTP server
+  -> {"status":"stopping"} 반환
+  -> 200 ms 뒤 HTTP server graceful shutdown
 ```
 
 Vsock IP reconfiguration:
@@ -362,54 +350,50 @@ CHANGE_IP <cidr_ip> <gateway>
   -> ip addr add <cidr_ip> dev eth0
   -> ip link set eth0 up
   -> ip route replace default via <gateway>
-  -> return OK or ERROR
+  -> OK 또는 ERROR 반환
 ```
 
-## Guest Init Logic
+## Guest init 로직
 
-`micro-init` is PID 1 inside the VM.
-
-Flow:
+`micro-init`은 VM 내부 PID 1이다.
 
 ```text
 micro-init
-  -> mount /proc, /sys, /dev, /dev/pts
-  -> set HOME, USER, PATH
-  -> start /usr/local/bin/goose-agent
-  -> wait for goose-agent exit or SIGTERM/SIGINT
-  -> on signal, send SIGTERM to goose-agent
+  -> /proc, /sys, /dev, /dev/pts mount
+  -> HOME, USER, PATH 설정
+  -> /usr/local/bin/goose-agent 시작
+  -> goose-agent exit 또는 SIGTERM/SIGINT 대기
+  -> signal 수신 시 goose-agent에 SIGTERM 전송
   -> sync
   -> poweroff(2)
 ```
 
-This avoids the kernel panic that can happen when PID 1 exits without powering
-off the guest cleanly.
+이 흐름은 PID 1이 단순 종료되면서 발생할 수 있는 guest kernel panic을 피한다.
 
-## Error Model
+## 오류 모델
 
-- Control-plane auth failure: `401` with `{"error":"unauthorized"}`.
-- Missing VM: usually `404`.
-- Snapshot base dependency conflict: `409`.
-- Invalid profile or invalid snapshot type request: `400`.
-- Host/runtime setup failure: usually `500`.
-- Agent proxy connection failure: `502`.
+- Control-plane auth 실패: `401`, body `{"error":"unauthorized"}`
+- VM 없음: 일반적으로 `404`
+- Snapshot base dependency conflict: `409`
+- Invalid profile 또는 invalid snapshot type request: `400`
+- Host/runtime setup 실패: 일반적으로 `500`
+- Agent proxy connection 실패: `502`
 
-Some legacy paths still return plain text bodies. MCP v1 preserves daemon status
-and body rather than normalizing every response.
+일부 legacy path는 아직 plain text body를 반환한다. MCP v1은 daemon status와
+body를 보존하며, 모든 response를 새 domain model로 정규화하지 않는다.
 
-## Operational Invariants
+## 운영 불변 조건
 
-- Do not delete or mutate a running VM's disk outside `destroyVM`.
-- Do not expose guest `agent_token` in list/snapshot responses.
-- Do not restore from a snapshot while the source VM is still running.
-- Do not delete a full snapshot while any diff references it.
-- Always release TAP/IP on failed VM creation or restore.
-- Always tear down dm-snapshot, loop devices, bind mounts, and sparse COW files on
-  VM deletion.
-- Keep `anvil_stop_vm` and `anvil_delete_vm` semantics distinct at the MCP layer:
-  stop asks the guest agent to stop, delete destroys host VM resources.
+- 실행 중인 VM disk를 `destroyVM` 밖에서 삭제하거나 변경하지 않는다.
+- list/snapshot response에 guest `agent_token`을 노출하지 않는다.
+- source VM이 실행 중인 snapshot은 restore하지 않는다.
+- diff가 참조하는 full snapshot은 삭제하지 않는다.
+- VM 생성 또는 restore 실패 시 항상 TAP/IP를 반환한다.
+- VM 삭제 시 dm-snapshot, loop device, bind mount, sparse COW file을 정리한다.
+- MCP layer에서 `anvil_stop_vm`과 `anvil_delete_vm` 의미를 구분한다.
+  stop은 guest agent 중지 요청이고, delete는 host VM resource 삭제다.
 
-## Source References
+## 소스 참조
 
 - `cmd/goose-daemon/api.go`
 - `cmd/goose-daemon/config.go`

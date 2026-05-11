@@ -6,232 +6,219 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Firecracker](https://img.shields.io/badge/Firecracker-v1.15.1-FF4500?logo=amazonaws&logoColor=white)](https://github.com/firecracker-microvm/firecracker)
 
-**Enterprise Control Plane for Ephemeral AI Agents via Firecracker MicroVMs**
+**Firecracker MicroVM 기반 AI agent 격리 실행 제어 평면**
 
-anvil orchestrates isolated, KVM-backed MicroVM environments for agentic AI workloads. Each VM runs [Goose](https://github.com/aaif-goose/goose) as an autonomous agent inside a minimal Debian guest, fully contained within hardware VM boundaries and wiped on termination.
+`anvil`은 agentic AI workload를 KVM 기반 Firecracker MicroVM 안에서 실행하는
+단일 호스트 control plane이다. 각 VM은 최소 Debian guest 안에서
+[Goose](https://github.com/aaif-goose/goose)를 실행하고, 작업이 끝나면 VM을
+삭제하거나 snapshot으로 보존할 수 있다.
 
-The repository is still named `ephemera`; the official project and product name is `anvil`.
+저장소 이름은 아직 `ephemera`이고 Go 모듈 경로도 호환성 때문에 유지된다.
+공식 프로젝트명과 제품명은 `anvil`이다.
 
-Versioned source snapshots are published as Git tags. `v0.2.0` is the latest public
-source tag; GitHub Release pages are not currently published.
+버전별 소스 snapshot은 Git tag로 공개된다. 현재 공개 소스 tag 기준은
+`v0.2.0`이며, GitHub Release page는 아직 게시하지 않았다.
 
 ---
 
-## Architecture
+## 아키텍처
 
-```
-External Client
-      │  HTTPS (TLS-terminated by reverse proxy)
-      ▼
-Reverse Proxy  :443                   ← Caddy / Nginx (TLS termination)
-      │  HTTP (Bearer token, encrypted inside TLS tunnel)
-      ▼
-anvil Control Plane  :3000           ← VM lifecycle + snapshot management
-  POST   /vms                         → spawn VM → returns {vm_id, agent_url, agent_token}
-  GET    /vms                         → list running VMs
-  DELETE /vms/{vm_id}                 → stop & destroy VM
-  POST   /vms/{vm_id}/snapshot        → freeze VM state to disk
-  GET    /snapshots                   → list stored snapshots
-  POST   /snapshots/{id}/restore      → resume VM from snapshot (~5 s vs ~60 s cold boot)
-  DELETE /snapshots/{id}              → delete snapshot files
+```text
+외부 client
+      |
+      | HTTPS, TLS 종료는 reverse proxy가 담당
+      v
+Reverse proxy :443
+      |
+      | HTTP + control-plane Bearer token
+      v
+anvil control plane :3000
+  POST   /vms                  -> VM 생성
+  GET    /vms                  -> 실행 중인 VM 목록
+  DELETE /vms/{vm_id}          -> VM 종료 및 리소스 정리
+  POST   /vms/{vm_id}/snapshot -> VM snapshot 생성
+  GET    /snapshots            -> snapshot 목록
+  POST   /snapshots/{id}/restore
+                                -> snapshot에서 VM 복원
+  DELETE /snapshots/{id}       -> snapshot 삭제
 
-      │  provision
-      ▼
-MicroVM (Firecracker + KVM)           ← isolated KVM hardware boundary
-  ├── Debian Bookworm minbase (rootfs)
-  ├── micro-init (PID 1)  →  goose-agent :8080
-  └── goose (AI agent, runs per task)
+      |
+      | Firecracker SDK, KVM, TAP, rootfs, snapshot files
+      v
+Firecracker MicroVM
+  - Debian Bookworm minbase rootfs
+  - micro-init, PID 1
+  - goose-agent :8080
+  - goose CLI task 실행
 
-External Client
-      │  HTTP (via control plane proxy — no direct VM access needed)
-      ▼
-Control Plane  :3000  /vms/{vm_id}    ← proxies to VM's private agent
-  POST  /vms/{vm_id}/tasks            → proxy → goose-agent :8080/tasks
-  GET   /vms/{vm_id}/health           → proxy → goose-agent :8080/health
-  POST  /vms/{vm_id}/stop             → proxy → goose-agent :8080/stop
-
-goose-agent  http://10.0.1.x:8080    ← private subnet 10.0.1.0/24 (host-only)
-  POST  /tasks    {"prompt":"..."}    → run a Goose task, return result
-  GET   /health                       → idle | busy
-  POST  /stop                         → graceful shutdown
-```
-
-> `agent_url` in VM responses points to the control plane proxy when `EPHEMERA_PUBLIC_URL` is set, or to the VM's private IP otherwise. Direct access to the private IP still works from the host.
-
-### VM Provisioning Flow
-
-```
-CloneDisk()      → copy golden image → per-VM ext4 disk
-PrepareVM()      → inject goose.yaml, goose-secrets.yaml, agent_token,
-                   /etc/localtime (single mount/unmount cycle)
-StartMachine()   → Firecracker: kernel + disk + TAP NIC
-                   network via kernel ip= boot parameter (no DHCP)
-waitForAgent()   → poll http://10.0.1.x:8080/health until ready (~60 s cold boot)
+외부 client
+      |
+      | control plane proxy
+      v
+POST /vms/{vm_id}/tasks  -> goose-agent :8080/tasks
+GET  /vms/{vm_id}/health -> goose-agent :8080/health
+POST /vms/{vm_id}/stop   -> goose-agent :8080/stop
 ```
 
-### Snapshot/Restore Flow
+`EPHEMERA_PUBLIC_URL`이 설정되어 있으면 `POST /vms` 응답의 `agent_url`은
+control plane proxy 경로를 가리킨다. 설정되지 않은 경우 host에서 접근 가능한
+VM private IP가 반환된다.
 
+## VM 생성 흐름
+
+```text
+CloneDisk()
+  -> golden image를 VM별 ext4 disk로 copy
+
+PrepareVM()
+  -> goose.yaml, goose-secrets.yaml, agent_token, /etc/localtime 주입
+  -> 단일 mount/unmount cycle 사용
+
+StartMachine()
+  -> Firecracker kernel + disk + TAP NIC 시작
+  -> DHCP 없이 kernel ip= boot parameter로 네트워크 설정
+
+waitForAgent()
+  -> http://10.0.1.x:8080/health readiness poll
+  -> cold boot 기준 약 60초
 ```
+
+## Snapshot/Restore 흐름
+
+```text
 POST /vms/{id}/snapshot
-  → auto-detect type:
-      no prior Full for this VM → Full  (memory.bin = 2 GB, non-sparse)
-      prior Full exists         → Diff  (memory.bin = sparse, dirty pages only)
-  → PauseVM()         (freeze guest CPU execution)
-  → CreateSnapshot()  (write memory.bin + state.bin; Diff uses SnapshotType="Diff")
-  → CopyDisk()        (copy rootfs to snapshots/{id}/rootfs.ext4)
-  → ResumeVM()        (unfreeze guest, or destroy if stop_after=true)
+  -> snapshot type 자동 선택
+     - 해당 VM의 기존 Full 없음: Full
+     - 기존 Full 있음: Diff
+  -> PauseVM()
+  -> CreateSnapshot(memory.bin, state.bin)
+  -> rootfs.ext4 copy
+  -> ResumeVM() 또는 stop_after=true이면 source VM 삭제
 
 POST /snapshots/{id}/restore
-  → if Diff: MergeMemoryDiff(base.memory.bin, diff.memory.bin → tmp/merged.bin)
-  → SetupDMSnapshot() (COW restore: losetup × 2 + dmsetup snapshot → bind-mount;
-                        initial extra disk usage ≈ 0, writes-on-demand to sparse .cow file)
-  → AllocateForRestore() (recreate original TAP name + MAC; allocate any free IP)
-  → RestoreMachine()  (Firecracker loads snapshot; vsock device rebuilt from state.bin)
-  → ReconfigureGuestIP() (vsock: CHANGE_IP new_ip/24 → ip addr + ip route in guest)
-  → waitForAgent()    (poll /health at new IP, ~5 s)
-  → cleanup:          merged.bin deleted after VM starts;
-                      .cow exception store deleted on VM delete
+  -> Diff이면 base memory + diff memory merge
+  -> SetupDMSnapshot()으로 COW rootfs 구성
+  -> original TAP name/MAC 재생성, 새 IP 할당
+  -> Firecracker RestoreMachine()
+  -> vsock CHANGE_IP로 guest IP 재설정
+  -> /health readiness poll
 ```
 
-> Firecracker v1.x stores the TAP device name and disk path inside `state.bin`. Restoration recreates the TAP with the original name and places the disk at the original path. The guest IP is reconfigured via vsock after restore.
+Firecracker snapshot state에는 TAP device name과 disk path가 들어 있다.
+anvil은 restore 시 해당 device identity를 재생성하고, IP는 vsock channel을
+통해 새 값으로 재설정한다.
 
-### Teardown Flow
+## 종료 흐름
 
-```
+```text
 DELETE /vms/{id}
-  → StopVMM()          (SIGTERM to Firecracker → micro-init catches SIGTERM,
-                         calls sync + poweroff(2); guest shuts down gracefully)
-  → For COW-restored VMs:
-    TeardownDMSnapshot() (umount -l bind-mount → dmsetup remove → losetup -d × 2
-                           → rm sparse .cow exception store)
-  → For fresh VMs:
-    Remove disk        (delete cloned ext4 via stored diskPath)
-  → Release()          (delete TAP device, return IP to pool)
+  -> StopVMM()
+  -> micro-init이 SIGTERM 수신
+  -> goose-agent 종료 요청
+  -> sync + poweroff(2)
+  -> COW restore VM이면 dm-snapshot/loop/bind mount/.cow 정리
+  -> 일반 VM이면 cloned ext4 disk 삭제
+  -> TAP/IP 반환
 ```
 
 ---
 
-## Key Features
+## 주요 기능
 
-| Feature | Detail |
-|---------|--------|
-| **Self-bootstrapping** | Golden image, kernel, Firecracker downloaded + SHA256-verified on first run |
-| **Minimal guest OS** | Debian Bookworm minbase — no SSH, no init daemon; `micro-init` (Go binary, PID 1) mounts virtual filesystems and manages goose-agent lifecycle |
-| **Graceful guest shutdown** | `micro-init` traps SIGTERM and calls `poweroff(2)` — no kernel panic on VM exit |
-| **Per-VM LLM profiles** | Each VM spawn can specify a named profile (`configs/profiles/{name}/`) with its own provider, model, and API key |
-| **Runtime config injection** | `goose.yaml` and `goose-secrets.yaml` injected at provision time — no image rebuild required to change provider/model |
-| **Per-VM agent authentication** | Control plane generates a 32-byte random Bearer token per VM; token is written to the VM disk and returned once in `POST /vms` response |
-| **MicroVM snapshots (Full + Diff)** | Freeze VM memory state to disk; restore in ~5 s. First snapshot → Full (2 GB); subsequent snapshots of the same VM → Diff (sparse, dirty pages only). Diff is automatically selected; Full is always the reference base. Original agent token preserved across restores. |
-| **COW rootfs on restore** | Restored VMs use a Linux dm-snapshot COW device backed by the snapshot's `rootfs.ext4` (read-only base, shared). Per-VM guest writes accumulate in a sparse exception store (~0 initial disk usage). Eliminates the ~700 MB full copy previously required per restore. |
-| **Post-restore IP reconfiguration** | Restored VMs receive a fresh IP from the pool via vsock — the guest's network stack is updated in-place without reboot, decoupling the restore IP from the snapshot state. |
-| **IP and TAP recycling** | IPs (10.0.1.2–254) and TAP IDs are returned to a pool and reused across VM lifecycle |
-| **NAT for outbound internet** | Host bridge `goose-br0` with iptables MASQUERADE enables VM-to-internet for LLM API calls |
-| **Per-client API auth** | Named Bearer tokens per client (`alice:tok1,bob:tok2`); timing-safe comparison; per-request audit log |
-| **SIGHUP token hot reload** | API token list can be updated without restarting the daemon or interrupting running VMs |
+| 기능 | 설명 |
+|---|---|
+| 자체 bootstrap | 첫 실행 시 golden image, kernel, Firecracker binary를 준비하고 검증한다. |
+| 최소 guest OS | Debian Bookworm minbase와 Go 기반 `micro-init`으로 구성한다. |
+| 안전한 guest 종료 | `micro-init`이 signal을 받아 `poweroff(2)`를 호출해 kernel panic을 피한다. |
+| VM별 LLM profile | VM 생성 시 `configs/profiles/{name}/`의 provider/model/secret을 선택할 수 있다. |
+| 런타임 설정 주입 | `goose.yaml`, `goose-secrets.yaml`을 provision time에 주입한다. |
+| VM별 agent 인증 | VM마다 별도 Bearer token을 생성하고 guest disk에 `0600`으로 저장한다. |
+| Full/Diff snapshot | 첫 snapshot은 Full, 이후 snapshot은 dirty memory page 기반 Diff로 자동 선택된다. |
+| COW rootfs restore | restore VM은 snapshot rootfs를 read-only base로 공유하고 sparse COW file에 쓰기를 기록한다. |
+| Restore 후 IP 재설정 | VM은 새 IP를 할당받고 vsock으로 guest network stack을 갱신한다. |
+| IP/TAP 재사용 | lifecycle 종료 후 `10.0.1.2-254` IP와 TAP ID를 pool에 반환한다. |
+| Outbound NAT | `goose-br0`와 iptables MASQUERADE로 guest의 LLM API outbound를 지원한다. |
+| Control-plane 인증 | named Bearer token, timing-safe compare, audit log, `SIGHUP` hot reload를 지원한다. |
+| IronClaw MCP adapter | `cmd/anvil-mcp`가 daemon API를 stdio MCP tool로 노출한다. |
 
 ---
 
-## Project Layout
+## 프로젝트 구조
 
-```
+```text
 cmd/
-  goose-daemon/       Control plane daemon (main binary)
-    main.go           Startup, artifact bootstrap, ControlPlane init
-    api.go            HTTP API: VM + snapshot CRUD, auth middleware
-    config.go         Env-var configuration (ports, tokens, address)
-  anvil-mcp/          Stdio MCP adapter entrypoint for IronClaw
-  goose-agent/        In-VM HTTP agent (baked into golden image)
-    main.go           /tasks, /health, /stop  (Bearer token auth)
-  micro-init/         PID 1 for each MicroVM (baked into golden image)
-    main.go           Mounts virtual filesystems, manages goose-agent,
-                      calls poweroff(2) on exit
+  goose-daemon/       control plane daemon
+    main.go           startup, artifact bootstrap, ControlPlane init
+    api.go            VM/snapshot API, auth middleware, proxy
+    config.go         환경 변수 기반 설정
+  anvil-mcp/          IronClaw용 stdio MCP adapter entrypoint
+  goose-agent/        VM 내부 HTTP agent
+  micro-init/         VM 내부 PID 1
 
 internal/
-  anvilmcp/           MCP config, daemon client, session aliases, tool handlers
-  vm/machine.go       Firecracker SDK wrapper — StartMachine, RestoreMachine
-  network/manager.go  IP pool, TAP device lifecycle, AllocateForRestore, bridge, NAT
+  anvilmcp/           MCP config, daemon client, session alias, tool handler
+  vm/machine.go       Firecracker SDK wrapper
+  network/manager.go  IP pool, TAP lifecycle, bridge, NAT
   storage/
-    provisioner.go    Golden image bootstrap, disk clone, config/token injection,
-                      artifact download + SHA256 verification
-    snapshot.go       Snapshot metadata (read/write), disk copy helpers,
-                      SetupDMSnapshot/TeardownDMSnapshot (COW restore via dm-snapshot),
-                      MergeMemoryDiff (SEEK_DATA/SEEK_HOLE sparse merge)
+    provisioner.go    golden image bootstrap, disk clone, config/token injection
+    snapshot.go       snapshot metadata, COW restore, diff memory merge
 
 configs/
-  anvil-mcp.yaml.example        MCP adapter config template
-  goose.yaml.example             Default provider/model template
-  goose-secrets.yaml.example     API key template
-  profiles/                      Per-VM LLM profiles (optional)
-    <profile-name>/
-      goose.yaml
-      goose-secrets.yaml
-
-.github/
-  workflows/ci.yml    go build + go vet + go test on push/PR (ubuntu-22.04)
+  anvil-mcp.yaml.example
+  goose.yaml.example
+  goose-secrets.yaml.example
+  profiles/<profile-name>/
 
 docs/
-  architecture/        Runtime, service logic, and MCP architecture docs
-  analysis/            Version comparison and source analysis reports
-  lifecycle/runs/      Computed lifecycle status snapshots
-  operations/          Release/operate handoff records
-  superpowers/         Accepted specs, grill-me decisions, and plans
+  architecture/        런타임, 서비스 로직, MCP 아키텍처
+  analysis/            버전 비교와 소스 분석
+  lifecycle/runs/      계산된 lifecycle 상태 snapshot
+  operations/          release/operate handoff 기록
+  superpowers/         승인된 spec, review, plan 기록
 
-snapshots/            Stored snapshot directories (auto-created, gitignored)
-  <snapshot-id>/
-    memory.bin        Guest RAM dump — 2 GB (Full) or sparse/small (Diff)
-    state.bin         Firecracker hardware state
-    rootfs.ext4       Disk copy (always full, ~700 MB)
-    metadata.json     Restore params (IP, TAP, MAC, token, type, base_snapshot_id)
-
-e2e_test.sh           End-to-end integration test (50 steps; requires /dev/kvm + root)
-
-scripts/
-  build_image.sh      Builds golden image (Debian Bookworm + Goose + goose-agent + micro-init)
-
-artifacts/            Auto-populated at runtime (gitignored)
-  golden-image.ext4   Golden VM disk image
-  vmlinux.bin         Firecracker-compatible Linux 6.1 kernel
-  firecracker         Firecracker VMM binary (SHA256-verified)
-  goose-agent         In-VM HTTP agent binary (compiled from source)
-  micro-init          PID 1 init binary (compiled from source)
+snapshots/             snapshot 저장 디렉터리, gitignore
+artifacts/             runtime artifact 디렉터리, gitignore
+e2e_test.sh            50단계 통합 테스트
+scripts/build_image.sh golden image build script
 ```
 
-## Documentation Map
+## 문서 지도
 
-| Document | Purpose |
-|----------|---------|
-| [CONTEXT.md](CONTEXT.md) | Canonical product name, source-of-truth order, domain glossary, and frozen runtime contracts |
-| [AGENTS.md](AGENTS.md) | Codex project guidance, workflow rules, commands, and invariants |
-| [RELEASE_NOTES.md](RELEASE_NOTES.md) | Version notes for `v0.1.0`, `v0.2.0`, and unreleased changes |
-| [docs/architecture/runtime-architecture.md](docs/architecture/runtime-architecture.md) | Runtime architecture for the daemon, MicroVM, storage, network, and guest components |
-| [docs/architecture/service-logic.md](docs/architecture/service-logic.md) | Control-plane API, VM lifecycle, snapshot/restore, and guest agent service flows |
-| [docs/architecture/mcp-architecture.md](docs/architecture/mcp-architecture.md) | IronClaw MCP adapter architecture, tool contracts, config, and session alias behavior |
-| [docs/analysis/README.md](docs/analysis/README.md) | Index for 0.1.0 and 0.2.0 analysis documents |
-| [docs/operations/2026-05-11-anvil-redesign-handoff.md](docs/operations/2026-05-11-anvil-redesign-handoff.md) | Current redesign release/operate handoff evidence |
+| 문서 | 역할 |
+|---|---|
+| [CONTEXT.md](CONTEXT.md) | 제품명, 진실 기준 문서 순서, 경계 규칙, 고정 계약 |
+| [AGENTS.md](AGENTS.md) | Codex 작업 규약, 검증 명령, 불변 조건 |
+| [RELEASE_NOTES.md](RELEASE_NOTES.md) | `v0.1.0`, `v0.2.0`, 미릴리즈 변경 사항 |
+| [docs/architecture/runtime-architecture.md](docs/architecture/runtime-architecture.md) | daemon, MicroVM, storage, network, guest runtime 구조 |
+| [docs/architecture/service-logic.md](docs/architecture/service-logic.md) | control-plane API, VM lifecycle, snapshot/restore, guest agent 흐름 |
+| [docs/architecture/mcp-architecture.md](docs/architecture/mcp-architecture.md) | IronClaw MCP adapter 구조와 tool 계약 |
+| [docs/analysis/README.md](docs/analysis/README.md) | 0.1.0/0.2.0 분석 문서 index |
+| [docs/operations/2026-05-11-anvil-redesign-handoff.md](docs/operations/2026-05-11-anvil-redesign-handoff.md) | 재설계 release/operate handoff 근거 |
 
 ---
 
-## Prerequisites
+## 사전 요구사항
 
-| Requirement | Detail |
-|-------------|--------|
-| **Host OS** | Ubuntu 22.04 or 24.04 (bare metal, or VM with nested virtualization) |
-| **CPU** | `/dev/kvm` accessible |
-| **Go** | 1.25+ |
-| **Packages** | `curl`, `debootstrap`, `e2fsprogs`, `util-linux` |
-| **Privileges** | `sudo` at runtime (KVM + network interface management) |
+| 항목 | 내용 |
+|---|---|
+| Host OS | Ubuntu 22.04 또는 24.04 권장 |
+| CPU | `/dev/kvm` 접근 가능 |
+| Go | 1.25 이상 |
+| Package | `curl`, `debootstrap`, `e2fsprogs`, `util-linux` |
+| 권한 | 실행 시 `sudo` 필요. KVM, bridge, TAP, iptables를 설정한다. |
 
 ```bash
 sudo apt-get install -y curl debootstrap e2fsprogs util-linux
 ```
 
-Firecracker, the Linux kernel, and the golden image are **downloaded and built automatically** on first run.
+Firecracker, Linux kernel, golden image는 첫 실행 시 자동으로 다운로드하거나
+빌드한다.
 
 ---
 
-## Getting Started
+## 시작하기
 
-### 1. Clone and build
+### 1. 복제와 빌드
 
 ```bash
 git clone https://github.com/HardcoreMonk/ephemera.git
@@ -239,171 +226,111 @@ cd ephemera
 go build -o anvil-daemon ./cmd/goose-daemon/
 ```
 
-`cmd/anvil-mcp` uses the official MCP Go SDK, which requires Go 1.25 or newer.
+`cmd/anvil-mcp`는 공식 MCP Go SDK를 사용하므로 Go 1.25 이상이 필요하다.
 
-### 2. Configure the default LLM
+### 2. 기본 LLM 설정
 
 ```bash
-cp configs/goose.yaml.example    configs/goose.yaml
+cp configs/goose.yaml.example configs/goose.yaml
 cp configs/goose-secrets.yaml.example configs/goose-secrets.yaml
 ```
 
-Edit `configs/goose.yaml`:
+`configs/goose.yaml` 예시:
 
 ```yaml
 GOOSE_PROVIDER: google
 GOOSE_MODEL: gemini-2.5-flash
 GOOSE_TELEMETRY_ENABLED: false
-GOOSE_DISABLE_KEYRING: true   # required — MicroVM has no keyring daemon
+GOOSE_DISABLE_KEYRING: true
 ```
 
-Edit `configs/goose-secrets.yaml` (**never commit this file**):
+`configs/goose-secrets.yaml` 예시:
 
 ```yaml
 GOOGLE_API_KEY: "your-key-here"
 ```
 
-Supported providers: `google` · `anthropic` · `openai` · `ollama` · [others supported by Goose](https://goose-docs.ai/docs/getting-started/providers/).
+`configs/goose-secrets.yaml`은 실제 API key를 담는 로컬 파일이며 절대
+커밋하지 않는다. 지원 provider는 `google`, `anthropic`, `openai`,
+`ollama` 및 Goose가 지원하는 provider를 따른다.
 
-### 3. Run
+### 3. 실행
 
 ```bash
 sudo ./anvil-daemon
 ```
 
-On first run, anvil will:
-1. Compile `micro-init` and `goose-agent` binaries
-2. Build the golden image via `debootstrap` (~5–8 minutes)
-3. Download the Firecracker kernel and binary
-
-Subsequent starts skip these steps if artifacts already exist.
+첫 실행에서는 `micro-init`, `goose-agent`, golden image, Firecracker kernel,
+Firecracker binary를 준비한다. 이후 실행에서는 기존 artifact를 재사용한다.
 
 ---
 
-## Testing
+## 테스트
 
-anvil has two levels of testing.
-
-### Unit tests (CI)
-
-Run automatically on every push and pull request via GitHub Actions. No special hardware required.
+### 단위 테스트
 
 ```bash
 go test ./...
 ```
 
-Covers: API token parsing, LLM profile path resolution, agent auth middleware, token generation.
+GitHub Actions에서도 push/PR마다 실행된다. API token parsing, profile path
+resolution, agent auth middleware, token generation 등을 검증한다.
 
-### End-to-end test (`e2e_test.sh`)
-
-A full integration test that boots a real daemon, spawns actual Firecracker MicroVMs, and exercises every API endpoint. Requires a host with `/dev/kvm` and root privileges.
+### 종단 간 테스트
 
 ```bash
-# Build first
 go build -o anvil-daemon ./cmd/goose-daemon/
-
-# Run (takes ~15–30 minutes depending on API rate limits)
 sudo bash e2e_test.sh
 ```
 
-**What it tests (50 steps):**
+`e2e_test.sh`는 실제 Firecracker MicroVM을 부팅하는 50단계 통합 테스트다.
+호스트에 `/dev/kvm`, root 권한, 로컬 LLM API key가 필요하다. 환경과 API
+rate limit에 따라 보통 15-30분 이상 걸릴 수 있다.
 
-| Steps | Scenario |
-|-------|----------|
-| 1–5 | Daemon startup, single VM lifecycle (create → task → stop → delete) |
-| 6–9 | Two VMs in parallel — concurrent task execution |
-| 11–17 | Full snapshot lifecycle: create with `stop_after`, list, restore, verify agent token and new IP, delete |
-| 19–24 | **Concurrent restore** — two different snapshots restored simultaneously; verifies both VMs run at the same time with independent IPs and disks |
-| 26–28 | **Diff snapshot creation** — auto-detection: first snapshot → `full`, second → `diff` with correct `base_snapshot_id` |
-| 29 | **Diff size verification** — `stat -c%b` confirms Diff `memory.bin` allocates fewer disk blocks than Full (sparse file) |
-| 30–32 | Diff snapshot restore — merged memory applied, agent responds, token preserved |
-| 33 | **Dependency protection** — deleting the Full base while Diff references it returns `409 Conflict` |
-| 34 | Ordered cleanup: delete Diff → delete Full (now unblocked) |
-| 36–37 | **COW rootfs** — create VM, take snapshot |
-| 38–40 | Restore via dm-snapshot: verify `/dev/mapper/cow-*` device active; exception store initially ≈ 0 MB actual disk usage |
-| 41 | Restored agent `/health` responds |
-| 42 | Delete restored VM: verify dm device, loop devices, and `.cow` file all cleaned up |
-| 43 | Delete snapshot and verify empty |
-| 45–47 | **Agent proxy** — `GET /vms/{id}/health`, `POST /vms/{id}/stop` via control plane proxy; no direct VM IP access |
-| 48–49 | **`EPHEMERA_PUBLIC_URL`** — restart daemon with var set; verify `agent_url` becomes proxy path; use `agent_url` for health + stop |
-| 50 | Daemon graceful shutdown |
+검증 범위:
 
-**Example output (passing, steps 41–50):**
-
-```
-━━━ 41. Verify COW-restored agent responds ━━━
-  ✓ COW-restored VM /health (HTTP 200)
-
-━━━ 42. Delete COW-restored VM and verify kernel resource cleanup ━━━
-  ✓ COW-restored VM /stop (HTTP 200)
-  ✓ DELETE COW-restored VM (HTTP 200)
-  ✓ dm-snapshot device removed after VM delete ✓
-  ✓ Exception store (.cow) removed after VM delete ✓
-
-━━━ 43. Delete COW snapshot ━━━
-  ✓ DELETE /snapshots/snap-... (HTTP 200)
-  ✓ Snapshot count after cleanup: 0
-
-━━━ 45. Create VM for agent proxy endpoint test ━━━
-  ✓ POST /vms (proxy-test) (HTTP 201)
-  ✓ Proxy-test VM: vm-...
-
-━━━ 46. Test proxy: GET /vms/$PROXY_VM_ID/health ━━━
-  ✓ GET /vms/vm-.../health (proxy) (HTTP 200)
-
-━━━ 47. Test proxy: POST /vms/$PROXY_VM_ID/stop ━━━
-  ✓ POST /vms/vm-.../stop (proxy) (HTTP 200)
-  ✓ DELETE proxy-test VM (HTTP 200)
-
-━━━ 48. Restart daemon with EPHEMERA_PUBLIC_URL=http://localhost:3000 ━━━
-  ✓ Daemon restarted with EPHEMERA_PUBLIC_URL
-  ✓ POST /vms (EPHEMERA_PUBLIC_URL test) (HTTP 201)
-  ✓ VM: vm-...  agent_url: http://localhost:3000/vms/vm-...
-  ✓ agent_url is proxy path ✓ (http://localhost:3000/vms/vm-...)
-
-━━━ 49. Verify proxy access via agent_url ━━━
-  ✓ $agent_url/health (via proxy) (HTTP 200)
-  ✓ $agent_url/stop (via proxy) (HTTP 200)
-  ✓ DELETE EPHEMERA_PUBLIC_URL test VM (HTTP 200)
-
-━━━ 50. Shut down daemon ━━━
-  ✓ Daemon stopped
-
-══════════════════════════════════
-  All test steps passed ✓
-══════════════════════════════════
-```
+| 단계 | 시나리오 |
+|---|---|
+| 1-5 | daemon startup, 단일 VM create/task/stop/delete |
+| 6-9 | VM 두 개의 병렬 task 실행 |
+| 11-17 | Full snapshot create/list/restore/delete |
+| 19-24 | 서로 다른 snapshot의 concurrent restore |
+| 26-29 | Diff snapshot 자동 선택과 sparse size 검증 |
+| 30-34 | Diff restore와 full/diff dependency protection |
+| 36-43 | COW rootfs restore와 kernel resource cleanup |
+| 45-47 | control-plane agent proxy endpoint |
+| 48-49 | `EPHEMERA_PUBLIC_URL` 기반 proxy `agent_url` |
+| 50 | daemon graceful shutdown |
 
 ---
 
-## Configuration
+## 설정
 
-All settings are read from environment variables at startup.
+모든 daemon 설정은 시작 시 환경 변수에서 읽는다.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `EPHEMERA_API_ADDR` | `127.0.0.1:3000` | Control plane bind address. Set to `0.0.0.0:3000` when behind a reverse proxy. |
-| `EPHEMERA_API_PORT` | `3000` | Port only (used when `EPHEMERA_API_ADDR` is not set). |
-| `EPHEMERA_API_TOKENS` | *(unset)* | Per-client Bearer tokens: `alice:token1,bob:token2`. Preferred. |
-| `EPHEMERA_API_TOKEN` | *(unset)* | Single Bearer token (backward-compatible fallback). |
-| `EPHEMERA_AGENT_PORT` | `8080` | Port goose-agent listens on inside each VM. |
-| `EPHEMERA_PUBLIC_URL` | *(unset)* | Externally-reachable base URL of the control plane (no trailing slash). When set, `agent_url` in VM responses uses the proxy path `{EPHEMERA_PUBLIC_URL}/vms/{vm_id}` instead of the VM's private IP. Example: `https://api.example.com`. |
+| 변수 | 기본값 | 설명 |
+|---|---|---|
+| `EPHEMERA_API_ADDR` | `127.0.0.1:3000` | control plane bind 주소. reverse proxy 뒤에서는 `0.0.0.0:3000`으로 설정할 수 있다. |
+| `EPHEMERA_API_PORT` | `3000` | `EPHEMERA_API_ADDR`가 없을 때 사용하는 port. |
+| `EPHEMERA_API_TOKENS` | unset | named Bearer token 목록. 예: `alice:token1,bob:token2` |
+| `EPHEMERA_API_TOKEN` | unset | 단일 Bearer token fallback. |
+| `EPHEMERA_AGENT_PORT` | `8080` | VM 내부 `goose-agent` listen port. |
+| `EPHEMERA_PUBLIC_URL` | unset | 외부에서 접근 가능한 control plane base URL. 설정 시 `agent_url`이 proxy path가 된다. |
 
-`EPHEMERA_API_ADDR` takes precedence over `EPHEMERA_API_PORT`. All variables are read at startup; use SIGHUP to reload tokens without restarting.
+`EPHEMERA_API_ADDR`가 `EPHEMERA_API_PORT`보다 우선한다. token은 `SIGHUP`으로
+daemon 재시작 없이 reload할 수 있다.
 
 ---
 
-## IronClaw MCP Adapter
+## IronClaw MCP 어댑터
 
-`cmd/anvil-mcp` exposes the anvil daemon API as a stdio MCP server for IronClaw.
-
-Build the adapter:
+`cmd/anvil-mcp`는 anvil daemon API를 stdio MCP server로 노출한다.
 
 ```bash
 go build -o anvil-mcp ./cmd/anvil-mcp
 ```
 
-Configure it with environment variables:
+환경 변수 설정:
 
 ```bash
 export ANVIL_DAEMON_URL=http://127.0.0.1:3000
@@ -411,45 +338,44 @@ export ANVIL_API_TOKEN="<daemon-bearer-token>"
 export ANVIL_MCP_DEFAULT_TIMEOUT=300
 ```
 
-`ANVIL_API_TOKEN` must be set to one daemon bearer token value. This can be one token from `EPHEMERA_API_TOKENS`, or `$EPHEMERA_API_TOKEN` only when the daemon is using legacy single-token mode.
-
-Or use a config file:
+또는 설정 파일을 사용할 수 있다.
 
 ```bash
 cp configs/anvil-mcp.yaml.example configs/anvil-mcp.yaml
 export ANVIL_MCP_CONFIG=configs/anvil-mcp.yaml
 ```
 
-MCP tools:
+MCP tool:
 
-| Tool | Meaning |
-|------|---------|
-| `anvil_spawn_vm` | create a VM; accepts optional profile and session_name |
-| `anvil_run_task` | run a prompt in a VM; accepts vm_id or session_name |
-| `anvil_get_vm_health` | check VM agent health |
-| `anvil_stop_vm` | ask the agent to stop gracefully |
-| `anvil_delete_vm` | delete the VM and release its session alias |
+| Tool | 의미 |
+|---|---|
+| `anvil_spawn_vm` | VM을 만들고 optional `session_name` alias를 연결한다. |
+| `anvil_run_task` | `vm_id` 또는 `session_name`으로 VM에 prompt를 실행한다. |
+| `anvil_get_vm_health` | VM agent health를 확인한다. |
+| `anvil_stop_vm` | guest agent에 graceful stop을 요청한다. |
+| `anvil_delete_vm` | host VM 리소스를 삭제하고 session alias를 해제한다. |
 
-v1 is a thin runtime bridge; it does not copy workspace files, create snapshots, restore sessions, or delete VMs automatically.
-
----
-
-## API Reference
-
-### Control Plane API (`localhost:3000`)
-
-All endpoints require `Authorization: Bearer <token>` when tokens are configured.
+MCP v1은 얇은 runtime bridge다. workspace copy, snapshot tool, restore tool,
+persistent session database, 자동 VM cleanup은 v1 범위가 아니다.
 
 ---
 
-#### Spawn a VM
+## API 참조
 
-```
+token이 설정되어 있으면 모든 control-plane endpoint는
+`Authorization: Bearer <token>`을 요구한다.
+
+### VM 생성
+
+```text
 POST /vms
 Content-Type: application/json
 
-{ "profile": "anthropic" }   ← optional; omit to use default config
+{ "profile": "anthropic" }
 ```
+
+`profile`을 생략하면 기본 `configs/goose.yaml`과
+`configs/goose-secrets.yaml`을 사용한다.
 
 ```bash
 curl -X POST http://localhost:3000/vms \
@@ -460,487 +386,157 @@ curl -X POST http://localhost:3000/vms \
 
 ```json
 {
-  "vm_id":       "vm-1778227813435",
-  "guest_ip":    "10.0.1.10",
-  "agent_url":   "http://10.0.1.10:8080",
-  "profile":     "anthropic",
+  "vm_id": "vm-1778227813435",
+  "guest_ip": "10.0.1.10",
+  "agent_url": "http://10.0.1.10:8080",
+  "profile": "anthropic",
   "agent_token": "3f9a2c..."
 }
 ```
 
-Blocks until `goose-agent` is ready (~60 s cold boot). `agent_token` is returned **only here** — store it, as it cannot be retrieved again.
+`agent_token`은 이 응답에만 포함된다.
 
-#### List VMs
+### VM 목록
 
 ```bash
-curl http://localhost:3000/vms -H "Authorization: Bearer $TOKEN"
+curl http://localhost:3000/vms \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
-#### Delete a VM
+### VM 삭제
 
 ```bash
 curl -X DELETE http://localhost:3000/vms/vm-1778227813435 \
   -H "Authorization: Bearer $TOKEN"
 ```
 
----
+### Snapshot 생성
 
-#### Create a snapshot
-
-Freeze the running VM's memory state to disk.
-
-```
+```text
 POST /vms/{vm_id}/snapshot
 Content-Type: application/json
 
 {
-  "stop_after": false,   ← optional; true = destroy VM after snapshot (migration mode)
-  "type": ""             ← optional; "full" | "diff" | "" (auto, default)
+  "stop_after": false,
+  "type": ""
 }
 ```
 
-**Snapshot type auto-detection** (`type` omitted or `""`):
+`type`이 비어 있으면 자동 선택한다.
 
-| Condition | Result |
-|-----------|--------|
-| No prior Full snapshot for this VM | `full` — captures all 2 GB of guest RAM |
-| Prior Full snapshot exists | `diff` — captures only dirty pages since the last Full (sparse file, typically much smaller) |
+| 조건 | 결과 |
+|---|---|
+| 해당 VM의 기존 Full snapshot 없음 | `full` |
+| 해당 VM의 기존 Full snapshot 있음 | `diff` |
 
 ```bash
-# First snapshot → Full (auto)
-curl -X POST http://localhost:3000/vms/vm-1778227813435/snapshot \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json"
-
-# Second snapshot → Diff (auto, references the Full above)
 curl -X POST http://localhost:3000/vms/vm-1778227813435/snapshot \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json"
 ```
 
-```json
-{
-  "snapshot_id":      "snap-1778227847573",
-  "source_vm_id":     "vm-1778227813435",
-  "profile":          "anthropic",
-  "snapshot_type":    "diff",
-  "base_snapshot_id": "snap-1778227840000",
-  "created_at":       "2026-05-08T08:10:50Z"
-}
-```
-
-Snapshot files are written to `snapshots/<snapshot_id>/`. For a Diff snapshot the `memory.bin` is a sparse file — only dirty pages consume actual disk blocks.
-
-#### List snapshots
+### Snapshot 목록
 
 ```bash
-curl http://localhost:3000/snapshots -H "Authorization: Bearer $TOKEN"
-```
-
-#### Restore a VM from snapshot
-
-```bash
-curl -X POST http://localhost:3000/snapshots/snap-1778227847573/restore \
+curl http://localhost:3000/snapshots \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-```json
-{
-  "vm_id":              "vm-1778227851562",
-  "guest_ip":           "10.0.1.10",
-  "agent_url":          "http://10.0.1.10:8080",
-  "profile":            "anthropic",
-  "agent_token":        "3f9a2c...",
-  "source_snapshot_id": "snap-1778227847573"
-}
-```
-
-Restoration takes ~5 s (vs ~60 s cold boot). The `agent_token` is identical to the original VM's token — existing clients continue to work without reconfiguration.
-
-**Restore constraints:**
-- The original guest IP must be available (not in use by another VM)
-- Same-snapshot concurrent restores are not supported — the vsock UDS path is fixed in `state.bin` and would collide. Different-snapshot concurrent restores work correctly.
-
-#### Delete a snapshot
+### Snapshot 복원
 
 ```bash
-curl -X DELETE http://localhost:3000/snapshots/snap-1778227847573 \
+curl -X POST http://localhost:3000/snapshots/snap-1778229000000/restore \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-> **Dependency rule**: A Full snapshot that is the base for one or more Diff snapshots cannot be deleted (returns `409 Conflict`). Delete all referencing Diff snapshots first.
+source VM이 아직 실행 중이면 restore는 거부된다. restore된 VM은 새 VM ID와
+새 IP를 받지만 snapshot의 agent token은 유지한다.
 
----
-
-### Agent Proxy (via Control Plane)
-
-The control plane proxies the three agent endpoints, making them accessible to external clients without direct access to the private VM subnet. Authentication uses the **control plane Bearer token** — the agent token is injected internally.
-
-```
-POST /vms/{vm_id}/tasks    → proxied to goose-agent /tasks
-GET  /vms/{vm_id}/health   → proxied to goose-agent /health  (no auth required)
-POST /vms/{vm_id}/stop     → proxied to goose-agent /stop
-```
-
-When `EPHEMERA_PUBLIC_URL` is configured, `agent_url` in VM responses points directly to the proxy base (`{EPHEMERA_PUBLIC_URL}/vms/{vm_id}`), so clients can use it as-is:
+### Snapshot 삭제
 
 ```bash
-export EPHEMERA_PUBLIC_URL=https://api.example.com
-# agent_url in POST /vms response will be: https://api.example.com/vms/vm-...
+curl -X DELETE http://localhost:3000/snapshots/snap-1778229000000 \
+  -H "Authorization: Bearer $TOKEN"
+```
 
-curl -X POST "$AGENT_URL/tasks" \
+diff snapshot이 참조 중인 full snapshot은 삭제할 수 없다.
+
+### Agent proxy 사용
+
+```bash
+curl http://localhost:3000/vms/$VM_ID/health \
+  -H "Authorization: Bearer $TOKEN"
+
+curl -X POST http://localhost:3000/vms/$VM_ID/tasks \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"prompt": "Check system environment."}'
+  -d '{"prompt":"hello from inside the VM"}'
+
+curl -X POST http://localhost:3000/vms/$VM_ID/stop \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
-Without `EPHEMERA_PUBLIC_URL`, `agent_url` still contains the private IP, but the proxy paths (`/vms/{vm_id}/tasks` etc.) are always available on the control plane regardless.
+외부 client는 control-plane token만 사용한다. daemon이 guest agent token을
+내부적으로 주입한다.
 
 ---
 
-### goose-agent API (`http://<guest_ip>:8080`)
+## VM별 LLM profile 설정
 
-Direct access to the VM's private IP — reachable from the host only. `POST /tasks` and `POST /stop` require the `agent_token` returned by `POST /vms` or `POST /snapshots/{id}/restore`. `GET /health` is always unauthenticated.
+기본 설정:
 
-#### Run a task
+```text
+configs/goose.yaml
+configs/goose-secrets.yaml
+```
+
+named profile:
+
+```text
+configs/profiles/anthropic/goose.yaml
+configs/profiles/anthropic/goose-secrets.yaml
+```
+
+생성 요청:
 
 ```bash
-curl -X POST http://10.0.1.10:8080/tasks \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $AGENT_TOKEN" \
-  -d '{"prompt": "Check my current system environment."}'
-```
-
-```json
-{ "output": "...", "error": "" }
-```
-
-Returns when the task completes. Only one task runs at a time per VM; concurrent requests receive `503 agent busy`.
-
-#### Health check
-
-```bash
-curl http://10.0.1.10:8080/health
-# {"status":"idle"}  or  {"status":"busy"}
-```
-
-No authentication required — used internally by the control plane's `waitForAgent` poller.
-
-#### Stop the agent
-
-```bash
-curl -X POST http://10.0.1.10:8080/stop \
-  -H "Authorization: Bearer $AGENT_TOKEN"
-```
-
-Shuts down `goose-agent`. `micro-init` (PID 1) then calls `sync` + `poweroff(2)`, triggering a clean Firecracker exit. Call `DELETE /vms/{id}` afterwards to release host resources.
-
----
-
-## Per-VM LLM Profiles
-
-Profiles allow each VM to use a different LLM provider or model without modifying the default config. API keys stay on the server — clients only pass a profile name.
-
-### Setup
-
-Create one subdirectory per profile under `configs/profiles/`:
-
-```
-configs/
-  profiles/
-    anthropic/
-      goose.yaml           ← GOOSE_PROVIDER: anthropic, GOOSE_MODEL: claude-sonnet-4-6
-      goose-secrets.yaml   ← ANTHROPIC_API_KEY: sk-ant-...
-    openai/
-      goose.yaml
-      goose-secrets.yaml
-```
-
-### Usage
-
-```bash
-# Spawn VM with the 'anthropic' profile
 curl -X POST http://localhost:3000/vms \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"profile": "anthropic"}'
+  -d '{"profile":"anthropic"}'
 ```
 
-Omitting `profile` (or sending an empty body) uses `configs/goose.yaml` and `configs/goose-secrets.yaml`.
+profile 이름에는 `/` 또는 `\`를 사용할 수 없다.
 
 ---
 
-## Diff Snapshots (Multi-Checkpoint)
+## 보안 모델
 
-Diff snapshots capture only the memory pages dirtied since the last Full snapshot, reducing storage cost for repeated checkpointing of a long-running VM.
+| 경계 | 메커니즘 |
+|---|---|
+| client -> control plane | `EPHEMERA_API_TOKENS` 또는 `EPHEMERA_API_TOKEN` Bearer token |
+| control plane -> guest agent | VM별 Bearer token |
+| guest task isolation | Firecracker MicroVM + KVM boundary |
+| guest network | host-only `10.0.1.0/24`, bridge `goose-br0` |
+| 외부 공개 | TLS 종료 reverse proxy 뒤에서 운영 |
+| secret | gitignore된 로컬 config에서 guest disk로 주입 |
 
-### Storage comparison
-
-| Scenario | Full × N | With Diff |
-|----------|----------|-----------|
-| 3 checkpoints | 3 × 2.7 GB = **8.1 GB** | 2.7 GB + 2 × ~0.9 GB = **4.5 GB** |
-| 5 checkpoints | 5 × 2.7 GB = **13.5 GB** | 2.7 GB + 4 × ~0.9 GB = **6.3 GB** |
-
-*Diff size depends on actual memory activity; typical Goose workloads dirty 10–20% of RAM.*
-
-### How it works
-
-```
-VM starts (TrackDirtyPages=true in MachineConfiguration)
-
-POST /vms/{id}/snapshot          ← first call
-  snapshot_type: "full"          ← 2 GB memory.bin
-
-... VM runs tasks, dirties pages ...
-
-POST /vms/{id}/snapshot          ← second call (auto-detects prior Full)
-  snapshot_type: "diff"          ← sparse memory.bin, only dirty pages
-  base_snapshot_id: snap-xxx     ← references the Full above
-
-POST /snapshots/{diff-id}/restore
-  → MergeMemoryDiff(full.memory.bin + diff.memory.bin → tmp/merged.bin)
-  → RestoreMachine(merged.bin, diff.state.bin)
-  → os.Remove(merged.bin)        ← temp file cleaned up after VM starts
-```
-
-> **Disk space during restore**: the merge step writes a temporary 2 GB `merged.bin` alongside the existing base and diff files. Ensure the host has at least 2 GB of free space in the anvil working directory before restoring a diff snapshot. The file is removed as soon as Firecracker has opened it.
-
-### Dependency rule
-
-A Full snapshot referenced by one or more Diff snapshots is **protected from deletion**:
-
-```bash
-# Will fail with 409 Conflict while diff exists
-curl -X DELETE http://localhost:3000/snapshots/$FULL_SNAP_ID
-
-# Correct order: delete Diff first
-curl -X DELETE http://localhost:3000/snapshots/$DIFF_SNAP_ID
-curl -X DELETE http://localhost:3000/snapshots/$FULL_SNAP_ID  # now succeeds
-```
-
-### Explicit type override
-
-```bash
-# Force a full snapshot even if a prior Full exists
-curl -X POST http://localhost:3000/vms/$VMID/snapshot \
-  -H "Content-Type: application/json" \
-  -d '{"type": "full"}'
-
-# Force a diff snapshot (returns 400 if no Full exists)
-curl -X POST http://localhost:3000/vms/$VMID/snapshot \
-  -H "Content-Type: application/json" \
-  -d '{"type": "diff"}'
-```
+실제 API key는 문서, issue, commit, 채팅에 남기지 않는다.
 
 ---
 
-## COW Rootfs Restore
+## 알려진 제약
 
-When restoring a VM from a snapshot, anvil uses Linux **device mapper snapshot** (dm-snapshot) to create a block-level copy-on-write view of the snapshot's `rootfs.ext4`. This eliminates the ~700 MB full disk copy that was previously required per restore.
-
-### How it works
-
-```
-snapshots/<id>/rootfs.ext4   (read-only base, shared across all restores of this snapshot)
-        │
-  losetup -r --find → /dev/loopX      (read-only loop device for base)
-  truncate -s 8G   → vm-{id}.cow      (sparse exception store, ~0 bytes initially)
-  losetup --find   → /dev/loopY      (read-write loop device for exception store)
-        │
-  dmsetup create cow-vm-{id}.cow
-    --table "0 <sectors> snapshot /dev/loopX /dev/loopY P 8"
-        │
-  /dev/mapper/cow-vm-{id}.cow         (COW block device)
-        │
-  mount --bind /dev/mapper/cow-{id}   (over original disk path from state.bin)
-  /tmp/goose-workspaces/vm-{orig}.ext4
-        │
-  Firecracker opens the path → reads base, writes go to .cow
-```
-
-- **Base**: `rootfs.ext4` in the snapshot directory (read-only, never modified)
-- **Exception store** (`vm-{id}.cow`): 8 GB sparse file; actual disk blocks allocated only on VM write
-- **Initial extra disk usage**: ~0 MB (16 × 512-byte blocks for dm-snapshot metadata)
-
-### Disk usage comparison
-
-| Restores | Before (full copy per restore) | After (COW) |
-|----------|-------------------------------|-------------|
-| 1 restore | +700 MB | +~0 MB |
-| 5 concurrent restores | +5 × 700 MB = **3.5 GB** | +5 × ~0 MB = **~0 MB** |
-| After 1 GB of VM writes | +700 MB | +~1 GB |
-
-### Cleanup
-
-When a COW-restored VM is deleted:
-
-```
-TeardownDMSnapshot()
-  → umount -l <original disk path>   (lazy unmount — safe if Firecracker still holds fd)
-  → dmsetup remove cow-vm-{id}.cow   (retries up to 5× for Firecracker fd release)
-  → losetup -d /dev/loopY            (detach COW loop device)
-  → losetup -d /dev/loopX            (detach base loop device)
-  → rm vm-{id}.cow                   (delete sparse exception store)
-```
-
-### Fallback
-
-If dm-snapshot setup fails (e.g., `dmsetup` unavailable), the control plane automatically falls back to the original bind-mount approach (full 700 MB disk copy per restore) and logs the reason.
+- 같은 snapshot을 동시에 두 번 restore하는 흐름은 지원하지 않는다.
+- 서로 다른 snapshot의 concurrent restore는 지원한다.
+- source VM이 실행 중인 동안 해당 VM의 snapshot restore는 거부된다.
+- diff snapshot은 memory만 diff다. rootfs는 snapshot마다 full copy다.
+- diff restore는 임시 merged memory file을 만들 disk space가 필요하다.
+- control-plane token 환경 변수를 설정하지 않으면 API 인증이 비활성화된다.
+- MCP v1은 snapshot/restore tool을 제공하지 않는다.
 
 ---
 
-## Security
+## 라이선스
 
-### Control plane API authentication
-
-#### Per-client tokens (recommended)
-
-```bash
-ALICE_TOKEN=$(openssl rand -hex 32)
-BOB_TOKEN=$(openssl rand -hex 32)
-
-export EPHEMERA_API_TOKENS="alice:$ALICE_TOKEN,bob:$BOB_TOKEN"
-sudo -E ./anvil-daemon
-```
-
-Startup log:
-```
-Control plane API on 127.0.0.1:3000  (auth: Bearer token (2 client(s): alice, bob))
-```
-
-Each request is logged with the authenticated client name:
-```
-[alice] POST /vms
-[bob]   GET  /vms
-```
-
-#### Single-token fallback
-
-```bash
-export EPHEMERA_API_TOKEN=$(openssl rand -hex 32)
-sudo -E ./anvil-daemon
-```
-
-Treated as a single client named `default`.
-
-If neither variable is set, a startup warning is logged and the API is unauthenticated — **never expose the control plane without a token**.
-
-#### Token hot reload (SIGHUP)
-
-API tokens can be updated without restarting the daemon or interrupting running VMs:
-
-```bash
-# Update the environment variable and send SIGHUP
-export EPHEMERA_API_TOKENS="alice:$NEW_ALICE,carol:$CAROL_TOKEN"
-kill -HUP $(pgrep anvil-daemon)
-```
-
-The daemon re-reads `EPHEMERA_API_TOKENS` / `EPHEMERA_API_TOKEN` and swaps the in-memory client list. All running VMs continue unaffected.
-
-| Scenario | Action |
-|----------|--------|
-| Adding a new client | Update env var → SIGHUP |
-| Rotating a token | Update env var → SIGHUP |
-| Emergency revocation | Update env var → SIGHUP — **no VM interruption** |
-
----
-
-### goose-agent authentication
-
-Each VM's agent is protected by a unique 32-byte random Bearer token generated at spawn time and written to `/root/.ephemera-agent-token` (mode `0600`) inside the VM disk. The token is returned once in the `POST /vms` response (and again in `POST /snapshots/{id}/restore`).
-
-- `POST /tasks` and `POST /stop` require `Authorization: Bearer <agent_token>`
-- `GET /health` is always open (used by the control plane's internal health poller)
-- The token is tied to the VM's disk and persists across snapshot/restore cycles
-
----
-
-### TLS and network exposure
-
-By default the control plane binds to `127.0.0.1:3000` (localhost only). Place a TLS-terminating reverse proxy in front for external access.
-
-#### Step 1 — allow external binding
-
-```bash
-export EPHEMERA_API_ADDR=0.0.0.0:3000
-sudo -E ./anvil-daemon
-```
-
-#### Step 2 — configure a reverse proxy
-
-**Caddy** (automatic HTTPS via Let's Encrypt — recommended):
-
-`/etc/caddy/Caddyfile`:
-```
-api.example.com {
-    reverse_proxy localhost:3000
-}
-```
-
-```bash
-sudo apt-get install -y caddy
-sudo systemctl restart caddy
-```
-
-**Nginx** (manual certificate):
-
-`/etc/nginx/sites-available/anvil`:
-```nginx
-server {
-    listen 443 ssl;
-    server_name api.example.com;
-
-    ssl_certificate     /etc/ssl/certs/anvil.crt;
-    ssl_certificate_key /etc/ssl/private/anvil.key;
-    ssl_protocols       TLSv1.2 TLSv1.3;
-
-    location / {
-        proxy_pass         http://127.0.0.1:3000;
-        proxy_set_header   Host $host;
-        proxy_set_header   X-Real-IP $remote_addr;
-        proxy_read_timeout 300s;   # POST /vms/*/snapshot can take several minutes
-    }
-}
-
-server {
-    listen 80;
-    server_name api.example.com;
-    return 301 https://$host$request_uri;
-}
-```
-
-```bash
-sudo ln -s /etc/nginx/sites-available/anvil /etc/nginx/sites-enabled/
-sudo nginx -t && sudo systemctl restart nginx
-```
-
-#### Step 3 — call via HTTPS
-
-```bash
-curl -X POST https://api.example.com/vms \
-  -H "Authorization: Bearer $ALICE_TOKEN" \
-  -H "Content-Type: application/json"
-```
-
-### VM isolation
-
-- Each VM runs in a separate KVM hardware boundary.
-- Each VM gets a **cloned** rootfs — no shared filesystem state between VMs.
-- Goose config and API keys are injected at provision time and exist only inside the ephemeral VM disk.
-- On teardown: `micro-init` calls `poweroff(2)`, TAP device is deleted, disk is wiped, IP is returned to pool.
-
----
-
-## Known Limitations
-
-| Limitation | Detail |
-|------------|--------|
-| **Single-host** | All VMs run on one physical host. Multi-host clustering is not supported. |
-| **Same-snapshot concurrent restores not supported** | The guest IP is reconfigured via vsock after restore, so different-snapshot concurrent restores each get a fresh IP. However, two VMs from the *same* snapshot would still collide on the Firecracker vsock UDS path (which is fixed in `state.bin`), so same-snapshot concurrent restores are not supported. |
-| **Cross-machine restore** | Supported manually: copy the `snapshots/<id>/` directory to the target host at the same absolute path, then call `POST /snapshots/{id}/restore`. Automated transfer is not built in. |
-
----
-
-## License
-
-MIT — see [LICENSE](LICENSE).
+MIT License. 자세한 내용은 [LICENSE](LICENSE)를 참조한다.

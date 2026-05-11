@@ -1,165 +1,229 @@
-# Unreleased
+# 미릴리즈
 
-Project naming note: `anvil` is the official product/project name. `ephemera` remains
-the GitHub repository and Go module name.
+프로젝트 공식 명칭은 `anvil`이다. 저장소와 일부 기존 API/환경 변수 이름은
+호환성 때문에 아직 `ephemera` 또는 `goose-*`를 유지한다.
 
-## Added
+## 추가됨
 
-- `cmd/anvil-mcp`: Go stdio MCP server for IronClaw integration.
-- MCP tools for VM spawn, task execution, health, stop, and delete.
-- Optional in-memory `session_name` aliases for MCP callers.
-- `configs/anvil-mcp.yaml.example` for adapter configuration.
+- `cmd/anvil-mcp`: IronClaw 연동용 Go stdio MCP 서버.
+- `internal/anvilmcp`: 설정 로더, daemon HTTP client, session alias 저장소,
+  MCP tool handler.
+- `configs/anvil-mcp.yaml.example`: 파일 기반 MCP adapter 설정 예시.
+- MCP tool:
+  - `anvil_spawn_vm`
+  - `anvil_run_task`
+  - `anvil_get_vm_health`
+  - `anvil_stop_vm`
+  - `anvil_delete_vm`
+- `docs/architecture/`: 런타임 아키텍처, 서비스 로직, MCP 아키텍처 문서.
 
-## Changed
+## 변경됨
 
-- Minimum Go version is now 1.25+ to support the official MCP Go SDK.
+- 공식 MCP Go SDK 지원을 위해 최소 Go 버전은 1.25 이상이다.
+- 로컬 빌드 산출물 `anvil-daemon`이 git에 들어가지 않도록 ignore 규칙을
+  정리했다.
 
-# v0.2.0 — Single-Host Feature Complete
+# v0.2.0 — 단일 호스트 기능 완성
 
-**anvil** completes the single-host feature set. Every limitation noted in v0.1.0 is resolved: guests shut down gracefully, agent authentication is enforced, tokens reload without a restart, and VMs can be snapshotted and restored in seconds. A new control plane proxy makes goose-agent accessible from external clients without direct access to the private VM subnet.
+`v0.2.0`은 v0.1.0의 기본 VM 생성/작업 실행 모델에 snapshot, restore,
+인증, proxy, profile, COW rootfs, diff snapshot을 추가한 릴리즈다.
 
----
+## 새 기능
 
-## What's New
+### 안전한 게스트 종료
 
-### Graceful Guest Shutdown
+- 새 guest PID 1인 `micro-init` 추가.
+- VM 종료 시 Firecracker가 보내는 `SIGTERM`을 `micro-init`이 받아
+  `goose-agent`를 종료하고 `sync` 후 `poweroff(2)`를 호출한다.
+- PID 1이 그냥 종료될 때 발생할 수 있는 guest kernel panic을 제거했다.
 
-- `micro-init` (PID 1) now traps `SIGTERM` and calls `sync` + `poweroff(2)` — the guest powers off cleanly with no kernel panic
-- `reboot=k` kernel argument lets Firecracker exit cleanly (exit code 0) on guest power-off
+### VM별 agent 인증
 
-### Per-VM Agent Authentication
+- 각 VM 생성 시 32-byte random Bearer token을 생성한다.
+- token은 VM disk의 `/root/.ephemera-agent-token`에 `0600` 권한으로
+  주입된다.
+- `POST /tasks`와 `POST /stop`은 VM별 token을 요구한다.
+- `GET /health`는 readiness probe를 위해 인증 없이 유지한다.
+- `POST /vms` 응답에만 `agent_token`을 포함한다. list, snapshot 응답에는
+  노출하지 않는다.
 
-- Control plane generates a 32-byte random Bearer token per VM at spawn time
-- Token written to `/root/.ephemera-agent-token` (mode `0600`) inside the VM disk
-- `POST /tasks` and `POST /stop` require `Authorization: Bearer <agent_token>`
-- `GET /health` remains unauthenticated (used by the control plane health poller)
-- Token returned once in `POST /vms` and `POST /snapshots/{id}/restore` responses; preserved across snapshot/restore cycles
+### 제어 평면 API 인증
 
-### Per-VM LLM Profiles
+- daemon API에 per-client Bearer token 인증을 추가했다.
+- 선호 설정: `EPHEMERA_API_TOKENS=alice:tok1,bob:tok2`
+- 기존 단일 token 호환 설정: `EPHEMERA_API_TOKEN=tok`
+- 비교는 timing-safe 방식으로 수행한다.
+- 요청 로그에 인증된 client 이름을 남긴다.
+- `SIGHUP`으로 token list를 hot reload할 수 있다.
 
-- Each VM spawn can specify a named profile via `{"profile": "anthropic"}` in the request body
-- Profiles stored under `configs/profiles/<name>/goose.yaml` + `goose-secrets.yaml`
-- Enables running multiple VMs with different providers, models, or API keys simultaneously
-- Omitting `profile` uses the default `configs/goose.yaml`
+### Agent proxy endpoint 추가
 
-### API Token Hot Reload (SIGHUP)
+- 새 control-plane proxy endpoint:
+  - `POST /vms/{vm_id}/tasks`
+  - `GET /vms/{vm_id}/health`
+  - `POST /vms/{vm_id}/stop`
+- 외부 client는 VM private IP로 직접 접근하지 않아도 된다.
+- daemon이 VM별 `agent_token`을 내부적으로 주입한다.
 
-- `kill -HUP <daemon_pid>` re-reads `EPHEMERA_API_TOKENS` / `EPHEMERA_API_TOKEN` and swaps the in-memory client list
-- Running VMs are not affected; no downtime required to add, rotate, or revoke tokens
+### 공개 `agent_url`
 
-### MicroVM Snapshot & Restore
+- 새 환경 변수: `EPHEMERA_PUBLIC_URL`
+- 설정하면 `POST /vms` 응답의 `agent_url`이
+  `{EPHEMERA_PUBLIC_URL}/vms/{vm_id}` 형태의 proxy path가 된다.
+- reverse proxy/TLS 배포에서 VM private IP를 외부에 노출하지 않는다.
 
-- `POST /vms/{vm_id}/snapshot` — freezes VM memory state and copies rootfs to `snapshots/<id>/`
-- `POST /snapshots/{id}/restore` — resumes a VM from snapshot in ~5 s (vs ~60 s cold boot); preserves agent token
-- `DELETE /vms/{vm_id}` with `stop_after: true` destroys the source VM immediately after snapshot
-- `GET /snapshots` — list all stored snapshots
-- `DELETE /snapshots/{id}` — delete snapshot files
+### VM별 LLM profile 지원
 
-### Diff Snapshots (Multi-Checkpoint)
+- `POST /vms`가 optional `profile` field를 받는다.
+- 기본 설정:
+  - `configs/goose.yaml`
+  - `configs/goose-secrets.yaml`
+- named profile 설정:
+  - `configs/profiles/{profile}/goose.yaml`
+  - `configs/profiles/{profile}/goose-secrets.yaml`
+- profile 이름에는 path separator를 허용하지 않는다.
+- 설정과 secret은 image rebuild 없이 provision time에 주입된다.
 
-- First snapshot of a VM → **Full** (2 GB `memory.bin`)
-- Subsequent snapshots → **Diff** (sparse `memory.bin`, dirty pages only — typically 1–400 MB)
-- Type auto-detected; `"type": "full"` or `"type": "diff"` can override
-- `base_snapshot_id` links each Diff to its Full base
-- Deleting a Full that has referencing Diffs returns `409 Conflict`
-- Restore from Diff merges base + diff memory in-memory; temp file cleaned up immediately after Firecracker opens it
+### Full snapshot 수명주기
 
-### Post-Restore IP Reconfiguration (vsock)
+- 새 endpoint:
+  - `POST /vms/{vm_id}/snapshot`
+  - `GET /snapshots`
+  - `POST /snapshots/{id}/restore`
+  - `DELETE /snapshots/{id}`
+- snapshot은 다음 파일을 저장한다.
+  - `memory.bin`
+  - `state.bin`
+  - `rootfs.ext4`
+  - `metadata.json`
+- `stop_after` option으로 snapshot 생성 뒤 source VM을 삭제할 수 있다.
+- restore 후 새 VM ID와 새 IP를 할당한다.
+- snapshot metadata는 original agent token, MAC, TAP, disk path, vsock path를
+  보존한다.
 
-- Each restored VM receives a fresh IP from the pool; the original IP is freed
-- Guest network stack updated in-place via vsock (`CHANGE_IP <cidr> <gw>`) — no reboot required
-- `goose-agent` binds `AF_VSOCK` port 1234 inside the VM for reconfiguration commands
+### Diff memory snapshot 지원
 
-### Concurrent Restore
+- dirty page tracking을 사용해 memory diff snapshot을 지원한다.
+- 첫 snapshot은 자동으로 `full`이다.
+- 같은 VM의 이후 snapshot은 자동으로 `diff`이며 latest full snapshot을
+  `base_snapshot_id`로 참조한다.
+- 명시적 `type: "full"` 또는 `type: "diff"` 요청도 지원한다.
+- diff restore는 base memory와 diff memory를 sparse-aware 방식으로 merge한
+  뒤 Firecracker restore에 전달한다.
+- diff가 참조 중인 full snapshot 삭제는 `409 Conflict`로 차단한다.
 
-- Multiple VMs can be restored simultaneously from different snapshots
-- Each restore gets its own disk COW device; bind-mount stacking ensures Firecracker opens the correct device
+### COW rootfs restore 지원
 
-### COW Rootfs Restore (dm-snapshot)
+- restore된 VM은 기본적으로 Linux `dm-snapshot` COW device를 사용한다.
+- snapshot `rootfs.ext4`는 read-only base로 공유한다.
+- VM별 쓰기는 `/tmp/goose-workspaces/<vm_id>.cow` sparse exception store에
+  기록한다.
+- restore마다 약 700 MB rootfs copy를 만들던 방식을 제거했다.
+- VM 삭제 시 dm device, loop device, bind mount, `.cow` file을 정리한다.
+- dm-snapshot setup이 실패하면 기존 bind-mount restore fallback으로
+  동작한다.
 
-- Restore no longer copies the 700 MB rootfs — instead creates a Linux dm-snapshot COW device
-- Base disk (`rootfs.ext4`) is read-only and shared; per-VM writes go to a sparse exception store (~0 MB initial)
-- On VM delete: dm device removed, loop devices detached, exception store deleted automatically
-- Falls back to full copy if dm-snapshot is unavailable
+### Restore 후 IP 재설정
 
-### Control Plane Agent Proxy
+- Firecracker snapshot state에는 TAP device identity와 disk path가 들어 있다.
+- restore 시 original TAP name/MAC을 재생성한다.
+- guest IP는 vsock `CHANGE_IP` command로 새 IP로 재설정한다.
+- 같은 host에서 snapshot state와 runtime IP allocation을 분리한다.
 
-- Three new proxy endpoints route agent traffic through the control plane — no direct VM subnet access needed:
-  - `POST /vms/{vm_id}/tasks` → goose-agent `/tasks`
-  - `GET  /vms/{vm_id}/health` → goose-agent `/health`
-  - `POST /vms/{vm_id}/stop`  → goose-agent `/stop`
-- Callers authenticate with the control plane Bearer token only; agent token is injected internally
-- `EPHEMERA_PUBLIC_URL` env var: when set, `agent_url` in VM responses points to the proxy path (`{url}/vms/{vm_id}`) instead of the private VM IP
+### 통합 테스트 확장
 
-### End-to-End Test Suite
+- `e2e_test.sh`를 50단계 통합 테스트로 확장했다.
+- 검증 범위:
+  - daemon startup
+  - VM lifecycle
+  - 병렬 VM 작업
+  - full snapshot create/list/restore/delete
+  - concurrent restore
+  - diff snapshot 자동 선택
+  - diff sparse size 검증
+  - diff restore
+  - full/diff dependency protection
+  - COW restore resource cleanup
+  - agent proxy endpoints
+  - `EPHEMERA_PUBLIC_URL` proxy URL behavior
+  - graceful daemon shutdown
 
-- `e2e_test.sh` — 50-step integration test covering the full VM and snapshot lifecycle
-- Validates: VM spawn, parallel tasks, snapshot/restore, concurrent restore, diff snapshots, COW rootfs, agent proxy, `EPHEMERA_PUBLIC_URL` behavior
+## 변경됨
 
----
+- guest boot flow가 `init=/usr/local/sbin/micro-init`을 사용한다.
+- provisioner는 VM별 token과 timezone data를 한 번의 mount/unmount cycle에서
+  주입한다.
+- Firecracker restore path는 vsock device와 original disk path 복원을
+  명시적으로 처리한다.
+- README를 현재 architecture와 운영 절차에 맞춰 갱신했다.
 
-# v0.1.0 — Initial Implementation
+## 수정됨
 
-**anvil** is an enterprise control plane for running ephemeral AI agents inside Firecracker MicroVMs. This first release delivers a fully working end-to-end implementation: from spinning up an isolated KVM-backed VM to executing Goose AI tasks via HTTP and cleaning up all host resources on teardown.
+- VM 종료 시 PID 1 exit kernel panic 문제를 수정했다.
+- restore 후 IP 충돌과 stale private IP 의존 문제를 수정했다.
+- VM 생성/restore 실패 경로의 TAP/IP cleanup을 강화했다.
+- COW restore 삭제 시 kernel resource 누수를 방지했다.
 
----
+## 알려진 제약
 
-## What's New
+- 같은 snapshot을 동시에 두 번 restore하는 흐름은 지원하지 않는다.
+  snapshot state의 original vsock UDS path 제약 때문이다.
+- 서로 다른 snapshot의 concurrent restore는 지원한다.
+- diff snapshot은 memory만 diff다. rootfs는 snapshot마다 full copy다.
+- diff restore는 임시 merged memory file을 만들 수 있는 disk space가 필요하다.
+- control-plane auth 환경 변수를 설정하지 않으면 API 인증이 비활성화된다.
+- GitHub tag는 공개되어 있지만 GitHub Release page는 아직 게시하지 않았다.
 
-### Control Plane API
+# v0.1.0 — 초기 구현
 
-- `POST /vms` — spawn a MicroVM; blocks until goose-agent is ready (~60 s), returns `vm_id`, `guest_ip`, `agent_url`
-- `GET /vms` — list running VMs
-- `DELETE /vms/{vm_id}` — stop VM and release all host resources (TAP device, disk clone, IP)
+`v0.1.0`은 anvil의 초기 proof-of-concept 릴리즈다. 단일 host에서
+Firecracker MicroVM을 만들고, 그 안에서 Goose task를 실행하는 기본
+경로를 제공했다.
 
-### goose-agent (in-VM HTTP agent)
+## 포함된 기능
 
-- Runs inside each MicroVM as PID 1 via `micro-init`
-- `POST /tasks {"prompt":"..."}` — execute a Goose task, return output
-- `GET /health` — `idle` | `busy` status
-- `POST /stop` — graceful agent shutdown
+- Go 기반 control-plane daemon: `cmd/goose-daemon`
+- Firecracker MicroVM 생성
+- Debian Bookworm minbase golden image build
+- first-run bootstrap:
+  - golden rootfs build
+  - Firecracker binary download
+  - Linux kernel download
+  - guest agent build
+- host bridge `goose-br0`
+- private network `10.0.1.0/24`
+- outbound NAT
+- TAP/IP allocation and recycling
+- VM별 writable rootfs clone
+- Goose config와 secret injection
+- guest-side `goose-agent` HTTP server
+- API:
+  - `POST /vms`
+  - `GET /vms`
+  - `DELETE /vms/{vm_id}`
+  - guest direct `POST /tasks`
+  - guest direct `GET /health`
+- 초기 e2e smoke test
 
-### Self-bootstrapping
+## v0.1.0 제약
 
-- Firecracker v1.15.1 downloaded and SHA256-verified automatically on first run
-- Linux 6.1.155 kernel downloaded automatically
-- Golden image (Debian Bookworm minbase + Goose + goose-agent) built via `debootstrap` on first run
-- `goose-agent` binary compiled from source before image build
+- API 인증이 없었다.
+- VM별 agent token이 없었다.
+- 외부 client가 guest private IP에 직접 접근해야 했다.
+- snapshot/restore가 없었다.
+- diff memory snapshot이 없었다.
+- COW rootfs restore가 없었다.
+- VM별 LLM profile이 없었다.
+- graceful guest shutdown이 없어서 종료 시 kernel panic이 발생할 수 있었다.
+- public reverse proxy URL model이 없었다.
+- MCP/IronClaw adapter가 없었다.
 
-### Guest OS — Minimal Debian Bookworm
+## 사전 요구사항
 
-- Replaced initial Ubuntu 22.04 skeleton with Debian Bookworm `--variant=minbase`
-- No SSH, no init daemon, no DHCP client — `micro-init` mounts virtual filesystems and execs goose-agent directly as PID 1
-- Network configured via Linux kernel `ip=` boot parameter (live before any user-space process starts)
-- Host timezone mirrored into VM via `/etc/localtime` symlink injection at provisioning time
-
-### Runtime Config Injection
-
-- `configs/goose.yaml` (provider, model, extensions) and `configs/goose-secrets.yaml` (API keys) injected into each VM's disk at provisioning time — no image rebuild needed to change provider or model
-- Supports Google, Anthropic, OpenAI, Ollama, and all other Goose-compatible providers
-- Keyring-free operation (`GOOSE_DISABLE_KEYRING: true`) for headless VM environments
-
-### Network & Storage
-
-- Linux bridge `goose-br0` with iptables MASQUERADE for VM-to-internet connectivity
-- IP pool (10.0.1.2–254) sorted and recycled across VM lifecycle
-- TAP device IDs recycled via free-list after VM destruction
-- All host resources guaranteed to be released on teardown
-
-### Security
-
-- Per-client Bearer token authentication (`EPHEMERA_API_TOKENS=alice:token1,bob:token2`)
-- Timing-safe token comparison via `crypto/subtle.ConstantTimeCompare`
-- Each request logged with authenticated client name for audit trail
-- Control plane binds to `127.0.0.1:3000` by default (localhost only)
-- TLS supported via Caddy or Nginx reverse proxy (see README)
-- Single-token fallback (`EPHEMERA_API_TOKEN`) for backward compatibility
-
----
-
-## Prerequisites
-
-- Ubuntu 22.04 or 24.04 host (bare metal or nested virtualization)
-- `/dev/kvm` accessible
-- Go 1.18+
-- `sudo apt install -y curl debootstrap e2fsprogs util-linux`
+- Linux host with `/dev/kvm`
+- root 또는 sudo 권한
+- `curl`
+- `debootstrap`
+- `e2fsprogs`
+- `util-linux`
+- Go 1.25 이상
