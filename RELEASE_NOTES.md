@@ -1,3 +1,16 @@
+# Unreleased
+
+## Added
+
+- `cmd/anvil-mcp`: Go stdio MCP server for IronClaw integration.
+- MCP tools for VM spawn, task execution, health, stop, and delete.
+- Optional in-memory `session_name` aliases for MCP callers.
+- `configs/anvil-mcp.yaml.example` for adapter configuration.
+
+## Changed
+
+- Minimum Go version is now 1.25+ to support the official MCP Go SDK.
+
 # v0.2.0 — Single-Host Feature Complete
 
 **Ephemera** completes the single-host feature set. Every limitation noted in v0.1.0 is resolved: guests shut down gracefully, agent authentication is enforced, tokens reload without a restart, and VMs can be snapshotted and restored in seconds. A new control plane proxy makes goose-agent accessible from external clients without direct access to the private VM subnet.
