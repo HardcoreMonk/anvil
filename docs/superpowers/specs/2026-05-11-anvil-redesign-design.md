@@ -1,7 +1,7 @@
 ---
 lifecycle_run: 2026-05-11-anvil-redesign
 lifecycle_stage: superpowers:brainstorming
-lifecycle_status: draft
+lifecycle_status: passed
 generated_by: lifecycle-redesign-start
 generated_at: 2026-05-11T00:00:00
 redaction_applied: true
@@ -90,6 +90,27 @@ Boundary rules:
 - MCP v1 remains a thin runtime bridge. Workspace sync, snapshot MCP tools,
   persistent sessions, and automatic VM cleanup stay out of scope for this redesign.
 
+## Domain Architecture Pass
+
+The accepted domain boundary is documentation-facing and does not require runtime code
+changes. Domain terms determine documentation ownership and future planning boundaries,
+not new package moves in this run.
+
+Accepted boundaries:
+
+- Product identity is `anvil`; repository identity can remain `ephemera`.
+- Core runtime remains owned by the daemon, storage, network, and VM packages.
+- Guest runtime remains owned by `goose-agent` and `micro-init`.
+- IronClaw integration remains owned by the MCP adapter packages.
+- Session alias means MCP adapter process memory only; it is not persistent session
+  state.
+- Snapshot/restore remains a daemon capability; it is not part of MCP v1.
+- `docs/analysis/` remains evidence and does not override `AGENTS.md`, `CONTEXT.md`,
+  README, or accepted lifecycle specs.
+
+No ADR is required for this pass because the redesign does not introduce a
+hard-to-reverse runtime or public API decision.
+
 ## Planned Documentation Changes
 
 The implementation plan for this redesign should update only documentation and
@@ -145,8 +166,12 @@ These are explicit follow-up candidates, not part of this redesign:
 ## Lifecycle Gate Evidence
 
 - Stage: `superpowers:brainstorming`
-- Status: `draft`
+- Status: `passed`
 - Approved by: user approved scope, canonical document structure, domain architecture
   boundary, completion criteria, and Canonical Docs First approach in conversation.
-- Evidence: This written spec is pending final user file review before implementation
-  planning begins.
+- Evidence: User reviewed and approved this written spec in conversation.
+- Stage: `domain-architecture`
+- Status: `passed`
+- Approved by: user approved `CONTEXT.md` as the domain glossary and boundary map and
+  approved the accepted domain terms above.
+- Evidence: Domain Architecture Pass section in this spec.

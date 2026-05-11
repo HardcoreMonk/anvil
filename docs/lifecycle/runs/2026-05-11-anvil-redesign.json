@@ -248,15 +248,15 @@
   "schema_version": 1,
   "stages": {
     "code-review": "pending",
-    "domain-architecture": "draft",
+    "domain-architecture": "passed",
     "grill-me": "draft",
     "implement": "pending",
-    "intake": "draft",
+    "intake": "passed",
     "operate": "draft",
     "plan-design-review": "pending",
     "plan-eng-review": "pending",
     "release": "draft",
-    "superpowers:brainstorming": "draft",
+    "superpowers:brainstorming": "passed",
     "superpowers:writing-plans": "draft"
   },
   "status": "created",
