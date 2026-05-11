@@ -73,6 +73,10 @@ Go 모듈 경로와 기존 API/환경 변수에는 `ephemera` 또는 `goose` 이
 - MCP adapter daemon URL 환경 변수: `ANVIL_DAEMON_URL`
 - MCP adapter token 환경 변수: `ANVIL_API_TOKEN`
 
+`ANVIL_API_TOKEN`은 프로세스별 의미가 다르다. goose-daemon에서는
+`EPHEMERA_API_TOKEN`의 control-plane token alias이고, `cmd/anvil-mcp`에서는
+daemon으로 보내는 outbound Bearer token이다.
+
 ## 후속 후보
 
 - 공개 tag/release 정리: Git tag와 GitHub Release page 상태를 함께 관리

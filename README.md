@@ -387,8 +387,10 @@ rate limit에 따라 보통 15-30분 이상 걸릴 수 있다.
 | `EPHEMERA_PUBLIC_URL` | `ANVIL_PUBLIC_URL` | unset | 외부에서 접근 가능한 control plane base URL. 설정 시 `agent_url`이 proxy path가 된다. |
 
 `EPHEMERA_*`는 ephemera runtime의 canonical 변수이고 `ANVIL_*`는 anvil 운영자를
-위한 alias다. 둘 다 설정되어 있으면 `EPHEMERA_*`가 우선한다.
-`EPHEMERA_API_ADDR` 또는 `ANVIL_API_ADDR`가 port 변수보다 우선한다. token은
+위한 alias다. 각 변수 쌍에서는 `EPHEMERA_*` 값이 `ANVIL_*` 값보다 우선한다.
+bind 주소 쌍(`EPHEMERA_API_ADDR`/`ANVIL_API_ADDR`)은 port 쌍보다 우선한다.
+인증 token precedence는 `EPHEMERA_API_TOKENS` -> `ANVIL_API_TOKENS` ->
+`EPHEMERA_API_TOKEN` -> `ANVIL_API_TOKEN` -> 인증 비활성화 순서다. token은
 `SIGHUP`으로 daemon 재시작 없이 reload할 수 있다.
 
 ---
@@ -408,6 +410,11 @@ export ANVIL_DAEMON_URL=http://127.0.0.1:3000
 export ANVIL_API_TOKEN="<daemon-bearer-token>"
 export ANVIL_MCP_DEFAULT_TIMEOUT=300
 ```
+
+여기서 `ANVIL_API_TOKEN`은 `cmd/anvil-mcp` 프로세스가 daemon으로 보내는 outbound
+Bearer token이다. goose-daemon 환경 변수에서는 같은 이름이
+`EPHEMERA_API_TOKEN`의 fallback alias로, daemon이 client 요청에서 받아들이는
+control-plane token을 뜻한다.
 
 또는 설정 파일을 사용할 수 있다.
 
