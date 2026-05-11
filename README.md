@@ -6,44 +6,90 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Firecracker](https://img.shields.io/badge/Firecracker-v1.15.1-FF4500?logo=amazonaws&logoColor=white)](https://github.com/firecracker-microvm/firecracker)
 
-**IronClaw + ephemera 결합 AI agent 실행 프로젝트**
+**IronClaw를 위한 격리 AI agent 실행 layer**
 
-`anvil`은 IronClaw와 ephemera를 결합하는 새로운 프로젝트다. IronClaw는 상위
-orchestration/MCP client 역할을 맡고, ephemera는 KVM 기반 Firecracker MicroVM
-격리 runtime을 제공한다. anvil의 목표는 IronClaw가 ephemera VM을 생성하고,
-작업을 실행하고, 중지하고, snapshot/restore할 수 있게 만드는 통합 실행
-환경이다.
+`anvil`은 IronClaw가 AI agent 작업을 안전하게 생성, 실행, 중지,
+snapshot/restore할 수 있도록 만드는 통합 실행 프로젝트다. IronClaw는 상위
+orchestration과 MCP client 역할을 맡고, anvil은 IronClaw의 tool call을 실제
+격리 실행 환경으로 연결한다. 기반 실행 엔진은 ephemera이며, ephemera는 KVM 기반
+Firecracker MicroVM runtime을 제공한다.
 
-현재 저장소는 `https://github.com/HardcoreMonk/ephemera/`이다. ephemera는 이미
-`0.1.0`, `0.2.0`이 릴리즈된 기반 runtime이며, 이 저장소의 Go 모듈 경로와
-기존 API/환경 변수 이름은 ephemera/goose 계열을 유지한다. anvil은 이 runtime을
-IronClaw와 결합하는 프로젝트 이름이다.
+이 저장소의 현재 URL은 `https://github.com/HardcoreMonk/ephemera/`이다.
+ephemera는 이미 `0.1.0`, `0.2.0`이 릴리즈된 기반 runtime이므로 Go 모듈 경로,
+daemon 이름, HTTP API, 일부 환경 변수에는 `ephemera` 또는 `goose` 이름이 남아
+있다. README에서는 `anvil`을 IronClaw 통합 프로젝트로, `ephemera`를 분리된 기반
+runtime으로 구분한다.
 
 버전별 ephemera 소스 snapshot은 Git tag로 공개된다. 현재 공개 소스 tag 기준은
 `v0.2.0`이며, GitHub Release page는 아직 게시하지 않았다.
 
 ---
 
-## 아키텍처
+## 프로젝트 경계
+
+| 영역 | 책임 | 현재 구현 |
+|---|---|---|
+| IronClaw | 상위 orchestration, MCP client, 작업 의사결정 | 외부 통합 계층 |
+| anvil | IronClaw가 사용할 MCP tool surface와 실행 lifecycle 계약 | `cmd/anvil-mcp`, `internal/anvilmcp` |
+| ephemera | Firecracker MicroVM 생성, agent proxy, snapshot/restore, host resource 정리 | `cmd/goose-daemon`, `internal/vm`, `internal/storage`, `internal/network` |
+| guest runtime | VM 내부 task 실행, health, graceful stop | `cmd/goose-agent`, `cmd/micro-init` |
+
+anvil은 ephemera를 이름만 바꾼 프로젝트가 아니다. anvil은 IronClaw와 ephemera를
+연결하는 통합 실행 layer이고, ephemera는 독립적인 runtime 구현과 API 계약을
+가진다. 따라서 runtime API와 환경 변수는 호환성을 위해 ephemera/goose 이름을
+유지하고, IronClaw가 직접 사용하는 표면은 `anvil_*` MCP tool로 노출한다.
+
+## anvil 실행 모델
 
 ```text
-IronClaw / MCP client
+IronClaw
+  - planner / orchestrator
+  - MCP client
       |
-      | stdio MCP
+      | stdio MCP tool call
       v
 anvil MCP adapter
+  - anvil_spawn_vm
+  - anvil_run_task
+  - anvil_create_snapshot
+  - anvil_restore_snapshot
       |
       | HTTP + optional Bearer token
       v
-ephemera control plane :3000
-      |
-      | Firecracker SDK, KVM, TAP, rootfs, snapshot files
-      v
-ephemera MicroVM runtime
-      |
-      v
-goose-agent / Goose task
+ephemera runtime boundary
+  - control plane :3000
+  - Firecracker MicroVM
+  - goose-agent task runtime
 ```
+
+IronClaw 관점에서 anvil은 다음 계약을 제공한다.
+
+- VM 생성과 local `session_name` alias binding
+- VM 내부 prompt/task 실행
+- VM health, graceful stop, delete lifecycle
+- full/diff snapshot 생성, 목록, restore, 삭제
+- daemon token과 guest agent token을 분리하는 proxy 보안 경계
+- restore 후 alias bind race를 명시적으로 노출하는 cleanup 계약
+
+## anvil 핵심 기능
+
+| 기능 | 설명 |
+|---|---|
+| IronClaw MCP adapter | `cmd/anvil-mcp`가 IronClaw/MCP client에 `anvil_*` tool을 제공한다. |
+| VM lifecycle tool | `anvil_spawn_vm`, `anvil_run_task`, `anvil_get_vm_health`, `anvil_stop_vm`, `anvil_delete_vm`을 제공한다. |
+| Snapshot lifecycle tool | `anvil_create_snapshot`, `anvil_list_snapshots`, `anvil_restore_snapshot`, `anvil_delete_snapshot`을 제공한다. |
+| Session alias | adapter process 내부에서 `session_name -> vm_id` alias를 유지해 IronClaw workflow를 단순화한다. |
+| Token redaction | daemon restore 응답의 `agent_token`은 decode할 수 있지만 MCP output에는 노출하지 않는다. |
+| Restore cleanup 계약 | restore 성공 후 alias bind가 실패하면 restored VM을 자동 삭제하지 않고 error에 VM ID를 포함한다. |
+
+---
+
+## ephemera runtime 분리
+
+ephemera는 anvil이 사용하는 기반 실행 엔진이다. VM 생성, Firecracker machine
+관리, TAP/IP 할당, rootfs 준비, snapshot file 관리, guest agent proxy는
+ephemera control plane이 소유한다. anvil MCP adapter는 이 의미를 재해석하지 않고
+얇게 호출한다.
 
 ephemera runtime의 현재 HTTP API 구조:
 
@@ -88,7 +134,7 @@ POST /vms/{vm_id}/stop   -> goose-agent :8080/stop
 control plane proxy 경로를 가리킨다. 설정되지 않은 경우 host에서 접근 가능한
 VM private IP가 반환된다.
 
-## VM 생성 흐름
+### VM 생성 흐름
 
 ```text
 CloneDisk()
@@ -107,7 +153,7 @@ waitForAgent()
   -> cold boot 기준 약 60초
 ```
 
-## Snapshot/Restore 흐름
+### Snapshot/Restore 흐름
 
 ```text
 POST /vms/{id}/snapshot
@@ -132,7 +178,7 @@ Firecracker snapshot state에는 TAP device name과 disk path가 들어 있다.
 ephemera는 restore 시 해당 device identity를 재생성하고, IP는 vsock channel을
 통해 새 값으로 재설정한다.
 
-## 종료 흐름
+### 종료 흐름
 
 ```text
 DELETE /vms/{id}
@@ -147,11 +193,10 @@ DELETE /vms/{id}
 
 ---
 
-## 주요 기능
+## ephemera runtime 기능
 
 | 기능 | 설명 |
 |---|---|
-| IronClaw 연동 | `cmd/anvil-mcp`가 IronClaw/MCP client를 ephemera daemon API에 연결한다. |
 | 자체 bootstrap | ephemera 첫 실행 시 golden image, kernel, Firecracker binary를 준비하고 검증한다. |
 | 최소 guest OS | Debian Bookworm minbase와 Go 기반 `micro-init`으로 구성한다. |
 | 안전한 guest 종료 | `micro-init`이 signal을 받아 `poweroff(2)`를 호출해 kernel panic을 피한다. |
@@ -164,7 +209,6 @@ DELETE /vms/{id}
 | IP/TAP 재사용 | lifecycle 종료 후 `10.0.1.2-254` IP와 TAP ID를 pool에 반환한다. |
 | Outbound NAT | `goose-br0`와 iptables MASQUERADE로 guest의 LLM API outbound를 지원한다. |
 | Control-plane 인증 | named Bearer token, timing-safe compare, audit log, `SIGHUP` hot reload를 지원한다. |
-| IronClaw MCP adapter | `cmd/anvil-mcp`가 ephemera daemon API를 stdio MCP tool로 노출한다. |
 
 ---
 
