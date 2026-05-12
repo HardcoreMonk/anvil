@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -283,5 +284,80 @@ func TestPlanSnapshotGCProtectsReferencedAndKeepLast(t *testing.T) {
 		if entry.Reason != "keep_last_per_vm" {
 			t.Fatalf("%s reason = %q, want keep_last_per_vm", snapshotID, entry.Reason)
 		}
+	}
+}
+
+func TestHandleSnapshotGCDryRunDoesNotDelete(t *testing.T) {
+	now := time.Now().UTC()
+	cp := newTestCP(t)
+	addTestSnapshot(t, cp, testSnapshotMeta("snap-old", "vm-1", "full", now.Add(-10*24*time.Hour)))
+	addTestSnapshot(t, cp, testSnapshotMeta("snap-new", "vm-1", "full", now.Add(-1*time.Hour)))
+
+	req := httptest.NewRequest(http.MethodPost, "/snapshots/gc", bytes.NewReader([]byte(`{"older_than_seconds":604800}`)))
+	rr := httptest.NewRecorder()
+	cp.handleSnapshotGC(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q; want 200", rr.Code, rr.Body.String())
+	}
+	resp := decodeGCResponse(t, rr)
+	if resp.Applied {
+		t.Fatal("dry-run response applied = true, want false")
+	}
+	if ids := strings.Join(snapshotIDs(resp.Candidates), ","); ids != "snap-old" {
+		t.Fatalf("candidate IDs = %s, want snap-old", ids)
+	}
+	if len(resp.Deleted) != 0 {
+		t.Fatalf("deleted count = %d, want 0", len(resp.Deleted))
+	}
+	if _, ok := cp.snapshots["snap-old"]; !ok {
+		t.Fatal("dry-run removed snap-old from map")
+	}
+	if _, err := os.Stat(storage.SnapshotDir(cp.workDir, "snap-old")); err != nil {
+		t.Fatalf("dry-run removed snap-old directory: %v", err)
+	}
+}
+
+func TestHandleSnapshotGCRejectsInvalidPolicy(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		wantStatus int
+		wantBody   string
+	}{
+		{
+			name:       "malformed json",
+			body:       `{`,
+			wantStatus: http.StatusBadRequest,
+			wantBody:   "invalid JSON body",
+		},
+		{
+			name:       "negative older_than_seconds",
+			body:       `{"older_than_seconds":-1}`,
+			wantStatus: http.StatusBadRequest,
+			wantBody:   "older_than_seconds must be non-negative",
+		},
+		{
+			name:       "negative keep_last_per_vm",
+			body:       `{"keep_last_per_vm":-1}`,
+			wantStatus: http.StatusBadRequest,
+			wantBody:   "keep_last_per_vm must be non-negative",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cp := newTestCP(t)
+			req := httptest.NewRequest(http.MethodPost, "/snapshots/gc", bytes.NewReader([]byte(tt.body)))
+			rr := httptest.NewRecorder()
+			cp.handleSnapshotGC(rr, req)
+
+			if rr.Code != tt.wantStatus {
+				t.Fatalf("status = %d, body = %q; want %d", rr.Code, rr.Body.String(), tt.wantStatus)
+			}
+			if !strings.Contains(rr.Body.String(), tt.wantBody) {
+				t.Fatalf("body = %q, want substring %q", rr.Body.String(), tt.wantBody)
+			}
+		})
 	}
 }
