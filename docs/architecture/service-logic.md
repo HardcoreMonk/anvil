@@ -25,6 +25,7 @@ control plane daemon은 하나의 HTTP service를 노출한다.
 | `/vms/{vm_id}/stop` | `cmd/goose-daemon/api.go` | guest agent에 stop 요청 |
 | `/vms/{vm_id}/snapshot` | `cmd/goose-daemon/api.go` | full 또는 diff VM snapshot 생성 |
 | `/snapshots` | `cmd/goose-daemon/api.go` | 저장된 snapshot 목록 |
+| `/snapshots/gc` | `cmd/goose-daemon/api.go` | snapshot retention GC dry-run/apply |
 | `/snapshots/{id}/restore` | `cmd/goose-daemon/api.go` | snapshot에서 VM restore |
 | `/snapshots/{id}` | `cmd/goose-daemon/api.go` | snapshot 삭제 |
 
@@ -332,6 +333,44 @@ deleteSnapshot()
 
 이 규칙은 diff snapshot이 아직 필요로 하는 full snapshot을 삭제하지 못하게
 막는다.
+
+## Snapshot GC 로직
+
+Route: `POST /snapshots/gc`
+
+Request 예시:
+
+```json
+{
+  "older_than_seconds": 604800,
+  "keep_last_per_vm": 1,
+  "apply": false
+}
+```
+
+Flow:
+
+```text
+handleSnapshotGC()
+  -> optional JSON body parse
+  -> negative older_than_seconds / keep_last_per_vm 거부
+  -> cp.snapshots metadata를 복사해 CreatedAt 기준 정렬
+  -> diff snapshot의 base_snapshot_id reverse reference map 생성
+  -> referenced full snapshot 보호
+  -> source_vm_id별 최신 keep_last_per_vm개 보호
+  -> age 조건을 통과하고 보호되지 않은 snapshot을 candidates로 분류
+  -> apply=false이면 plan만 반환
+  -> apply=true이면 candidates를 storage.DeleteSnapshot으로 삭제하고 cp.snapshots에서 제거
+```
+
+불변 조건:
+
+- `apply` 기본값은 `false`다.
+- 응답에 `agent_token`을 포함하지 않는다.
+- diff snapshot이 참조 중인 full snapshot은 삭제하지 않는다.
+- 같은 GC 호출에서 diff를 삭제한 뒤 해당 full을 연쇄 삭제하지 않는다.
+- snapshot create, restore, delete, GC는 필요한 구간에서 snapshot lifecycle lock으로
+  직렬화해 진행 중인 restore 파일 읽기와 diff base가 삭제되지 않게 한다.
 
 ## Guest agent 로직
 

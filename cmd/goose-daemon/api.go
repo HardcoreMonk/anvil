@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -122,6 +123,8 @@ type ControlPlane struct {
 	snapshotsMu sync.RWMutex
 	snapshots   map[string]storage.SnapshotMetadata
 
+	snapshotLifecycleMu sync.Mutex
+
 	// restoreMu serializes the bind-mount-setup + Firecracker-open window so that each
 	// Firecracker instance opens the topmost (correct) bind mount before the next restore
 	// can stack another one on top. Released as soon as RestoreMachine returns.
@@ -179,6 +182,7 @@ func NewControlPlane(
 	mux.HandleFunc("/vms", cp.handleVMs)
 	mux.HandleFunc("/vms/", cp.handleVM)
 	mux.HandleFunc("/snapshots", cp.handleSnapshots)
+	mux.HandleFunc("/snapshots/gc", cp.handleSnapshotGC)
 	mux.HandleFunc("/snapshots/", cp.handleSnapshotItem)
 	cp.srv = &http.Server{Addr: apiAddr, Handler: authMiddleware(cp.getClients, mux)}
 	return cp
@@ -230,6 +234,7 @@ func (cp *ControlPlane) Start() error {
 	log.Printf("  GET    /vms/{vm_id}/health               — proxy: agent health check")
 	log.Printf("  POST   /vms/{vm_id}/stop                 — proxy: stop agent")
 	log.Printf("  GET    /snapshots                        — list snapshots")
+	log.Printf("  POST   /snapshots/gc                     — plan/apply snapshot retention GC")
 	log.Printf("  POST   /snapshots/{snapshot_id}/restore  — restore VM from snapshot")
 	log.Printf("  DELETE /snapshots/{snapshot_id}          — delete snapshot")
 	if publicURL != "" {
@@ -628,6 +633,54 @@ type SnapshotRequest struct {
 	Type      string `json:"type,omitempty"` // "full" | "diff" | "" (auto-detect)
 }
 
+// SnapshotGCRequest is the optional body for POST /snapshots/gc.
+type SnapshotGCRequest struct {
+	OlderThanSeconds int64 `json:"older_than_seconds"`
+	KeepLastPerVM    int   `json:"keep_last_per_vm"`
+	Apply            bool  `json:"apply"`
+}
+
+// SnapshotGCPolicy is echoed in GC responses without the apply flag.
+type SnapshotGCPolicy struct {
+	OlderThanSeconds int64 `json:"older_than_seconds"`
+	KeepLastPerVM    int   `json:"keep_last_per_vm"`
+}
+
+// SnapshotGCEntry is the public representation of one GC decision.
+type SnapshotGCEntry struct {
+	SnapshotID     string    `json:"snapshot_id"`
+	SourceVMID     string    `json:"source_vm_id"`
+	Profile        string    `json:"profile,omitempty"`
+	SnapshotType   string    `json:"snapshot_type"`
+	BaseSnapshotID string    `json:"base_snapshot_id,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	Reason         string    `json:"reason"`
+	ReferencedBy   []string  `json:"referenced_by,omitempty"`
+}
+
+// SnapshotGCError records a per-snapshot apply failure.
+type SnapshotGCError struct {
+	SnapshotID string `json:"snapshot_id"`
+	Error      string `json:"error"`
+}
+
+// SnapshotGCResponse is returned by POST /snapshots/gc for dry-run and apply.
+type SnapshotGCResponse struct {
+	Applied     bool              `json:"applied"`
+	RequestedAt time.Time         `json:"requested_at"`
+	Policy      SnapshotGCPolicy  `json:"policy"`
+	Candidates  []SnapshotGCEntry `json:"candidates"`
+	Protected   []SnapshotGCEntry `json:"protected"`
+	Deleted     []SnapshotGCEntry `json:"deleted"`
+	Errors      []SnapshotGCError `json:"errors"`
+}
+
+const (
+	snapshotGCReasonOlderThan        = "older_than"
+	snapshotGCReasonReferencedByDiff = "referenced_by_diff"
+	snapshotGCReasonKeepLastPerVM    = "keep_last_per_vm"
+)
+
 func snapshotInfoFrom(meta storage.SnapshotMetadata) SnapshotInfo {
 	return SnapshotInfo{
 		SnapshotID:     meta.SnapshotID,
@@ -639,7 +692,162 @@ func snapshotInfoFrom(meta storage.SnapshotMetadata) SnapshotInfo {
 	}
 }
 
+func snapshotGCEntryFrom(meta storage.SnapshotMetadata, reason string, referencedBy []string) SnapshotGCEntry {
+	refs := append([]string(nil), referencedBy...)
+	sort.Strings(refs)
+	return SnapshotGCEntry{
+		SnapshotID:     meta.SnapshotID,
+		SourceVMID:     meta.SourceVMID,
+		Profile:        meta.Profile,
+		SnapshotType:   meta.SnapshotType,
+		BaseSnapshotID: meta.BaseSnapshotID,
+		CreatedAt:      meta.CreatedAt,
+		Reason:         reason,
+		ReferencedBy:   refs,
+	}
+}
+
+func sortSnapshotsOldestFirst(snapshots []storage.SnapshotMetadata) {
+	sort.Slice(snapshots, func(i, j int) bool {
+		if snapshots[i].CreatedAt.Equal(snapshots[j].CreatedAt) {
+			return snapshots[i].SnapshotID < snapshots[j].SnapshotID
+		}
+		return snapshots[i].CreatedAt.Before(snapshots[j].CreatedAt)
+	})
+}
+
+func (cp *ControlPlane) snapshotMetadataList() []storage.SnapshotMetadata {
+	cp.snapshotsMu.RLock()
+	defer cp.snapshotsMu.RUnlock()
+
+	list := make([]storage.SnapshotMetadata, 0, len(cp.snapshots))
+	for _, meta := range cp.snapshots {
+		list = append(list, meta)
+	}
+	sortSnapshotsOldestFirst(list)
+	return list
+}
+
+func (cp *ControlPlane) planSnapshotGC(policy SnapshotGCPolicy, now time.Time) SnapshotGCResponse {
+	snapshots := cp.snapshotMetadataList()
+	referencedBy := make(map[string][]string)
+	for _, meta := range snapshots {
+		if meta.BaseSnapshotID != "" {
+			referencedBy[meta.BaseSnapshotID] = append(referencedBy[meta.BaseSnapshotID], meta.SnapshotID)
+		}
+	}
+	for id := range referencedBy {
+		sort.Strings(referencedBy[id])
+	}
+
+	protected := make(map[string]SnapshotGCEntry)
+	for _, meta := range snapshots {
+		if refs, ok := referencedBy[meta.SnapshotID]; ok {
+			protected[meta.SnapshotID] = snapshotGCEntryFrom(meta, snapshotGCReasonReferencedByDiff, refs)
+		}
+	}
+
+	if policy.KeepLastPerVM > 0 {
+		byVM := make(map[string][]storage.SnapshotMetadata)
+		for _, meta := range snapshots {
+			byVM[meta.SourceVMID] = append(byVM[meta.SourceVMID], meta)
+		}
+		for _, group := range byVM {
+			sort.Slice(group, func(i, j int) bool {
+				if group[i].CreatedAt.Equal(group[j].CreatedAt) {
+					return group[i].SnapshotID > group[j].SnapshotID
+				}
+				return group[i].CreatedAt.After(group[j].CreatedAt)
+			})
+			for i := 0; i < len(group) && i < policy.KeepLastPerVM; i++ {
+				meta := group[i]
+				if _, exists := protected[meta.SnapshotID]; !exists {
+					protected[meta.SnapshotID] = snapshotGCEntryFrom(meta, snapshotGCReasonKeepLastPerVM, nil)
+				}
+			}
+		}
+	}
+
+	resp := SnapshotGCResponse{
+		RequestedAt: now,
+		Policy:      policy,
+		Candidates:  []SnapshotGCEntry{},
+		Protected:   []SnapshotGCEntry{},
+		Deleted:     []SnapshotGCEntry{},
+		Errors:      []SnapshotGCError{},
+	}
+
+	cutoff := now.Add(-time.Duration(policy.OlderThanSeconds) * time.Second)
+	for _, meta := range snapshots {
+		if entry, ok := protected[meta.SnapshotID]; ok {
+			resp.Protected = append(resp.Protected, entry)
+			continue
+		}
+		if policy.OlderThanSeconds == 0 || !meta.CreatedAt.After(cutoff) {
+			resp.Candidates = append(resp.Candidates, snapshotGCEntryFrom(meta, snapshotGCReasonOlderThan, nil))
+		}
+	}
+	return resp
+}
+
 // ---- Snapshot handlers ----
+
+func writeJSONError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]string{"error": message})
+}
+
+// POST /snapshots/gc
+func (cp *ControlPlane) handleSnapshotGC(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req SnapshotGCRequest
+	if r.Body != nil {
+		dec := json.NewDecoder(r.Body)
+		if err := dec.Decode(&req); err != nil && err != io.EOF {
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON body: %v", err))
+			return
+		}
+	}
+	if req.OlderThanSeconds < 0 {
+		writeJSONError(w, http.StatusBadRequest, "older_than_seconds must be non-negative")
+		return
+	}
+	if req.KeepLastPerVM < 0 {
+		writeJSONError(w, http.StatusBadRequest, "keep_last_per_vm must be non-negative")
+		return
+	}
+	policy := SnapshotGCPolicy{
+		OlderThanSeconds: req.OlderThanSeconds,
+		KeepLastPerVM:    req.KeepLastPerVM,
+	}
+	resp := cp.planSnapshotGC(policy, time.Now().UTC())
+	resp.Applied = req.Apply
+	if req.Apply {
+		cp.applySnapshotGC(&resp)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (cp *ControlPlane) applySnapshotGC(resp *SnapshotGCResponse) {
+	for _, candidate := range resp.Candidates {
+		meta, _, err := cp.deleteSnapshotByID(candidate.SnapshotID)
+		if err != nil {
+			resp.Errors = append(resp.Errors, SnapshotGCError{
+				SnapshotID: candidate.SnapshotID,
+				Error:      err.Error(),
+			})
+			continue
+		}
+		resp.Deleted = append(resp.Deleted, snapshotGCEntryFrom(meta, candidate.Reason, nil))
+	}
+}
 
 // GET /snapshots
 func (cp *ControlPlane) handleSnapshots(w http.ResponseWriter, r *http.Request) {
@@ -733,6 +941,9 @@ func (cp *ControlPlane) createSnapshot(w http.ResponseWriter, r *http.Request, v
 		http.Error(w, `{"error":"VM not found"}`, http.StatusNotFound)
 		return
 	}
+
+	cp.snapshotLifecycleMu.Lock()
+	defer cp.snapshotLifecycleMu.Unlock()
 
 	// Determine snapshot type (full or diff) and base snapshot ID.
 	snapType, baseSnapID, err := cp.resolveSnapshotType(req.Type, vmID)
@@ -843,6 +1054,10 @@ func deriveMACFromTap(tapDevice string) string {
 
 // POST /snapshots/{snapshot_id}/restore
 func (cp *ControlPlane) restoreSnapshot(w http.ResponseWriter, snapID string) {
+	// Prevent delete/GC from removing snapshot files while restore reads them.
+	cp.snapshotLifecycleMu.Lock()
+	defer cp.snapshotLifecycleMu.Unlock()
+
 	cp.snapshotsMu.RLock()
 	meta, ok := cp.snapshots[snapID]
 	cp.snapshotsMu.RUnlock()
@@ -1095,35 +1310,45 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 	})
 }
 
-// DELETE /snapshots/{snapshot_id}
-func (cp *ControlPlane) deleteSnapshot(w http.ResponseWriter, snapID string) {
-	// Check for diff snapshots that reference this snapshot as their base.
-	// Deleting a base would make those diffs un-restorable.
+func (cp *ControlPlane) deleteSnapshotByID(snapID string) (storage.SnapshotMetadata, int, error) {
+	cp.snapshotLifecycleMu.Lock()
+	defer cp.snapshotLifecycleMu.Unlock()
+
 	cp.snapshotsMu.RLock()
 	for id, snap := range cp.snapshots {
 		if snap.BaseSnapshotID == snapID {
 			cp.snapshotsMu.RUnlock()
-			http.Error(w, fmt.Sprintf(`{"error":"cannot delete: snapshot %s is the base for diff snapshot %s — delete the diff first"}`, snapID, id), http.StatusConflict)
-			return
+			return storage.SnapshotMetadata{}, http.StatusConflict, fmt.Errorf("cannot delete: snapshot %s is the base for diff snapshot %s — delete the diff first", snapID, id)
 		}
 	}
-	cp.snapshotsMu.RUnlock()
-
-	cp.snapshotsMu.Lock()
 	meta, ok := cp.snapshots[snapID]
-	if ok {
-		delete(cp.snapshots, snapID)
-	}
-	cp.snapshotsMu.Unlock()
-
+	cp.snapshotsMu.RUnlock()
 	if !ok {
-		http.Error(w, `{"error":"snapshot not found"}`, http.StatusNotFound)
-		return
+		return storage.SnapshotMetadata{}, http.StatusNotFound, fmt.Errorf("snapshot not found")
 	}
 
 	snapDir := storage.SnapshotDir(cp.workDir, snapID)
 	if err := storage.DeleteSnapshot(snapDir); err != nil {
 		log.Printf("Warning: failed to delete snapshot dir %s: %v", snapDir, err)
+		return meta, http.StatusInternalServerError, fmt.Errorf("failed to delete snapshot %s", snapID)
+	}
+
+	cp.snapshotsMu.Lock()
+	delete(cp.snapshots, snapID)
+	cp.snapshotsMu.Unlock()
+	return meta, http.StatusOK, nil
+}
+
+// DELETE /snapshots/{snapshot_id}
+func (cp *ControlPlane) deleteSnapshot(w http.ResponseWriter, snapID string) {
+	meta, status, err := cp.deleteSnapshotByID(snapID)
+	if err != nil {
+		if status == http.StatusNotFound {
+			http.Error(w, `{"error":"snapshot not found"}`, http.StatusNotFound)
+			return
+		}
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), status)
+		return
 	}
 
 	log.Printf("Snapshot [%s] (%s, from VM %s) deleted.", snapID, meta.SnapshotType, meta.SourceVMID)

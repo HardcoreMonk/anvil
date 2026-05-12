@@ -6,6 +6,10 @@
 
 ## 추가됨
 
+- ephemera daemon `POST /snapshots/gc`: 수동 snapshot retention/GC API.
+  - 기본 dry-run mode로 삭제 후보와 보호 사유를 반환한다.
+  - `apply: true`일 때만 후보 snapshot directory를 삭제한다.
+  - diff snapshot이 참조 중인 full snapshot은 삭제하지 않는다.
 - `cmd/anvil-mcp`: IronClaw 연동용 Go stdio MCP 서버.
 - `internal/anvilmcp`: 설정 로더, daemon HTTP client, session alias 저장소,
   MCP tool handler.
