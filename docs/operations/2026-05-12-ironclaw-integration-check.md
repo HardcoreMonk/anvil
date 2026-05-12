@@ -7,11 +7,12 @@ IronClaw 본체 기준 검증을 진행할 수 없었다. 이후 로컬에 IronC
 설치했고, IronClaw CLI에서 `anvil` stdio MCP server 등록과 `mcp test` 기반
 연결/도구 목록 조회까지 확인했다.
 
-아직 완료되지 않은 범위는 IronClaw agent가 실제 LLM workflow 안에서
-`anvil_spawn_vm`, `anvil_run_task` 같은 tool을 선택해 호출하는 end-to-end 검증이다.
-IronClaw onboarding과 Google Gemini provider 설정은 완료되었으므로, 다음 검증은
-`anvil-daemon`을 실행한 상태에서 IronClaw agent가 실제 `anvil_*` MCP tool을
-호출하는 흐름이다.
+이후 `anvil-daemon`을 실행한 상태에서 IronClaw agent가 실제 LLM workflow 안에서
+`anvil_*` MCP tool을 선택해 호출하는 end-to-end 검증까지 완료했다.
+단, 기본 IronClaw tool inventory 전체를 Gemini backend에 노출하면 일부 IronClaw
+내장 tool schema가 Gemini function declaration 검증에서 거부된다. 따라서 이번
+검증은 임시 PostgreSQL DB에 anvil 외 내장 tool permission을 `disabled`로 설정한
+anvil 전용 profile로 수행했다.
 
 ## 확인 일시
 
@@ -95,6 +96,71 @@ ironclaw mcp test anvil --no-onboard --cli-only
 - `ironclaw mcp list`: `anvil` stdio MCP server 등록 확인
 - `ironclaw mcp test anvil`: 연결 성공, `anvil_*` tool 11개 조회 성공
 
+## IronClaw Agent E2E 결과
+
+검증 환경:
+
+- `anvil-daemon`: `ANVIL_API_ADDR=127.0.0.1:3000`
+- IronClaw backend: `gemini`
+- IronClaw model: `gemini-2.5-flash`
+- MCP server: `anvil` stdio
+- E2E 격리 방식: 임시 DB `ironclaw_e2e_anvil`
+  - 기존 `ironclaw` DB 설정을 변경하지 않기 위해 별도 DB를 사용했다.
+  - 임시 DB에는 anvil 외 IronClaw 내장 tool permission을 `disabled`로 설정했다.
+  - 검증 후 임시 DB는 삭제했다.
+
+사전 확인:
+
+```bash
+DATABASE_URL='postgresql:///ironclaw_e2e_anvil?host=/var/run/postgresql' \
+DATABASE_BACKEND=postgres \
+LLM_BACKEND=gemini \
+GEMINI_MODEL=gemini-2.5-flash \
+GEMINI_API_KEY='<redacted>' \
+SKILLS_ENABLED=false \
+WASM_ENABLED=false \
+BUILDER_ENABLED=false \
+GATEWAY_ENABLED=false \
+HEARTBEAT_ENABLED=false \
+ironclaw mcp test anvil --no-onboard --cli-only
+```
+
+결과:
+
+- `anvil` MCP 연결 성공
+- `anvil_*` tool 11개 조회 성공
+
+최소 agent E2E:
+
+- 요청: `anvil_spawn_vm` 후 `anvil_delete_vm`
+- 결과: 성공
+- 관찰:
+  - 첫 tool call에서 모델이 지시하지 않은 `profile=minimal`을 붙여 daemon이
+    `profile "minimal" not found`를 반환했다.
+  - 같은 agent run 안에서 모델이 profile 없이 재시도했고, VM 생성과 삭제가
+    정상 완료되었다.
+
+전체 agent E2E:
+
+- 요청 flow:
+  - `anvil_spawn_vm`
+  - `anvil_copy_in`
+  - `anvil_copy_out`
+  - `anvil_get_vm_health`
+  - `anvil_stop_vm`
+  - `anvil_delete_vm`
+- session_name: `ironclaw-e2e-full-20260512`
+- copy path: `e2e/input.txt`
+- copy content: `ironclaw-anvil-e2e-input`
+- 결과:
+  - VM 생성 성공
+  - `anvil_copy_in`은 첫 호출에서 잘못된 `encoding` 값으로 validation failure가
+    1회 발생했으나, 같은 agent run 안에서 올바른 인자로 재호출해 성공했다.
+  - `anvil_copy_out` 결과 content는 `ironclaw-anvil-e2e-input`와 일치했다.
+  - health 결과는 `{"status":"idle"}`였다.
+  - stop/delete 모두 HTTP 200으로 완료되었다.
+  - 검증 후 `GET /vms` 결과는 빈 목록 `[]`였다.
+
 ## 검증 완료 범위
 
 - `cmd/anvil-mcp` stdio MCP adapter build 가능
@@ -108,20 +174,26 @@ ironclaw mcp test anvil --no-onboard --cli-only
   - `anvil_stop_vm`
   - `anvil_delete_vm`
 
-## Blocker
+## 남은 운영상 주의점
 
-남은 blocker는 설치나 onboarding이 아니라 실제 agent workflow 검증이다.
+설치, onboarding, MCP 등록, MCP smoke, IronClaw agent E2E는 완료되었다.
+남은 주의점은 IronClaw 기본 tool inventory와 Gemini function schema의 호환성이다.
 
-- NEAR AI session file은 없음: `/home/hardcoremonk/.ironclaw/session.json`
-- 그러나 현재 backend는 NEAR AI가 아니라 Google Gemini이므로 blocker가 아니다.
-- 따라서 IronClaw agent가 자연어 요청을 받아 실제 `anvil_*` MCP tool을 선택하고
-  호출하는 end-to-end 검증은 아직 미완료다.
+- 기본 설정으로 `ironclaw run`을 실행하면 Gemini가 다음 형태의 요청 오류를 반환한다.
+  - `Invalid value at 'tools[0].function_declarations[...]...type', ""`
+- 이 오류는 `ironclaw mcp test anvil` 실패가 아니다.
+  - `ironclaw mcp test anvil`은 성공한다.
+  - 실패는 LLM provider로 전달되는 전체 tool declaration 배열에서 발생한다.
+- 임시 DB에서 anvil 외 내장 tool을 숨기면 IronClaw agent가 `anvil_*` tool을 실제로
+  호출할 수 있다.
+- 운영 profile에서는 anvil 전용 tool permission profile을 유지하거나, IronClaw
+  upstream에서 Gemini function schema 변환이 수정된 버전으로 재검증해야 한다.
 
 ## 재개 조건
 
-다음 순서로 end-to-end 검증을 진행한다.
+후속 검증은 다음 조건에서 진행한다.
 
-1. root 권한으로 `anvil-daemon`을 실행한다.
-2. IronClaw에서 `anvil_spawn_vm`, `anvil_copy_in`, `anvil_run_task`,
-   `anvil_copy_out`, `anvil_delete_vm`을 호출한다.
-3. tool response와 daemon log를 함께 보관한다.
+1. 실제 운영 DB에 anvil 전용 tool permission profile을 적용한다.
+2. `anvil_run_task`를 포함한 장시간 tool call을 IronClaw agent 기준으로 재검증한다.
+3. Gemini schema 호환성 문제가 IronClaw upstream에서 해결되면 기본 tool inventory
+   상태로 회귀 테스트한다.
