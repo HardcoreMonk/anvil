@@ -14,6 +14,9 @@ orchestration과 MCP client 역할을 맡고, anvil은 IronClaw의 tool call을 
 격리 실행 환경으로 연결한다. 기반 실행 엔진은 ephemera이며, ephemera는 KVM 기반
 Firecracker MicroVM runtime을 제공한다.
 
+anvil의 상위 통합 대상은 IronClaw 전용이다. OpenClaw 연동은 anvil의 지원 범위가
+아니며, OpenClaw용 compatibility layer나 운영 계약은 제공하지 않는다.
+
 이 저장소의 현재 URL은 `https://github.com/HardcoreMonk/ephemera/`이다.
 ephemera는 이미 `0.1.0`, `0.2.0`이 릴리즈된 기반 runtime이므로 Go 모듈 경로,
 daemon 이름, HTTP API, 일부 환경 변수에는 `ephemera` 또는 `goose` 이름이 남아
@@ -75,7 +78,7 @@ IronClaw 관점에서 anvil은 다음 계약을 제공한다.
 
 | 기능 | 설명 |
 |---|---|
-| IronClaw MCP adapter | `cmd/anvil-mcp`가 IronClaw/MCP client에 `anvil_*` tool을 제공한다. |
+| IronClaw MCP adapter | `cmd/anvil-mcp`가 IronClaw에 `anvil_*` MCP tool을 제공한다. |
 | VM lifecycle tool | `anvil_spawn_vm`, `anvil_run_task`, `anvil_get_vm_health`, `anvil_stop_vm`, `anvil_delete_vm`을 제공한다. |
 | Snapshot lifecycle tool | `anvil_create_snapshot`, `anvil_list_snapshots`, `anvil_restore_snapshot`, `anvil_delete_snapshot`을 제공한다. |
 | Session alias | adapter process 내부에서 `session_name -> vm_id` alias를 유지해 IronClaw workflow를 단순화한다. |

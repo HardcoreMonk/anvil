@@ -12,10 +12,14 @@ MCP v1은 IronClaw와 ephemera runtime을 연결하는 얇은 bridge다. VM life
 adapter process 안에는 작은 in-memory
 `session_name` alias map만 유지한다.
 
+이 adapter의 제품 통합 대상은 IronClaw 전용이다. Go MCP SDK smoke client는
+검증 도구일 뿐이며, OpenClaw 또는 다른 orchestration product와의 연동 계약을
+의미하지 않는다.
+
 ## 시스템 관점
 
 ```text
-IronClaw 또는 다른 MCP client
+IronClaw
   |
   | stdio MCP transport
   v

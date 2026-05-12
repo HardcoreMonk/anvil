@@ -8,6 +8,10 @@
 격리 VM에서 생성, 실행, 중지, snapshot, restore할 수 있게 만드는 통합
 프로젝트다.
 
+anvil의 상위 통합 대상은 IronClaw 전용이다. OpenClaw 연동은 지원 범위가 아니며,
+OpenClaw compatibility layer, shared gateway, shared runtime contract를 anvil
+요구사항으로 취급하지 않는다.
+
 현재 GitHub 저장소는 `https://github.com/HardcoreMonk/ephemera/`이다.
 ephemera는 이미 `0.1.0`, `0.2.0`이 릴리즈된 기반 runtime이며, 이 저장소의
 Go 모듈 경로와 기존 API/환경 변수에는 `ephemera` 또는 `goose` 이름이 남아
@@ -28,6 +32,7 @@ Go 모듈 경로와 기존 API/환경 변수에는 `ephemera` 또는 `goose` 이
 |---|---|---|
 | anvil | IronClaw와 ephemera를 결합하는 새 프로젝트 이름 | project-wide |
 | IronClaw | MCP client/orchestration 계층. anvil VM 실행 기능을 사용하는 상위 시스템 | 외부/상위 통합 |
+| OpenClaw | anvil의 통합 대상이 아님. anvil 문서와 구현은 OpenClaw 운영 계약을 제공하지 않음 | 제외 범위 |
 | ephemera | Firecracker MicroVM 기반 격리 실행 runtime. `0.1.0`, `0.2.0` 릴리즈 기준 구현 | `cmd/goose-daemon`, `internal/*` |
 | ephemera control plane | VM 생성, 삭제, snapshot, restore, proxy를 담당하는 호스트 daemon | `cmd/goose-daemon` |
 | MicroVM | Firecracker + KVM으로 실행되는 ephemera 격리 실행 환경 | `internal/vm` |
