@@ -27,6 +27,14 @@ runtime으로 구분한다.
 tag 기준은 `v0.2.0`이고, IronClaw 통합 프로젝트 anvil의 첫 공개 tag는
 `anvil-v0.1.0`이다.
 
+<p align="center">
+  <img src="docs/assets/ironclaw-e2e.gif" alt="IronClaw anvil E2E terminal replay" width="900">
+</p>
+
+<p align="center">
+  <sub>IronClaw 본체에서 anvil MCP tool을 호출한 E2E terminal replay</sub>
+</p>
+
 ---
 
 ## 프로젝트 경계
