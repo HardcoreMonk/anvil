@@ -9,8 +9,9 @@ IronClaw 본체 기준 검증을 진행할 수 없었다. 이후 로컬에 IronC
 
 아직 완료되지 않은 범위는 IronClaw agent가 실제 LLM workflow 안에서
 `anvil_spawn_vm`, `anvil_run_task` 같은 tool을 선택해 호출하는 end-to-end 검증이다.
-이 검증에는 `ironclaw onboard`를 통한 NEAR AI session 또는 다른 LLM provider
-설정이 필요하다.
+IronClaw onboarding과 Google Gemini provider 설정은 완료되었으므로, 다음 검증은
+`anvil-daemon`을 실행한 상태에서 IronClaw agent가 실제 `anvil_*` MCP tool을
+호출하는 흐름이다.
 
 ## 확인 일시
 
@@ -53,7 +54,20 @@ find /home/hardcoremonk -maxdepth 4 -iname '*ironclaw*' 2>/dev/null | head -n 80
   - `/home/hardcoremonk/.ironclaw/.env`
   - `DATABASE_URL`은 local PostgreSQL Unix socket을 사용한다.
   - `DATABASE_SSLMODE=disable`
+  - `LLM_BACKEND=gemini`
+  - `GEMINI_MODEL=gemini-2.5-flash`
   - `SECRETS_MASTER_KEY`는 IronClaw가 자동 생성했으며 문서에 값을 기록하지 않는다.
+  - Google Gemini API key는 onboarding 과정에서 입력했고 문서에 값을 기록하지 않는다.
+- IronClaw onboarding:
+  - 실행 명령: `ironclaw onboard --cli-only`
+  - database: PostgreSQL
+  - security: environment variable
+  - provider: Google Gemini native API
+  - model: `gemini-2.5-flash`
+  - channel: CLI/TUI only
+  - registry extension: none
+  - Docker sandbox: disabled
+  - heartbeat: disabled
 - IronClaw MCP server 등록:
   - name: `anvil`
   - transport: `stdio`
@@ -67,6 +81,7 @@ find /home/hardcoremonk -maxdepth 4 -iname '*ironclaw*' 2>/dev/null | head -n 80
 ```bash
 ironclaw --version
 ironclaw doctor --no-onboard --cli-only
+ironclaw models status --json --no-onboard --cli-only
 ironclaw mcp list --verbose --no-onboard --cli-only
 ironclaw mcp test anvil --no-onboard --cli-only
 ```
@@ -74,7 +89,9 @@ ironclaw mcp test anvil --no-onboard --cli-only
 결과:
 
 - `ironclaw --version`: `ironclaw 0.28.1`
-- `ironclaw doctor`: PostgreSQL 연결, MCP server config, secrets backing store 확인
+- `ironclaw doctor`: 실패 0개. PostgreSQL 연결, Gemini LLM config, MCP server
+  config, secrets backing store 확인
+- `ironclaw models status`: provider `gemini`, model `gemini-2.5-flash`
 - `ironclaw mcp list`: `anvil` stdio MCP server 등록 확인
 - `ironclaw mcp test anvil`: 연결 성공, `anvil_*` tool 11개 조회 성공
 
@@ -93,16 +110,16 @@ ironclaw mcp test anvil --no-onboard --cli-only
 
 ## Blocker
 
-남은 blocker는 IronClaw 본체 설치가 아니라 interactive/onboarded runtime 상태다.
+남은 blocker는 설치나 onboarding이 아니라 실제 agent workflow 검증이다.
 
-- NEAR AI session file이 없음: `/home/hardcoremonk/.ironclaw/session.json`
-- `ironclaw onboard` 또는 대체 LLM provider 설정이 아직 완료되지 않았다.
+- NEAR AI session file은 없음: `/home/hardcoremonk/.ironclaw/session.json`
+- 그러나 현재 backend는 NEAR AI가 아니라 Google Gemini이므로 blocker가 아니다.
 - 따라서 IronClaw agent가 자연어 요청을 받아 실제 `anvil_*` MCP tool을 선택하고
   호출하는 end-to-end 검증은 아직 미완료다.
 
 ## 재개 조건
 
-IronClaw onboarding 또는 LLM provider 설정이 완료되면 다음 순서로 재검증한다.
+다음 순서로 end-to-end 검증을 진행한다.
 
 1. root 권한으로 `anvil-daemon`을 실행한다.
 2. IronClaw에서 `anvil_spawn_vm`, `anvil_copy_in`, `anvil_run_task`,
