@@ -232,7 +232,7 @@ func (cp *ControlPlane) Start() error {
 	log.Printf("  GET    /vms/{vm_id}/health               — proxy: agent health check")
 	log.Printf("  POST   /vms/{vm_id}/stop                 — proxy: stop agent")
 	log.Printf("  GET    /snapshots                        — list snapshots")
-	log.Printf("  POST   /snapshots/gc                     — plan snapshot retention GC")
+	log.Printf("  POST   /snapshots/gc                     — plan/apply snapshot retention GC")
 	log.Printf("  POST   /snapshots/{snapshot_id}/restore  — restore VM from snapshot")
 	log.Printf("  DELETE /snapshots/{snapshot_id}          — delete snapshot")
 	if publicURL != "" {
@@ -819,19 +819,32 @@ func (cp *ControlPlane) handleSnapshotGC(w http.ResponseWriter, r *http.Request)
 		writeJSONError(w, http.StatusBadRequest, "keep_last_per_vm must be non-negative")
 		return
 	}
-	if req.Apply {
-		writeJSONError(w, http.StatusBadRequest, "apply is not implemented yet")
-		return
-	}
-
 	policy := SnapshotGCPolicy{
 		OlderThanSeconds: req.OlderThanSeconds,
 		KeepLastPerVM:    req.KeepLastPerVM,
 	}
 	resp := cp.planSnapshotGC(policy, time.Now().UTC())
+	resp.Applied = req.Apply
+	if req.Apply {
+		cp.applySnapshotGC(&resp)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
+}
+
+func (cp *ControlPlane) applySnapshotGC(resp *SnapshotGCResponse) {
+	for _, candidate := range resp.Candidates {
+		meta, _, err := cp.deleteSnapshotByID(candidate.SnapshotID)
+		if err != nil {
+			resp.Errors = append(resp.Errors, SnapshotGCError{
+				SnapshotID: candidate.SnapshotID,
+				Error:      err.Error(),
+			})
+			continue
+		}
+		resp.Deleted = append(resp.Deleted, snapshotGCEntryFrom(meta, candidate.Reason, nil))
+	}
 }
 
 // GET /snapshots
@@ -1288,35 +1301,41 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 	})
 }
 
-// DELETE /snapshots/{snapshot_id}
-func (cp *ControlPlane) deleteSnapshot(w http.ResponseWriter, snapID string) {
-	// Check for diff snapshots that reference this snapshot as their base.
-	// Deleting a base would make those diffs un-restorable.
+func (cp *ControlPlane) deleteSnapshotByID(snapID string) (storage.SnapshotMetadata, int, error) {
 	cp.snapshotsMu.RLock()
 	for id, snap := range cp.snapshots {
 		if snap.BaseSnapshotID == snapID {
 			cp.snapshotsMu.RUnlock()
-			http.Error(w, fmt.Sprintf(`{"error":"cannot delete: snapshot %s is the base for diff snapshot %s — delete the diff first"}`, snapID, id), http.StatusConflict)
-			return
+			return storage.SnapshotMetadata{}, http.StatusConflict, fmt.Errorf("cannot delete: snapshot %s is the base for diff snapshot %s — delete the diff first", snapID, id)
 		}
 	}
-	cp.snapshotsMu.RUnlock()
-
-	cp.snapshotsMu.Lock()
 	meta, ok := cp.snapshots[snapID]
-	if ok {
-		delete(cp.snapshots, snapID)
-	}
-	cp.snapshotsMu.Unlock()
-
+	cp.snapshotsMu.RUnlock()
 	if !ok {
-		http.Error(w, `{"error":"snapshot not found"}`, http.StatusNotFound)
-		return
+		return storage.SnapshotMetadata{}, http.StatusNotFound, fmt.Errorf("snapshot not found")
 	}
 
 	snapDir := storage.SnapshotDir(cp.workDir, snapID)
 	if err := storage.DeleteSnapshot(snapDir); err != nil {
-		log.Printf("Warning: failed to delete snapshot dir %s: %v", snapDir, err)
+		return meta, http.StatusInternalServerError, fmt.Errorf("delete snapshot dir %s: %w", snapDir, err)
+	}
+
+	cp.snapshotsMu.Lock()
+	delete(cp.snapshots, snapID)
+	cp.snapshotsMu.Unlock()
+	return meta, http.StatusOK, nil
+}
+
+// DELETE /snapshots/{snapshot_id}
+func (cp *ControlPlane) deleteSnapshot(w http.ResponseWriter, snapID string) {
+	meta, status, err := cp.deleteSnapshotByID(snapID)
+	if err != nil {
+		if status == http.StatusNotFound {
+			http.Error(w, `{"error":"snapshot not found"}`, http.StatusNotFound)
+			return
+		}
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), status)
+		return
 	}
 
 	log.Printf("Snapshot [%s] (%s, from VM %s) deleted.", snapID, meta.SnapshotType, meta.SourceVMID)
