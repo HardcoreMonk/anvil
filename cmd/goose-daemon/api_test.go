@@ -367,3 +367,95 @@ func TestHandleSnapshotGCRejectsInvalidPolicy(t *testing.T) {
 		})
 	}
 }
+
+func TestHandleSnapshotGCApplyDeletesCandidates(t *testing.T) {
+	now := time.Now().UTC()
+	cp := newTestCP(t)
+	addTestSnapshot(t, cp, testSnapshotMeta("snap-old", "vm-1", "full", now.Add(-10*24*time.Hour)))
+	addTestSnapshot(t, cp, testSnapshotMeta("snap-new", "vm-1", "full", now.Add(-1*time.Hour)))
+
+	req := httptest.NewRequest(http.MethodPost, "/snapshots/gc", bytes.NewReader([]byte(`{"older_than_seconds":604800,"apply":true}`)))
+	rr := httptest.NewRecorder()
+	cp.handleSnapshotGC(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q; want 200", rr.Code, rr.Body.String())
+	}
+	resp := decodeGCResponse(t, rr)
+	if !resp.Applied {
+		t.Fatal("apply response applied = false, want true")
+	}
+	if ids := strings.Join(snapshotIDs(resp.Deleted), ","); ids != "snap-old" {
+		t.Fatalf("deleted IDs = %s, want snap-old", ids)
+	}
+	if len(resp.Errors) != 0 {
+		t.Fatalf("errors = %#v, want empty", resp.Errors)
+	}
+	if _, ok := cp.snapshots["snap-old"]; ok {
+		t.Fatal("snap-old still exists in map after apply")
+	}
+	if _, err := os.Stat(storage.SnapshotDir(cp.workDir, "snap-old")); !os.IsNotExist(err) {
+		t.Fatalf("snap-old directory stat err = %v, want not exist", err)
+	}
+	if _, ok := cp.snapshots["snap-new"]; !ok {
+		t.Fatal("snap-new was removed from map")
+	}
+	if _, err := os.Stat(storage.SnapshotDir(cp.workDir, "snap-new")); err != nil {
+		t.Fatalf("snap-new directory missing: %v", err)
+	}
+}
+
+func TestHandleSnapshotGCApplyKeepsReferencedFullUntilNextRun(t *testing.T) {
+	now := time.Now().UTC()
+	cp := newTestCP(t)
+	full := testSnapshotMeta("snap-full", "vm-1", "full", now.Add(-10*24*time.Hour))
+	diff := testSnapshotMeta("snap-diff", "vm-1", "diff", now.Add(-9*24*time.Hour))
+	diff.BaseSnapshotID = "snap-full"
+	addTestSnapshot(t, cp, full)
+	addTestSnapshot(t, cp, diff)
+
+	req := httptest.NewRequest(http.MethodPost, "/snapshots/gc", bytes.NewReader([]byte(`{"older_than_seconds":604800,"apply":true}`)))
+	rr := httptest.NewRecorder()
+	cp.handleSnapshotGC(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q; want 200", rr.Code, rr.Body.String())
+	}
+	resp := decodeGCResponse(t, rr)
+	if ids := strings.Join(snapshotIDs(resp.Deleted), ","); ids != "snap-diff" {
+		t.Fatalf("deleted IDs = %s, want snap-diff", ids)
+	}
+	if _, ok := cp.snapshots["snap-full"]; !ok {
+		t.Fatal("referenced full snapshot was removed in same GC run")
+	}
+	if _, err := os.Stat(storage.SnapshotDir(cp.workDir, "snap-full")); err != nil {
+		t.Fatalf("referenced full snapshot directory missing: %v", err)
+	}
+}
+
+func TestDeleteSnapshotStillProtectsDiffBase(t *testing.T) {
+	now := time.Now().UTC()
+	cp := newTestCP(t)
+	full := testSnapshotMeta("snap-full", "vm-1", "full", now.Add(-10*24*time.Hour))
+	diff := testSnapshotMeta("snap-diff", "vm-1", "diff", now.Add(-9*24*time.Hour))
+	diff.BaseSnapshotID = "snap-full"
+	addTestSnapshot(t, cp, full)
+	addTestSnapshot(t, cp, diff)
+
+	req := httptest.NewRequest(http.MethodDelete, "/snapshots/snap-full", nil)
+	rr := httptest.NewRecorder()
+	cp.deleteSnapshot(rr, "snap-full")
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, body = %q; want 409", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "base for diff snapshot snap-diff") {
+		t.Fatalf("body = %q, want diff dependency error", rr.Body.String())
+	}
+	if _, ok := cp.snapshots["snap-full"]; !ok {
+		t.Fatal("protected full snapshot was removed from map")
+	}
+	if req.Method != http.MethodDelete {
+		t.Fatalf("request method changed to %s", req.Method)
+	}
+}
