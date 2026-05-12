@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
@@ -11,6 +12,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"ephemera/internal/storage"
 )
 
 // ---- profileConfigPaths ----
@@ -18,17 +22,64 @@ import (
 func newTestCP(t *testing.T) *ControlPlane {
 	t.Helper()
 	tmp := t.TempDir()
-	// Create stub default config files.
 	defaultCfg := filepath.Join(tmp, "goose.yaml")
 	defaultSec := filepath.Join(tmp, "goose-secrets.yaml")
 	os.WriteFile(defaultCfg, []byte("GOOSE_PROVIDER: default\n"), 0644)
 	os.WriteFile(defaultSec, []byte("DEFAULT_KEY: x\n"), 0644)
 	return &ControlPlane{
 		vms:              make(map[string]*runningVM),
+		snapshots:        make(map[string]storage.SnapshotMetadata),
 		workDir:          tmp,
 		gooseConfigPath:  defaultCfg,
 		gooseSecretsPath: defaultSec,
 	}
+}
+
+func testSnapshotMeta(snapshotID, sourceVMID, snapshotType string, createdAt time.Time) storage.SnapshotMetadata {
+	return storage.SnapshotMetadata{
+		SnapshotID:   snapshotID,
+		SourceVMID:   sourceVMID,
+		SnapshotType: snapshotType,
+		CreatedAt:    createdAt,
+	}
+}
+
+func addTestSnapshot(t *testing.T, cp *ControlPlane, meta storage.SnapshotMetadata) {
+	t.Helper()
+	snapDir := storage.SnapshotDir(cp.workDir, meta.SnapshotID)
+	if err := os.MkdirAll(snapDir, 0755); err != nil {
+		t.Fatalf("create snapshot dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(snapDir, "metadata.json"), []byte(`{}`), 0600); err != nil {
+		t.Fatalf("create snapshot metadata: %v", err)
+	}
+	cp.snapshots[meta.SnapshotID] = meta
+}
+
+func snapshotIDs(entries []SnapshotGCEntry) []string {
+	ids := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		ids = append(ids, entry.SnapshotID)
+	}
+	return ids
+}
+
+func gcEntryByID(entries []SnapshotGCEntry, snapshotID string) (SnapshotGCEntry, bool) {
+	for _, entry := range entries {
+		if entry.SnapshotID == snapshotID {
+			return entry, true
+		}
+	}
+	return SnapshotGCEntry{}, false
+}
+
+func decodeGCResponse(t *testing.T, rr *httptest.ResponseRecorder) SnapshotGCResponse {
+	t.Helper()
+	var resp SnapshotGCResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode GC response %q: %v", rr.Body.String(), err)
+	}
+	return resp
 }
 
 func TestProfileConfigPaths_EmptyProfile_ReturnsDefaults(t *testing.T) {
@@ -186,5 +237,51 @@ func TestHandleVMWorkspaceProxiesQueryAuthAndBody(t *testing.T) {
 	}
 	if gotBody != "hello" {
 		t.Fatalf("proxied body = %q, want hello", gotBody)
+	}
+}
+
+func TestPlanSnapshotGCProtectsReferencedAndKeepLast(t *testing.T) {
+	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
+	cp := newTestCP(t)
+
+	fullOld := testSnapshotMeta("snap-full-old", "vm-1", "full", now.Add(-10*24*time.Hour))
+	diffOld := testSnapshotMeta("snap-diff-old", "vm-1", "diff", now.Add(-9*24*time.Hour))
+	diffOld.BaseSnapshotID = "snap-full-old"
+	fullRecent := testSnapshotMeta("snap-full-recent", "vm-1", "full", now.Add(-1*time.Hour))
+	otherOld := testSnapshotMeta("snap-other-old", "vm-2", "full", now.Add(-8*24*time.Hour))
+	otherRecent := testSnapshotMeta("snap-other-recent", "vm-2", "full", now.Add(-30*time.Minute))
+
+	for _, meta := range []storage.SnapshotMetadata{fullOld, diffOld, fullRecent, otherOld, otherRecent} {
+		cp.snapshots[meta.SnapshotID] = meta
+	}
+
+	got := cp.planSnapshotGC(SnapshotGCPolicy{
+		OlderThanSeconds: int64((7 * 24 * time.Hour) / time.Second),
+		KeepLastPerVM:    1,
+	}, now)
+
+	if ids := strings.Join(snapshotIDs(got.Candidates), ","); ids != "snap-diff-old,snap-other-old" {
+		t.Fatalf("candidate IDs = %s, want snap-diff-old,snap-other-old", ids)
+	}
+
+	base, ok := gcEntryByID(got.Protected, "snap-full-old")
+	if !ok {
+		t.Fatal("snap-full-old was not protected")
+	}
+	if base.Reason != "referenced_by_diff" {
+		t.Fatalf("snap-full-old reason = %q, want referenced_by_diff", base.Reason)
+	}
+	if strings.Join(base.ReferencedBy, ",") != "snap-diff-old" {
+		t.Fatalf("snap-full-old referenced_by = %v, want [snap-diff-old]", base.ReferencedBy)
+	}
+
+	for _, snapshotID := range []string{"snap-full-recent", "snap-other-recent"} {
+		entry, ok := gcEntryByID(got.Protected, snapshotID)
+		if !ok {
+			t.Fatalf("%s was not protected", snapshotID)
+		}
+		if entry.Reason != "keep_last_per_vm" {
+			t.Fatalf("%s reason = %q, want keep_last_per_vm", snapshotID, entry.Reason)
+		}
 	}
 }
