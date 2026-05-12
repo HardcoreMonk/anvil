@@ -180,6 +180,7 @@ func NewControlPlane(
 	mux.HandleFunc("/vms", cp.handleVMs)
 	mux.HandleFunc("/vms/", cp.handleVM)
 	mux.HandleFunc("/snapshots", cp.handleSnapshots)
+	mux.HandleFunc("/snapshots/gc", cp.handleSnapshotGC)
 	mux.HandleFunc("/snapshots/", cp.handleSnapshotItem)
 	cp.srv = &http.Server{Addr: apiAddr, Handler: authMiddleware(cp.getClients, mux)}
 	return cp
@@ -231,6 +232,7 @@ func (cp *ControlPlane) Start() error {
 	log.Printf("  GET    /vms/{vm_id}/health               — proxy: agent health check")
 	log.Printf("  POST   /vms/{vm_id}/stop                 — proxy: stop agent")
 	log.Printf("  GET    /snapshots                        — list snapshots")
+	log.Printf("  POST   /snapshots/gc                     — plan/apply snapshot retention GC")
 	log.Printf("  POST   /snapshots/{snapshot_id}/restore  — restore VM from snapshot")
 	log.Printf("  DELETE /snapshots/{snapshot_id}          — delete snapshot")
 	if publicURL != "" {
@@ -787,6 +789,47 @@ func (cp *ControlPlane) planSnapshotGC(policy SnapshotGCPolicy, now time.Time) S
 }
 
 // ---- Snapshot handlers ----
+
+func writeJSONError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]string{"error": message})
+}
+
+// POST /snapshots/gc
+func (cp *ControlPlane) handleSnapshotGC(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req SnapshotGCRequest
+	if r.Body != nil {
+		dec := json.NewDecoder(r.Body)
+		if err := dec.Decode(&req); err != nil && err != io.EOF {
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON body: %v", err))
+			return
+		}
+	}
+	if req.OlderThanSeconds < 0 {
+		writeJSONError(w, http.StatusBadRequest, "older_than_seconds must be non-negative")
+		return
+	}
+	if req.KeepLastPerVM < 0 {
+		writeJSONError(w, http.StatusBadRequest, "keep_last_per_vm must be non-negative")
+		return
+	}
+
+	policy := SnapshotGCPolicy{
+		OlderThanSeconds: req.OlderThanSeconds,
+		KeepLastPerVM:    req.KeepLastPerVM,
+	}
+	resp := cp.planSnapshotGC(policy, time.Now().UTC())
+	resp.Applied = req.Apply
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
 
 // GET /snapshots
 func (cp *ControlPlane) handleSnapshots(w http.ResponseWriter, r *http.Request) {
