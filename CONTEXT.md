@@ -15,7 +15,9 @@ OpenClaw compatibility layer, shared gateway, shared runtime contract를 anvil
 현재 GitHub 저장소는 `https://github.com/HardcoreMonk/ephemera/`이다.
 ephemera는 이미 `0.1.0`, `0.2.0`이 릴리즈된 기반 runtime이며, 이 저장소의
 Go 모듈 경로와 기존 API/환경 변수에는 `ephemera` 또는 `goose` 이름이 남아
-있다. 문서에서는 anvil과 ephemera를 같은 이름으로 취급하지 않는다.
+있다. anvil 통합 릴리즈는 ephemera runtime tag와 충돌하지 않도록
+`anvil-v0.1.0`처럼 별도 prefix를 사용한다. 문서에서는 anvil과 ephemera를 같은
+이름으로 취급하지 않는다.
 
 ## 진실 기준 문서 순서
 
