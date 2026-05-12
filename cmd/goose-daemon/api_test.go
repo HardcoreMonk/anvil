@@ -458,3 +458,46 @@ func TestDeleteSnapshotStillProtectsDiffBase(t *testing.T) {
 		t.Fatalf("protected full snapshot directory missing: %v", err)
 	}
 }
+
+func TestDeleteSnapshotFailureDoesNotExposeSnapshotPath(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission-based delete failure is not reliable as root")
+	}
+
+	now := time.Now().UTC().Add(-2 * time.Hour)
+	cp := newTestCP(t)
+	meta := testSnapshotMeta("snap-fail", "vm-1", "full", now)
+	addTestSnapshot(t, cp, meta)
+
+	snapshotsDir := filepath.Join(cp.workDir, "snapshots")
+	snapDir := storage.SnapshotDir(cp.workDir, "snap-fail")
+	if err := os.Chmod(snapshotsDir, 0555); err != nil {
+		t.Fatalf("chmod snapshots dir read-only: %v", err)
+	}
+	defer os.Chmod(snapshotsDir, 0755)
+
+	rr := httptest.NewRecorder()
+	cp.deleteSnapshot(rr, "snap-fail")
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, body = %q; want %d", rr.Code, rr.Body.String(), http.StatusInternalServerError)
+	}
+	if !strings.Contains(rr.Body.String(), "failed to delete snapshot snap-fail") {
+		t.Fatalf("body = %q, want sanitized delete failure", rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), cp.workDir) || strings.Contains(rr.Body.String(), snapDir) {
+		t.Fatalf("body = %q, must not expose snapshot path %q", rr.Body.String(), snapDir)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/snapshots/gc", strings.NewReader(`{"older_than_seconds":0,"apply":true}`))
+	gcRR := httptest.NewRecorder()
+	cp.handleSnapshotGC(gcRR, req)
+	if gcRR.Code != http.StatusOK {
+		t.Fatalf("gc status = %d, body = %q; want %d", gcRR.Code, gcRR.Body.String(), http.StatusOK)
+	}
+	if !strings.Contains(gcRR.Body.String(), "failed to delete snapshot snap-fail") {
+		t.Fatalf("gc body = %q, want sanitized delete failure", gcRR.Body.String())
+	}
+	if strings.Contains(gcRR.Body.String(), cp.workDir) || strings.Contains(gcRR.Body.String(), snapDir) {
+		t.Fatalf("gc body = %q, must not expose snapshot path %q", gcRR.Body.String(), snapDir)
+	}
+}

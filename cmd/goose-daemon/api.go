@@ -123,6 +123,8 @@ type ControlPlane struct {
 	snapshotsMu sync.RWMutex
 	snapshots   map[string]storage.SnapshotMetadata
 
+	snapshotLifecycleMu sync.Mutex
+
 	// restoreMu serializes the bind-mount-setup + Firecracker-open window so that each
 	// Firecracker instance opens the topmost (correct) bind mount before the next restore
 	// can stack another one on top. Released as soon as RestoreMachine returns.
@@ -940,6 +942,9 @@ func (cp *ControlPlane) createSnapshot(w http.ResponseWriter, r *http.Request, v
 		return
 	}
 
+	cp.snapshotLifecycleMu.Lock()
+	defer cp.snapshotLifecycleMu.Unlock()
+
 	// Determine snapshot type (full or diff) and base snapshot ID.
 	snapType, baseSnapID, err := cp.resolveSnapshotType(req.Type, vmID)
 	if err != nil {
@@ -1302,6 +1307,9 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 }
 
 func (cp *ControlPlane) deleteSnapshotByID(snapID string) (storage.SnapshotMetadata, int, error) {
+	cp.snapshotLifecycleMu.Lock()
+	defer cp.snapshotLifecycleMu.Unlock()
+
 	cp.snapshotsMu.RLock()
 	for id, snap := range cp.snapshots {
 		if snap.BaseSnapshotID == snapID {
@@ -1317,7 +1325,8 @@ func (cp *ControlPlane) deleteSnapshotByID(snapID string) (storage.SnapshotMetad
 
 	snapDir := storage.SnapshotDir(cp.workDir, snapID)
 	if err := storage.DeleteSnapshot(snapDir); err != nil {
-		return meta, http.StatusInternalServerError, fmt.Errorf("delete snapshot dir %s: %w", snapDir, err)
+		log.Printf("Warning: failed to delete snapshot dir %s: %v", snapDir, err)
+		return meta, http.StatusInternalServerError, fmt.Errorf("failed to delete snapshot %s", snapID)
 	}
 
 	cp.snapshotsMu.Lock()
