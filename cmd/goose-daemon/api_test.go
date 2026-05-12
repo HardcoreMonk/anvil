@@ -425,6 +425,12 @@ func TestHandleSnapshotGCApplyKeepsReferencedFullUntilNextRun(t *testing.T) {
 	if ids := strings.Join(snapshotIDs(resp.Deleted), ","); ids != "snap-diff" {
 		t.Fatalf("deleted IDs = %s, want snap-diff", ids)
 	}
+	if _, ok := cp.snapshots["snap-diff"]; ok {
+		t.Fatal("snap-diff still exists in map after apply")
+	}
+	if _, err := os.Stat(storage.SnapshotDir(cp.workDir, "snap-diff")); !os.IsNotExist(err) {
+		t.Fatalf("snap-diff directory stat err = %v, want not exist", err)
+	}
 	if _, ok := cp.snapshots["snap-full"]; !ok {
 		t.Fatal("referenced full snapshot was removed in same GC run")
 	}
@@ -442,7 +448,6 @@ func TestDeleteSnapshotStillProtectsDiffBase(t *testing.T) {
 	addTestSnapshot(t, cp, full)
 	addTestSnapshot(t, cp, diff)
 
-	req := httptest.NewRequest(http.MethodDelete, "/snapshots/snap-full", nil)
 	rr := httptest.NewRecorder()
 	cp.deleteSnapshot(rr, "snap-full")
 
@@ -455,7 +460,7 @@ func TestDeleteSnapshotStillProtectsDiffBase(t *testing.T) {
 	if _, ok := cp.snapshots["snap-full"]; !ok {
 		t.Fatal("protected full snapshot was removed from map")
 	}
-	if req.Method != http.MethodDelete {
-		t.Fatalf("request method changed to %s", req.Method)
+	if _, err := os.Stat(storage.SnapshotDir(cp.workDir, "snap-full")); err != nil {
+		t.Fatalf("protected full snapshot directory missing: %v", err)
 	}
 }
