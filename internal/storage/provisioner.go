@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -60,7 +61,7 @@ func (p *Provisioner) EnsureGoldenImage() error {
 
 	// Execute the build script
 	cmd := exec.Command("bash", p.BuildScriptPath)
-	
+
 	// Pipe the script's output to the daemon's standard output for visibility
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -283,30 +284,193 @@ func EnsureMicroInit(binaryPath, projectRoot string) error {
 	return nil
 }
 
-// EnsureGooseAgent builds the goose-agent binary into binaryPath if it doesn't exist.
+const gooseAgentStampSuffix = ".sha256"
+
+// GooseAgentSourceHash returns a stable hash of inputs that affect the guest goose-agent binary.
+func GooseAgentSourceHash(projectRoot string) (string, error) {
+	var files []string
+	for _, rel := range []string{"go.mod", "go.sum"} {
+		if _, err := os.Stat(filepath.Join(projectRoot, rel)); err == nil {
+			files = append(files, rel)
+		} else if !os.IsNotExist(err) {
+			return "", fmt.Errorf("stat %s: %w", rel, err)
+		}
+	}
+
+	agentDir := filepath.Join(projectRoot, "cmd", "goose-agent")
+	if err := filepath.WalkDir(agentDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		rel, err := filepath.Rel(projectRoot, path)
+		if err != nil {
+			return err
+		}
+		files = append(files, rel)
+		return nil
+	}); err != nil {
+		return "", fmt.Errorf("walk goose-agent sources: %w", err)
+	}
+	sort.Strings(files)
+
+	h := sha256.New()
+	for _, rel := range files {
+		data, err := os.ReadFile(filepath.Join(projectRoot, rel))
+		if err != nil {
+			return "", fmt.Errorf("read %s: %w", rel, err)
+		}
+		io.WriteString(h, filepath.ToSlash(rel))
+		h.Write([]byte{0})
+		h.Write(data)
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func gooseAgentArtifactIsCurrent(binaryPath, wantHash string) (bool, error) {
+	if _, err := os.Stat(binaryPath); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	data, err := os.ReadFile(binaryPath + gooseAgentStampSuffix)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return strings.TrimSpace(string(data)) == wantHash, nil
+}
+
+func gooseAgentImageStampPath(mntDir string) string {
+	return filepath.Join(mntDir, "usr", "local", "bin", "goose-agent.sha256")
+}
+
+func gooseAgentImageIsCurrent(mntDir, wantHash string) (bool, error) {
+	data, err := os.ReadFile(gooseAgentImageStampPath(mntDir))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return strings.TrimSpace(string(data)) == wantHash, nil
+}
+
+func installGooseAgentIntoMountedImage(mntDir, binaryPath, sourceHash string) error {
+	dstDir := filepath.Join(mntDir, "usr", "local", "bin")
+	if err := os.MkdirAll(dstDir, 0755); err != nil {
+		return fmt.Errorf("create image binary dir: %w", err)
+	}
+	if err := copyFile(binaryPath, filepath.Join(dstDir, "goose-agent")); err != nil {
+		return fmt.Errorf("install image goose-agent: %w", err)
+	}
+	if err := os.Chmod(filepath.Join(dstDir, "goose-agent"), 0755); err != nil {
+		return fmt.Errorf("chmod image goose-agent: %w", err)
+	}
+	if err := os.WriteFile(gooseAgentImageStampPath(mntDir), []byte(sourceHash+"\n"), 0644); err != nil {
+		return fmt.Errorf("write image goose-agent stamp: %w", err)
+	}
+	return nil
+}
+
+// EnsureGoldenImageGooseAgent patches an existing golden image when its embedded
+// goose-agent source-hash stamp is stale. It assumes EnsureGooseAgent already ran.
+func EnsureGoldenImageGooseAgent(goldenImagePath, binaryPath string) error {
+	stamp, err := os.ReadFile(binaryPath + gooseAgentStampSuffix)
+	if err != nil {
+		return fmt.Errorf("read goose-agent source stamp: %w", err)
+	}
+	sourceHash := strings.TrimSpace(string(stamp))
+	if sourceHash == "" {
+		return fmt.Errorf("goose-agent source stamp is empty")
+	}
+
+	mntDir, err := os.MkdirTemp("", "goose-golden-image-*")
+	if err != nil {
+		return fmt.Errorf("create golden image mount dir: %w", err)
+	}
+	mounted := false
+	defer func() {
+		if mounted {
+			if err := exec.Command("umount", "-l", mntDir).Run(); err != nil {
+				log.Printf("Warning: failed to unmount golden image %s: %v", mntDir, err)
+			}
+		}
+		os.RemoveAll(mntDir)
+	}()
+
+	if out, err := exec.Command("mount", "-o", "loop", goldenImagePath, mntDir).CombinedOutput(); err != nil {
+		return fmt.Errorf("mount golden image: %w: %s", err, out)
+	}
+	mounted = true
+
+	current, err := gooseAgentImageIsCurrent(mntDir, sourceHash)
+	if err != nil {
+		return fmt.Errorf("check golden image goose-agent stamp: %w", err)
+	}
+	if current {
+		log.Printf("golden image goose-agent is current (source hash %s).", sourceHash)
+		return nil
+	}
+	log.Printf("Patching golden image goose-agent (source hash %s) ...", sourceHash)
+	return installGooseAgentIntoMountedImage(mntDir, binaryPath, sourceHash)
+}
+
+// EnsureGooseAgent builds the goose-agent binary into binaryPath if it doesn't exist
+// or if the sidecar source-hash stamp no longer matches the current source tree.
 // The binary is compiled from cmd/goose-agent/ in the projectRoot directory using
 // CGO_ENABLED=0 so it is statically linked and portable across the VM's glibc version.
 func EnsureGooseAgent(binaryPath, projectRoot string) error {
-	if _, err := os.Stat(binaryPath); err == nil {
-		log.Printf("goose-agent found at %s.", binaryPath)
+	sourceHash, err := GooseAgentSourceHash(projectRoot)
+	if err != nil {
+		return err
+	}
+	current, err := gooseAgentArtifactIsCurrent(binaryPath, sourceHash)
+	if err != nil {
+		return fmt.Errorf("check goose-agent artifact stamp: %w", err)
+	}
+	if current {
+		log.Printf("goose-agent found at %s (source hash %s).", binaryPath, sourceHash)
 		return nil
 	}
 
-	log.Printf("Building goose-agent at %s ...", binaryPath)
+	log.Printf("Building goose-agent at %s (source hash %s) ...", binaryPath, sourceHash)
 
 	if err := os.MkdirAll(filepath.Dir(binaryPath), 0755); err != nil {
 		return fmt.Errorf("failed to create artifacts dir: %w", err)
 	}
 
-	cmd := exec.Command("go", "build", "-o", binaryPath, "./cmd/goose-agent/")
+	tempPath := binaryPath + ".tmp"
+	os.Remove(tempPath)
+	cmd := exec.Command("go", "build", "-o", tempPath, "./cmd/goose-agent/")
 	cmd.Dir = projectRoot
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH=amd64")
 
 	if err := cmd.Run(); err != nil {
-		os.Remove(binaryPath)
+		os.Remove(tempPath)
 		return fmt.Errorf("failed to build goose-agent: %w", err)
+	}
+	if err := os.Rename(tempPath, binaryPath); err != nil {
+		os.Remove(tempPath)
+		return fmt.Errorf("replace goose-agent binary: %w", err)
+	}
+	if err := os.WriteFile(binaryPath+gooseAgentStampSuffix, []byte(sourceHash+"\n"), 0644); err != nil {
+		return fmt.Errorf("write goose-agent source stamp: %w", err)
 	}
 
 	log.Printf("goose-agent built at %s.", binaryPath)

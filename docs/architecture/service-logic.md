@@ -343,7 +343,7 @@ Startup:
 main()
   -> /root/.ephemera-agent-token 읽기
   -> vsock CHANGE_IP listener 시작
-  -> /tasks, /stop, /health 등록
+  -> /tasks, /workspace, /stop, /health 등록
   -> 기본 :8080 listen
 ```
 
@@ -359,6 +359,24 @@ POST /tasks
   -> prompt를 stdin으로 넘겨 /usr/local/bin/goose run -i - 실행
   -> {"output":"..."} 또는 {"output":"...","error":"..."} 반환
   -> busy=false
+```
+
+Workspace file copy:
+
+```text
+PUT /workspace?path=<relative-path>[&overwrite=true]
+  -> VM /workspace 기준 relative path 검증
+  -> body가 4 MiB를 초과하면 413 JSON error
+  -> overwrite=false 기본값이면 기존 file 존재 시 409 JSON error
+  -> parent directory 생성
+  -> raw bytes 저장
+  -> {"path":"...","bytes":N} 반환
+
+GET /workspace?path=<relative-path>
+  -> VM /workspace 기준 relative path 검증
+  -> file 없음이면 404 JSON error
+  -> file이 4 MiB를 초과하면 413 JSON error
+  -> raw bytes 반환
 ```
 
 Health:
@@ -410,6 +428,8 @@ micro-init
 - VM 없음: 일반적으로 `404`
 - Snapshot base dependency conflict: `409`
 - Invalid profile 또는 invalid snapshot type request: `400`
+- Workspace copy error: `{"error":"..."}` JSON body와 함께 `400`, `404`,
+  `409`, `413`, `500` 중 하나
 - Host/runtime setup 실패: 일반적으로 `500`
 - Agent proxy connection 실패: `502`
 

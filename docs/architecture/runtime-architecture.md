@@ -84,6 +84,7 @@ Host disk 상태:
 | `artifacts/vmlinux.bin` | Firecracker 호환 Linux kernel |
 | `artifacts/firecracker` | 다운로드 시 SHA256 검증된 Firecracker binary |
 | `artifacts/goose-agent` | VM 내부 HTTP agent binary |
+| `artifacts/goose-agent.sha256` | `cmd/goose-agent`, `go.mod`, `go.sum` 기준 source hash stamp |
 | `artifacts/micro-init` | VM 내부 PID 1 binary |
 | `/tmp/goose-workspaces/<vm_id>.ext4` | cold-spawn VM의 writable rootfs clone |
 | `/tmp/goose-workspaces/<vm_id>.cow` | COW-restored VM의 sparse exception store |
@@ -100,6 +101,7 @@ Guest disk 상태:
 | `/root/.config/goose/secrets.yaml` | 주입된 Goose secrets |
 | `/root/.ephemera-agent-token` | VM별 guest agent Bearer token, mode `0600` |
 | `/usr/local/bin/goose-agent` | guest task server |
+| `/usr/local/bin/goose-agent.sha256` | golden image에 설치된 guest agent source hash stamp |
 | `/usr/local/sbin/micro-init` | guest PID 1 |
 
 ## 시작 흐름
@@ -109,11 +111,13 @@ cmd/goose-daemon/main.go
   -> project-relative artifact/config path 해석
   -> snapshots/ 없으면 생성
   -> artifacts/micro-init compile 또는 재사용
-  -> artifacts/goose-agent compile 또는 재사용
+  -> artifacts/goose-agent source hash 확인 후 compile 또는 재사용
   -> storage.Provisioner 생성
        -> /tmp/goose-workspaces 보장
        -> artifacts/golden-image.ext4 보장
        -> 없으면 scripts/build_image.sh 실행
+  -> golden image 내부 goose-agent hash stamp 확인
+       -> host artifact stamp와 다르면 image 내부 /usr/local/bin/goose-agent 교체
   -> Firecracker kernel 다운로드 또는 재사용
   -> Firecracker binary 다운로드 또는 재사용, SHA256 검증
   -> network.Manager 생성

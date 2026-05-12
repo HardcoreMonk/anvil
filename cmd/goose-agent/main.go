@@ -50,6 +50,7 @@ func agentListenAddr() string {
 
 const agentTokenPath = "/root/.ephemera-agent-token"
 const workspaceRoot = "/workspace"
+const maxWorkspaceFileBytes = 4 << 20
 
 // loadAgentToken reads the per-VM Bearer token written by the control plane at VM provision time.
 // Returns an empty string (auth disabled) if the file does not exist — backward compatible with
@@ -196,6 +197,16 @@ type WorkspaceWriteResult struct {
 	Bytes int64  `json:"bytes"`
 }
 
+type ErrorResponse struct {
+	Error string `json:"error"`
+}
+
+func writeJSONError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(ErrorResponse{Error: message})
+}
+
 func workspaceFilePath(root, relPath string) (string, error) {
 	relPath = strings.TrimSpace(relPath)
 	if relPath == "" || filepath.IsAbs(relPath) {
@@ -221,59 +232,88 @@ func workspaceFilePath(root, relPath string) (string, error) {
 	return fullPath, nil
 }
 
+func workspaceOverwriteAllowed(r *http.Request) bool {
+	return strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("overwrite")), "true")
+}
+
 func workspaceHandler(root string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		fullPath, err := workspaceFilePath(root, r.URL.Query().Get("path"))
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
 		switch r.Method {
 		case http.MethodPut:
-			if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
-				http.Error(w, fmt.Sprintf("create parent directory: %v", err), http.StatusInternalServerError)
-				return
-			}
-			out, err := os.Create(fullPath)
+			data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxWorkspaceFileBytes))
 			if err != nil {
-				http.Error(w, fmt.Sprintf("create workspace file: %v", err), http.StatusInternalServerError)
+				writeJSONError(w, http.StatusRequestEntityTooLarge, "workspace file exceeds size limit")
 				return
 			}
-			n, copyErr := io.Copy(out, r.Body)
+			if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+				writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("create parent directory: %v", err))
+				return
+			}
+
+			flags := os.O_WRONLY | os.O_CREATE
+			if workspaceOverwriteAllowed(r) {
+				flags |= os.O_TRUNC
+			} else {
+				flags |= os.O_EXCL
+			}
+			out, err := os.OpenFile(fullPath, flags, 0644)
+			if err != nil {
+				if os.IsExist(err) {
+					writeJSONError(w, http.StatusConflict, "workspace file already exists")
+					return
+				}
+				writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("create workspace file: %v", err))
+				return
+			}
+			n, copyErr := out.Write(data)
 			closeErr := out.Close()
 			if copyErr != nil {
-				http.Error(w, fmt.Sprintf("write workspace file: %v", copyErr), http.StatusInternalServerError)
+				writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("write workspace file: %v", copyErr))
 				return
 			}
 			if closeErr != nil {
-				http.Error(w, fmt.Sprintf("close workspace file: %v", closeErr), http.StatusInternalServerError)
+				writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("close workspace file: %v", closeErr))
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(WorkspaceWriteResult{
 				Path:  filepath.ToSlash(strings.TrimPrefix(fullPath, filepath.Clean(root)+string(os.PathSeparator))),
-				Bytes: n,
+				Bytes: int64(n),
 			})
 
 		case http.MethodGet:
 			in, err := os.Open(fullPath)
 			if err != nil {
 				if os.IsNotExist(err) {
-					http.Error(w, "workspace file not found", http.StatusNotFound)
+					writeJSONError(w, http.StatusNotFound, "workspace file not found")
 					return
 				}
-				http.Error(w, fmt.Sprintf("open workspace file: %v", err), http.StatusInternalServerError)
+				writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("open workspace file: %v", err))
 				return
 			}
 			defer in.Close()
+			info, err := in.Stat()
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("stat workspace file: %v", err))
+				return
+			}
+			if info.Size() > maxWorkspaceFileBytes {
+				writeJSONError(w, http.StatusRequestEntityTooLarge, "workspace file exceeds size limit")
+				return
+			}
 			w.Header().Set("Content-Type", "application/octet-stream")
 			if _, err := io.Copy(w, in); err != nil {
 				log.Printf("workspace response copy failed: %v", err)
 			}
 
 		default:
-			http.Error(w, "GET or PUT required", http.StatusMethodNotAllowed)
+			writeJSONError(w, http.StatusMethodNotAllowed, "GET or PUT required")
 		}
 	}
 }

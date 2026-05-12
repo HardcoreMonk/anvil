@@ -36,14 +36,14 @@ func toolRegistrations() []toolRegistration {
 		},
 		{
 			name:        "anvil_copy_in",
-			description: "Write a single text file into an ephemera VM workspace using vm_id or session_name.",
+			description: "Write a single file into an ephemera VM workspace using vm_id or session_name.",
 			register: func(server *mcp.Server, tool *mcp.Tool, tools *anvilmcp.Tools) {
 				mcp.AddTool(server, tool, tools.MCPCopyIn)
 			},
 		},
 		{
 			name:        "anvil_copy_out",
-			description: "Read a single text file from an ephemera VM workspace using vm_id or session_name.",
+			description: "Read a single file from an ephemera VM workspace using vm_id or session_name.",
 			register: func(server *mcp.Server, tool *mcp.Tool, tools *anvilmcp.Tools) {
 				mcp.AddTool(server, tool, tools.MCPCopyOut)
 			},

@@ -13,8 +13,8 @@ func TestToolRegistrationsIncludeSnapshotTools(t *testing.T) {
 	want := map[string]string{
 		"anvil_spawn_vm":         "Create an ephemera VM and optionally bind a local session_name alias.",
 		"anvil_run_task":         "Run a prompt synchronously in an existing ephemera VM using vm_id or session_name.",
-		"anvil_copy_in":          "Write a single text file into an ephemera VM workspace using vm_id or session_name.",
-		"anvil_copy_out":         "Read a single text file from an ephemera VM workspace using vm_id or session_name.",
+		"anvil_copy_in":          "Write a single file into an ephemera VM workspace using vm_id or session_name.",
+		"anvil_copy_out":         "Read a single file from an ephemera VM workspace using vm_id or session_name.",
 		"anvil_get_vm_health":    "Return health for an existing ephemera VM agent using vm_id or session_name.",
 		"anvil_stop_vm":          "Ask the ephemera VM agent to stop gracefully without deleting VM resources.",
 		"anvil_delete_vm":        "Delete an ephemera VM and release its session_name alias if present.",

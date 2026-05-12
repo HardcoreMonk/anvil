@@ -93,8 +93,8 @@ Validation:
 |---|---|---|
 | `anvil_spawn_vm` | `POST /vms` | VM 생성 및 optional `session_name` alias binding |
 | `anvil_run_task` | `POST /vms/{vm_id}/tasks` | daemon agent proxy를 통해 VM에서 prompt 실행 |
-| `anvil_copy_in` | `PUT /vms/{vm_id}/workspace?path=...` | VM `/workspace` 아래 단일 text file 쓰기 |
-| `anvil_copy_out` | `GET /vms/{vm_id}/workspace?path=...` | VM `/workspace` 아래 단일 text file 읽기 |
+| `anvil_copy_in` | `PUT /vms/{vm_id}/workspace?path=...` | VM `/workspace` 아래 단일 file 쓰기 |
+| `anvil_copy_out` | `GET /vms/{vm_id}/workspace?path=...` | VM `/workspace` 아래 단일 file 읽기 |
 | `anvil_get_vm_health` | `GET /vms/{vm_id}/health` | daemon proxy를 통해 guest agent health 반환 |
 | `anvil_stop_vm` | `POST /vms/{vm_id}/stop` | guest agent에 graceful stop 요청 |
 | `anvil_delete_vm` | `DELETE /vms/{vm_id}` | VM resource 삭제 및 관련 session alias 해제 |
@@ -176,7 +176,9 @@ Validation:
   "vm_id": "optional-if-session-name-is-set",
   "session_name": "optional-if-vm-id-is-set",
   "path": "notes/task.txt",
-  "content": "file content"
+  "content": "file content",
+  "encoding": "text",
+  "overwrite": false
 }
 ```
 
@@ -185,9 +187,14 @@ Validation:
 - VM identity를 resolve한다.
 - `path`는 VM 내부 `/workspace` 기준 상대경로다.
 - 빈 path, 절대경로, `..` traversal, backslash가 포함된 path를 거부한다.
-- `PUT /vms/{vm_id}/workspace?path=...`를 호출한다.
+- `encoding`은 생략, `text`, `base64`만 허용한다. 생략하면 `text`다.
+- `base64` copy-in은 content를 decode한 raw bytes를 VM에 저장한다.
+- 단일 파일 payload는 4 MiB를 초과할 수 없다.
+- `overwrite` 기본값은 `false`다. 기존 file이 있으면 guest agent가 `409`를 반환한다.
+- `overwrite: true`이면 `PUT /vms/{vm_id}/workspace?path=...&overwrite=true`를 호출한다.
 - daemon은 guest agent token을 주입하고, guest agent가 parent directory를 만든 뒤
   파일을 저장한다.
+- workspace error body는 JSON `{"error":"..."}` 형식이다.
 
 출력:
 
@@ -206,7 +213,8 @@ Validation:
 {
   "vm_id": "optional-if-session-name-is-set",
   "session_name": "optional-if-vm-id-is-set",
-  "path": "notes/task.txt"
+  "path": "notes/task.txt",
+  "encoding": "text"
 }
 ```
 
@@ -214,6 +222,9 @@ Validation:
 
 - VM identity를 resolve한다.
 - `path`는 `anvil_copy_in`과 같은 validation을 거친다.
+- `encoding`은 생략, `text`, `base64`만 허용한다. 생략하면 `text`다.
+- `base64` copy-out은 VM에서 읽은 raw bytes를 base64 string으로 반환한다.
+- guest agent는 4 MiB를 초과하는 file read를 `413`으로 거부한다.
 - `GET /vms/{vm_id}/workspace?path=...`를 호출한다.
 - guest agent가 파일을 찾지 못하면 daemon error가 그대로 반환된다.
 
@@ -222,7 +233,8 @@ Validation:
 ```json
 {
   "path": "notes/task.txt",
-  "content": "file content"
+  "content": "file content",
+  "encoding": "text"
 }
 ```
 

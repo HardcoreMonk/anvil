@@ -23,15 +23,15 @@ func main() {
 		log.Fatalf("Fatal: %v", err)
 	}
 
-	goldenImagePath  := filepath.Join(cwd, "artifacts/golden-image.ext4")
-	buildScriptPath  := filepath.Join(cwd, "scripts/build_image.sh")
-	kernelPath       := filepath.Join(cwd, "artifacts/vmlinux.bin")
-	firecrackerPath  := filepath.Join(cwd, "artifacts/firecracker")
-	microInitPath    := filepath.Join(cwd, "artifacts/micro-init")
-	gooseAgentPath   := filepath.Join(cwd, "artifacts/goose-agent")
-	gooseConfigPath  := filepath.Join(cwd, "configs/goose.yaml")
+	goldenImagePath := filepath.Join(cwd, "artifacts/golden-image.ext4")
+	buildScriptPath := filepath.Join(cwd, "scripts/build_image.sh")
+	kernelPath := filepath.Join(cwd, "artifacts/vmlinux.bin")
+	firecrackerPath := filepath.Join(cwd, "artifacts/firecracker")
+	microInitPath := filepath.Join(cwd, "artifacts/micro-init")
+	gooseAgentPath := filepath.Join(cwd, "artifacts/goose-agent")
+	gooseConfigPath := filepath.Join(cwd, "configs/goose.yaml")
 	gooseSecretsPath := filepath.Join(cwd, "configs/goose-secrets.yaml")
-	snapshotDir      := filepath.Join(cwd, "snapshots")
+	snapshotDir := filepath.Join(cwd, "snapshots")
 
 	if err := os.MkdirAll(snapshotDir, 0755); err != nil {
 		log.Fatalf("Fatal: failed to create snapshot directory: %v", err)
@@ -58,6 +58,10 @@ func main() {
 	log.Println("Initializing Storage Provisioner...")
 	provisioner, err := storage.NewProvisioner(goldenImagePath, "/tmp/goose-workspaces", buildScriptPath)
 	if err != nil {
+		log.Fatalf("Fatal: %v", err)
+	}
+	log.Println("Ensuring golden image goose-agent...")
+	if err := storage.EnsureGoldenImageGooseAgent(goldenImagePath, gooseAgentPath); err != nil {
 		log.Fatalf("Fatal: %v", err)
 	}
 

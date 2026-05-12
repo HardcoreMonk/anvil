@@ -118,3 +118,137 @@ func TestPrepareVM_NoTokenFileWhenTokenEmpty(t *testing.T) {
 		t.Errorf("expected no token file, but it exists (stat err: %v)", err)
 	}
 }
+
+func TestGooseAgentSourceHashChangesWhenSourceChanges(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "cmd", "goose-agent"), 0755); err != nil {
+		t.Fatalf("mkdir goose-agent: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module test\n"), 0644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "go.sum"), []byte(""), 0644); err != nil {
+		t.Fatalf("write go.sum: %v", err)
+	}
+	sourcePath := filepath.Join(root, "cmd", "goose-agent", "main.go")
+	if err := os.WriteFile(sourcePath, []byte("package main\nfunc main() {}\n"), 0644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	first, err := GooseAgentSourceHash(root)
+	if err != nil {
+		t.Fatalf("GooseAgentSourceHash first: %v", err)
+	}
+	if err := os.WriteFile(sourcePath, []byte("package main\nfunc main() { println(\"changed\") }\n"), 0644); err != nil {
+		t.Fatalf("rewrite source: %v", err)
+	}
+	second, err := GooseAgentSourceHash(root)
+	if err != nil {
+		t.Fatalf("GooseAgentSourceHash second: %v", err)
+	}
+
+	if first == second {
+		t.Fatalf("source hash did not change after source edit: %s", first)
+	}
+}
+
+func TestGooseAgentArtifactIsCurrentUsesStamp(t *testing.T) {
+	tmp := t.TempDir()
+	binaryPath := filepath.Join(tmp, "goose-agent")
+	if err := os.WriteFile(binaryPath, []byte("binary"), 0755); err != nil {
+		t.Fatalf("write binary: %v", err)
+	}
+	if err := os.WriteFile(binaryPath+".sha256", []byte("abc123\n"), 0644); err != nil {
+		t.Fatalf("write stamp: %v", err)
+	}
+
+	current, err := gooseAgentArtifactIsCurrent(binaryPath, "abc123")
+	if err != nil {
+		t.Fatalf("gooseAgentArtifactIsCurrent current: %v", err)
+	}
+	if !current {
+		t.Fatal("artifact with matching stamp should be current")
+	}
+
+	current, err = gooseAgentArtifactIsCurrent(binaryPath, "def456")
+	if err != nil {
+		t.Fatalf("gooseAgentArtifactIsCurrent stale: %v", err)
+	}
+	if current {
+		t.Fatal("artifact with mismatched stamp should be stale")
+	}
+}
+
+func TestGooseAgentArtifactIsCurrentFalseWhenStampMissing(t *testing.T) {
+	tmp := t.TempDir()
+	binaryPath := filepath.Join(tmp, "goose-agent")
+	if err := os.WriteFile(binaryPath, []byte("binary"), 0755); err != nil {
+		t.Fatalf("write binary: %v", err)
+	}
+
+	current, err := gooseAgentArtifactIsCurrent(binaryPath, "abc123")
+	if err != nil {
+		t.Fatalf("gooseAgentArtifactIsCurrent: %v", err)
+	}
+	if current {
+		t.Fatal("artifact without stamp should be stale")
+	}
+}
+
+func TestGooseAgentImageIsCurrentUsesMountedStamp(t *testing.T) {
+	mntDir := t.TempDir()
+	stampPath := filepath.Join(mntDir, "usr", "local", "bin", "goose-agent.sha256")
+	if err := os.MkdirAll(filepath.Dir(stampPath), 0755); err != nil {
+		t.Fatalf("mkdir stamp dir: %v", err)
+	}
+	if err := os.WriteFile(stampPath, []byte("abc123\n"), 0644); err != nil {
+		t.Fatalf("write stamp: %v", err)
+	}
+
+	current, err := gooseAgentImageIsCurrent(mntDir, "abc123")
+	if err != nil {
+		t.Fatalf("gooseAgentImageIsCurrent current: %v", err)
+	}
+	if !current {
+		t.Fatal("image with matching stamp should be current")
+	}
+
+	current, err = gooseAgentImageIsCurrent(mntDir, "def456")
+	if err != nil {
+		t.Fatalf("gooseAgentImageIsCurrent stale: %v", err)
+	}
+	if current {
+		t.Fatal("image with mismatched stamp should be stale")
+	}
+}
+
+func TestInstallGooseAgentIntoMountedImageWritesBinaryAndStamp(t *testing.T) {
+	tmp := t.TempDir()
+	mntDir := filepath.Join(tmp, "mnt")
+	if err := os.MkdirAll(filepath.Join(mntDir, "usr", "local", "bin"), 0755); err != nil {
+		t.Fatalf("mkdir image bin dir: %v", err)
+	}
+	binaryPath := filepath.Join(tmp, "goose-agent")
+	if err := os.WriteFile(binaryPath, []byte("new-binary"), 0755); err != nil {
+		t.Fatalf("write binary: %v", err)
+	}
+
+	if err := installGooseAgentIntoMountedImage(mntDir, binaryPath, "abc123"); err != nil {
+		t.Fatalf("installGooseAgentIntoMountedImage: %v", err)
+	}
+
+	imageBinary, err := os.ReadFile(filepath.Join(mntDir, "usr", "local", "bin", "goose-agent"))
+	if err != nil {
+		t.Fatalf("read image binary: %v", err)
+	}
+	if string(imageBinary) != "new-binary" {
+		t.Fatalf("image binary = %q, want new-binary", string(imageBinary))
+	}
+	stamp, err := os.ReadFile(filepath.Join(mntDir, "usr", "local", "bin", "goose-agent.sha256"))
+	if err != nil {
+		t.Fatalf("read image stamp: %v", err)
+	}
+	if string(stamp) != "abc123\n" {
+		t.Fatalf("image stamp = %q, want abc123 newline", string(stamp))
+	}
+}

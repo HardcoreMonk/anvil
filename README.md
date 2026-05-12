@@ -432,8 +432,8 @@ MCP tool:
 |---|---|
 | `anvil_spawn_vm` | ephemera VM을 만들고 optional `session_name` alias를 연결한다. |
 | `anvil_run_task` | `vm_id` 또는 `session_name`으로 VM에 prompt를 실행한다. |
-| `anvil_copy_in` | `vm_id` 또는 `session_name`으로 VM `/workspace`에 단일 text file을 쓴다. |
-| `anvil_copy_out` | `vm_id` 또는 `session_name`으로 VM `/workspace`의 단일 text file을 읽는다. |
+| `anvil_copy_in` | `vm_id` 또는 `session_name`으로 VM `/workspace`에 단일 file을 쓴다. |
+| `anvil_copy_out` | `vm_id` 또는 `session_name`으로 VM `/workspace`의 단일 file을 읽는다. |
 | `anvil_get_vm_health` | VM agent health를 확인한다. |
 | `anvil_stop_vm` | guest agent에 graceful stop을 요청한다. |
 | `anvil_delete_vm` | host VM 리소스를 삭제하고 session alias를 해제한다. |
@@ -443,11 +443,14 @@ MCP tool:
 | `anvil_delete_snapshot` | `snapshot_id`로 snapshot을 삭제한다. |
 
 MCP adapter는 얇은 runtime bridge다. 현재 workspace copy는 VM 내부
-`/workspace` 기준 단일 text file copy-in/copy-out만 지원한다. directory sync,
-snapshot alias, session alias 영속화, HTTP MCP transport는 제공하지 않는다.
-Restore 응답은 daemon의 `agent_token`을 decode할 수 있지만 MCP output에는
-노출하지 않는다. Restore 후 `session_name` bind가 실패하면 adapter는 restored
-VM을 자동 삭제하지 않고 error에 restored VM ID를 포함한다.
+`/workspace` 기준 단일 file copy-in/copy-out만 지원한다. 기본 encoding은
+`text`이고, binary payload는 `encoding: "base64"`로 전달한다. 단일 파일 크기는
+4 MiB로 제한하며, copy-in은 기본적으로 기존 파일을 덮어쓰지 않는다.
+`overwrite: true`를 명시해야 교체한다. directory sync, snapshot alias,
+session alias 영속화, HTTP MCP transport는 제공하지 않는다. Restore 응답은
+daemon의 `agent_token`을 decode할 수 있지만 MCP output에는 노출하지 않는다.
+Restore 후 `session_name` bind가 실패하면 adapter는 restored VM을 자동 삭제하지
+않고 error에 restored VM ID를 포함한다.
 
 정확한 입력/출력 계약은 `docs/architecture/mcp-architecture.md`를 참조한다.
 

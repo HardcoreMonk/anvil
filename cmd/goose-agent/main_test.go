@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -145,5 +146,121 @@ func TestHandleWorkspaceMissingFile(t *testing.T) {
 
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rr.Code)
+	}
+}
+
+func TestHandleWorkspaceRejectsOverwriteByDefault(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "notes"), 0755); err != nil {
+		t.Fatalf("mkdir notes: %v", err)
+	}
+	target := filepath.Join(root, "notes", "task.txt")
+	if err := os.WriteFile(target, []byte("old"), 0644); err != nil {
+		t.Fatalf("write old file: %v", err)
+	}
+	handler := workspaceHandler(root)
+
+	req := httptest.NewRequest(http.MethodPut, "/workspace?path=notes/task.txt", strings.NewReader("new"))
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, body = %q; want 409", rr.Code, rr.Body.String())
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	if string(got) != "old" {
+		t.Fatalf("file content = %q, want old", string(got))
+	}
+	assertJSONError(t, rr, "workspace file already exists")
+}
+
+func TestHandleWorkspaceAllowsExplicitOverwrite(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "notes"), 0755); err != nil {
+		t.Fatalf("mkdir notes: %v", err)
+	}
+	target := filepath.Join(root, "notes", "task.txt")
+	if err := os.WriteFile(target, []byte("old"), 0644); err != nil {
+		t.Fatalf("write old file: %v", err)
+	}
+	handler := workspaceHandler(root)
+
+	req := httptest.NewRequest(http.MethodPut, "/workspace?path=notes/task.txt&overwrite=true", strings.NewReader("new"))
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q; want 200", rr.Code, rr.Body.String())
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	if string(got) != "new" {
+		t.Fatalf("file content = %q, want new", string(got))
+	}
+}
+
+func TestHandleWorkspaceRejectsOversizedPut(t *testing.T) {
+	handler := workspaceHandler(t.TempDir())
+	body := strings.NewReader(strings.Repeat("x", maxWorkspaceFileBytes+1))
+	req := httptest.NewRequest(http.MethodPut, "/workspace?path=large.txt", body)
+	rr := httptest.NewRecorder()
+
+	handler(rr, req)
+
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, body = %q; want 413", rr.Code, rr.Body.String())
+	}
+	assertJSONError(t, rr, "workspace file exceeds size limit")
+}
+
+func TestHandleWorkspaceRejectsOversizedGet(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "large.txt")
+	if err := os.WriteFile(target, []byte(strings.Repeat("x", maxWorkspaceFileBytes+1)), 0644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	handler := workspaceHandler(root)
+	req := httptest.NewRequest(http.MethodGet, "/workspace?path=large.txt", nil)
+	rr := httptest.NewRecorder()
+
+	handler(rr, req)
+
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, body = %q; want 413", rr.Code, rr.Body.String())
+	}
+	assertJSONError(t, rr, "workspace file exceeds size limit")
+}
+
+func TestHandleWorkspaceErrorsAreJSON(t *testing.T) {
+	handler := workspaceHandler(t.TempDir())
+	req := httptest.NewRequest(http.MethodGet, "/workspace?path=../secret.txt", nil)
+	rr := httptest.NewRecorder()
+
+	handler(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rr.Code)
+	}
+	assertJSONError(t, rr, "path must stay within workspace")
+}
+
+func assertJSONError(t *testing.T, rr *httptest.ResponseRecorder, want string) {
+	t.Helper()
+	if got := rr.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", got)
+	}
+	var body struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode JSON error body %q: %v", rr.Body.String(), err)
+	}
+	if body.Error != want {
+		t.Fatalf("error = %q, want %q", body.Error, want)
 	}
 }

@@ -72,11 +72,15 @@ rm -rf "$GOOSE_TMP"; GOOSE_TMP=""
 
 # goose-agent is pre-built by the daemon (EnsureGooseAgent) before this script runs.
 GOOSE_AGENT_BIN="artifacts/goose-agent"
+GOOSE_AGENT_STAMP="${GOOSE_AGENT_BIN}.sha256"
 if [ ! -f "$GOOSE_AGENT_BIN" ]; then
     echo "Error: $GOOSE_AGENT_BIN not found. The daemon builds it automatically." >&2
     exit 1
 fi
 install -m 755 "$GOOSE_AGENT_BIN" "$MNT_DIR/usr/local/bin/goose-agent"
+if [ -f "$GOOSE_AGENT_STAMP" ]; then
+    install -m 644 "$GOOSE_AGENT_STAMP" "$MNT_DIR/usr/local/bin/goose-agent.sha256"
+fi
 
 echo "==> 5. Installing micro-init binary <=="
 # micro-init is a Go binary (cmd/micro-init/) pre-built by the daemon before this

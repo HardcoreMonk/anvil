@@ -2,6 +2,7 @@ package anvilmcp
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"path"
 	"strings"
@@ -10,12 +11,16 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-const maxTimeoutSeconds = int((24 * time.Hour) / time.Second)
+const (
+	maxTimeoutSeconds = int((24 * time.Hour) / time.Second)
+	// MaxWorkspaceFileBytes is the v1 single-file copy size limit.
+	MaxWorkspaceFileBytes = 4 << 20
+)
 
 type Daemon interface {
 	SpawnVM(ctx context.Context, profile string) (*SpawnVMResponse, error)
 	RunTask(ctx context.Context, vmID, prompt string) (*RawDaemonResponse, error)
-	CopyIn(ctx context.Context, vmID, workspacePath, content string) (*RawDaemonResponse, error)
+	CopyIn(ctx context.Context, vmID, workspacePath, content string, overwrite bool) (*RawDaemonResponse, error)
 	CopyOut(ctx context.Context, vmID, workspacePath string) (string, error)
 	Health(ctx context.Context, vmID string) (*RawDaemonResponse, error)
 	Stop(ctx context.Context, vmID string) (*RawDaemonResponse, error)
@@ -64,17 +69,21 @@ type CopyInInput struct {
 	SessionName string `json:"session_name,omitempty"`
 	Path        string `json:"path"`
 	Content     string `json:"content"`
+	Encoding    string `json:"encoding,omitempty"`
+	Overwrite   bool   `json:"overwrite,omitempty"`
 }
 
 type CopyOutInput struct {
 	VMID        string `json:"vm_id,omitempty"`
 	SessionName string `json:"session_name,omitempty"`
 	Path        string `json:"path"`
+	Encoding    string `json:"encoding,omitempty"`
 }
 
 type CopyOutOutput struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
+	Path     string `json:"path"`
+	Content  string `json:"content"`
+	Encoding string `json:"encoding"`
 }
 
 type VMIdentityInput struct {
@@ -223,11 +232,26 @@ func (t *Tools) CopyIn(ctx context.Context, input CopyInInput) (*RawDaemonRespon
 	if err != nil {
 		return nil, err
 	}
+	encoding, err := normalizeWorkspaceEncoding(input.Encoding)
+	if err != nil {
+		return nil, err
+	}
+	content := input.Content
+	if encoding == "base64" {
+		data, err := base64.StdEncoding.DecodeString(content)
+		if err != nil {
+			return nil, fmt.Errorf("content must be valid base64")
+		}
+		content = string(data)
+	}
+	if len([]byte(content)) > MaxWorkspaceFileBytes {
+		return nil, fmt.Errorf("content exceeds %d byte workspace file limit", MaxWorkspaceFileBytes)
+	}
 	vmID, err := t.resolveIdentity(input.VMID, input.SessionName)
 	if err != nil {
 		return nil, err
 	}
-	return t.daemon.CopyIn(ctx, vmID, workspacePath, input.Content)
+	return t.daemon.CopyIn(ctx, vmID, workspacePath, content, input.Overwrite)
 }
 
 func (t *Tools) MCPCopyIn(ctx context.Context, req *mcp.CallToolRequest, input CopyInInput) (*mcp.CallToolResult, RawDaemonResponse, error) {
@@ -243,6 +267,10 @@ func (t *Tools) CopyOut(ctx context.Context, input CopyOutInput) (*CopyOutOutput
 	if err != nil {
 		return nil, err
 	}
+	encoding, err := normalizeWorkspaceEncoding(input.Encoding)
+	if err != nil {
+		return nil, err
+	}
 	vmID, err := t.resolveIdentity(input.VMID, input.SessionName)
 	if err != nil {
 		return nil, err
@@ -251,9 +279,13 @@ func (t *Tools) CopyOut(ctx context.Context, input CopyOutInput) (*CopyOutOutput
 	if err != nil {
 		return nil, err
 	}
+	if encoding == "base64" {
+		content = base64.StdEncoding.EncodeToString([]byte(content))
+	}
 	return &CopyOutOutput{
-		Path:    workspacePath,
-		Content: content,
+		Path:     workspacePath,
+		Content:  content,
+		Encoding: encoding,
 	}, nil
 }
 
@@ -450,6 +482,18 @@ func normalizeWorkspacePath(value string) (string, error) {
 		return "", fmt.Errorf("path must stay within workspace")
 	}
 	return clean, nil
+}
+
+func normalizeWorkspaceEncoding(value string) (string, error) {
+	encoding := strings.ToLower(strings.TrimSpace(value))
+	switch encoding {
+	case "", "text":
+		return "text", nil
+	case "base64":
+		return "base64", nil
+	default:
+		return "", fmt.Errorf("encoding must be empty, text, or base64")
+	}
 }
 
 func (t *Tools) resolveIdentity(vmID, sessionName string) (string, error) {

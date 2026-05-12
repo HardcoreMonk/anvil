@@ -24,12 +24,13 @@ type fakeDaemon struct {
 	runResp        *RawDaemonResponse
 	runErr         error
 
-	copyInCalls   int
-	copyInVMID    string
-	copyInPath    string
-	copyInContent string
-	copyInResp    *RawDaemonResponse
-	copyInErr     error
+	copyInCalls     int
+	copyInVMID      string
+	copyInPath      string
+	copyInContent   string
+	copyInOverwrite bool
+	copyInResp      *RawDaemonResponse
+	copyInErr       error
 
 	copyOutCalls   int
 	copyOutVMID    string
@@ -106,11 +107,12 @@ func (f *fakeDaemon) RunTask(ctx context.Context, vmID, prompt string) (*RawDaem
 	return &RawDaemonResponse{StatusCode: 200, Body: `{"ok":true}`}, nil
 }
 
-func (f *fakeDaemon) CopyIn(_ context.Context, vmID, workspacePath, content string) (*RawDaemonResponse, error) {
+func (f *fakeDaemon) CopyIn(_ context.Context, vmID, workspacePath, content string, overwrite bool) (*RawDaemonResponse, error) {
 	f.copyInCalls++
 	f.copyInVMID = vmID
 	f.copyInPath = workspacePath
 	f.copyInContent = content
+	f.copyInOverwrite = overwrite
 	if f.copyInErr != nil {
 		return nil, f.copyInErr
 	}
@@ -488,6 +490,7 @@ func TestToolsCopyInUsesSession(t *testing.T) {
 		SessionName: "work",
 		Path:        "notes/task.txt",
 		Content:     "hello workspace",
+		Overwrite:   true,
 	})
 	if err != nil {
 		t.Fatalf("CopyIn returned error: %v", err)
@@ -499,8 +502,49 @@ func TestToolsCopyInUsesSession(t *testing.T) {
 	if daemon.copyInVMID != "vm-1" || daemon.copyInPath != "notes/task.txt" || daemon.copyInContent != "hello workspace" {
 		t.Fatalf("CopyIn args = %q, %q, %q; want vm-1 notes/task.txt hello workspace", daemon.copyInVMID, daemon.copyInPath, daemon.copyInContent)
 	}
+	if !daemon.copyInOverwrite {
+		t.Fatal("CopyIn overwrite = false, want true")
+	}
 	if out.StatusCode != 200 {
 		t.Fatalf("StatusCode = %d, want 200", out.StatusCode)
+	}
+}
+
+func TestToolsCopyInDefaultsEncodingToTextAndOverwriteFalse(t *testing.T) {
+	daemon := &fakeDaemon{}
+	tools := NewTools(daemon, NewSessionStore(), time.Second)
+
+	if _, err := tools.CopyIn(context.Background(), CopyInInput{
+		VMID:    "vm-1",
+		Path:    "notes/task.txt",
+		Content: "hello workspace",
+	}); err != nil {
+		t.Fatalf("CopyIn returned error: %v", err)
+	}
+
+	if daemon.copyInContent != "hello workspace" {
+		t.Fatalf("CopyIn content = %q, want hello workspace", daemon.copyInContent)
+	}
+	if daemon.copyInOverwrite {
+		t.Fatal("CopyIn overwrite = true, want false by default")
+	}
+}
+
+func TestToolsCopyInDecodesBase64(t *testing.T) {
+	daemon := &fakeDaemon{}
+	tools := NewTools(daemon, NewSessionStore(), time.Second)
+
+	if _, err := tools.CopyIn(context.Background(), CopyInInput{
+		VMID:     "vm-1",
+		Path:     "bin/payload",
+		Content:  "AAEC",
+		Encoding: "base64",
+	}); err != nil {
+		t.Fatalf("CopyIn returned error: %v", err)
+	}
+
+	if got := []byte(daemon.copyInContent); string(got) != string([]byte{0, 1, 2}) {
+		t.Fatalf("decoded content bytes = %v, want [0 1 2]", got)
 	}
 }
 
@@ -528,6 +572,58 @@ func TestToolsCopyOutUsesSession(t *testing.T) {
 	}
 	if out.Path != "notes/task.txt" || out.Content != "hello workspace" {
 		t.Fatalf("CopyOut output = %+v, want notes/task.txt hello workspace", out)
+	}
+}
+
+func TestToolsCopyOutEncodesBase64(t *testing.T) {
+	daemon := &fakeDaemon{copyOutContent: string([]byte{0, 1, 2})}
+	tools := NewTools(daemon, NewSessionStore(), time.Second)
+
+	out, err := tools.CopyOut(context.Background(), CopyOutInput{
+		VMID:     "vm-1",
+		Path:     "bin/payload",
+		Encoding: "base64",
+	})
+	if err != nil {
+		t.Fatalf("CopyOut returned error: %v", err)
+	}
+
+	if out.Encoding != "base64" {
+		t.Fatalf("Encoding = %q, want base64", out.Encoding)
+	}
+	if out.Content != "AAEC" {
+		t.Fatalf("Content = %q, want AAEC", out.Content)
+	}
+}
+
+func TestToolsCopyRejectsInvalidEncodingBeforeDaemonCall(t *testing.T) {
+	daemon := &fakeDaemon{}
+	tools := NewTools(daemon, NewSessionStore(), time.Second)
+
+	if _, err := tools.CopyIn(context.Background(), CopyInInput{VMID: "vm-1", Path: "file.txt", Content: "x", Encoding: "hex"}); err == nil {
+		t.Fatal("CopyIn returned nil error for invalid encoding")
+	}
+	if _, err := tools.CopyOut(context.Background(), CopyOutInput{VMID: "vm-1", Path: "file.txt", Encoding: "hex"}); err == nil {
+		t.Fatal("CopyOut returned nil error for invalid encoding")
+	}
+	if daemon.copyInCalls != 0 || daemon.copyOutCalls != 0 {
+		t.Fatalf("daemon calls = copyIn %d copyOut %d, want 0", daemon.copyInCalls, daemon.copyOutCalls)
+	}
+}
+
+func TestToolsCopyInRejectsOversizedContentBeforeDaemonCall(t *testing.T) {
+	daemon := &fakeDaemon{}
+	tools := NewTools(daemon, NewSessionStore(), time.Second)
+
+	if _, err := tools.CopyIn(context.Background(), CopyInInput{
+		VMID:    "vm-1",
+		Path:    "large.txt",
+		Content: strings.Repeat("x", MaxWorkspaceFileBytes+1),
+	}); err == nil {
+		t.Fatal("CopyIn returned nil error for oversized content")
+	}
+	if daemon.copyInCalls != 0 {
+		t.Fatalf("CopyIn calls = %d, want 0", daemon.copyInCalls)
 	}
 }
 

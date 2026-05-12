@@ -114,6 +114,9 @@ func TestDaemonClientCopyIn(t *testing.T) {
 		if r.URL.Query().Get("path") != "notes/task.txt" {
 			t.Fatalf("query path = %q, want notes/task.txt", r.URL.Query().Get("path"))
 		}
+		if r.URL.Query().Get("overwrite") != "true" {
+			t.Fatalf("query overwrite = %q, want true", r.URL.Query().Get("overwrite"))
+		}
 		if got := r.Header.Get("Content-Type"); got != "application/octet-stream" {
 			t.Fatalf("Content-Type = %q, want application/octet-stream", got)
 		}
@@ -129,7 +132,7 @@ func TestDaemonClientCopyIn(t *testing.T) {
 	defer server.Close()
 
 	client := NewDaemonClient(Config{DaemonURL: server.URL}, server.Client())
-	resp, err := client.CopyIn(context.Background(), "vm-1", "notes/task.txt", "hello workspace")
+	resp, err := client.CopyIn(context.Background(), "vm-1", "notes/task.txt", "hello workspace", true)
 	if err != nil {
 		t.Fatalf("CopyIn returned error: %v", err)
 	}

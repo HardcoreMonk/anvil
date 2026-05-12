@@ -96,11 +96,16 @@ func (c *DaemonClient) RunTask(ctx context.Context, vmID, prompt string) (*RawDa
 	return c.raw(ctx, http.MethodPost, "/vms/"+vmID+"/tasks", map[string]string{"prompt": prompt})
 }
 
-func (c *DaemonClient) CopyIn(ctx context.Context, vmID, workspacePath, content string) (*RawDaemonResponse, error) {
+func (c *DaemonClient) CopyIn(ctx context.Context, vmID, workspacePath, content string, overwrite bool) (*RawDaemonResponse, error) {
+	query := url.Values{}
+	query.Set("path", workspacePath)
+	if overwrite {
+		query.Set("overwrite", "true")
+	}
 	return c.rawBody(
 		ctx,
 		http.MethodPut,
-		"/vms/"+vmID+"/workspace?path="+url.QueryEscape(workspacePath),
+		"/vms/"+vmID+"/workspace?"+query.Encode(),
 		strings.NewReader(content),
 		"application/octet-stream",
 	)
