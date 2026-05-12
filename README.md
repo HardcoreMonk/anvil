@@ -6,13 +6,28 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Firecracker](https://img.shields.io/badge/Firecracker-v1.15.1-FF4500?logo=amazonaws&logoColor=white)](https://github.com/firecracker-microvm/firecracker)
 
-**IronClaw를 위한 격리 AI agent 실행 layer**
+**IronClaw의 tool call을 격리 MicroVM 실행으로 변환하는 AI agent execution layer**
 
-`anvil`은 IronClaw가 AI agent 작업을 안전하게 생성, 실행, 중지,
-snapshot/restore할 수 있도록 만드는 통합 실행 프로젝트다. IronClaw는 상위
-orchestration과 MCP client 역할을 맡고, anvil은 IronClaw의 tool call을 실제
-격리 실행 환경으로 연결한다. 기반 실행 엔진은 ephemera이며, ephemera는 KVM 기반
-Firecracker MicroVM runtime을 제공한다.
+`anvil`은 IronClaw의 판단과 tool call을 Firecracker MicroVM 안의 실제 agent
+실행으로 변환하는 격리 execution layer다. IronClaw는 상위 orchestration,
+planner, MCP client 역할을 맡고, anvil은 그 요청을 VM 생성, 작업 실행, health
+확인, graceful stop/delete, snapshot/restore 같은 실행 lifecycle로 바꾼다.
+
+구조적으로 anvil은 두 경계를 연결한다. 첫 번째는 IronClaw가 호출하는
+`anvil_*` MCP tool surface이고, 두 번째는 ephemera가 제공하는 KVM 기반
+Firecracker MicroVM runtime boundary다. 즉 anvil은 IronClaw가 직접 host runtime
+세부사항을 알지 않아도, 격리된 agent workspace를 생성하고 제어할 수 있게 만드는
+MCP adapter이자 실행 계약이다.
+
+IronClaw와 ephemera를 서비스 대 서비스로 1:1 직접 연결하지 않는 이유는 두
+시스템의 책임과 추상화 수준이 다르기 때문이다. IronClaw는 "어떤 agent 작업을
+수행할 것인가"를 결정하는 orchestration/MCP client 계층이고, ephemera는 "어떤
+VM을 만들고 어떤 host resource를 정리할 것인가"를 다루는 low-level runtime
+control plane이다. 직접 연결하면 IronClaw가 VM ID, guest private URL, daemon
+token, agent token, snapshot file lifecycle, cleanup 실패 처리 같은 runtime
+세부사항을 알아야 한다. anvil은 이 결합을 막고, IronClaw에는 안전한
+`anvil_*` tool 계약만 노출하며, 내부에서 ephemera API 호출, session alias,
+token redaction, workspace 정책, restore/cleanup 의미를 변환한다.
 
 anvil의 상위 통합 대상은 IronClaw 전용이다. OpenClaw 연동은 anvil의 지원 범위가
 아니며, OpenClaw용 compatibility layer나 운영 계약은 제공하지 않는다.

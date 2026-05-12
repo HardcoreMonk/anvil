@@ -2,11 +2,24 @@
 
 ## 목적
 
-`anvil`은 IronClaw와 ephemera를 결합하는 새로운 프로젝트다. IronClaw는
-상위 orchestration과 MCP client 역할을 맡고, ephemera는 Firecracker MicroVM
-기반 격리 실행 runtime을 제공한다. anvil은 이 둘을 연결해 AI agent 작업을
-격리 VM에서 생성, 실행, 중지, snapshot, restore할 수 있게 만드는 통합
-프로젝트다.
+`anvil`은 IronClaw의 tool call을 Firecracker MicroVM 안의 실제 agent 실행으로
+변환하는 격리 execution layer다. IronClaw는 상위 orchestration, planner, MCP
+client 역할을 맡고, ephemera는 Firecracker MicroVM 기반 격리 실행 runtime을
+제공한다. anvil은 이 둘을 연결해 AI agent workspace를 격리 VM에서 생성, 실행,
+중지, snapshot, restore할 수 있게 만드는 통합 프로젝트다.
+
+구조적으로 anvil은 IronClaw가 호출하는 `anvil_*` MCP tool surface와 ephemera가
+제공하는 runtime boundary 사이의 adapter다. 이 adapter는 IronClaw가 host runtime
+세부사항을 직접 다루지 않고도 격리된 agent lifecycle을 제어할 수 있게 하는 실행
+계약을 제공한다.
+
+IronClaw와 ephemera는 1:1 service integration으로 직접 묶지 않는다. IronClaw는
+orchestration/MCP client 계층이고, ephemera는 VM, token, guest network,
+snapshot file, host cleanup을 다루는 runtime control plane이다. 직접 결합하면
+IronClaw가 ephemera의 low-level HTTP API와 resource cleanup semantics에 종속된다.
+anvil은 이 결합을 흡수해 IronClaw에는 `anvil_*` tool 계약만 제공하고, 내부에서
+session alias, token redaction, workspace 정책, snapshot/restore 의미, 오류
+정리를 ephemera API 호출로 변환한다.
 
 anvil의 상위 통합 대상은 IronClaw 전용이다. OpenClaw 연동은 지원 범위가 아니며,
 OpenClaw compatibility layer, shared gateway, shared runtime contract를 anvil
