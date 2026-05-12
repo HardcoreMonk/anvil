@@ -459,6 +459,35 @@ func TestDeleteSnapshotStillProtectsDiffBase(t *testing.T) {
 	}
 }
 
+func TestRestoreSnapshotUsesSnapshotLifecycleLock(t *testing.T) {
+	cp := newTestCP(t)
+	rr := httptest.NewRecorder()
+	done := make(chan struct{})
+
+	cp.snapshotLifecycleMu.Lock()
+	go func() {
+		defer close(done)
+		cp.restoreSnapshot(rr, "missing-snapshot")
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("restoreSnapshot finished while snapshotLifecycleMu was held")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	cp.snapshotLifecycleMu.Unlock()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("restoreSnapshot did not finish after snapshotLifecycleMu was released")
+	}
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, body = %q; want %d", rr.Code, rr.Body.String(), http.StatusNotFound)
+	}
+}
+
 func TestDeleteSnapshotFailureDoesNotExposeSnapshotPath(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("permission-based delete failure is not reliable as root")

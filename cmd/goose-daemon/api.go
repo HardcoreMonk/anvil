@@ -1054,6 +1054,10 @@ func deriveMACFromTap(tapDevice string) string {
 
 // POST /snapshots/{snapshot_id}/restore
 func (cp *ControlPlane) restoreSnapshot(w http.ResponseWriter, snapID string) {
+	// Prevent delete/GC from removing snapshot files while restore reads them.
+	cp.snapshotLifecycleMu.Lock()
+	defer cp.snapshotLifecycleMu.Unlock()
+
 	cp.snapshotsMu.RLock()
 	meta, ok := cp.snapshots[snapID]
 	cp.snapshotsMu.RUnlock()

@@ -369,8 +369,8 @@ handleSnapshotGC()
 - 응답에 `agent_token`을 포함하지 않는다.
 - diff snapshot이 참조 중인 full snapshot은 삭제하지 않는다.
 - 같은 GC 호출에서 diff를 삭제한 뒤 해당 full을 연쇄 삭제하지 않는다.
-- snapshot create와 delete/GC는 snapshot lifecycle lock으로 직렬화해 진행 중인 diff
-  base가 삭제되지 않게 한다.
+- snapshot create, restore, delete, GC는 필요한 구간에서 snapshot lifecycle lock으로
+  직렬화해 진행 중인 restore 파일 읽기와 diff base가 삭제되지 않게 한다.
 
 ## Guest agent 로직
 
