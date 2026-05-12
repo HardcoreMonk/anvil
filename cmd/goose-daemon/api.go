@@ -232,7 +232,7 @@ func (cp *ControlPlane) Start() error {
 	log.Printf("  GET    /vms/{vm_id}/health               — proxy: agent health check")
 	log.Printf("  POST   /vms/{vm_id}/stop                 — proxy: stop agent")
 	log.Printf("  GET    /snapshots                        — list snapshots")
-	log.Printf("  POST   /snapshots/gc                     — plan/apply snapshot retention GC")
+	log.Printf("  POST   /snapshots/gc                     — plan snapshot retention GC")
 	log.Printf("  POST   /snapshots/{snapshot_id}/restore  — restore VM from snapshot")
 	log.Printf("  DELETE /snapshots/{snapshot_id}          — delete snapshot")
 	if publicURL != "" {
@@ -819,13 +819,16 @@ func (cp *ControlPlane) handleSnapshotGC(w http.ResponseWriter, r *http.Request)
 		writeJSONError(w, http.StatusBadRequest, "keep_last_per_vm must be non-negative")
 		return
 	}
+	if req.Apply {
+		writeJSONError(w, http.StatusBadRequest, "apply is not implemented yet")
+		return
+	}
 
 	policy := SnapshotGCPolicy{
 		OlderThanSeconds: req.OlderThanSeconds,
 		KeepLastPerVM:    req.KeepLastPerVM,
 	}
 	resp := cp.planSnapshotGC(policy, time.Now().UTC())
-	resp.Applied = req.Apply
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)

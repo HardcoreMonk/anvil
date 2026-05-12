@@ -343,6 +343,12 @@ func TestHandleSnapshotGCRejectsInvalidPolicy(t *testing.T) {
 			wantStatus: http.StatusBadRequest,
 			wantBody:   "keep_last_per_vm must be non-negative",
 		},
+		{
+			name:       "apply not implemented",
+			body:       `{"apply":true}`,
+			wantStatus: http.StatusBadRequest,
+			wantBody:   "apply is not implemented yet",
+		},
 	}
 
 	for _, tt := range tests {
