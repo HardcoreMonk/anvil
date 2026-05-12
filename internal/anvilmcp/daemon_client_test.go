@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -99,6 +100,66 @@ func TestDaemonClientRawEndpoints(t *testing.T) {
 		if paths[i] != want[i] {
 			t.Fatalf("paths[%d] = %q, want %q; all paths = %v", i, paths[i], want[i], paths)
 		}
+	}
+}
+
+func TestDaemonClientCopyIn(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			t.Fatalf("method = %s, want PUT", r.Method)
+		}
+		if r.URL.Path != "/vms/vm-1/workspace" {
+			t.Fatalf("path = %s, want /vms/vm-1/workspace", r.URL.Path)
+		}
+		if r.URL.Query().Get("path") != "notes/task.txt" {
+			t.Fatalf("query path = %q, want notes/task.txt", r.URL.Query().Get("path"))
+		}
+		if got := r.Header.Get("Content-Type"); got != "application/octet-stream" {
+			t.Fatalf("Content-Type = %q, want application/octet-stream", got)
+		}
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		if string(data) != "hello workspace" {
+			t.Fatalf("body = %q, want hello workspace", string(data))
+		}
+		_, _ = w.Write([]byte(`{"path":"notes/task.txt","bytes":15}`))
+	}))
+	defer server.Close()
+
+	client := NewDaemonClient(Config{DaemonURL: server.URL}, server.Client())
+	resp, err := client.CopyIn(context.Background(), "vm-1", "notes/task.txt", "hello workspace")
+	if err != nil {
+		t.Fatalf("CopyIn returned error: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestDaemonClientCopyOut(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("method = %s, want GET", r.Method)
+		}
+		if r.URL.Path != "/vms/vm-1/workspace" {
+			t.Fatalf("path = %s, want /vms/vm-1/workspace", r.URL.Path)
+		}
+		if r.URL.Query().Get("path") != "notes/task.txt" {
+			t.Fatalf("query path = %q, want notes/task.txt", r.URL.Query().Get("path"))
+		}
+		_, _ = w.Write([]byte("hello workspace"))
+	}))
+	defer server.Close()
+
+	client := NewDaemonClient(Config{DaemonURL: server.URL}, server.Client())
+	content, err := client.CopyOut(context.Background(), "vm-1", "notes/task.txt")
+	if err != nil {
+		t.Fatalf("CopyOut returned error: %v", err)
+	}
+	if content != "hello workspace" {
+		t.Fatalf("content = %q, want hello workspace", content)
 	}
 }
 

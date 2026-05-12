@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -75,5 +78,72 @@ func TestLoadAgentToken_TrimsWhitespace(t *testing.T) {
 	got := strings.TrimSpace(raw)
 	if got != "mytoken123" {
 		t.Errorf("expected trimmed token, got %q", got)
+	}
+}
+
+func TestWorkspaceFilePathRejectsUnsafePaths(t *testing.T) {
+	root := t.TempDir()
+	for _, unsafePath := range []string{"", ".", "/absolute", "../secret", "safe/../../secret"} {
+		if _, err := workspaceFilePath(root, unsafePath); err == nil {
+			t.Fatalf("workspaceFilePath(%q) returned nil error", unsafePath)
+		}
+	}
+}
+
+func TestHandleWorkspacePutGetRoundTrip(t *testing.T) {
+	root := t.TempDir()
+	handler := workspaceHandler(root)
+
+	putReq := httptest.NewRequest(http.MethodPut, "/workspace?path=notes/task.txt", bytes.NewBufferString("hello workspace"))
+	putRR := httptest.NewRecorder()
+	handler(putRR, putReq)
+	if putRR.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body = %q; want 200", putRR.Code, putRR.Body.String())
+	}
+
+	written, err := os.ReadFile(filepath.Join(root, "notes", "task.txt"))
+	if err != nil {
+		t.Fatalf("read written file: %v", err)
+	}
+	if string(written) != "hello workspace" {
+		t.Fatalf("written file = %q, want hello workspace", string(written))
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/workspace?path=notes/task.txt", nil)
+	getRR := httptest.NewRecorder()
+	handler(getRR, getReq)
+	if getRR.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, body = %q; want 200", getRR.Code, getRR.Body.String())
+	}
+	got, err := io.ReadAll(getRR.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	if string(got) != "hello workspace" {
+		t.Fatalf("GET body = %q, want hello workspace", string(got))
+	}
+}
+
+func TestHandleWorkspaceRejectsTraversal(t *testing.T) {
+	handler := workspaceHandler(t.TempDir())
+	req := httptest.NewRequest(http.MethodPut, "/workspace?path=../secret.txt", strings.NewReader("secret"))
+	rr := httptest.NewRecorder()
+
+	handler(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rr.Code)
+	}
+}
+
+func TestHandleWorkspaceMissingFile(t *testing.T) {
+	handler := workspaceHandler(t.TempDir())
+	req := httptest.NewRequest(http.MethodGet, "/workspace?path=missing.txt", nil)
+	rr := httptest.NewRecorder()
+
+	handler(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rr.Code)
 	}
 }

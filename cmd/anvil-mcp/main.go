@@ -35,6 +35,20 @@ func toolRegistrations() []toolRegistration {
 			},
 		},
 		{
+			name:        "anvil_copy_in",
+			description: "Write a single text file into an ephemera VM workspace using vm_id or session_name.",
+			register: func(server *mcp.Server, tool *mcp.Tool, tools *anvilmcp.Tools) {
+				mcp.AddTool(server, tool, tools.MCPCopyIn)
+			},
+		},
+		{
+			name:        "anvil_copy_out",
+			description: "Read a single text file from an ephemera VM workspace using vm_id or session_name.",
+			register: func(server *mcp.Server, tool *mcp.Tool, tools *anvilmcp.Tools) {
+				mcp.AddTool(server, tool, tools.MCPCopyOut)
+			},
+		},
+		{
 			name:        "anvil_get_vm_health",
 			description: "Return health for an existing ephemera VM agent using vm_id or session_name.",
 			register: func(server *mcp.Server, tool *mcp.Tool, tools *anvilmcp.Tools) {

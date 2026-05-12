@@ -3,6 +3,7 @@ package anvilmcp
 import (
 	"context"
 	"fmt"
+	"path"
 	"strings"
 	"time"
 
@@ -14,6 +15,8 @@ const maxTimeoutSeconds = int((24 * time.Hour) / time.Second)
 type Daemon interface {
 	SpawnVM(ctx context.Context, profile string) (*SpawnVMResponse, error)
 	RunTask(ctx context.Context, vmID, prompt string) (*RawDaemonResponse, error)
+	CopyIn(ctx context.Context, vmID, workspacePath, content string) (*RawDaemonResponse, error)
+	CopyOut(ctx context.Context, vmID, workspacePath string) (string, error)
 	Health(ctx context.Context, vmID string) (*RawDaemonResponse, error)
 	Stop(ctx context.Context, vmID string) (*RawDaemonResponse, error)
 	Delete(ctx context.Context, vmID string) (*RawDaemonResponse, error)
@@ -54,6 +57,24 @@ type RunTaskInput struct {
 	SessionName    string `json:"session_name,omitempty"`
 	Prompt         string `json:"prompt"`
 	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
+}
+
+type CopyInInput struct {
+	VMID        string `json:"vm_id,omitempty"`
+	SessionName string `json:"session_name,omitempty"`
+	Path        string `json:"path"`
+	Content     string `json:"content"`
+}
+
+type CopyOutInput struct {
+	VMID        string `json:"vm_id,omitempty"`
+	SessionName string `json:"session_name,omitempty"`
+	Path        string `json:"path"`
+}
+
+type CopyOutOutput struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
 }
 
 type VMIdentityInput struct {
@@ -193,6 +214,53 @@ func (t *Tools) MCPRunTask(ctx context.Context, req *mcp.CallToolRequest, input 
 	out, err := t.RunTask(ctx, input)
 	if err != nil || out == nil {
 		return nil, RawDaemonResponse{}, err
+	}
+	return nil, *out, nil
+}
+
+func (t *Tools) CopyIn(ctx context.Context, input CopyInInput) (*RawDaemonResponse, error) {
+	workspacePath, err := normalizeWorkspacePath(input.Path)
+	if err != nil {
+		return nil, err
+	}
+	vmID, err := t.resolveIdentity(input.VMID, input.SessionName)
+	if err != nil {
+		return nil, err
+	}
+	return t.daemon.CopyIn(ctx, vmID, workspacePath, input.Content)
+}
+
+func (t *Tools) MCPCopyIn(ctx context.Context, req *mcp.CallToolRequest, input CopyInInput) (*mcp.CallToolResult, RawDaemonResponse, error) {
+	out, err := t.CopyIn(ctx, input)
+	if err != nil || out == nil {
+		return nil, RawDaemonResponse{}, err
+	}
+	return nil, *out, nil
+}
+
+func (t *Tools) CopyOut(ctx context.Context, input CopyOutInput) (*CopyOutOutput, error) {
+	workspacePath, err := normalizeWorkspacePath(input.Path)
+	if err != nil {
+		return nil, err
+	}
+	vmID, err := t.resolveIdentity(input.VMID, input.SessionName)
+	if err != nil {
+		return nil, err
+	}
+	content, err := t.daemon.CopyOut(ctx, vmID, workspacePath)
+	if err != nil {
+		return nil, err
+	}
+	return &CopyOutOutput{
+		Path:    workspacePath,
+		Content: content,
+	}, nil
+}
+
+func (t *Tools) MCPCopyOut(ctx context.Context, req *mcp.CallToolRequest, input CopyOutInput) (*mcp.CallToolResult, CopyOutOutput, error) {
+	out, err := t.CopyOut(ctx, input)
+	if err != nil || out == nil {
+		return nil, CopyOutOutput{}, err
 	}
 	return nil, *out, nil
 }
@@ -370,6 +438,18 @@ func normalizeSnapshotType(value string) (string, error) {
 	default:
 		return "", fmt.Errorf("type must be empty, full, or diff")
 	}
+}
+
+func normalizeWorkspacePath(value string) (string, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" || strings.HasPrefix(trimmed, "/") || strings.Contains(trimmed, `\`) {
+		return "", fmt.Errorf("path must be a non-empty relative workspace path")
+	}
+	clean := path.Clean(trimmed)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("path must stay within workspace")
+	}
+	return clean, nil
 }
 
 func (t *Tools) resolveIdentity(vmID, sessionName string) (string, error) {

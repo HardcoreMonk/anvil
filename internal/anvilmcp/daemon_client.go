@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -94,6 +96,24 @@ func (c *DaemonClient) RunTask(ctx context.Context, vmID, prompt string) (*RawDa
 	return c.raw(ctx, http.MethodPost, "/vms/"+vmID+"/tasks", map[string]string{"prompt": prompt})
 }
 
+func (c *DaemonClient) CopyIn(ctx context.Context, vmID, workspacePath, content string) (*RawDaemonResponse, error) {
+	return c.rawBody(
+		ctx,
+		http.MethodPut,
+		"/vms/"+vmID+"/workspace?path="+url.QueryEscape(workspacePath),
+		strings.NewReader(content),
+		"application/octet-stream",
+	)
+}
+
+func (c *DaemonClient) CopyOut(ctx context.Context, vmID, workspacePath string) (string, error) {
+	_, body, err := c.doRaw(ctx, http.MethodGet, "/vms/"+vmID+"/workspace?path="+url.QueryEscape(workspacePath), nil, "")
+	if err != nil {
+		return "", err
+	}
+	return body, nil
+}
+
 func (c *DaemonClient) Health(ctx context.Context, vmID string) (*RawDaemonResponse, error) {
 	return c.raw(ctx, http.MethodGet, "/vms/"+vmID+"/health", nil)
 }
@@ -160,6 +180,17 @@ func (c *DaemonClient) raw(ctx context.Context, method, path string, payload any
 	}, nil
 }
 
+func (c *DaemonClient) rawBody(ctx context.Context, method, path string, body io.Reader, contentType string) (*RawDaemonResponse, error) {
+	statusCode, responseBody, err := c.doRaw(ctx, method, path, body, contentType)
+	if err != nil {
+		return nil, err
+	}
+	return &RawDaemonResponse{
+		StatusCode: statusCode,
+		Body:       responseBody,
+	}, nil
+}
+
 func (c *DaemonClient) do(ctx context.Context, method, path string, payload any) (int, string, error) {
 	var body io.Reader
 	hasBody := payload != nil
@@ -182,6 +213,25 @@ func (c *DaemonClient) do(ctx context.Context, method, path string, payload any)
 		req.Header.Set("Content-Type", "application/json")
 	}
 
+	return c.send(req)
+}
+
+func (c *DaemonClient) doRaw(ctx context.Context, method, path string, body io.Reader, contentType string) (int, string, error) {
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
+	if err != nil {
+		return 0, "", fmt.Errorf("create daemon request: %w", err)
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+
+	return c.send(req)
+}
+
+func (c *DaemonClient) send(req *http.Request) (int, string, error) {
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return 0, "", fmt.Errorf("send daemon request: %w", err)

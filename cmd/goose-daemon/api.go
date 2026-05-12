@@ -87,11 +87,11 @@ type VMSpawnRequest struct {
 
 type runningVM struct {
 	VMInfo
-	agentToken      string // per-VM bearer token; only returned at spawn time, never re-serialized
-	diskPath        string // actual disk file to delete on teardown (spawned) or exception store (COW-restored)
-	bindMountTarget string // non-empty for bind-mount restored VMs (legacy path)
+	agentToken      string                  // per-VM bearer token; only returned at spawn time, never re-serialized
+	diskPath        string                  // actual disk file to delete on teardown (spawned) or exception store (COW-restored)
+	bindMountTarget string                  // non-empty for bind-mount restored VMs (legacy path)
 	dmSnapshot      *storage.DMSnapshotInfo // non-nil for COW-restored VMs; replaces bindMountTarget
-	vsockPath       string // host-side UDS for Firecracker vsock proxy; cleaned up on teardown
+	vsockPath       string                  // host-side UDS for Firecracker vsock proxy; cleaned up on teardown
 	machine         *firecracker.Machine
 	tapDevice       string
 	socketPath      string
@@ -109,8 +109,9 @@ func generateAgentToken() (string, error) {
 // ControlPlane manages the MicroVM lifecycle and proxies agent requests.
 // External clients interact entirely through the control plane URL:
 //   - VM lifecycle: POST/GET/DELETE /vms, POST/GET/DELETE /snapshots
-//   - Agent proxy:  POST /vms/{vm_id}/tasks, GET /vms/{vm_id}/health,
-//     POST /vms/{vm_id}/stop  (forwarded to the VM's private goose-agent)
+//   - Agent proxy:  POST /vms/{vm_id}/tasks, GET/PUT /vms/{vm_id}/workspace,
+//     GET /vms/{vm_id}/health, POST /vms/{vm_id}/stop
+//     (forwarded to the VM's private goose-agent)
 type ControlPlane struct {
 	mu  sync.RWMutex
 	vms map[string]*runningVM
@@ -225,6 +226,7 @@ func (cp *ControlPlane) Start() error {
 	log.Printf("  DELETE /vms/{vm_id}                      — stop VM")
 	log.Printf("  POST   /vms/{vm_id}/snapshot             — create snapshot")
 	log.Printf("  POST   /vms/{vm_id}/tasks                — proxy: run task on agent")
+	log.Printf("  GET/PUT /vms/{vm_id}/workspace?path=...  — proxy: workspace file read/write")
 	log.Printf("  GET    /vms/{vm_id}/health               — proxy: agent health check")
 	log.Printf("  POST   /vms/{vm_id}/stop                 — proxy: stop agent")
 	log.Printf("  GET    /snapshots                        — list snapshots")
@@ -288,6 +290,16 @@ func (cp *ControlPlane) handleVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if strings.HasSuffix(path, "/workspace") {
+		vmID := strings.TrimSuffix(path, "/workspace")
+		if r.Method != http.MethodGet && r.Method != http.MethodPut {
+			http.Error(w, `{"error":"GET or PUT required"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		cp.proxyAgentEndpoint(w, r, vmID, "/workspace")
+		return
+	}
+
 	if strings.HasSuffix(path, "/health") {
 		vmID := strings.TrimSuffix(path, "/health")
 		cp.proxyAgentEndpoint(w, r, vmID, "/health")
@@ -330,6 +342,9 @@ func (cp *ControlPlane) proxyAgentEndpoint(w http.ResponseWriter, r *http.Reques
 	}
 
 	targetURL := fmt.Sprintf("http://%s:%d%s", v.GuestIP, agentPort, agentPath)
+	if r.URL.RawQuery != "" {
+		targetURL += "?" + r.URL.RawQuery
+	}
 	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, r.Body)
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":"proxy request: %v"}`, err), http.StatusInternalServerError)

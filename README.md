@@ -429,6 +429,8 @@ MCP tool:
 |---|---|
 | `anvil_spawn_vm` | ephemera VM을 만들고 optional `session_name` alias를 연결한다. |
 | `anvil_run_task` | `vm_id` 또는 `session_name`으로 VM에 prompt를 실행한다. |
+| `anvil_copy_in` | `vm_id` 또는 `session_name`으로 VM `/workspace`에 단일 text file을 쓴다. |
+| `anvil_copy_out` | `vm_id` 또는 `session_name`으로 VM `/workspace`의 단일 text file을 읽는다. |
 | `anvil_get_vm_health` | VM agent health를 확인한다. |
 | `anvil_stop_vm` | guest agent에 graceful stop을 요청한다. |
 | `anvil_delete_vm` | host VM 리소스를 삭제하고 session alias를 해제한다. |
@@ -437,11 +439,12 @@ MCP tool:
 | `anvil_restore_snapshot` | `snapshot_id`에서 새 VM을 restore하고 optional `session_name` alias를 연결한다. |
 | `anvil_delete_snapshot` | `snapshot_id`로 snapshot을 삭제한다. |
 
-MCP v1은 얇은 runtime bridge다. workspace copy, snapshot alias, session alias 영속화,
-HTTP MCP transport는 제공하지 않는다. Restore 응답은 daemon의 `agent_token`을
-decode할 수 있지만 MCP output에는 노출하지 않는다. Restore 후 `session_name`
-bind가 실패하면 adapter는 restored VM을 자동 삭제하지 않고 error에 restored VM ID를
-포함한다.
+MCP adapter는 얇은 runtime bridge다. 현재 workspace copy는 VM 내부
+`/workspace` 기준 단일 text file copy-in/copy-out만 지원한다. directory sync,
+snapshot alias, session alias 영속화, HTTP MCP transport는 제공하지 않는다.
+Restore 응답은 daemon의 `agent_token`을 decode할 수 있지만 MCP output에는
+노출하지 않는다. Restore 후 `session_name` bind가 실패하면 adapter는 restored
+VM을 자동 삭제하지 않고 error에 restored VM ID를 포함한다.
 
 정확한 입력/출력 계약은 `docs/architecture/mcp-architecture.md`를 참조한다.
 
@@ -458,11 +461,12 @@ sudo ANVIL_API_ADDR=127.0.0.1:3000 ./anvil-daemon
 go run scripts/anvil-mcp-smoke.go -session smoke
 ```
 
-이 검사는 `anvil_spawn_vm`, `anvil_run_task`, `anvil_get_vm_health`,
-`anvil_stop_vm`, `anvil_delete_vm` 순서로 tool call을 수행한다. 기본값은
-`anvil_run_task` 응답에 `anvil-smoke-ok`가 포함되는지 확인한다. provider
-credential이 아직 유효하지 않은 환경에서 MCP lifecycle만 확인하려면
-`-expect-output ""`를 사용한다.
+이 검사는 `anvil_spawn_vm`, `anvil_copy_in`, `anvil_copy_out`,
+`anvil_run_task`, `anvil_get_vm_health`, `anvil_stop_vm`,
+`anvil_delete_vm` 순서로 tool call을 수행한다. 기본값은 workspace copy
+round-trip과 `anvil_run_task` 응답의 `anvil-smoke-ok` 포함 여부를 확인한다.
+provider credential이 아직 유효하지 않은 환경에서 MCP lifecycle과 workspace
+copy만 확인하려면 `-expect-output ""`를 사용한다.
 
 ---
 

@@ -2,8 +2,14 @@ package main
 
 import (
 	"encoding/hex"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -122,5 +128,63 @@ func TestGenerateAgentToken_Uniqueness(t *testing.T) {
 	b, _ := generateAgentToken()
 	if a == b {
 		t.Error("two tokens should not be identical (probabilistic)")
+	}
+}
+
+func TestHandleVMWorkspaceProxiesQueryAuthAndBody(t *testing.T) {
+	var gotBody string
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			t.Fatalf("method = %s, want PUT", r.Method)
+		}
+		if r.URL.Path != "/workspace" {
+			t.Fatalf("path = %s, want /workspace", r.URL.Path)
+		}
+		if r.URL.Query().Get("path") != "notes/task.txt" {
+			t.Fatalf("query path = %q, want notes/task.txt", r.URL.Query().Get("path"))
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer agent-token" {
+			t.Fatalf("Authorization = %q, want Bearer agent-token", got)
+		}
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		gotBody = string(data)
+		_, _ = w.Write([]byte(`{"path":"notes/task.txt","bytes":5}`))
+	}))
+	defer agent.Close()
+
+	_, portText, err := net.SplitHostPort(strings.TrimPrefix(agent.URL, "http://"))
+	if err != nil {
+		t.Fatalf("split agent URL: %v", err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatalf("parse agent port: %v", err)
+	}
+	oldAgentPort := agentPort
+	agentPort = port
+	defer func() { agentPort = oldAgentPort }()
+
+	cp := newTestCP(t)
+	cp.agentHTTPClient = agent.Client()
+	cp.vms["vm-1"] = &runningVM{
+		VMInfo: VMInfo{
+			VMID:    "vm-1",
+			GuestIP: "127.0.0.1",
+		},
+		agentToken: "agent-token",
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/vms/vm-1/workspace?path=notes/task.txt", strings.NewReader("hello"))
+	rr := httptest.NewRecorder()
+	cp.handleVM(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q; want 200", rr.Code, rr.Body.String())
+	}
+	if gotBody != "hello" {
+		t.Fatalf("proxied body = %q, want hello", gotBody)
 	}
 }

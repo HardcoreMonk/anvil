@@ -25,6 +25,11 @@ type rawOutput struct {
 	Body       string `json:"body"`
 }
 
+type copyOutOutput struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+
 func main() {
 	if err := run(); err != nil {
 		log.Fatal(err)
@@ -37,6 +42,8 @@ func run() error {
 	profile := flag.String("profile", "", "optional VM profile")
 	prompt := flag.String("prompt", "Reply with exactly: anvil-smoke-ok", "prompt for anvil_run_task")
 	expectOutput := flag.String("expect-output", "anvil-smoke-ok", "substring expected in anvil_run_task response body; empty disables semantic output check")
+	copyPath := flag.String("copy-path", "smoke/input.txt", "workspace path for copy-in/copy-out smoke")
+	copyContent := flag.String("copy-content", "anvil workspace smoke", "workspace content for copy-in/copy-out smoke")
 	timeout := flag.Duration("timeout", 8*time.Minute, "overall smoke test timeout")
 	taskTimeout := flag.Int("task-timeout", 180, "anvil_run_task timeout_seconds")
 	flag.Parse()
@@ -81,6 +88,28 @@ func run() error {
 			log.Printf("cleanup delete status=%d body=%s", out.StatusCode, out.Body)
 		}
 	}()
+
+	var copyIn rawOutput
+	if err := callStructured(ctx, clientSession, "anvil_copy_in", map[string]any{
+		"session_name": *session,
+		"path":         *copyPath,
+		"content":      *copyContent,
+	}, &copyIn); err != nil {
+		return err
+	}
+	fmt.Printf("copy_in status=%d body=%s\n", copyIn.StatusCode, copyIn.Body)
+
+	var copyOut copyOutOutput
+	if err := callStructured(ctx, clientSession, "anvil_copy_out", map[string]any{
+		"session_name": *session,
+		"path":         *copyPath,
+	}, &copyOut); err != nil {
+		return err
+	}
+	fmt.Printf("copy_out path=%s content=%q\n", copyOut.Path, copyOut.Content)
+	if copyOut.Content != *copyContent {
+		return fmt.Errorf("copy_out content = %q, want %q", copyOut.Content, *copyContent)
+	}
 
 	var task rawOutput
 	if err := callStructured(ctx, clientSession, "anvil_run_task", map[string]any{

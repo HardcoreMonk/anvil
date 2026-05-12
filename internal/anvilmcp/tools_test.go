@@ -24,6 +24,19 @@ type fakeDaemon struct {
 	runResp        *RawDaemonResponse
 	runErr         error
 
+	copyInCalls   int
+	copyInVMID    string
+	copyInPath    string
+	copyInContent string
+	copyInResp    *RawDaemonResponse
+	copyInErr     error
+
+	copyOutCalls   int
+	copyOutVMID    string
+	copyOutPath    string
+	copyOutContent string
+	copyOutErr     error
+
 	healthCalls int
 	healthVMID  string
 	healthResp  *RawDaemonResponse
@@ -91,6 +104,33 @@ func (f *fakeDaemon) RunTask(ctx context.Context, vmID, prompt string) (*RawDaem
 		return f.runResp, nil
 	}
 	return &RawDaemonResponse{StatusCode: 200, Body: `{"ok":true}`}, nil
+}
+
+func (f *fakeDaemon) CopyIn(_ context.Context, vmID, workspacePath, content string) (*RawDaemonResponse, error) {
+	f.copyInCalls++
+	f.copyInVMID = vmID
+	f.copyInPath = workspacePath
+	f.copyInContent = content
+	if f.copyInErr != nil {
+		return nil, f.copyInErr
+	}
+	if f.copyInResp != nil {
+		return f.copyInResp, nil
+	}
+	return &RawDaemonResponse{StatusCode: 200, Body: `{"path":"notes/task.txt","bytes":15}`}, nil
+}
+
+func (f *fakeDaemon) CopyOut(_ context.Context, vmID, workspacePath string) (string, error) {
+	f.copyOutCalls++
+	f.copyOutVMID = vmID
+	f.copyOutPath = workspacePath
+	if f.copyOutErr != nil {
+		return "", f.copyOutErr
+	}
+	if f.copyOutContent != "" {
+		return f.copyOutContent, nil
+	}
+	return "hello workspace", nil
 }
 
 func (f *fakeDaemon) Health(_ context.Context, vmID string) (*RawDaemonResponse, error) {
@@ -433,6 +473,79 @@ func TestToolsRunTaskRejectsExcessiveTimeout(t *testing.T) {
 	}
 	if daemon.runCalls != 0 {
 		t.Fatalf("RunTask calls = %d, want 0", daemon.runCalls)
+	}
+}
+
+func TestToolsCopyInUsesSession(t *testing.T) {
+	daemon := &fakeDaemon{copyInResp: &RawDaemonResponse{StatusCode: 200, Body: `{"path":"notes/task.txt","bytes":15}`}}
+	store := NewSessionStore()
+	if err := store.Bind("work", "vm-1"); err != nil {
+		t.Fatalf("Bind returned error: %v", err)
+	}
+	tools := NewTools(daemon, store, time.Second)
+
+	out, err := tools.CopyIn(context.Background(), CopyInInput{
+		SessionName: "work",
+		Path:        "notes/task.txt",
+		Content:     "hello workspace",
+	})
+	if err != nil {
+		t.Fatalf("CopyIn returned error: %v", err)
+	}
+
+	if daemon.copyInCalls != 1 {
+		t.Fatalf("CopyIn calls = %d, want 1", daemon.copyInCalls)
+	}
+	if daemon.copyInVMID != "vm-1" || daemon.copyInPath != "notes/task.txt" || daemon.copyInContent != "hello workspace" {
+		t.Fatalf("CopyIn args = %q, %q, %q; want vm-1 notes/task.txt hello workspace", daemon.copyInVMID, daemon.copyInPath, daemon.copyInContent)
+	}
+	if out.StatusCode != 200 {
+		t.Fatalf("StatusCode = %d, want 200", out.StatusCode)
+	}
+}
+
+func TestToolsCopyOutUsesSession(t *testing.T) {
+	daemon := &fakeDaemon{copyOutContent: "hello workspace"}
+	store := NewSessionStore()
+	if err := store.Bind("work", "vm-1"); err != nil {
+		t.Fatalf("Bind returned error: %v", err)
+	}
+	tools := NewTools(daemon, store, time.Second)
+
+	out, err := tools.CopyOut(context.Background(), CopyOutInput{
+		SessionName: "work",
+		Path:        "notes/task.txt",
+	})
+	if err != nil {
+		t.Fatalf("CopyOut returned error: %v", err)
+	}
+
+	if daemon.copyOutCalls != 1 {
+		t.Fatalf("CopyOut calls = %d, want 1", daemon.copyOutCalls)
+	}
+	if daemon.copyOutVMID != "vm-1" || daemon.copyOutPath != "notes/task.txt" {
+		t.Fatalf("CopyOut args = %q, %q; want vm-1 notes/task.txt", daemon.copyOutVMID, daemon.copyOutPath)
+	}
+	if out.Path != "notes/task.txt" || out.Content != "hello workspace" {
+		t.Fatalf("CopyOut output = %+v, want notes/task.txt hello workspace", out)
+	}
+}
+
+func TestToolsCopyRejectsUnsafePathBeforeDaemonCall(t *testing.T) {
+	daemon := &fakeDaemon{}
+	tools := NewTools(daemon, NewSessionStore(), time.Second)
+
+	if _, err := tools.CopyIn(context.Background(), CopyInInput{VMID: "vm-1", Path: "../secret", Content: "x"}); err == nil {
+		t.Fatal("CopyIn returned nil error for unsafe path")
+	}
+	if _, err := tools.CopyOut(context.Background(), CopyOutInput{VMID: "vm-1", Path: "/absolute"}); err == nil {
+		t.Fatal("CopyOut returned nil error for unsafe path")
+	}
+	if daemon.copyInCalls != 0 {
+		t.Fatalf("CopyIn calls = %d, want 0", daemon.copyInCalls)
+	}
+	if daemon.copyOutCalls != 0 {
+		t.Fatalf("CopyOut calls = %d, want 0", daemon.copyOutCalls)
 	}
 }
 

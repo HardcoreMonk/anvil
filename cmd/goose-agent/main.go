@@ -6,10 +6,12 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,6 +49,7 @@ func agentListenAddr() string {
 }
 
 const agentTokenPath = "/root/.ephemera-agent-token"
+const workspaceRoot = "/workspace"
 
 // loadAgentToken reads the per-VM Bearer token written by the control plane at VM provision time.
 // Returns an empty string (auth disabled) if the file does not exist — backward compatible with
@@ -94,6 +97,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/tasks", agentAuthMiddleware(token, handleTask))
+	mux.HandleFunc("/workspace", agentAuthMiddleware(token, workspaceHandler(workspaceRoot)))
 	mux.HandleFunc("/stop", agentAuthMiddleware(token, handleStop))
 	mux.HandleFunc("/health", handleHealth) // always unauthenticated
 
@@ -185,6 +189,93 @@ func applyIPConfig(cidrIP, gateway string) error {
 		}
 	}
 	return nil
+}
+
+type WorkspaceWriteResult struct {
+	Path  string `json:"path"`
+	Bytes int64  `json:"bytes"`
+}
+
+func workspaceFilePath(root, relPath string) (string, error) {
+	relPath = strings.TrimSpace(relPath)
+	if relPath == "" || filepath.IsAbs(relPath) {
+		return "", fmt.Errorf("path must be a non-empty relative path")
+	}
+
+	clean := filepath.Clean(relPath)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("path must stay within workspace")
+	}
+
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace root: %w", err)
+	}
+	fullPath, err := filepath.Abs(filepath.Join(rootAbs, clean))
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace path: %w", err)
+	}
+	if fullPath != rootAbs && !strings.HasPrefix(fullPath, rootAbs+string(os.PathSeparator)) {
+		return "", fmt.Errorf("path must stay within workspace")
+	}
+	return fullPath, nil
+}
+
+func workspaceHandler(root string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		fullPath, err := workspaceFilePath(root, r.URL.Query().Get("path"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		switch r.Method {
+		case http.MethodPut:
+			if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+				http.Error(w, fmt.Sprintf("create parent directory: %v", err), http.StatusInternalServerError)
+				return
+			}
+			out, err := os.Create(fullPath)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("create workspace file: %v", err), http.StatusInternalServerError)
+				return
+			}
+			n, copyErr := io.Copy(out, r.Body)
+			closeErr := out.Close()
+			if copyErr != nil {
+				http.Error(w, fmt.Sprintf("write workspace file: %v", copyErr), http.StatusInternalServerError)
+				return
+			}
+			if closeErr != nil {
+				http.Error(w, fmt.Sprintf("close workspace file: %v", closeErr), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(WorkspaceWriteResult{
+				Path:  filepath.ToSlash(strings.TrimPrefix(fullPath, filepath.Clean(root)+string(os.PathSeparator))),
+				Bytes: n,
+			})
+
+		case http.MethodGet:
+			in, err := os.Open(fullPath)
+			if err != nil {
+				if os.IsNotExist(err) {
+					http.Error(w, "workspace file not found", http.StatusNotFound)
+					return
+				}
+				http.Error(w, fmt.Sprintf("open workspace file: %v", err), http.StatusInternalServerError)
+				return
+			}
+			defer in.Close()
+			w.Header().Set("Content-Type", "application/octet-stream")
+			if _, err := io.Copy(w, in); err != nil {
+				log.Printf("workspace response copy failed: %v", err)
+			}
+
+		default:
+			http.Error(w, "GET or PUT required", http.StatusMethodNotAllowed)
+		}
+	}
 }
 
 func handleTask(w http.ResponseWriter, r *http.Request) {

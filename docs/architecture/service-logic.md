@@ -20,6 +20,7 @@ control plane daemon은 하나의 HTTP service를 노출한다.
 |---|---|---|
 | `/vms` | `cmd/goose-daemon/api.go` | VM 생성, 목록, 삭제 |
 | `/vms/{vm_id}/tasks` | `cmd/goose-daemon/api.go` | guest agent로 task 실행 proxy |
+| `/vms/{vm_id}/workspace` | `cmd/goose-daemon/api.go` | guest `/workspace` 단일 파일 read/write proxy |
 | `/vms/{vm_id}/health` | `cmd/goose-daemon/api.go` | guest health proxy |
 | `/vms/{vm_id}/stop` | `cmd/goose-daemon/api.go` | guest agent에 stop 요청 |
 | `/vms/{vm_id}/snapshot` | `cmd/goose-daemon/api.go` | full 또는 diff VM snapshot 생성 |
@@ -32,6 +33,8 @@ VM 내부의 `goose-agent`는 다음 endpoint를 제공한다.
 | Endpoint | Auth | 목적 |
 |---|---|---|
 | `POST /tasks` | VM별 Bearer token | Goose prompt 실행 |
+| `PUT /workspace?path=...` | VM별 Bearer token | `/workspace` 아래 단일 파일 쓰기 |
+| `GET /workspace?path=...` | VM별 Bearer token | `/workspace` 아래 단일 파일 읽기 |
 | `GET /health` | 없음 | `idle` 또는 `busy` 반환 |
 | `POST /stop` | VM별 Bearer token | agent HTTP server graceful stop |
 
