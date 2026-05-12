@@ -162,6 +162,7 @@ ephemera control plane :3000
   DELETE /vms/{vm_id}          -> VM 종료 및 리소스 정리
   POST   /vms/{vm_id}/snapshot -> VM snapshot 생성
   GET    /snapshots            -> snapshot 목록
+  POST   /snapshots/gc         -> snapshot GC dry-run/apply
   POST   /snapshots/{id}/restore
                                 -> snapshot에서 VM 복원
   DELETE /snapshots/{id}       -> snapshot 삭제
@@ -701,6 +702,30 @@ curl -X DELETE http://localhost:3000/snapshots/snap-1778229000000 \
 ```
 
 diff snapshot이 참조 중인 full snapshot은 삭제할 수 없다.
+
+### Snapshot GC dry-run/apply
+
+`POST /snapshots/gc`는 snapshot retention plan을 계산한다. 기본값은 dry-run이며
+파일을 삭제하지 않는다.
+
+```bash
+curl -X POST http://localhost:3000/snapshots/gc \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $EPHEMERA_API_TOKEN" \
+  -d '{"older_than_seconds":604800,"keep_last_per_vm":1}'
+```
+
+실제 삭제는 `apply: true`를 명시해야 수행된다.
+
+```bash
+curl -X POST http://localhost:3000/snapshots/gc \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $EPHEMERA_API_TOKEN" \
+  -d '{"older_than_seconds":604800,"keep_last_per_vm":1,"apply":true}'
+```
+
+diff snapshot이 참조 중인 full snapshot은 항상 보호된다. full과 diff가 모두 오래된
+경우 첫 GC apply에서는 diff만 삭제되고, 다음 GC 호출에서 full이 삭제 후보가 된다.
 
 ### Agent proxy 사용
 

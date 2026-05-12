@@ -203,6 +203,13 @@ snapshots/<snapshot_id>/
   metadata.json
 ```
 
+Snapshot directory는 `POST /snapshots/gc`로 수동 정리할 수 있다. GC는 먼저
+`cp.snapshots` metadata graph를 기준으로 삭제 후보와 보호 사유를 계산한다.
+`apply: false`가 기본값이므로 dry-run은 host disk를 변경하지 않는다.
+`apply: true`일 때만 보호되지 않은 후보 snapshot directory를 삭제한다.
+diff snapshot이 참조 중인 full snapshot은 base dependency가 사라질 때까지
+보호된다.
+
 Snapshot type 선택:
 
 | 요청 | 결과 |

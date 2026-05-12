@@ -100,5 +100,6 @@ daemon으로 보내는 outbound Bearer token이다.
 ## 후속 후보
 
 - 공개 tag/release 정리: Git tag와 GitHub Release page 상태를 함께 관리
-- MCP v2에서 snapshot/restore tool, workspace copy, persistent session 지원
+- MCP v2에서 persistent session 지원
+- snapshot retention/GC 이후: size 기반 policy, 자동 background GC, retention audit 추가
 - multi-host runtime, scheduler, quota, audit storage 추가
