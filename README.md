@@ -9,25 +9,32 @@
 **IronClaw의 tool call을 격리 MicroVM 실행으로 변환하는 AI agent execution layer**
 
 `anvil`은 IronClaw의 판단과 tool call을 Firecracker MicroVM 안의 실제 agent
-실행으로 변환하는 격리 execution layer다. IronClaw는 상위 orchestration,
-planner, MCP client 역할을 맡고, anvil은 그 요청을 VM 생성, 작업 실행, health
-확인, graceful stop/delete, snapshot/restore 같은 실행 lifecycle로 바꾼다.
+실행으로 변환하는 격리 execution layer다.
+
+IronClaw는 상위 orchestration, planner, MCP client 역할을 맡는다. anvil은 그
+요청을 VM 생성, 작업 실행, health 확인, graceful stop/delete, snapshot/restore
+같은 실행 lifecycle로 바꾼다.
 
 구조적으로 anvil은 두 경계를 연결한다. 첫 번째는 IronClaw가 호출하는
 `anvil_*` MCP tool surface이고, 두 번째는 ephemera가 제공하는 KVM 기반
-Firecracker MicroVM runtime boundary다. 즉 anvil은 IronClaw가 직접 host runtime
-세부사항을 알지 않아도, 격리된 agent workspace를 생성하고 제어할 수 있게 만드는
-MCP adapter이자 실행 계약이다.
+Firecracker MicroVM runtime boundary다.
+
+즉 anvil은 IronClaw가 직접 host runtime 세부사항을 알지 않아도, 격리된 agent
+workspace를 생성하고 제어할 수 있게 만드는 MCP adapter이자 실행 계약이다.
 
 IronClaw와 ephemera를 서비스 대 서비스로 1:1 직접 연결하지 않는 이유는 두
-시스템의 책임과 추상화 수준이 다르기 때문이다. IronClaw는 "어떤 agent 작업을
-수행할 것인가"를 결정하는 orchestration/MCP client 계층이고, ephemera는 "어떤
-VM을 만들고 어떤 host resource를 정리할 것인가"를 다루는 low-level runtime
-control plane이다. 직접 연결하면 IronClaw가 VM ID, guest private URL, daemon
-token, agent token, snapshot file lifecycle, cleanup 실패 처리 같은 runtime
-세부사항을 알아야 한다. anvil은 이 결합을 막고, IronClaw에는 안전한
-`anvil_*` tool 계약만 노출하며, 내부에서 ephemera API 호출, session alias,
-token redaction, workspace 정책, restore/cleanup 의미를 변환한다.
+시스템의 책임과 추상화 수준이 다르기 때문이다.
+
+IronClaw는 "어떤 agent 작업을 수행할 것인가"를 결정하는 orchestration/MCP client
+계층이다. ephemera는 "어떤 VM을 만들고 어떤 host resource를 정리할 것인가"를
+다루는 low-level runtime control plane이다.
+
+직접 연결하면 IronClaw가 VM ID, guest private URL, daemon token, agent token,
+snapshot file lifecycle, cleanup 실패 처리 같은 runtime 세부사항을 알아야 한다.
+
+anvil은 이 결합을 막는다. IronClaw에는 안전한 `anvil_*` tool 계약만 노출하고,
+내부에서 ephemera API 호출, session alias, token redaction, workspace 정책,
+restore/cleanup 의미를 변환한다.
 
 anvil의 상위 통합 대상은 IronClaw 전용이다. OpenClaw 연동은 anvil의 지원 범위가
 아니며, OpenClaw용 compatibility layer나 운영 계약은 제공하지 않는다.
@@ -54,12 +61,18 @@ tag 기준은 `v0.2.0`이고, IronClaw 통합 프로젝트 anvil의 첫 공개 t
 
 ## 프로젝트 경계
 
-| 영역 | 책임 | 현재 구현 |
-|---|---|---|
-| IronClaw | 상위 orchestration, MCP client, 작업 의사결정 | 외부 통합 계층 |
-| anvil | IronClaw가 사용할 MCP tool surface와 실행 lifecycle 계약 | `cmd/anvil-mcp`, `internal/anvilmcp` |
-| ephemera | Firecracker MicroVM 생성, agent proxy, snapshot/restore, host resource 정리 | `cmd/goose-daemon`, `internal/vm`, `internal/storage`, `internal/network` |
-| guest runtime | VM 내부 task 실행, health, graceful stop | `cmd/goose-agent`, `cmd/micro-init` |
+- **IronClaw**: 상위 orchestration, MCP client, 작업 의사결정을 담당한다.
+  현재 구현은 anvil 밖의 외부 통합 계층이다.
+
+- **anvil**: IronClaw가 사용할 MCP tool surface와 실행 lifecycle 계약을 제공한다.
+  구현 위치는 `cmd/anvil-mcp`, `internal/anvilmcp`다.
+
+- **ephemera**: Firecracker MicroVM 생성, agent proxy, snapshot/restore,
+  host resource 정리를 담당한다. 구현 위치는 `cmd/goose-daemon`, `internal/vm`,
+  `internal/storage`, `internal/network`다.
+
+- **guest runtime**: VM 내부 task 실행, health, graceful stop을 담당한다.
+  구현 위치는 `cmd/goose-agent`, `cmd/micro-init`이다.
 
 anvil은 ephemera를 이름만 바꾼 프로젝트가 아니다. anvil은 IronClaw와 ephemera를
 연결하는 통합 실행 layer이고, ephemera는 독립적인 runtime 구현과 API 계약을
@@ -100,14 +113,28 @@ IronClaw 관점에서 anvil은 다음 계약을 제공한다.
 
 ## anvil 핵심 기능
 
-| 기능 | 설명 |
-|---|---|
-| IronClaw MCP adapter | `cmd/anvil-mcp`가 IronClaw에 `anvil_*` MCP tool을 제공한다. |
-| VM lifecycle tool | `anvil_spawn_vm`, `anvil_run_task`, `anvil_get_vm_health`, `anvil_stop_vm`, `anvil_delete_vm`을 제공한다. |
-| Snapshot lifecycle tool | `anvil_create_snapshot`, `anvil_list_snapshots`, `anvil_restore_snapshot`, `anvil_delete_snapshot`을 제공한다. |
-| Session alias | adapter process 내부에서 `session_name -> vm_id` alias를 유지해 IronClaw workflow를 단순화한다. |
-| Token redaction | daemon restore 응답의 `agent_token`은 decode할 수 있지만 MCP output에는 노출하지 않는다. |
-| Restore cleanup 계약 | restore 성공 후 alias bind가 실패하면 restored VM을 자동 삭제하지 않고 error에 VM ID를 포함한다. |
+- **IronClaw MCP adapter**:
+  `cmd/anvil-mcp`가 IronClaw에 `anvil_*` MCP tool을 제공한다.
+
+- **VM lifecycle tool**:
+  `anvil_spawn_vm`, `anvil_run_task`, `anvil_get_vm_health`,
+  `anvil_stop_vm`, `anvil_delete_vm`을 제공한다.
+
+- **Snapshot lifecycle tool**:
+  `anvil_create_snapshot`, `anvil_list_snapshots`, `anvil_restore_snapshot`,
+  `anvil_delete_snapshot`을 제공한다.
+
+- **Session alias**:
+  adapter process 내부에서 `session_name -> vm_id` alias를 유지해
+  IronClaw workflow를 단순화한다.
+
+- **Token redaction**:
+  daemon restore 응답의 `agent_token`은 decode할 수 있지만 MCP output에는
+  노출하지 않는다.
+
+- **Restore cleanup 계약**:
+  restore 성공 후 alias bind가 실패하면 restored VM을 자동 삭제하지 않고
+  error에 VM ID를 포함한다.
 
 ---
 
@@ -222,20 +249,42 @@ DELETE /vms/{id}
 
 ## ephemera runtime 기능
 
-| 기능 | 설명 |
-|---|---|
-| 자체 bootstrap | ephemera 첫 실행 시 golden image, kernel, Firecracker binary를 준비하고 검증한다. |
-| 최소 guest OS | Debian Bookworm minbase와 Go 기반 `micro-init`으로 구성한다. |
-| 안전한 guest 종료 | `micro-init`이 signal을 받아 `poweroff(2)`를 호출해 kernel panic을 피한다. |
-| VM별 LLM profile | VM 생성 시 `configs/profiles/{name}/`의 provider/model/secret을 선택할 수 있다. |
-| 런타임 설정 주입 | `goose.yaml`, `goose-secrets.yaml`을 provision time에 주입한다. |
-| VM별 agent 인증 | VM마다 별도 Bearer token을 생성하고 guest disk에 `0600`으로 저장한다. |
-| Full/Diff snapshot | 첫 snapshot은 Full, 이후 snapshot은 dirty memory page 기반 Diff로 자동 선택된다. |
-| COW rootfs restore | restore VM은 snapshot rootfs를 read-only base로 공유하고 sparse COW file에 쓰기를 기록한다. |
-| Restore 후 IP 재설정 | VM은 새 IP를 할당받고 vsock으로 guest network stack을 갱신한다. |
-| IP/TAP 재사용 | lifecycle 종료 후 `10.0.1.2-254` IP와 TAP ID를 pool에 반환한다. |
-| Outbound NAT | `goose-br0`와 iptables MASQUERADE로 guest의 LLM API outbound를 지원한다. |
-| Control-plane 인증 | named Bearer token, timing-safe compare, audit log, `SIGHUP` hot reload를 지원한다. |
+- **자체 bootstrap**:
+  ephemera 첫 실행 시 golden image, kernel, Firecracker binary를 준비하고 검증한다.
+
+- **최소 guest OS**:
+  Debian Bookworm minbase와 Go 기반 `micro-init`으로 구성한다.
+
+- **안전한 guest 종료**:
+  `micro-init`이 signal을 받아 `poweroff(2)`를 호출해 kernel panic을 피한다.
+
+- **VM별 LLM profile**:
+  VM 생성 시 `configs/profiles/{name}/`의 provider/model/secret을 선택할 수 있다.
+
+- **런타임 설정 주입**:
+  `goose.yaml`, `goose-secrets.yaml`을 provision time에 주입한다.
+
+- **VM별 agent 인증**:
+  VM마다 별도 Bearer token을 생성하고 guest disk에 `0600`으로 저장한다.
+
+- **Full/Diff snapshot**:
+  첫 snapshot은 Full, 이후 snapshot은 dirty memory page 기반 Diff로 자동 선택된다.
+
+- **COW rootfs restore**:
+  restore VM은 snapshot rootfs를 read-only base로 공유하고 sparse COW file에
+  쓰기를 기록한다.
+
+- **Restore 후 IP 재설정**:
+  VM은 새 IP를 할당받고 vsock으로 guest network stack을 갱신한다.
+
+- **IP/TAP 재사용**:
+  lifecycle 종료 후 `10.0.1.2-254` IP와 TAP ID를 pool에 반환한다.
+
+- **Outbound NAT**:
+  `goose-br0`와 iptables MASQUERADE로 guest의 LLM API outbound를 지원한다.
+
+- **Control-plane 인증**:
+  named Bearer token, timing-safe compare, audit log, `SIGHUP` hot reload를 지원한다.
 
 ---
 
@@ -280,16 +329,29 @@ scripts/build_image.sh golden image build script
 
 ## 문서 지도
 
-| 문서 | 역할 |
-|---|---|
-| [CONTEXT.md](CONTEXT.md) | anvil/ephemera/IronClaw 경계, 진실 기준 문서 순서, 고정 계약 |
-| [AGENTS.md](AGENTS.md) | Codex 작업 규약, 검증 명령, 불변 조건 |
-| [RELEASE_NOTES.md](RELEASE_NOTES.md) | ephemera `v0.1.0`, `v0.2.0`, anvil `anvil-v0.1.0` 변경 사항 |
-| [docs/architecture/runtime-architecture.md](docs/architecture/runtime-architecture.md) | ephemera daemon, MicroVM, storage, network, guest runtime 구조 |
-| [docs/architecture/service-logic.md](docs/architecture/service-logic.md) | ephemera control-plane API, VM lifecycle, snapshot/restore, guest agent 흐름 |
-| [docs/architecture/mcp-architecture.md](docs/architecture/mcp-architecture.md) | IronClaw MCP adapter 구조와 tool 계약 |
-| [docs/analysis/README.md](docs/analysis/README.md) | ephemera 0.1.0/0.2.0 분석 문서 index |
-| [docs/operations/2026-05-11-anvil-redesign-handoff.md](docs/operations/2026-05-11-anvil-redesign-handoff.md) | 재설계 release/operate handoff 근거 |
+- [CONTEXT.md](CONTEXT.md):
+  anvil/ephemera/IronClaw 경계, 진실 기준 문서 순서, 고정 계약.
+
+- [AGENTS.md](AGENTS.md):
+  Codex 작업 규약, 검증 명령, 불변 조건.
+
+- [RELEASE_NOTES.md](RELEASE_NOTES.md):
+  ephemera `v0.1.0`, `v0.2.0`, anvil `anvil-v0.1.0` 변경 사항.
+
+- [docs/architecture/runtime-architecture.md](docs/architecture/runtime-architecture.md):
+  ephemera daemon, MicroVM, storage, network, guest runtime 구조.
+
+- [docs/architecture/service-logic.md](docs/architecture/service-logic.md):
+  ephemera control-plane API, VM lifecycle, snapshot/restore, guest agent 흐름.
+
+- [docs/architecture/mcp-architecture.md](docs/architecture/mcp-architecture.md):
+  IronClaw MCP adapter 구조와 tool 계약.
+
+- [docs/analysis/README.md](docs/analysis/README.md):
+  ephemera 0.1.0/0.2.0 분석 문서 index.
+
+- [anvil redesign handoff](docs/operations/2026-05-11-anvil-redesign-handoff.md):
+  재설계 release/operate handoff 근거.
 
 ---
 
@@ -404,14 +466,32 @@ rate limit에 따라 보통 15-30분 이상 걸릴 수 있다.
 
 모든 daemon 설정은 시작 시 환경 변수에서 읽는다.
 
-| Canonical 변수 | Alias 변수 | 기본값 | 설명 |
-|---|---|---|---|
-| `EPHEMERA_API_ADDR` | `ANVIL_API_ADDR` | `127.0.0.1:3000` | control plane bind 주소. reverse proxy 뒤에서는 `0.0.0.0:3000`으로 설정할 수 있다. |
-| `EPHEMERA_API_PORT` | `ANVIL_API_PORT` | `3000` | API addr가 없을 때 사용하는 port. |
-| `EPHEMERA_API_TOKENS` | `ANVIL_API_TOKENS` | unset | named Bearer token 목록. 예: `alice:token1,bob:token2` |
-| `EPHEMERA_API_TOKEN` | `ANVIL_API_TOKEN` | unset | 단일 Bearer token fallback. |
-| `EPHEMERA_AGENT_PORT` | `ANVIL_AGENT_PORT` | `8080` | VM 내부 `goose-agent` listen port. |
-| `EPHEMERA_PUBLIC_URL` | `ANVIL_PUBLIC_URL` | unset | 외부에서 접근 가능한 control plane base URL. 설정 시 `agent_url`이 proxy path가 된다. |
+- `EPHEMERA_API_ADDR` / `ANVIL_API_ADDR`
+  - 기본값: `127.0.0.1:3000`
+  - control plane bind 주소다.
+  - reverse proxy 뒤에서는 `0.0.0.0:3000`으로 설정할 수 있다.
+
+- `EPHEMERA_API_PORT` / `ANVIL_API_PORT`
+  - 기본값: `3000`
+  - API addr가 없을 때 사용하는 port다.
+
+- `EPHEMERA_API_TOKENS` / `ANVIL_API_TOKENS`
+  - 기본값: unset
+  - named Bearer token 목록이다.
+  - 예: `alice:token1,bob:token2`
+
+- `EPHEMERA_API_TOKEN` / `ANVIL_API_TOKEN`
+  - 기본값: unset
+  - 단일 Bearer token fallback이다.
+
+- `EPHEMERA_AGENT_PORT` / `ANVIL_AGENT_PORT`
+  - 기본값: `8080`
+  - VM 내부 `goose-agent` listen port다.
+
+- `EPHEMERA_PUBLIC_URL` / `ANVIL_PUBLIC_URL`
+  - 기본값: unset
+  - 외부에서 접근 가능한 control plane base URL이다.
+  - 설정 시 `agent_url`이 proxy path가 된다.
 
 `EPHEMERA_*`는 ephemera runtime의 canonical 변수이고 `ANVIL_*`는 anvil 운영자를
 위한 alias다. 각 변수 쌍에서는 `EPHEMERA_*` 값이 `ANVIL_*` 값보다 우선한다.
@@ -452,19 +532,38 @@ export ANVIL_MCP_CONFIG=configs/anvil-mcp.yaml
 
 MCP tool:
 
-| Tool | 역할 |
-|---|---|
-| `anvil_spawn_vm` | ephemera VM을 만들고 optional `session_name` alias를 연결한다. |
-| `anvil_run_task` | `vm_id` 또는 `session_name`으로 VM에 prompt를 실행한다. |
-| `anvil_copy_in` | `vm_id` 또는 `session_name`으로 VM `/workspace`에 단일 file을 쓴다. |
-| `anvil_copy_out` | `vm_id` 또는 `session_name`으로 VM `/workspace`의 단일 file을 읽는다. |
-| `anvil_get_vm_health` | VM agent health를 확인한다. |
-| `anvil_stop_vm` | guest agent에 graceful stop을 요청한다. |
-| `anvil_delete_vm` | host VM 리소스를 삭제하고 session alias를 해제한다. |
-| `anvil_create_snapshot` | `vm_id` 또는 `session_name`으로 VM snapshot을 생성한다. |
-| `anvil_list_snapshots` | daemon이 알고 있는 snapshot 목록을 조회한다. |
-| `anvil_restore_snapshot` | `snapshot_id`에서 새 VM을 restore하고 optional `session_name` alias를 연결한다. |
-| `anvil_delete_snapshot` | `snapshot_id`로 snapshot을 삭제한다. |
+- `anvil_spawn_vm`:
+  ephemera VM을 만들고 optional `session_name` alias를 연결한다.
+
+- `anvil_run_task`:
+  `vm_id` 또는 `session_name`으로 VM에 prompt를 실행한다.
+
+- `anvil_copy_in`:
+  `vm_id` 또는 `session_name`으로 VM `/workspace`에 단일 file을 쓴다.
+
+- `anvil_copy_out`:
+  `vm_id` 또는 `session_name`으로 VM `/workspace`의 단일 file을 읽는다.
+
+- `anvil_get_vm_health`:
+  VM agent health를 확인한다.
+
+- `anvil_stop_vm`:
+  guest agent에 graceful stop을 요청한다.
+
+- `anvil_delete_vm`:
+  host VM 리소스를 삭제하고 session alias를 해제한다.
+
+- `anvil_create_snapshot`:
+  `vm_id` 또는 `session_name`으로 VM snapshot을 생성한다.
+
+- `anvil_list_snapshots`:
+  daemon이 알고 있는 snapshot 목록을 조회한다.
+
+- `anvil_restore_snapshot`:
+  `snapshot_id`에서 새 VM을 restore하고 optional `session_name` alias를 연결한다.
+
+- `anvil_delete_snapshot`:
+  `snapshot_id`로 snapshot을 삭제한다.
 
 MCP adapter는 얇은 runtime bridge다. 현재 workspace copy는 VM 내부
 `/workspace` 기준 단일 file copy-in/copy-out만 지원한다. 기본 encoding은
@@ -654,14 +753,24 @@ profile 이름에는 `/` 또는 `\`를 사용할 수 없다.
 
 ## 보안 모델
 
-| 경계 | 메커니즘 |
-|---|---|
-| client -> control plane | `EPHEMERA_API_TOKENS`/`EPHEMERA_API_TOKEN` 또는 `ANVIL_API_TOKENS`/`ANVIL_API_TOKEN` Bearer token |
-| control plane -> guest agent | VM별 Bearer token |
-| guest task isolation | Firecracker MicroVM + KVM boundary |
-| guest network | host-only `10.0.1.0/24`, bridge `goose-br0` |
-| 외부 공개 | TLS 종료 reverse proxy 뒤에서 운영 |
-| secret | gitignore된 로컬 config에서 guest disk로 주입 |
+- **client -> control plane**:
+  `EPHEMERA_API_TOKENS`/`EPHEMERA_API_TOKEN` 또는
+  `ANVIL_API_TOKENS`/`ANVIL_API_TOKEN` Bearer token을 사용한다.
+
+- **control plane -> guest agent**:
+  VM별 Bearer token을 사용한다.
+
+- **guest task isolation**:
+  Firecracker MicroVM + KVM boundary로 격리한다.
+
+- **guest network**:
+  host-only `10.0.1.0/24` network와 `goose-br0` bridge를 사용한다.
+
+- **외부 공개**:
+  TLS 종료 reverse proxy 뒤에서 운영한다.
+
+- **secret**:
+  gitignore된 로컬 config에서 guest disk로 주입한다.
 
 실제 API key는 문서, issue, commit, 채팅에 남기지 않는다.
 
@@ -675,7 +784,8 @@ profile 이름에는 `/` 또는 `\`를 사용할 수 없다.
 - diff snapshot은 memory만 diff다. rootfs는 snapshot마다 full copy다.
 - diff restore는 임시 merged memory file을 만들 disk space가 필요하다.
 - control-plane token 환경 변수를 설정하지 않으면 API 인증이 비활성화된다.
-- MCP v1은 snapshot/restore tool을 제공하지만 snapshot alias와 session alias 영속화는 제공하지 않는다.
+- MCP v1은 snapshot/restore tool을 제공하지만 snapshot alias와 session alias
+  영속화는 제공하지 않는다.
 
 ---
 
