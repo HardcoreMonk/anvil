@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -15,7 +17,10 @@ import (
 	"testing"
 	"time"
 
+	firecracker "github.com/firecracker-microvm/firecracker-go-sdk"
+
 	"ephemera/internal/storage"
+	"ephemera/internal/vm"
 )
 
 // ---- profileConfigPaths ----
@@ -87,6 +92,15 @@ func decodeGCResponse(t *testing.T, rr *httptest.ResponseRecorder) SnapshotGCRes
 	var resp SnapshotGCResponse
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode GC response %q: %v", rr.Body.String(), err)
+	}
+	return resp
+}
+
+func decodeRestoreErrorResponse(t *testing.T, rr *httptest.ResponseRecorder) RestoreErrorResponse {
+	t.Helper()
+	var resp RestoreErrorResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode restore error response %q: %v", rr.Body.String(), err)
 	}
 	return resp
 }
@@ -603,6 +617,217 @@ func TestDeleteSnapshotStillProtectsDiffBase(t *testing.T) {
 	if _, err := os.Stat(storage.SnapshotDir(cp.workDir, "snap-full")); err != nil {
 		t.Fatalf("protected full snapshot directory missing: %v", err)
 	}
+}
+
+func TestCreateSnapshotRejectsMalformedJSONWithJSONError(t *testing.T) {
+	cp := newTestCP(t)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/vms/vm-1/snapshot", strings.NewReader("{"))
+
+	cp.createSnapshot(rr, req, "vm-1")
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %q; want %d", rr.Code, rr.Body.String(), http.StatusBadRequest)
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Fatalf("Content-Type = %q, want application/json", ct)
+	}
+	if !strings.Contains(rr.Body.String(), "invalid JSON body") {
+		t.Fatalf("body = %q, want invalid JSON body", rr.Body.String())
+	}
+}
+
+func TestRestoreSnapshotMissingSnapshotReturnsJSONError(t *testing.T) {
+	cp := newTestCP(t)
+	rr := httptest.NewRecorder()
+
+	cp.restoreSnapshot(rr, "missing-snapshot")
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, body = %q; want %d", rr.Code, rr.Body.String(), http.StatusNotFound)
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Fatalf("Content-Type = %q, want application/json", ct)
+	}
+	resp := decodeRestoreErrorResponse(t, rr)
+	if resp.Code != "snapshot_not_found" {
+		t.Fatalf("code = %q, want snapshot_not_found", resp.Code)
+	}
+	if resp.SourceSnapshotID != "missing-snapshot" {
+		t.Fatalf("source_snapshot_id = %q, want missing-snapshot", resp.SourceSnapshotID)
+	}
+	if resp.Error != "snapshot not found" {
+		t.Fatalf("error = %q, want snapshot not found", resp.Error)
+	}
+}
+
+func TestRestoreSnapshotFirecrackerFailureCleansNetworkAndDMSnapshot(t *testing.T) {
+	cp := newTestCP(t)
+	cp.provisioner = &storage.Provisioner{WorkspaceDir: t.TempDir()}
+	snapshotID := "snap-firecracker-fail"
+	meta := testSnapshotMeta(snapshotID, "vm-source", "full", time.Now().UTC())
+	meta.GuestIP = "10.0.1.2"
+	meta.TapDevice = "tap9"
+	meta.MacAddr = "AA:FC:00:00:00:09"
+	meta.VsockPath = filepath.Join(t.TempDir(), "old.vsock")
+	meta.DiskPath = filepath.Join(t.TempDir(), "source.ext4")
+	meta.DiskCopyPath = filepath.Join(t.TempDir(), "rootfs.ext4")
+	meta.MemFilePath = filepath.Join(t.TempDir(), "memory.bin")
+	meta.StatFilePath = filepath.Join(t.TempDir(), "state.bin")
+	cp.snapshots[snapshotID] = meta
+
+	dmInfo := &storage.DMSnapshotInfo{
+		DMDevice:       "dm-test",
+		LoopDevice:     "/dev/loop-test-base",
+		COWLoopDevice:  "/dev/loop-test-cow",
+		ExceptionStore: filepath.Join(t.TempDir(), "restore.cow"),
+		MountTarget:    meta.DiskPath,
+	}
+	var releasedTap, releasedIP string
+	var tornDown *storage.DMSnapshotInfo
+
+	cp.allocateForRestore = func(tapDeviceName, macAddr string) (string, string, error) {
+		if tapDeviceName != meta.TapDevice {
+			t.Fatalf("tapDeviceName = %q, want %q", tapDeviceName, meta.TapDevice)
+		}
+		if macAddr != meta.MacAddr {
+			t.Fatalf("macAddr = %q, want %q", macAddr, meta.MacAddr)
+		}
+		return "tap-restored", "10.0.1.44", nil
+	}
+	cp.releaseNetwork = func(tapDevice, guestIP string) error {
+		releasedTap = tapDevice
+		releasedIP = guestIP
+		return nil
+	}
+	cp.setupDMSnapshot = func(baseDiskPath, exceptionStorePath, mountTargetPath string) (*storage.DMSnapshotInfo, error) {
+		if baseDiskPath != meta.DiskCopyPath {
+			t.Fatalf("baseDiskPath = %q, want %q", baseDiskPath, meta.DiskCopyPath)
+		}
+		if mountTargetPath != meta.DiskPath {
+			t.Fatalf("mountTargetPath = %q, want %q", mountTargetPath, meta.DiskPath)
+		}
+		return dmInfo, nil
+	}
+	cp.teardownDMSnapshot = func(info *storage.DMSnapshotInfo) {
+		tornDown = info
+	}
+	cp.restoreMachine = func(ctx context.Context, cfg vm.VMConfig, memFilePath, snapshotPath string) (*firecracker.Machine, error) {
+		if cfg.RootfsPath != meta.DiskPath {
+			t.Fatalf("RootfsPath = %q, want %q", cfg.RootfsPath, meta.DiskPath)
+		}
+		if cfg.TapDevice != "tap-restored" {
+			t.Fatalf("TapDevice = %q, want tap-restored", cfg.TapDevice)
+		}
+		if cfg.GuestIP != "10.0.1.44" {
+			t.Fatalf("GuestIP = %q, want 10.0.1.44", cfg.GuestIP)
+		}
+		if memFilePath != meta.MemFilePath {
+			t.Fatalf("memFilePath = %q, want %q", memFilePath, meta.MemFilePath)
+		}
+		if snapshotPath != meta.StatFilePath {
+			t.Fatalf("snapshotPath = %q, want %q", snapshotPath, meta.StatFilePath)
+		}
+		return nil, errors.New("restore failed")
+	}
+
+	rr := httptest.NewRecorder()
+	cp.restoreSnapshot(rr, snapshotID)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, body = %q; want %d", rr.Code, rr.Body.String(), http.StatusInternalServerError)
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Fatalf("Content-Type = %q, want application/json", ct)
+	}
+	resp := decodeRestoreErrorResponse(t, rr)
+	if resp.Code != "firecracker_restore_failed" {
+		t.Fatalf("code = %q, want firecracker_restore_failed", resp.Code)
+	}
+	if resp.SourceSnapshotID != snapshotID {
+		t.Fatalf("source_snapshot_id = %q, want %q", resp.SourceSnapshotID, snapshotID)
+	}
+	if releasedTap != "tap-restored" || releasedIP != "10.0.1.44" {
+		t.Fatalf("released network = (%q, %q), want (tap-restored, 10.0.1.44)", releasedTap, releasedIP)
+	}
+	if tornDown != dmInfo {
+		t.Fatalf("torn down dm snapshot = %#v, want %#v", tornDown, dmInfo)
+	}
+	if !cp.restoreMu.TryLock() {
+		t.Fatal("restoreMu remained locked after restore failure")
+	}
+	cp.restoreMu.Unlock()
+	if !cp.snapshotLifecycleMu.TryLock() {
+		t.Fatal("snapshotLifecycleMu remained locked after restore failure")
+	}
+	cp.snapshotLifecycleMu.Unlock()
+}
+
+func TestRestoreSnapshotDMSnapshotFallbackReleasesNetworkOnlyAfterBindMountFailure(t *testing.T) {
+	cp := newTestCP(t)
+	cp.provisioner = &storage.Provisioner{WorkspaceDir: t.TempDir()}
+	snapshotID := "snap-bind-fallback-fail"
+	meta := testSnapshotMeta(snapshotID, "vm-source", "full", time.Now().UTC())
+	meta.TapDevice = "tap9"
+	meta.MacAddr = "AA:FC:00:00:00:09"
+	meta.VsockPath = filepath.Join(t.TempDir(), "old.vsock")
+	meta.DiskPath = filepath.Join(t.TempDir(), "source.ext4")
+	meta.DiskCopyPath = filepath.Join(t.TempDir(), "rootfs.ext4")
+	meta.MemFilePath = filepath.Join(t.TempDir(), "memory.bin")
+	meta.StatFilePath = filepath.Join(t.TempDir(), "state.bin")
+	cp.snapshots[snapshotID] = meta
+
+	events := []string{}
+	cp.allocateForRestore = func(string, string) (string, string, error) {
+		events = append(events, "allocate")
+		return "tap-restored", "10.0.1.44", nil
+	}
+	cp.setupDMSnapshot = func(string, string, string) (*storage.DMSnapshotInfo, error) {
+		events = append(events, "dm-fail")
+		return nil, errors.New("dm unavailable")
+	}
+	cp.setupBindMount = func(baseDiskPath, newDiskPath, mountTargetPath string) error {
+		events = append(events, "bind-fail")
+		if baseDiskPath != meta.DiskCopyPath {
+			t.Fatalf("baseDiskPath = %q, want %q", baseDiskPath, meta.DiskCopyPath)
+		}
+		if !strings.HasPrefix(newDiskPath, cp.provisioner.WorkspaceDir) {
+			t.Fatalf("newDiskPath = %q, want under %q", newDiskPath, cp.provisioner.WorkspaceDir)
+		}
+		if mountTargetPath != meta.DiskPath {
+			t.Fatalf("mountTargetPath = %q, want %q", mountTargetPath, meta.DiskPath)
+		}
+		return errors.New("bind unavailable")
+	}
+	cp.releaseNetwork = func(tapDevice, guestIP string) error {
+		events = append(events, "release")
+		if tapDevice != "tap-restored" || guestIP != "10.0.1.44" {
+			t.Fatalf("released network = (%q, %q), want (tap-restored, 10.0.1.44)", tapDevice, guestIP)
+		}
+		return nil
+	}
+
+	rr := httptest.NewRecorder()
+	cp.restoreSnapshot(rr, snapshotID)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, body = %q; want %d", rr.Code, rr.Body.String(), http.StatusInternalServerError)
+	}
+	resp := decodeRestoreErrorResponse(t, rr)
+	if resp.Code != "firecracker_restore_failed" {
+		t.Fatalf("code = %q, want firecracker_restore_failed", resp.Code)
+	}
+	if got := strings.Join(events, ","); got != "allocate,dm-fail,bind-fail,release" {
+		t.Fatalf("events = %s, want allocate,dm-fail,bind-fail,release", got)
+	}
+	if !cp.restoreMu.TryLock() {
+		t.Fatal("restoreMu remained locked after bind fallback failure")
+	}
+	cp.restoreMu.Unlock()
+	if !cp.snapshotLifecycleMu.TryLock() {
+		t.Fatal("snapshotLifecycleMu remained locked after bind fallback failure")
+	}
+	cp.snapshotLifecycleMu.Unlock()
 }
 
 func TestRestoreSnapshotUsesSnapshotLifecycleLock(t *testing.T) {

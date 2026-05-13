@@ -719,6 +719,32 @@ curl -X POST http://localhost:3000/snapshots/snap-1778229000000/restore \
 source VM이 아직 실행 중이면 restore는 거부된다. restore된 VM은 새 VM ID와
 새 IP를 받지만 snapshot의 agent token은 유지한다.
 
+restore 실패는 JSON error body를 반환한다.
+
+```json
+{
+  "error": "snapshot not found",
+  "code": "snapshot_not_found",
+  "source_snapshot_id": "snap-1778229000000"
+}
+```
+
+`code`는 안정적인 machine-readable 값이다.
+
+| code | 의미 |
+|---|---|
+| `snapshot_not_found` | 요청한 snapshot metadata가 없다 |
+| `source_vm_running` | source VM이 아직 실행 중이라 restore할 수 없다 |
+| `network_unavailable` | restore용 TAP/IP allocation에 실패했다 |
+| `diff_base_missing` | diff snapshot의 base full snapshot이 없다 |
+| `memory_merge_failed` | diff memory merge에 실패했다 |
+| `firecracker_restore_failed` | disk setup 또는 Firecracker restore에 실패했다 |
+| `guest_reconfigure_failed` | restore 후 guest IP 재설정에 실패했다 |
+| `agent_not_ready` | restore된 VM의 `goose-agent` health 대기가 실패했다 |
+
+현재 snapshot lifecycle은 보수적으로 직렬화되어 하나의 create/restore/delete/GC
+lifecycle operation만 동시에 실행된다.
+
 ### Snapshot 삭제
 
 ```bash
@@ -838,8 +864,7 @@ profile 이름에는 `/` 또는 `\`를 사용할 수 없다.
 
 ## 알려진 제약
 
-- 같은 snapshot을 동시에 두 번 restore하는 흐름은 지원하지 않는다.
-- 서로 다른 snapshot의 concurrent restore는 지원한다.
+- snapshot create/restore/delete/GC lifecycle operation은 한 번에 하나만 실행된다.
 - source VM이 실행 중인 동안 해당 VM의 snapshot restore는 거부된다.
 - diff snapshot은 memory만 diff다. rootfs는 snapshot마다 full copy다.
 - diff restore는 임시 merged memory file을 만들 disk space가 필요하다.
