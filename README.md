@@ -710,13 +710,17 @@ diff snapshot이 참조 중인 full snapshot은 삭제할 수 없다.
 ### Snapshot GC dry-run/apply
 
 `POST /snapshots/gc`는 snapshot retention plan을 계산한다. 기본값은 dry-run이며
-파일을 삭제하지 않는다.
+파일을 삭제하지 않는다. `older_than_seconds`와 `keep_last_per_vm`에 더해
+`max_total_bytes`를 지정할 수 있다. `max_total_bytes` 기본값 `0`은 비활성화이며,
+양수이면 모든 snapshot directory의 apparent file size를 합산한 뒤 projected
+remaining total이 한도 이하가 될 때까지 보호되지 않은 snapshot을 오래된 순서로
+추가 후보에 넣는다.
 
 ```bash
 curl -X POST http://localhost:3000/snapshots/gc \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $EPHEMERA_API_TOKEN" \
-  -d '{"older_than_seconds":604800,"keep_last_per_vm":1}'
+  -d '{"older_than_seconds":604800,"keep_last_per_vm":1,"max_total_bytes":10737418240}'
 ```
 
 실제 삭제는 `apply: true`를 명시해야 수행된다.
@@ -725,11 +729,17 @@ curl -X POST http://localhost:3000/snapshots/gc \
 curl -X POST http://localhost:3000/snapshots/gc \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $EPHEMERA_API_TOKEN" \
-  -d '{"older_than_seconds":604800,"keep_last_per_vm":1,"apply":true}'
+  -d '{"older_than_seconds":604800,"keep_last_per_vm":1,"max_total_bytes":10737418240,"apply":true}'
 ```
 
 diff snapshot이 참조 중인 full snapshot은 항상 보호된다. full과 diff가 모두 오래된
 경우 첫 GC apply에서는 diff만 삭제되고, 다음 GC 호출에서 full이 삭제 후보가 된다.
+`candidates`, `protected`, `deleted` entry는 계산 가능한 경우 `size_bytes`를 포함한다.
+`max_total_bytes` 때문에 추가된 후보의 `reason`은 `max_total_bytes`다. `apply: true`
+호출은 삭제 시도 후 `snapshots/gc-audit.jsonl`에 JSONL audit record를 1줄 append한다.
+audit record에는 timestamp, applied, policy, candidates/deleted/errors count만 들어가며
+snapshot metadata나 `agent_token`은 기록하지 않는다. dry-run은 audit record를 쓰지
+않는다.
 
 ### Agent proxy 사용
 

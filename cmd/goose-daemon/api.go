@@ -637,6 +637,7 @@ type SnapshotRequest struct {
 type SnapshotGCRequest struct {
 	OlderThanSeconds int64 `json:"older_than_seconds"`
 	KeepLastPerVM    int   `json:"keep_last_per_vm"`
+	MaxTotalBytes    int64 `json:"max_total_bytes"`
 	Apply            bool  `json:"apply"`
 }
 
@@ -644,6 +645,7 @@ type SnapshotGCRequest struct {
 type SnapshotGCPolicy struct {
 	OlderThanSeconds int64 `json:"older_than_seconds"`
 	KeepLastPerVM    int   `json:"keep_last_per_vm"`
+	MaxTotalBytes    int64 `json:"max_total_bytes"`
 }
 
 // SnapshotGCEntry is the public representation of one GC decision.
@@ -656,6 +658,7 @@ type SnapshotGCEntry struct {
 	CreatedAt      time.Time `json:"created_at"`
 	Reason         string    `json:"reason"`
 	ReferencedBy   []string  `json:"referenced_by,omitempty"`
+	SizeBytes      int64     `json:"size_bytes,omitempty"`
 }
 
 // SnapshotGCError records a per-snapshot apply failure.
@@ -679,6 +682,7 @@ const (
 	snapshotGCReasonOlderThan        = "older_than"
 	snapshotGCReasonReferencedByDiff = "referenced_by_diff"
 	snapshotGCReasonKeepLastPerVM    = "keep_last_per_vm"
+	snapshotGCReasonMaxTotalBytes    = "max_total_bytes"
 )
 
 func snapshotInfoFrom(meta storage.SnapshotMetadata) SnapshotInfo {
@@ -692,7 +696,7 @@ func snapshotInfoFrom(meta storage.SnapshotMetadata) SnapshotInfo {
 	}
 }
 
-func snapshotGCEntryFrom(meta storage.SnapshotMetadata, reason string, referencedBy []string) SnapshotGCEntry {
+func snapshotGCEntryFrom(meta storage.SnapshotMetadata, reason string, referencedBy []string, sizeBytes int64) SnapshotGCEntry {
 	refs := append([]string(nil), referencedBy...)
 	sort.Strings(refs)
 	return SnapshotGCEntry{
@@ -704,6 +708,7 @@ func snapshotGCEntryFrom(meta storage.SnapshotMetadata, reason string, reference
 		CreatedAt:      meta.CreatedAt,
 		Reason:         reason,
 		ReferencedBy:   refs,
+		SizeBytes:      sizeBytes,
 	}
 }
 
@@ -728,8 +733,33 @@ func (cp *ControlPlane) snapshotMetadataList() []storage.SnapshotMetadata {
 	return list
 }
 
+func (cp *ControlPlane) snapshotSizeBytes(snapshotID string) int64 {
+	var total int64
+	snapDir := storage.SnapshotDir(cp.workDir, snapshotID)
+	_ = filepath.WalkDir(snapDir, func(_ string, entry os.DirEntry, err error) error {
+		if err != nil || entry == nil || entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		total += info.Size()
+		return nil
+	})
+	return total
+}
+
 func (cp *ControlPlane) planSnapshotGC(policy SnapshotGCPolicy, now time.Time) SnapshotGCResponse {
 	snapshots := cp.snapshotMetadataList()
+	sizes := make(map[string]int64, len(snapshots))
+	var totalBytes int64
+	for _, meta := range snapshots {
+		sizeBytes := cp.snapshotSizeBytes(meta.SnapshotID)
+		sizes[meta.SnapshotID] = sizeBytes
+		totalBytes += sizeBytes
+	}
+
 	referencedBy := make(map[string][]string)
 	for _, meta := range snapshots {
 		if meta.BaseSnapshotID != "" {
@@ -743,7 +773,7 @@ func (cp *ControlPlane) planSnapshotGC(policy SnapshotGCPolicy, now time.Time) S
 	protected := make(map[string]SnapshotGCEntry)
 	for _, meta := range snapshots {
 		if refs, ok := referencedBy[meta.SnapshotID]; ok {
-			protected[meta.SnapshotID] = snapshotGCEntryFrom(meta, snapshotGCReasonReferencedByDiff, refs)
+			protected[meta.SnapshotID] = snapshotGCEntryFrom(meta, snapshotGCReasonReferencedByDiff, refs, sizes[meta.SnapshotID])
 		}
 	}
 
@@ -762,7 +792,7 @@ func (cp *ControlPlane) planSnapshotGC(policy SnapshotGCPolicy, now time.Time) S
 			for i := 0; i < len(group) && i < policy.KeepLastPerVM; i++ {
 				meta := group[i]
 				if _, exists := protected[meta.SnapshotID]; !exists {
-					protected[meta.SnapshotID] = snapshotGCEntryFrom(meta, snapshotGCReasonKeepLastPerVM, nil)
+					protected[meta.SnapshotID] = snapshotGCEntryFrom(meta, snapshotGCReasonKeepLastPerVM, nil, sizes[meta.SnapshotID])
 				}
 			}
 		}
@@ -778,13 +808,35 @@ func (cp *ControlPlane) planSnapshotGC(policy SnapshotGCPolicy, now time.Time) S
 	}
 
 	cutoff := now.Add(-time.Duration(policy.OlderThanSeconds) * time.Second)
+	candidateIDs := make(map[string]struct{})
+	projectedRemainingBytes := totalBytes
+	selectAgeCandidates := policy.OlderThanSeconds > 0 || policy.MaxTotalBytes == 0
 	for _, meta := range snapshots {
 		if entry, ok := protected[meta.SnapshotID]; ok {
 			resp.Protected = append(resp.Protected, entry)
 			continue
 		}
-		if policy.OlderThanSeconds == 0 || !meta.CreatedAt.After(cutoff) {
-			resp.Candidates = append(resp.Candidates, snapshotGCEntryFrom(meta, snapshotGCReasonOlderThan, nil))
+		if selectAgeCandidates && (policy.OlderThanSeconds == 0 || !meta.CreatedAt.After(cutoff)) {
+			resp.Candidates = append(resp.Candidates, snapshotGCEntryFrom(meta, snapshotGCReasonOlderThan, nil, sizes[meta.SnapshotID]))
+			candidateIDs[meta.SnapshotID] = struct{}{}
+			projectedRemainingBytes -= sizes[meta.SnapshotID]
+		}
+	}
+
+	if policy.MaxTotalBytes > 0 && projectedRemainingBytes > policy.MaxTotalBytes {
+		for _, meta := range snapshots {
+			if projectedRemainingBytes <= policy.MaxTotalBytes {
+				break
+			}
+			if _, ok := protected[meta.SnapshotID]; ok {
+				continue
+			}
+			if _, ok := candidateIDs[meta.SnapshotID]; ok {
+				continue
+			}
+			resp.Candidates = append(resp.Candidates, snapshotGCEntryFrom(meta, snapshotGCReasonMaxTotalBytes, nil, sizes[meta.SnapshotID]))
+			candidateIDs[meta.SnapshotID] = struct{}{}
+			projectedRemainingBytes -= sizes[meta.SnapshotID]
 		}
 	}
 	return resp
@@ -821,9 +873,14 @@ func (cp *ControlPlane) handleSnapshotGC(w http.ResponseWriter, r *http.Request)
 		writeJSONError(w, http.StatusBadRequest, "keep_last_per_vm must be non-negative")
 		return
 	}
+	if req.MaxTotalBytes < 0 {
+		writeJSONError(w, http.StatusBadRequest, "max_total_bytes must be non-negative")
+		return
+	}
 	policy := SnapshotGCPolicy{
 		OlderThanSeconds: req.OlderThanSeconds,
 		KeepLastPerVM:    req.KeepLastPerVM,
+		MaxTotalBytes:    req.MaxTotalBytes,
 	}
 	resp := cp.planSnapshotGC(policy, time.Now().UTC())
 	resp.Applied = req.Apply
@@ -837,7 +894,7 @@ func (cp *ControlPlane) handleSnapshotGC(w http.ResponseWriter, r *http.Request)
 
 func (cp *ControlPlane) applySnapshotGC(resp *SnapshotGCResponse) {
 	for _, candidate := range resp.Candidates {
-		meta, _, err := cp.deleteSnapshotByID(candidate.SnapshotID)
+		_, _, err := cp.deleteSnapshotByID(candidate.SnapshotID)
 		if err != nil {
 			resp.Errors = append(resp.Errors, SnapshotGCError{
 				SnapshotID: candidate.SnapshotID,
@@ -845,7 +902,26 @@ func (cp *ControlPlane) applySnapshotGC(resp *SnapshotGCResponse) {
 			})
 			continue
 		}
-		resp.Deleted = append(resp.Deleted, snapshotGCEntryFrom(meta, candidate.Reason, nil))
+		resp.Deleted = append(resp.Deleted, candidate)
+	}
+
+	record := storage.SnapshotGCAuditRecord{
+		Timestamp: time.Now().UTC(),
+		Applied:   resp.Applied,
+		Policy: storage.SnapshotGCAuditPolicy{
+			OlderThanSeconds: resp.Policy.OlderThanSeconds,
+			KeepLastPerVM:    resp.Policy.KeepLastPerVM,
+			MaxTotalBytes:    resp.Policy.MaxTotalBytes,
+		},
+		CandidatesCount: len(resp.Candidates),
+		DeletedCount:    len(resp.Deleted),
+		ErrorsCount:     len(resp.Errors),
+	}
+	if err := storage.AppendSnapshotGCAudit(cp.workDir, record); err != nil {
+		log.Printf("Warning: failed to write snapshot GC audit: %v", err)
+		resp.Errors = append(resp.Errors, SnapshotGCError{
+			Error: "write GC audit: failed to append audit record",
+		})
 	}
 }
 

@@ -344,6 +344,7 @@ Request 예시:
 {
   "older_than_seconds": 604800,
   "keep_last_per_vm": 1,
+  "max_total_bytes": 10737418240,
   "apply": false
 }
 ```
@@ -353,21 +354,40 @@ Flow:
 ```text
 handleSnapshotGC()
   -> optional JSON body parse
-  -> negative older_than_seconds / keep_last_per_vm 거부
+  -> negative older_than_seconds / keep_last_per_vm / max_total_bytes 거부
   -> cp.snapshots metadata를 복사해 CreatedAt 기준 정렬
+  -> 각 storage.SnapshotDir(workDir, snapshotID)를 walk해 file Info().Size() 합산
   -> diff snapshot의 base_snapshot_id reverse reference map 생성
   -> referenced full snapshot 보호
   -> source_vm_id별 최신 keep_last_per_vm개 보호
   -> age 조건을 통과하고 보호되지 않은 snapshot을 candidates로 분류
+  -> max_total_bytes > 0이면 전체 size에서 기존 candidates size를 뺀 projected
+     remaining total을 계산
+  -> projected remaining total이 max_total_bytes보다 크면 보호되지 않고 아직 후보가
+     아닌 snapshot을 오래된 순서로 추가 후보 처리(reason=max_total_bytes)
   -> apply=false이면 plan만 반환
   -> apply=true이면 candidates를 storage.DeleteSnapshot으로 삭제하고 cp.snapshots에서 제거
+  -> apply=true이면 snapshots/gc-audit.jsonl에 JSONL audit record append
 ```
+
+Size 계산은 planning 보조 정보다. walk 중 파일이 사라지거나 stat할 수 없는 경우 해당
+파일은 무시하고 planner는 실패하지 않는다. `candidates`, `protected`, `deleted` entry는
+계산 가능한 경우 `size_bytes`를 포함한다. 이미 age 후보인 snapshot은 size pressure가
+있어도 기존 `older_than` reason을 유지한다.
+
+Audit record는 timestamp, applied, policy, candidates_count, deleted_count,
+errors_count만 포함한다. snapshot metadata 전체를 기록하지 않으므로 `agent_token`이나
+profile별 secret 값이 audit file에 들어가지 않는다. audit append 실패는 HTTP 200
+response 안의 `errors`에 `snapshot_id: ""`, `error: "write GC audit: ..."` 형태로
+추가하며 삭제 결과는 유지한다.
 
 불변 조건:
 
 - `apply` 기본값은 `false`다.
 - 응답에 `agent_token`을 포함하지 않는다.
 - diff snapshot이 참조 중인 full snapshot은 삭제하지 않는다.
+- `max_total_bytes`를 만족하지 못하더라도 diff snapshot이 참조 중인 full snapshot은
+  보호 상태로 남긴다.
 - 같은 GC 호출에서 diff를 삭제한 뒤 해당 full을 연쇄 삭제하지 않는다.
 - snapshot create, restore, delete, GC는 필요한 구간에서 snapshot lifecycle lock으로
   직렬화해 진행 중인 restore 파일 읽기와 diff base가 삭제되지 않게 한다.
