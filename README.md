@@ -319,7 +319,7 @@ docs/
   architecture/        ephemera 런타임, 서비스 로직, anvil MCP 아키텍처
   analysis/            ephemera 버전 비교와 소스 분석
   lifecycle/runs/      계산된 lifecycle 상태 snapshot
-  operations/          release/operate handoff 기록
+  operations/          보안 정책, runbook, DR, 관측성, release/operate 기록
   superpowers/         승인된 spec, review, plan 기록
 
 snapshots/             snapshot 저장 디렉터리, gitignore
@@ -351,6 +351,15 @@ scripts/anvil-mcp-e2e.sh daemon 기반 MCP smoke wrapper
 
 - [docs/operations/security-policy.md](docs/operations/security-policy.md):
   공개 노출, 제어 평면 token, guest agent token, snapshot metadata 반출 보안 정책.
+
+- [docs/operations/runbook.md](docs/operations/runbook.md):
+  daemon 빌드/시작, health 확인, VM 정리, snapshot GC dry-run/apply 운영 명령.
+
+- [docs/operations/disaster-recovery.md](docs/operations/disaster-recovery.md):
+  daemon crash, stale TAP/IP, restore 실패, GC 실패, diff base 누락 대응 playbook.
+
+- [docs/operations/observability.md](docs/operations/observability.md):
+  daemon log, health endpoint, snapshot GC audit, 아직 없는 metrics와 향후 지표 후보.
 
 - [docs/analysis/README.md](docs/analysis/README.md):
   ephemera 0.1.0/0.2.0 분석 문서 index.

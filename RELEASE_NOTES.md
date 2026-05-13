@@ -34,6 +34,15 @@
 - `docs/operations/release-checklist.md`: ephemera runtime 릴리즈와 anvil
   integration 릴리즈를 구분하는 게시 전 확인 절차와 `anvil-v0.1.0` GitHub
   Release 본문 초안.
+- [docs/operations/security-policy.md](docs/operations/security-policy.md): 운영 공개
+  노출, token, local secret, `agent_token` 불변 조건, snapshot metadata scrub 정책을
+  구체화한 보안 정책.
+- [docs/operations/runbook.md](docs/operations/runbook.md): daemon 빌드/시작, API
+  확인, VM cleanup, snapshot GC dry-run/apply 운영 명령.
+- [docs/operations/disaster-recovery.md](docs/operations/disaster-recovery.md): daemon
+  crash/restart, stale TAP/IP, restore 실패, GC 실패, diff base 누락 대응 playbook.
+- [docs/operations/observability.md](docs/operations/observability.md): 현재
+  log/health/audit 기반 관측성과 아직 구현되지 않은 metrics 범위.
 
 ## 변경됨
 
