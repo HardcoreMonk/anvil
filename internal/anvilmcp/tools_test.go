@@ -4,7 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -241,6 +245,26 @@ func (f *fakeDaemon) DeleteSnapshot(_ context.Context, snapshotID string) (*RawD
 	return &RawDaemonResponse{StatusCode: 200, Body: `{"status":"deleted","snapshot_id":"snap-1"}`}, nil
 }
 
+type concurrentSpawnDaemon struct {
+	fakeDaemon
+	mu   sync.Mutex
+	next int
+}
+
+func (f *concurrentSpawnDaemon) SpawnVM(_ context.Context, profile string) (*SpawnVMResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.next++
+	vmID := fmt.Sprintf("vm-%d", f.next)
+	return &SpawnVMResponse{
+		VMID:     vmID,
+		GuestIP:  "10.0.0.2",
+		AgentURL: "http://10.0.0.2:3000",
+		Profile:  profile,
+	}, nil
+}
+
 type fakeSessionStore struct {
 	sessions map[string]string
 	bindErr  error
@@ -297,13 +321,141 @@ func (s *fakeSessionStore) ResolveIdentity(vmID, sessionName string) (string, er
 	return resolvedVMID, nil
 }
 
-func (s *fakeSessionStore) RemoveVM(vmID string) {
+func (s *fakeSessionStore) RemoveVM(vmID string) bool {
+	return len(s.removeVMAliases(vmID)) > 0
+}
+
+func (s *fakeSessionStore) removeVMAliases(vmID string) map[string]string {
 	vmID = strings.TrimSpace(vmID)
+	removed := make(map[string]string)
 	for sessionName, mappedVMID := range s.sessions {
 		if mappedVMID == vmID {
 			delete(s.sessions, sessionName)
+			removed[sessionName] = mappedVMID
 		}
 	}
+	return removed
+}
+
+func (s *fakeSessionStore) restoreAliases(aliases map[string]string) {
+	for sessionName, vmID := range aliases {
+		s.sessions[sessionName] = vmID
+	}
+}
+
+type blockingSaveSessionStore struct {
+	mu              sync.Mutex
+	sessions        map[string]string
+	saveStarted     chan struct{}
+	releaseSave     chan struct{}
+	saveStartedOnce sync.Once
+	saveErr         error
+}
+
+func newBlockingSaveSessionStore(saveErr error) *blockingSaveSessionStore {
+	return &blockingSaveSessionStore{
+		sessions:    make(map[string]string),
+		saveStarted: make(chan struct{}),
+		releaseSave: make(chan struct{}),
+		saveErr:     saveErr,
+	}
+}
+
+func (s *blockingSaveSessionStore) Bind(sessionName, vmID string) error {
+	sessionName = strings.TrimSpace(sessionName)
+	vmID = strings.TrimSpace(vmID)
+	if sessionName == "" {
+		return errors.New("session name must be non-empty")
+	}
+	if vmID == "" {
+		return errors.New("vm ID must be non-empty")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.sessions[sessionName]; ok {
+		return errors.New("session already exists")
+	}
+	s.sessions[sessionName] = vmID
+	return nil
+}
+
+func (s *blockingSaveSessionStore) Exists(sessionName string) bool {
+	sessionName = strings.TrimSpace(sessionName)
+	if sessionName == "" {
+		return false
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, ok := s.sessions[sessionName]
+	return ok
+}
+
+func (s *blockingSaveSessionStore) ResolveIdentity(vmID, sessionName string) (string, error) {
+	vmID = strings.TrimSpace(vmID)
+	sessionName = strings.TrimSpace(sessionName)
+	if vmID != "" {
+		return vmID, nil
+	}
+	if sessionName == "" {
+		return "", errors.New("vm ID or session name is required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	resolvedVMID, ok := s.sessions[sessionName]
+	if !ok {
+		return "", errors.New("unknown session")
+	}
+	return resolvedVMID, nil
+}
+
+func (s *blockingSaveSessionStore) RemoveVM(vmID string) bool {
+	return len(s.removeVMAliases(vmID)) > 0
+}
+
+func (s *blockingSaveSessionStore) removeVMAliases(vmID string) map[string]string {
+	vmID = strings.TrimSpace(vmID)
+	if vmID == "" {
+		return nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	removed := make(map[string]string)
+	for sessionName, mappedVMID := range s.sessions {
+		if mappedVMID == vmID {
+			delete(s.sessions, sessionName)
+			removed[sessionName] = mappedVMID
+		}
+	}
+	return removed
+}
+
+func (s *blockingSaveSessionStore) restoreAliases(aliases map[string]string) {
+	if len(aliases) == 0 {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for sessionName, vmID := range aliases {
+		s.sessions[sessionName] = vmID
+	}
+}
+
+func (s *blockingSaveSessionStore) Save(path string) error {
+	s.saveStartedOnce.Do(func() {
+		close(s.saveStarted)
+	})
+	<-s.releaseSave
+	return s.saveErr
 }
 
 func TestToolsSpawnBindsSession(t *testing.T) {
@@ -330,6 +482,92 @@ func TestToolsSpawnBindsSession(t *testing.T) {
 	}
 	if vmID, ok := store.Resolve("work"); !ok || vmID != "vm-1" {
 		t.Fatalf("session work resolved to %q, %v; want vm-1, true", vmID, ok)
+	}
+}
+
+func TestToolsSpawnSavesPersistentSession(t *testing.T) {
+	daemon := &fakeDaemon{}
+	store := NewSessionStore()
+	storePath := filepath.Join(t.TempDir(), "sessions.json")
+	tools := NewToolsWithSessionStorePath(daemon, store, time.Second, storePath)
+
+	out, err := tools.SpawnVM(context.Background(), SpawnVMInput{
+		Profile:     "dev",
+		SessionName: "work",
+	})
+	if err != nil {
+		t.Fatalf("SpawnVM returned error: %v", err)
+	}
+
+	if out.SessionName != "work" {
+		t.Fatalf("SessionName = %q, want work", out.SessionName)
+	}
+	sessions := readSavedSessions(t, storePath)
+	if sessions["work"] != "vm-1" {
+		t.Fatalf("saved session work = %q, want vm-1", sessions["work"])
+	}
+}
+
+func TestToolsConcurrentPersistentSpawnKeepsAllAliasesOnDisk(t *testing.T) {
+	daemon := &concurrentSpawnDaemon{}
+	store := NewSessionStore()
+	storePath := filepath.Join(t.TempDir(), "sessions.json")
+	tools := NewToolsWithSessionStorePath(daemon, store, time.Second, storePath)
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+
+	var wg sync.WaitGroup
+	for _, sessionName := range []string{"work", "review"} {
+		wg.Add(1)
+		go func(sessionName string) {
+			defer wg.Done()
+			<-start
+			_, err := tools.SpawnVM(context.Background(), SpawnVMInput{SessionName: sessionName})
+			errs <- err
+		}(sessionName)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("SpawnVM returned error: %v", err)
+		}
+	}
+
+	loaded, err := LoadSessionStore(storePath)
+	if err != nil {
+		t.Fatalf("LoadSessionStore() error = %v", err)
+	}
+	for _, sessionName := range []string{"work", "review"} {
+		if vmID, ok := loaded.Resolve(sessionName); !ok || vmID == "" {
+			t.Fatalf("Resolve(%q) = %q, %v; want non-empty vm ID, true", sessionName, vmID, ok)
+		}
+	}
+}
+
+func TestToolsSpawnSaveFailureDeletesSpawnedVM(t *testing.T) {
+	daemon := &fakeDaemon{}
+	store := NewSessionStore()
+	storePath := t.TempDir()
+	tools := NewToolsWithSessionStorePath(daemon, store, time.Second, storePath)
+
+	_, err := tools.SpawnVM(context.Background(), SpawnVMInput{SessionName: "work"})
+	if err == nil {
+		t.Fatal("SpawnVM returned nil error for session store save failure")
+	}
+	if !strings.Contains(err.Error(), "save session store") {
+		t.Fatalf("SpawnVM error = %q, want save session store context", err.Error())
+	}
+	if daemon.deleteCalls != 1 {
+		t.Fatalf("Delete calls = %d, want 1", daemon.deleteCalls)
+	}
+	if daemon.deleteVMID != "vm-1" {
+		t.Fatalf("Delete vmID = %q, want vm-1", daemon.deleteVMID)
+	}
+	if store.Exists("work") {
+		t.Fatal("session work still exists after failed persistent spawn bind")
 	}
 }
 
@@ -668,6 +906,54 @@ func TestToolsDeleteRemovesSession(t *testing.T) {
 	}
 }
 
+func TestToolsDeleteSavesPersistentSessionRemoval(t *testing.T) {
+	daemon := &fakeDaemon{}
+	store := NewSessionStore()
+	if err := store.Bind("work", "vm-1"); err != nil {
+		t.Fatalf("Bind returned error: %v", err)
+	}
+	storePath := filepath.Join(t.TempDir(), "sessions.json")
+	tools := NewToolsWithSessionStorePath(daemon, store, time.Second, storePath)
+
+	if _, err := tools.DeleteVM(context.Background(), VMIdentityInput{SessionName: "work"}); err != nil {
+		t.Fatalf("DeleteVM returned error: %v", err)
+	}
+
+	sessions := readSavedSessions(t, storePath)
+	if len(sessions) != 0 {
+		t.Fatalf("saved sessions = %#v, want empty after delete", sessions)
+	}
+}
+
+func TestToolsDeleteSaveFailureIncludesDeleteResponseContext(t *testing.T) {
+	daemon := &fakeDaemon{deleteResp: &RawDaemonResponse{
+		StatusCode: 202,
+		Body:       `{"deleted":true,"vm_id":"vm-1"}`,
+	}}
+	store := NewSessionStore()
+	if err := store.Bind("work", "vm-1"); err != nil {
+		t.Fatalf("Bind returned error: %v", err)
+	}
+	storePath := t.TempDir()
+	tools := NewToolsWithSessionStorePath(daemon, store, time.Second, storePath)
+
+	_, err := tools.DeleteVM(context.Background(), VMIdentityInput{SessionName: "work"})
+	if err == nil {
+		t.Fatal("DeleteVM returned nil error for session store save failure")
+	}
+	for _, want := range []string{"status 202", `{"deleted":true,"vm_id":"vm-1"}`, "save session store"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("DeleteVM error = %q, want substring %q", err.Error(), want)
+		}
+	}
+	if daemon.deleteCalls != 1 {
+		t.Fatalf("Delete calls = %d, want 1", daemon.deleteCalls)
+	}
+	if vmID, ok := store.Resolve("work"); !ok || vmID != "vm-1" {
+		t.Fatalf("session work resolved to %q, %v after failed save; want vm-1, true", vmID, ok)
+	}
+}
+
 func TestToolsReturnsDaemonError(t *testing.T) {
 	daemonErr := errors.New("daemon down")
 	daemon := &fakeDaemon{healthErr: daemonErr}
@@ -735,6 +1021,41 @@ func TestToolsCreateSnapshotKeepsSessionWithoutStopAfter(t *testing.T) {
 
 	if _, ok := store.Resolve("work"); !ok {
 		t.Fatal("session work was removed after snapshot without stop_after")
+	}
+}
+
+func TestToolsCreateSnapshotStopAfterSaveFailureRestoresRemovedSessions(t *testing.T) {
+	daemon := &fakeDaemon{}
+	store := NewSessionStore()
+	for sessionName, vmID := range map[string]string{
+		"work":   "vm-1",
+		"review": "vm-1",
+	} {
+		if err := store.Bind(sessionName, vmID); err != nil {
+			t.Fatalf("Bind(%q, %q) returned error: %v", sessionName, vmID, err)
+		}
+	}
+	storePath := t.TempDir()
+	tools := NewToolsWithSessionStorePath(daemon, store, time.Second, storePath)
+
+	_, err := tools.CreateSnapshot(context.Background(), CreateSnapshotInput{
+		SessionName: "work",
+		StopAfter:   true,
+		Type:        "full",
+	})
+	if err == nil {
+		t.Fatal("CreateSnapshot returned nil error for session store save failure")
+	}
+	for _, want := range []string{"snapshot", "succeeded", "save session store"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("CreateSnapshot error = %q, want substring %q", err.Error(), want)
+		}
+	}
+	for sessionName, wantVMID := range map[string]string{"work": "vm-1", "review": "vm-1"} {
+		gotVMID, ok := store.Resolve(sessionName)
+		if !ok || gotVMID != wantVMID {
+			t.Fatalf("Resolve(%q) = %q, %v; want %q, true", sessionName, gotVMID, ok, wantVMID)
+		}
 	}
 }
 
@@ -919,6 +1240,89 @@ func TestToolsRestoreSnapshotBindFailureDoesNotDeleteRestoredVM(t *testing.T) {
 	}
 }
 
+func TestToolsRestoreSnapshotSaveFailureReturnsBindErrorWithRestoredVMID(t *testing.T) {
+	daemon := &fakeDaemon{}
+	store := NewSessionStore()
+	storePath := t.TempDir()
+	tools := NewToolsWithSessionStorePath(daemon, store, time.Second, storePath)
+
+	_, err := tools.RestoreSnapshot(context.Background(), RestoreSnapshotInput{
+		SnapshotID:  "snap-1",
+		SessionName: "restored",
+	})
+	if err == nil {
+		t.Fatal("RestoreSnapshot returned nil error for session store save failure")
+	}
+
+	var restoreErr *RestoreSessionBindError
+	if !errors.As(err, &restoreErr) {
+		t.Fatalf("error type = %T, want *RestoreSessionBindError", err)
+	}
+	if restoreErr.RestoredVMID != "vm-restored" {
+		t.Fatalf("RestoredVMID = %q, want vm-restored", restoreErr.RestoredVMID)
+	}
+	if restoreErr.SessionName != "restored" {
+		t.Fatalf("SessionName = %q, want restored", restoreErr.SessionName)
+	}
+	if !strings.Contains(err.Error(), "save session store") {
+		t.Fatalf("error = %q, want save session store context", err.Error())
+	}
+	if daemon.deleteCalls != 0 {
+		t.Fatalf("Delete calls = %d, want 0", daemon.deleteCalls)
+	}
+}
+
+func TestToolsSessionReadWaitsForPendingRestoreSaveFailureRollback(t *testing.T) {
+	daemon := &fakeDaemon{}
+	store := newBlockingSaveSessionStore(errors.New("disk full"))
+	tools := newToolsWithSessionStorePath(daemon, store, time.Second, "/tmp/anvil-mcp-sessions.json")
+
+	restoreErrCh := make(chan error, 1)
+	go func() {
+		_, err := tools.RestoreSnapshot(context.Background(), RestoreSnapshotInput{
+			SnapshotID:  "snap-1",
+			SessionName: "restored",
+		})
+		restoreErrCh <- err
+	}()
+
+	<-store.saveStarted
+
+	readErrCh := make(chan error, 1)
+	go func() {
+		_, err := tools.Health(context.Background(), VMIdentityInput{SessionName: "restored"})
+		readErrCh <- err
+	}()
+
+	select {
+	case err := <-readErrCh:
+		t.Fatalf("Health returned during pending session save with error %v; want blocked read", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(store.releaseSave)
+
+	restoreErr := <-restoreErrCh
+	if restoreErr == nil {
+		t.Fatal("RestoreSnapshot error = nil, want save failure")
+	}
+	var restoreBindErr *RestoreSessionBindError
+	if !errors.As(restoreErr, &restoreBindErr) {
+		t.Fatalf("RestoreSnapshot error type = %T, want *RestoreSessionBindError", restoreErr)
+	}
+
+	readErr := <-readErrCh
+	if readErr == nil {
+		t.Fatal("Health error = nil, want unknown session after rollback")
+	}
+	if !strings.Contains(readErr.Error(), "unknown session") {
+		t.Fatalf("Health error = %q, want unknown session", readErr.Error())
+	}
+	if daemon.healthCalls != 0 {
+		t.Fatalf("Health daemon calls = %d, want 0", daemon.healthCalls)
+	}
+}
+
 func TestToolsRestoreSnapshotOutputOmitsAgentToken(t *testing.T) {
 	daemon := &fakeDaemon{}
 	tools := NewTools(daemon, NewSessionStore(), time.Second)
@@ -972,6 +1376,24 @@ func TestToolsRestoreSnapshotRequiresSnapshotID(t *testing.T) {
 	if daemon.restoreSnapshotCalls != 0 {
 		t.Fatalf("RestoreSnapshot calls = %d, want 0", daemon.restoreSnapshotCalls)
 	}
+}
+
+func readSavedSessions(t *testing.T, path string) map[string]string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", path, err)
+	}
+	var raw struct {
+		Sessions map[string]string `json:"sessions"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("Unmarshal(%q) error = %v", path, err)
+	}
+	if raw.Sessions == nil {
+		t.Fatalf("sessions field is nil in %q", path)
+	}
+	return raw.Sessions
 }
 
 func assertDeadlineWithin(t *testing.T, got time.Time, ok bool, want time.Time, tolerance time.Duration) {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -35,13 +36,17 @@ type sessionStore interface {
 	Exists(sessionName string) bool
 	Bind(sessionName, vmID string) error
 	ResolveIdentity(vmID, sessionName string) (string, error)
-	RemoveVM(vmID string)
+	RemoveVM(vmID string) bool
+	removeVMAliases(vmID string) map[string]string
+	restoreAliases(aliases map[string]string)
 }
 
 type Tools struct {
-	daemon         Daemon
-	sessions       sessionStore
-	defaultTimeout time.Duration
+	daemon               Daemon
+	sessions             sessionStore
+	defaultTimeout       time.Duration
+	sessionStorePath     string
+	sessionPersistenceMu sync.Mutex
 }
 
 type SpawnVMInput struct {
@@ -138,10 +143,21 @@ func NewTools(daemon Daemon, sessions *SessionStore, defaultTimeout time.Duratio
 	if sessions == nil {
 		sessions = NewSessionStore()
 	}
-	return newTools(daemon, sessions, defaultTimeout)
+	return newToolsWithSessionStorePath(daemon, sessions, defaultTimeout, "")
+}
+
+func NewToolsWithSessionStorePath(daemon Daemon, sessions *SessionStore, defaultTimeout time.Duration, sessionStorePath string) *Tools {
+	if sessions == nil {
+		sessions = NewSessionStore()
+	}
+	return newToolsWithSessionStorePath(daemon, sessions, defaultTimeout, sessionStorePath)
 }
 
 func newTools(daemon Daemon, sessions sessionStore, defaultTimeout time.Duration) *Tools {
+	return newToolsWithSessionStorePath(daemon, sessions, defaultTimeout, "")
+}
+
+func newToolsWithSessionStorePath(daemon Daemon, sessions sessionStore, defaultTimeout time.Duration, sessionStorePath string) *Tools {
 	if sessions == nil {
 		sessions = NewSessionStore()
 	}
@@ -149,16 +165,17 @@ func newTools(daemon Daemon, sessions sessionStore, defaultTimeout time.Duration
 		defaultTimeout = time.Duration(DefaultTimeoutSeconds) * time.Second
 	}
 	return &Tools{
-		daemon:         daemon,
-		sessions:       sessions,
-		defaultTimeout: defaultTimeout,
+		daemon:           daemon,
+		sessions:         sessions,
+		defaultTimeout:   defaultTimeout,
+		sessionStorePath: strings.TrimSpace(sessionStorePath),
 	}
 }
 
 func (t *Tools) SpawnVM(ctx context.Context, input SpawnVMInput) (*SpawnVMOutput, error) {
 	profile := strings.TrimSpace(input.Profile)
 	sessionName := strings.TrimSpace(input.SessionName)
-	if sessionName != "" && t.sessions.Exists(sessionName) {
+	if sessionName != "" && t.sessionExists(sessionName) {
 		return nil, fmt.Errorf("session %q already exists", sessionName)
 	}
 
@@ -168,11 +185,30 @@ func (t *Tools) SpawnVM(ctx context.Context, input SpawnVMInput) (*SpawnVMOutput
 	}
 
 	if sessionName != "" {
-		if err := t.sessions.Bind(sessionName, res.VMID); err != nil {
-			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-			defer cancel()
-			_, _ = t.daemon.Delete(cleanupCtx, res.VMID)
-			return nil, err
+		t.sessionPersistenceMu.Lock()
+		bindErr := t.sessions.Bind(sessionName, res.VMID)
+		var saveErr error
+		if bindErr == nil {
+			saveErr = t.saveSessionStore()
+			if saveErr != nil {
+				t.sessions.RemoveVM(res.VMID)
+			}
+		}
+		t.sessionPersistenceMu.Unlock()
+
+		if bindErr != nil {
+			_, _ = t.deleteSpawnedVM(context.WithoutCancel(ctx), res.VMID)
+			return nil, bindErr
+		}
+		if saveErr != nil {
+			deleteRes, deleteErr := t.deleteSpawnedVM(context.WithoutCancel(ctx), res.VMID)
+			if deleteErr != nil {
+				return nil, fmt.Errorf("failed to persist session %q for spawned VM %q: %w; cleanup delete failed: %v", sessionName, res.VMID, saveErr, deleteErr)
+			}
+			if deleteRes != nil {
+				return nil, fmt.Errorf("failed to persist session %q for spawned VM %q: %w; spawned VM was deleted with status %d body %q", sessionName, res.VMID, saveErr, deleteRes.StatusCode, deleteRes.Body)
+			}
+			return nil, fmt.Errorf("failed to persist session %q for spawned VM %q: %w; spawned VM cleanup was attempted", sessionName, res.VMID, saveErr)
 		}
 	}
 
@@ -339,7 +375,27 @@ func (t *Tools) DeleteVM(ctx context.Context, input VMIdentityInput) (*RawDaemon
 	if err != nil {
 		return nil, err
 	}
-	t.sessions.RemoveVM(vmID)
+
+	t.sessionPersistenceMu.Lock()
+	removedAliases := t.sessions.removeVMAliases(vmID)
+	var saveErr error
+	if len(removedAliases) > 0 {
+		saveErr = t.saveSessionStore()
+		if saveErr != nil {
+			t.sessions.restoreAliases(removedAliases)
+		}
+	}
+	t.sessionPersistenceMu.Unlock()
+
+	if saveErr != nil {
+		statusCode := 0
+		body := ""
+		if res != nil {
+			statusCode = res.StatusCode
+			body = res.Body
+		}
+		return nil, fmt.Errorf("delete VM %q succeeded with status %d body %s, but failed to persist removed session aliases: %w", vmID, statusCode, body, saveErr)
+	}
 	return res, nil
 }
 
@@ -370,7 +426,24 @@ func (t *Tools) CreateSnapshot(ctx context.Context, input CreateSnapshotInput) (
 		return nil, err
 	}
 	if input.StopAfter {
-		t.sessions.RemoveVM(vmID)
+		t.sessionPersistenceMu.Lock()
+		removedAliases := t.sessions.removeVMAliases(vmID)
+		var saveErr error
+		if len(removedAliases) > 0 {
+			saveErr = t.saveSessionStore()
+			if saveErr != nil {
+				t.sessions.restoreAliases(removedAliases)
+			}
+		}
+		t.sessionPersistenceMu.Unlock()
+
+		if saveErr != nil {
+			snapshotID := ""
+			if out != nil {
+				snapshotID = out.SnapshotID
+			}
+			return nil, fmt.Errorf("snapshot %q for VM %q succeeded, but failed to persist removed session aliases: %w", snapshotID, vmID, saveErr)
+		}
 	}
 	return out, nil
 }
@@ -409,7 +482,7 @@ func (t *Tools) RestoreSnapshot(ctx context.Context, input RestoreSnapshotInput)
 	}
 
 	sessionName := strings.TrimSpace(input.SessionName)
-	if sessionName != "" && t.sessions.Exists(sessionName) {
+	if sessionName != "" && t.sessionExists(sessionName) {
 		return nil, fmt.Errorf("session %q already exists", sessionName)
 	}
 
@@ -419,11 +492,29 @@ func (t *Tools) RestoreSnapshot(ctx context.Context, input RestoreSnapshotInput)
 	}
 
 	if sessionName != "" {
-		if err := t.sessions.Bind(sessionName, res.VMID); err != nil {
+		t.sessionPersistenceMu.Lock()
+		bindErr := t.sessions.Bind(sessionName, res.VMID)
+		var saveErr error
+		if bindErr == nil {
+			saveErr = t.saveSessionStore()
+			if saveErr != nil {
+				t.sessions.RemoveVM(res.VMID)
+			}
+		}
+		t.sessionPersistenceMu.Unlock()
+
+		if bindErr != nil {
 			return nil, &RestoreSessionBindError{
 				SessionName:  sessionName,
 				RestoredVMID: res.VMID,
-				Err:          err,
+				Err:          bindErr,
+			}
+		}
+		if saveErr != nil {
+			return nil, &RestoreSessionBindError{
+				SessionName:  sessionName,
+				RestoredVMID: res.VMID,
+				Err:          saveErr,
 			}
 		}
 	}
@@ -497,5 +588,37 @@ func normalizeWorkspaceEncoding(value string) (string, error) {
 }
 
 func (t *Tools) resolveIdentity(vmID, sessionName string) (string, error) {
+	t.sessionPersistenceMu.Lock()
+	defer t.sessionPersistenceMu.Unlock()
+
 	return t.sessions.ResolveIdentity(vmID, sessionName)
+}
+
+func (t *Tools) sessionExists(sessionName string) bool {
+	t.sessionPersistenceMu.Lock()
+	defer t.sessionPersistenceMu.Unlock()
+
+	return t.sessions.Exists(sessionName)
+}
+
+func (t *Tools) saveSessionStore() error {
+	if t.sessionStorePath == "" {
+		return nil
+	}
+	saver, ok := t.sessions.(interface {
+		Save(string) error
+	})
+	if !ok {
+		return fmt.Errorf("save session store %q: configured session store does not support persistence", t.sessionStorePath)
+	}
+	if err := saver.Save(t.sessionStorePath); err != nil {
+		return fmt.Errorf("save session store %q: %w", t.sessionStorePath, err)
+	}
+	return nil
+}
+
+func (t *Tools) deleteSpawnedVM(ctx context.Context, vmID string) (*RawDaemonResponse, error) {
+	cleanupCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return t.daemon.Delete(cleanupCtx, vmID)
 }

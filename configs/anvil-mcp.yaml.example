@@ -1,9 +1,16 @@
-# anvil-mcp configuration.
-# Environment variables override these values:
+# anvil-mcp 설정.
+# 환경 변수는 아래 값을 override한다:
 # - ANVIL_DAEMON_URL
 # - ANVIL_API_TOKEN
 # - ANVIL_MCP_DEFAULT_TIMEOUT
+# - ANVIL_MCP_SESSION_STORE
 
 daemon_url: http://127.0.0.1:3000
 api_token: ""
 default_timeout_seconds: 300
+
+# 선택 사항: session alias 영속 저장소.
+# 비워 두거나 생략하면 기존 in-memory-only session 동작을 유지한다.
+# 한 file은 single-writer 계약이다. 여러 anvil-mcp process를 동시에 실행한다면
+# file locking/catalog 설계가 추가되기 전까지 process마다 다른 path를 사용한다.
+# session_store_path: /var/lib/anvil-mcp/sessions.json
