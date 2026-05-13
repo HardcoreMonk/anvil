@@ -19,6 +19,7 @@ check_http() { local code=$1 expected=$2 label=$3
 rm -f /tmp/goose-workspaces/*.ext4 2>/dev/null || true
 rm -f /tmp/goose-workspaces/*.cow  2>/dev/null || true
 rm -rf snapshots/snap-* 2>/dev/null || true
+rm -rf flocks/flock-* 2>/dev/null || true
 
 # ── 1. Start daemon ──────────────────────────────────────────────
 step "1. Start daemon"
@@ -655,8 +656,97 @@ sleep 2
 check_http "$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/vms/$PUBVM_ID")" \
            "200" "DELETE EPHEMERA_PUBLIC_URL test VM"
 
-# ── 50. Shut down daemon ──────────────────────────────────────────
-step "50. Shut down daemon"
+# ════════════════════════════════════════════════════════════════
+# Goosetown flock scenario (multi-agent orchestration)
+# Validates POST /flocks, role-driven VM spawn, Town Wall log,
+# and flock-level teardown. No goose-agent /tasks call is made here:
+# the goal is to exercise the orchestrator surface, not the LLM
+# (which would require real API keys).
+# ════════════════════════════════════════════════════════════════
+
+# ── 51. Prep role profile yaml files ─────────────────────────────
+# profileConfigPaths requires goose.yaml + goose-secrets.yaml to exist
+# per role. Copy from the committed .example placeholders so the spawn
+# path can resolve; the API-key fields stay as placeholders since no
+# task is actually executed in this scenario.
+step "51. Prep role profile yaml files"
+for role in researcher worker reviewer orchestrator; do
+    for f in goose.yaml goose-secrets.yaml; do
+        src="configs/profiles/$role/${f}.example"
+        dst="configs/profiles/$role/${f}"
+        if [ -f "$src" ] && [ ! -f "$dst" ]; then
+            cp "$src" "$dst"
+        fi
+    done
+done
+ok "Profile yaml files ready"
+
+# ── 52. Create flock with 5 agents ───────────────────────────────
+step "52. Create flock with 5 agents"
+FLOCK_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/flocks" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "task": "Add dark mode toggle to login page",
+        "roles": ["orchestrator","researcher","researcher","worker","reviewer"]
+    }')
+FLOCK_CODE=$(echo "$FLOCK_RESP" | tail -1)
+FLOCK_BODY=$(echo "$FLOCK_RESP" | head -1)
+check_http "$FLOCK_CODE" "201" "POST /flocks"
+FLOCK_ID=$(echo "$FLOCK_BODY"     | jq -r '.flock_id')
+AGENT_COUNT=$(echo "$FLOCK_BODY"  | jq '.agents | length')
+TW_URL=$(echo "$FLOCK_BODY"       | jq -r '.townwall_url')
+[ "$AGENT_COUNT" = "5" ] && ok "Spawned 5 agents in flock $FLOCK_ID" \
+                         || fail "Expected 5 agents, got $AGENT_COUNT"
+echo "$TW_URL" | grep -q "/flocks/$FLOCK_ID/wall" \
+    && ok "townwall_url: $TW_URL" \
+    || fail "townwall_url malformed: $TW_URL"
+
+# ── 53. Verify VM list reflects the flock ────────────────────────
+step "53. Verify /vms shows the 5 flock members"
+VM_COUNT=$(curl -s "$API/vms" | jq 'length')
+[ "$VM_COUNT" -ge "5" ] && ok "Found $VM_COUNT VM(s) running" \
+                       || fail "Expected ≥5 VMs, got $VM_COUNT"
+
+# ── 54. Post a message to the Town Wall (direct control plane) ───
+step "54. Post a message to the Town Wall"
+POST_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/flocks/$FLOCK_ID/post" \
+    -H "Content-Type: application/json" \
+    -d '{"agent_id":"researcher-1","body":"Found existing dark mode CSS variables"}')
+check_http "$(echo "$POST_RESP" | tail -1)" "200" "POST /flocks/$FLOCK_ID/post"
+echo "$POST_RESP" | head -1 | jq -e '.body' >/dev/null \
+    && ok "Town Wall accepted the post" \
+    || fail "Post body invalid"
+
+# ── 55. Retrieve Town Wall history ───────────────────────────────
+# createFlock writes one "orchestrator" entry on spawn; step 54 added
+# another. Expect at least two parseable lines.
+step "55. Retrieve Town Wall history"
+HIST=$(curl -s "$API/flocks/$FLOCK_ID/wall/history")
+HIST_COUNT=$(echo "$HIST" | jq 'length')
+[ "$HIST_COUNT" -ge "2" ] && ok "Town Wall has $HIST_COUNT entries" \
+                          || fail "Expected ≥2 entries, got $HIST_COUNT"
+
+# ── 56. List flocks ──────────────────────────────────────────────
+step "56. Verify GET /flocks lists the new flock"
+FLOCK_LIST_COUNT=$(curl -s "$API/flocks" | jq 'length')
+[ "$FLOCK_LIST_COUNT" -ge "1" ] && ok "GET /flocks returns $FLOCK_LIST_COUNT entry(ies)" \
+                                || fail "Expected ≥1 flock listed"
+
+# ── 57. Delete flock and verify cleanup ──────────────────────────
+step "57. Delete flock and verify all member VMs are torn down"
+DEL_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/flocks/$FLOCK_ID")
+check_http "$DEL_CODE" "200" "DELETE /flocks/$FLOCK_ID"
+# Allow the parallel destroyVM goroutines to finish their teardown.
+sleep 3
+FINAL_VM_COUNT=$(curl -s "$API/vms" | jq 'length')
+[ "$FINAL_VM_COUNT" = "0" ] && ok "All flock VMs torn down" \
+                            || fail "$FINAL_VM_COUNT VM(s) remain after flock delete"
+FINAL_FLOCK_COUNT=$(curl -s "$API/flocks" | jq 'length')
+[ "$FINAL_FLOCK_COUNT" = "0" ] && ok "Flock unregistered from manager" \
+                               || fail "$FINAL_FLOCK_COUNT flock(s) remain"
+
+# ── 58. Shut down daemon ──────────────────────────────────────────
+step "58. Shut down daemon"
 kill "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null || true
 
 trap - EXIT
