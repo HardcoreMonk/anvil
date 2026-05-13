@@ -10,6 +10,8 @@
 
 Ephemera orchestrates isolated, KVM-backed MicroVM environments for agentic AI workloads. Each VM runs [Goose](https://github.com/aaif-goose/goose) as an autonomous agent inside a minimal Debian guest, fully contained within hardware VM boundaries and completely wiped on termination.
 
+Beyond single-VM execution, Ephemera supports **multi-agent flocks** ("Goosetown"): one `POST /flocks` call spawns a group of role-specialized VMs (orchestrator, researcher, worker, reviewer, …), each with its own vCPU/memory profile and system prompt, all sharing an append-only **Town Wall** log for coordination.
+
 ---
 
 ## Architecture
@@ -21,7 +23,7 @@ External Client
 Reverse Proxy  :443                   ← Caddy / Nginx (TLS termination)
       │  HTTP (Bearer token, encrypted inside TLS tunnel)
       ▼
-Ephemera Control Plane  :3000         ← VM lifecycle + snapshot management
+Ephemera Control Plane  :3000         ← VM + snapshot + flock management
   POST   /vms                         → spawn VM → returns {vm_id, agent_url, agent_token}
   GET    /vms                         → list running VMs
   DELETE /vms/{vm_id}                 → stop & destroy VM
@@ -29,6 +31,13 @@ Ephemera Control Plane  :3000         ← VM lifecycle + snapshot management
   GET    /snapshots                   → list stored snapshots
   POST   /snapshots/{id}/restore      → resume VM from snapshot (~5 s vs ~60 s cold boot)
   DELETE /snapshots/{id}              → delete snapshot files
+  POST   /flocks                      → spawn multi-agent flock (one VM per role)
+  GET    /flocks                      → list flocks
+  GET    /flocks/{id}                 → describe flock + agents
+  DELETE /flocks/{id}                 → tear down all member VMs in parallel
+  POST   /flocks/{id}/post            → append message to Town Wall
+  GET    /flocks/{id}/wall            → SSE stream of Town Wall messages
+  GET    /flocks/{id}/wall/history    → full Town Wall log
 
       │  provision
       ▼
@@ -57,9 +66,11 @@ goose-agent  http://10.0.1.x:8080    ← private subnet 10.0.1.0/24 (host-only)
 
 ```
 CloneDisk()      → copy golden image → per-VM ext4 disk
+                   (or CloneDiskCOW with EPHEMERA_DISK_MODE=cow → dm-snapshot, ~0 MiB)
 PrepareVM()      → inject goose.yaml, goose-secrets.yaml, agent_token,
-                   /etc/localtime (single mount/unmount cycle)
-StartMachine()   → Firecracker: kernel + disk + TAP NIC
+                   /etc/localtime, and (flock members only) /root/.ephemera-flock
+                   + /root/.goose-system-prompt   (single mount/unmount cycle)
+StartMachine()   → Firecracker: kernel + disk + TAP NIC + per-profile vCPU/memory
                    network via kernel ip= boot parameter (no DHCP)
 waitForAgent()   → poll http://10.0.1.x:8080/health until ready (~60 s cold boot)
 ```
@@ -114,6 +125,11 @@ DELETE /vms/{id}
 | **Minimal guest OS** | Debian Bookworm minbase — no SSH, no init daemon; `micro-init` (Go binary, PID 1) mounts virtual filesystems and manages goose-agent lifecycle |
 | **Graceful guest shutdown** | `micro-init` traps SIGTERM and calls `poweroff(2)` — no kernel panic on VM exit |
 | **Per-VM LLM profiles** | Each VM spawn can specify a named profile (`configs/profiles/{name}/`) with its own provider, model, and API key |
+| **Per-profile vCPU/memory** | Known roles (`researcher`, `worker`, `reviewer`, `orchestrator`, `builder`) map to canonical sizing (e.g. 1 vCPU / 512 MiB for researcher, 4 vCPU / 4096 MiB for builder); unknown profiles fall back to the legacy 2 vCPU / 2048 MiB default |
+| **Multi-agent flocks** | `POST /flocks` spawns a group of role-specialized VMs in one call; `DELETE /flocks/{id}` tears them all down in parallel |
+| **Town Wall log** | Per-flock append-only log with SSE streaming (`/flocks/{id}/wall`) for coordination; `gtwall "..."` CLI inside each VM posts via the in-VM agent |
+| **Role system prompts** | Each role profile can ship a `system.md` that is injected into the VM and prepended to every `/tasks` prompt |
+| **Optional COW spawn rootfs** | `EPHEMERA_DISK_MODE=cow` provisions new VMs with a dm-snapshot view of the golden image instead of a 700 MiB full copy (default off; safe rollback) |
 | **Runtime config injection** | `goose.yaml` and `goose-secrets.yaml` injected at provision time — no image rebuild required to change provider/model |
 | **Per-VM agent authentication** | Control plane generates a 32-byte random Bearer token per VM; token is written to the VM disk and returned once in `POST /vms` response |
 | **MicroVM snapshots (Full + Diff)** | Freeze VM memory state to disk; restore in ~5 s. First snapshot → Full (2 GB); subsequent snapshots of the same VM → Diff (sparse, dirty pages only). Diff is automatically selected; Full is always the reference base. Original agent token preserved across restores. |
@@ -132,31 +148,42 @@ DELETE /vms/{id}
 cmd/
   goose-daemon/       Control plane daemon (main binary)
     main.go           Startup, artifact bootstrap, ControlPlane init
-    api.go            HTTP API: VM + snapshot CRUD, auth middleware
-    config.go         Env-var configuration (ports, tokens, address)
+    api.go            HTTP API: VM + snapshot CRUD, auth middleware,
+                      spawnVMInternal (shared by /vms and /flocks paths)
+    config.go         Env-var configuration + AgentProfile / LookupProfile
+                      (role → vCPU, memory, profile directory mapping)
+    orchestrator_api.go  /flocks endpoints, SSE Town Wall streaming
   goose-agent/        In-VM HTTP agent (baked into golden image)
-    main.go           /tasks, /health, /stop  (Bearer token auth)
+    main.go           /tasks, /health, /stop, /townwall/post  (Bearer token auth);
+                      prepends role system prompt to /tasks bodies
   micro-init/         PID 1 for each MicroVM (baked into golden image)
     main.go           Mounts virtual filesystems, manages goose-agent,
                       calls poweroff(2) on exit
 
 internal/
   vm/machine.go       Firecracker SDK wrapper — StartMachine, RestoreMachine
+                      (VcpuCount / MemSizeMib are per-call; zero falls back to 2 / 2048)
   network/manager.go  IP pool, TAP device lifecycle, AllocateForRestore, bridge, NAT
   storage/
-    provisioner.go    Golden image bootstrap, disk clone, config/token injection,
-                      artifact download + SHA256 verification
+    provisioner.go    Golden image bootstrap, disk clone, config/token/flock injection,
+                      CloneDiskCOW (dm-snapshot-backed spawn), artifact download + SHA256
     snapshot.go       Snapshot metadata (read/write), disk copy helpers,
                       SetupDMSnapshot/TeardownDMSnapshot (COW restore via dm-snapshot),
                       MergeMemoryDiff (SEEK_DATA/SEEK_HOLE sparse merge)
+  orchestrator/
+    townwall.go       Per-flock append-only log + subscriber fan-out
+    flock.go          Flock + FlockManager (lock-safe JSON via MarshalJSON)
+    handoff.go        Structured JSON handoff between agents
 
 configs/
   goose.yaml.example             Default provider/model template
   goose-secrets.yaml.example     API key template
   profiles/                      Per-VM LLM profiles (optional)
     <profile-name>/
-      goose.yaml
-      goose-secrets.yaml
+      goose.yaml                 (gitignored; copied from .example)
+      goose-secrets.yaml         (gitignored; copied from .example)
+      system.md                  Role system prompt prepended to /tasks (optional)
+    researcher/  worker/  reviewer/  orchestrator/    ← built-in role profiles
 
 .github/
   workflows/ci.yml    go build + go vet + go test on push/PR (ubuntu-22.04)
@@ -168,10 +195,15 @@ snapshots/            Stored snapshot directories (auto-created, gitignored)
     rootfs.ext4       Disk copy (always full, ~700 MB)
     metadata.json     Restore params (IP, TAP, MAC, token, type, base_snapshot_id)
 
-e2e_test.sh           End-to-end integration test (50 steps; requires /dev/kvm + root)
+e2e_test.sh           End-to-end integration test (58 steps; requires /dev/kvm + root)
 
 scripts/
-  build_image.sh      Builds golden image (Debian Bookworm + Goose + goose-agent + micro-init)
+  build_image.sh      Builds golden image (Debian Bookworm + Goose + goose-agent + micro-init + gtwall)
+  gtwall              In-VM CLI for posting to the flock's Town Wall (installed into the golden image)
+
+flocks/               Per-flock workspace (auto-created at first flock spawn, gitignored)
+  <flock-id>/
+    TOWN_WALL.log     Append-only log of agent messages
 
 artifacts/            Auto-populated at runtime (gitignored)
   golden-image.ext4   Golden VM disk image
@@ -276,7 +308,7 @@ go build -o ephemera-daemon ./cmd/goose-daemon/
 sudo bash e2e_test.sh
 ```
 
-**What it tests (50 steps):**
+**What it tests (58 steps):**
 
 | Steps | Scenario |
 |-------|----------|
@@ -296,47 +328,45 @@ sudo bash e2e_test.sh
 | 43 | Delete snapshot and verify empty |
 | 45–47 | **Agent proxy** — `GET /vms/{id}/health`, `POST /vms/{id}/stop` via control plane proxy; no direct VM IP access |
 | 48–49 | **`EPHEMERA_PUBLIC_URL`** — restart daemon with var set; verify `agent_url` becomes proxy path; use `agent_url` for health + stop |
-| 50 | Daemon graceful shutdown |
+| 51 | Prep role profile yaml files from `.example` placeholders |
+| 52 | **Flock spawn** — `POST /flocks` with 5 roles (orchestrator/researcher×2/worker/reviewer) returns 201, `agents.length == 5`, valid `townwall_url` |
+| 53 | `GET /vms` shows all 5 flock members |
+| 54 | `POST /flocks/{id}/post` accepts a message and persists it |
+| 55 | `GET /flocks/{id}/wall/history` returns ≥ 2 entries (orchestrator init message + step 54 post) |
+| 56 | `GET /flocks` lists the new flock |
+| 57 | **Flock teardown** — `DELETE /flocks/{id}` returns 200; all 5 VMs and the flock registry entry are gone |
+| 58 | Daemon graceful shutdown |
 
-**Example output (passing, steps 41–50):**
+**Example output (passing, flock steps 51–58):**
 
 ```
-━━━ 41. Verify COW-restored agent responds ━━━
-  ✓ COW-restored VM /health (HTTP 200)
+━━━ 51. Prep role profile yaml files ━━━
+  ✓ Profile yaml files ready
 
-━━━ 42. Delete COW-restored VM and verify kernel resource cleanup ━━━
-  ✓ COW-restored VM /stop (HTTP 200)
-  ✓ DELETE COW-restored VM (HTTP 200)
-  ✓ dm-snapshot device removed after VM delete ✓
-  ✓ Exception store (.cow) removed after VM delete ✓
+━━━ 52. Create flock with 5 agents ━━━
+  ✓ POST /flocks (HTTP 201)
+  ✓ Spawned 5 agents in flock flock-1778665945495324840
+  ✓ townwall_url: http://localhost:3000/flocks/flock-1778665945495324840/wall
 
-━━━ 43. Delete COW snapshot ━━━
-  ✓ DELETE /snapshots/snap-... (HTTP 200)
-  ✓ Snapshot count after cleanup: 0
+━━━ 53. Verify /vms shows the 5 flock members ━━━
+  ✓ Found 5 VM(s) running
 
-━━━ 45. Create VM for agent proxy endpoint test ━━━
-  ✓ POST /vms (proxy-test) (HTTP 201)
-  ✓ Proxy-test VM: vm-...
+━━━ 54. Post a message to the Town Wall ━━━
+  ✓ POST /flocks/flock-1778665945495324840/post (HTTP 200)
+  ✓ Town Wall accepted the post
 
-━━━ 46. Test proxy: GET /vms/$PROXY_VM_ID/health ━━━
-  ✓ GET /vms/vm-.../health (proxy) (HTTP 200)
+━━━ 55. Retrieve Town Wall history ━━━
+  ✓ Town Wall has 2 entries
 
-━━━ 47. Test proxy: POST /vms/$PROXY_VM_ID/stop ━━━
-  ✓ POST /vms/vm-.../stop (proxy) (HTTP 200)
-  ✓ DELETE proxy-test VM (HTTP 200)
+━━━ 56. Verify GET /flocks lists the new flock ━━━
+  ✓ GET /flocks returns 1 entry(ies)
 
-━━━ 48. Restart daemon with EPHEMERA_PUBLIC_URL=http://localhost:3000 ━━━
-  ✓ Daemon restarted with EPHEMERA_PUBLIC_URL
-  ✓ POST /vms (EPHEMERA_PUBLIC_URL test) (HTTP 201)
-  ✓ VM: vm-...  agent_url: http://localhost:3000/vms/vm-...
-  ✓ agent_url is proxy path ✓ (http://localhost:3000/vms/vm-...)
+━━━ 57. Delete flock and verify all member VMs are torn down ━━━
+  ✓ DELETE /flocks/flock-1778665945495324840 (HTTP 200)
+  ✓ All flock VMs torn down
+  ✓ Flock unregistered from manager
 
-━━━ 49. Verify proxy access via agent_url ━━━
-  ✓ $agent_url/health (via proxy) (HTTP 200)
-  ✓ $agent_url/stop (via proxy) (HTTP 200)
-  ✓ DELETE EPHEMERA_PUBLIC_URL test VM (HTTP 200)
-
-━━━ 50. Shut down daemon ━━━
+━━━ 58. Shut down daemon ━━━
   ✓ Daemon stopped
 
 ══════════════════════════════════
@@ -358,6 +388,7 @@ All settings are read from environment variables at startup.
 | `EPHEMERA_API_TOKEN` | *(unset)* | Single Bearer token (backward-compatible fallback). |
 | `EPHEMERA_AGENT_PORT` | `8080` | Port goose-agent listens on inside each VM. |
 | `EPHEMERA_PUBLIC_URL` | *(unset)* | Externally-reachable base URL of the control plane (no trailing slash). When set, `agent_url` in VM responses uses the proxy path `{EPHEMERA_PUBLIC_URL}/vms/{vm_id}` instead of the VM's private IP. Example: `https://api.example.com`. |
+| `EPHEMERA_DISK_MODE` | *(unset)* | Set to `cow` to provision spawn disks as a dm-snapshot view of the golden image (~0 MiB initial usage) instead of a 700 MiB full copy. Default behavior is preserved when unset. |
 
 `EPHEMERA_API_ADDR` takes precedence over `EPHEMERA_API_PORT`. All variables are read at startup; use SIGHUP to reload tokens without restarting.
 
@@ -527,6 +558,120 @@ Without `EPHEMERA_PUBLIC_URL`, `agent_url` still contains the private IP, but th
 
 ---
 
+### Flock API (Multi-Agent Orchestration)
+
+A **flock** is one `POST /flocks` call that spawns one VM per requested role and registers them under a shared flock ID. Each role string is mapped through `LookupProfile` to (vCPU, memory, profile directory, system prompt), so a single request can produce a heterogeneous group of agents that all share a Town Wall log.
+
+> Role names map through built-in profiles. Unknown names spawn at default sizing (2 vCPU / 2048 MiB) and look for `configs/profiles/{name}/` for goose config files.
+
+#### Spawn a flock
+
+```
+POST /flocks
+Content-Type: application/json
+
+{
+  "task": "Add dark mode toggle to login page",
+  "roles": ["orchestrator","researcher","researcher","worker","reviewer"]
+}
+```
+
+```bash
+curl -X POST http://localhost:3000/flocks \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "task":"Add dark mode toggle to login page",
+        "roles":["orchestrator","researcher","researcher","worker","reviewer"]
+      }'
+```
+
+```json
+{
+  "flock_id":     "flock-1778665945495324840",
+  "task":         "Add dark mode toggle to login page",
+  "agents": [
+    { "agent_id":"orchestrator-1","role":"orchestrator","vm_id":"vm-...","agent_url":"http://10.0.1.2:8080","status":"ready" },
+    { "agent_id":"researcher-1",  "role":"researcher",  "vm_id":"vm-...","agent_url":"http://10.0.1.3:8080","status":"ready" },
+    { "agent_id":"researcher-2",  "role":"researcher",  "vm_id":"vm-...","agent_url":"http://10.0.1.4:8080","status":"ready" },
+    { "agent_id":"worker-1",      "role":"worker",      "vm_id":"vm-...","agent_url":"http://10.0.1.5:8080","status":"ready" },
+    { "agent_id":"reviewer-1",    "role":"reviewer",    "vm_id":"vm-...","agent_url":"http://10.0.1.6:8080","status":"ready" }
+  ],
+  "townwall_url": "http://localhost:3000/flocks/flock-1778665945495324840/wall",
+  "post_url":     "http://localhost:3000/flocks/flock-1778665945495324840/post"
+}
+```
+
+If any VM fails to spawn, every VM spawned so far is torn down and the flock is removed before the error response — partial flocks are never left running. The max flock size is **20** to bound IP-pool / TAP exhaustion.
+
+#### Post to the Town Wall
+
+```bash
+curl -X POST http://localhost:3000/flocks/$FLOCK_ID/post \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id":"researcher-1","body":"Found existing dark mode CSS variables"}'
+```
+
+Inside a flock VM, the same effect can be achieved via the bundled `gtwall` CLI:
+
+```bash
+# inside the VM (via SSH-equivalent flow or the agent /tasks shell)
+gtwall "Claiming src/styles/theme.css"
+```
+
+`gtwall` reads `/root/.ephemera-flock` for the flock context, calls the in-VM `goose-agent /townwall/post`, which forwards to the control plane.
+
+#### Stream the Town Wall (SSE)
+
+```bash
+curl -N http://localhost:3000/flocks/$FLOCK_ID/wall \
+  -H "Authorization: Bearer $TOKEN"
+# data: {"timestamp":"2026-05-13T...","agent_id":"orchestrator","body":"Flock spawned with 5 agents..."}
+# data: {"timestamp":"2026-05-13T...","agent_id":"researcher-1","body":"Found existing dark mode CSS variables"}
+# ...
+```
+
+The stream begins with the full history, then keeps the connection open and emits each subsequent `POST /post` as it happens.
+
+#### Town Wall history (one-shot)
+
+```bash
+curl http://localhost:3000/flocks/$FLOCK_ID/wall/history \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+[
+  { "timestamp":"...","agent_id":"orchestrator","body":"Flock spawned with 5 agents: [...]" },
+  { "timestamp":"...","agent_id":"researcher-1","body":"Found existing dark mode CSS variables" }
+]
+```
+
+#### List flocks
+
+```bash
+curl http://localhost:3000/flocks -H "Authorization: Bearer $TOKEN"
+```
+
+#### Describe a flock
+
+```bash
+curl http://localhost:3000/flocks/$FLOCK_ID -H "Authorization: Bearer $TOKEN"
+```
+
+#### Tear down a flock
+
+```bash
+curl -X DELETE http://localhost:3000/flocks/$FLOCK_ID \
+  -H "Authorization: Bearer $TOKEN"
+# {"status":"deleted","flock_id":"flock-..."}
+```
+
+Destroys every member VM in parallel and removes the flock from the registry. The Town Wall log on disk (`flocks/<id>/TOWN_WALL.log`) is left in place as an audit artifact.
+
+---
+
 ### goose-agent API (`http://<guest_ip>:8080`)
 
 Direct access to the VM's private IP — reachable from the host only. `POST /tasks` and `POST /stop` require the `agent_token` returned by `POST /vms` or `POST /snapshots/{id}/restore`. `GET /health` is always unauthenticated.
@@ -544,7 +689,18 @@ curl -X POST http://10.0.1.10:8080/tasks \
 { "output": "...", "error": "" }
 ```
 
-Returns when the task completes. Only one task runs at a time per VM; concurrent requests receive `503 agent busy`.
+Returns when the task completes. Only one task runs at a time per VM; concurrent requests receive `503 agent busy`. If `/root/.goose-system-prompt` is present (injected by `PrepareVM` for flock members), it is prepended to the user prompt as `[SYSTEM INSTRUCTIONS]\n...\n\n[USER TASK]\n...` before being piped to Goose.
+
+#### Post to Town Wall (flock members only)
+
+```bash
+curl -X POST http://10.0.1.10:8080/townwall/post \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $AGENT_TOKEN" \
+  -d '{"body":"Claiming src/styles/theme.css"}'
+```
+
+Reads `FLOCK_ID` and `AGENT_ID` from `/root/.ephemera-flock` (written by `PrepareVM` for flock members) and forwards the message to the host control plane's `POST /flocks/{id}/post`. Returns `400` when the VM is not a flock member. The bundled `gtwall` shell wrapper calls this endpoint.
 
 #### Health check
 
@@ -570,9 +726,23 @@ Shuts down `goose-agent`. `micro-init` (PID 1) then calls `sync` + `poweroff(2)`
 
 Profiles allow each VM to use a different LLM provider or model without modifying the default config. API keys stay on the server — clients only pass a profile name.
 
+### Built-in role profiles
+
+A handful of role names are pre-mapped to canonical sizing and a profile directory under `configs/profiles/`. Each ships an `.example` config and a `system.md` system prompt; copy the examples to real `*.yaml` files and fill in the API keys to enable them.
+
+| Role | vCPU | Memory (MiB) | Profile dir | Intent |
+|------|------|--------------|-------------|--------|
+| `researcher` | 1 | 512 | `researcher/` | Read-only exploration, fast/cheap model recommended |
+| `reviewer` | 1 | 512 | `reviewer/` | Adversarial diff review |
+| `worker` | 2 | 2048 | `worker/` | Implementation — code-writing model recommended |
+| `orchestrator` | 2 | 2048 | `orchestrator/` | Delegation + synthesis (never executes work itself) |
+| `builder` | 4 | 4096 | `worker/` | Heavyweight worker (reuses the worker profile) |
+
+Unknown names also work — they spawn at the default `2 vCPU / 2048 MiB` and look up `configs/profiles/{name}/`.
+
 ### Setup
 
-Create one subdirectory per profile under `configs/profiles/`:
+Each profile directory holds three files:
 
 ```
 configs/
@@ -580,22 +750,33 @@ configs/
     anthropic/
       goose.yaml           ← GOOSE_PROVIDER: anthropic, GOOSE_MODEL: claude-sonnet-4-6
       goose-secrets.yaml   ← ANTHROPIC_API_KEY: sk-ant-...
-    openai/
-      goose.yaml
-      goose-secrets.yaml
+    researcher/
+      goose.yaml.example   ← committed; copy to goose.yaml
+      goose-secrets.yaml.example
+      system.md            ← role system prompt (always committed)
 ```
+
+Real `goose.yaml` and `goose-secrets.yaml` files inside every `configs/profiles/*/` are gitignored.
 
 ### Usage
 
 ```bash
-# Spawn VM with the 'anthropic' profile
+# Spawn VM with the 'anthropic' profile (uses default sizing)
 curl -X POST http://localhost:3000/vms \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"profile": "anthropic"}'
+
+# Spawn VM with a built-in role (sized at 1 vCPU / 512 MiB)
+curl -X POST http://localhost:3000/vms \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"profile": "researcher"}'
 ```
 
-Omitting `profile` (or sending an empty body) uses `configs/goose.yaml` and `configs/goose-secrets.yaml`.
+Omitting `profile` (or sending an empty body) uses `configs/goose.yaml` and `configs/goose-secrets.yaml` at the legacy 2 vCPU / 2048 MiB sizing.
+
+If the profile directory has a `system.md`, its contents are written into the VM as `/root/.goose-system-prompt` and the in-VM `goose-agent` prepends it to every `/tasks` prompt — so the role stays in-character even when the orchestrator dispatches plain user prompts.
 
 ---
 
