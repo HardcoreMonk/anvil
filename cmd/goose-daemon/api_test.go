@@ -57,6 +57,14 @@ func addTestSnapshot(t *testing.T, cp *ControlPlane, meta storage.SnapshotMetada
 	cp.snapshots[meta.SnapshotID] = meta
 }
 
+func writeSnapshotFile(t *testing.T, cp *ControlPlane, snapshotID, name string, size int) {
+	t.Helper()
+	path := filepath.Join(storage.SnapshotDir(cp.workDir, snapshotID), name)
+	if err := os.WriteFile(path, bytes.Repeat([]byte("x"), size), 0600); err != nil {
+		t.Fatalf("write snapshot file %s: %v", path, err)
+	}
+}
+
 func snapshotIDs(entries []SnapshotGCEntry) []string {
 	ids := make([]string, 0, len(entries))
 	for _, entry := range entries {
@@ -287,6 +295,81 @@ func TestPlanSnapshotGCProtectsReferencedAndKeepLast(t *testing.T) {
 	}
 }
 
+func TestPlanSnapshotGCMaxTotalBytesSelectsOldestUnprotected(t *testing.T) {
+	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
+	cp := newTestCP(t)
+
+	base := testSnapshotMeta("snap-base", "vm-1", "full", now.Add(-6*24*time.Hour))
+	old := testSnapshotMeta("snap-old", "vm-2", "full", now.Add(-5*24*time.Hour))
+	diff := testSnapshotMeta("snap-diff", "vm-1", "diff", now.Add(-4*24*time.Hour))
+	diff.BaseSnapshotID = "snap-base"
+	newer := testSnapshotMeta("snap-new", "vm-3", "full", now.Add(-1*time.Hour))
+
+	for _, meta := range []storage.SnapshotMetadata{base, old, diff, newer} {
+		addTestSnapshot(t, cp, meta)
+	}
+	writeSnapshotFile(t, cp, "snap-base", "rootfs.ext4", 20)
+	writeSnapshotFile(t, cp, "snap-old", "rootfs.ext4", 8)
+	writeSnapshotFile(t, cp, "snap-diff", "memory.bin", 1)
+	writeSnapshotFile(t, cp, "snap-new", "rootfs.ext4", 7)
+
+	got := cp.planSnapshotGC(SnapshotGCPolicy{
+		OlderThanSeconds: int64((365 * 24 * time.Hour) / time.Second),
+		MaxTotalBytes:    34,
+	}, now)
+
+	if got.Policy.MaxTotalBytes != 34 {
+		t.Fatalf("policy max_total_bytes = %d, want 34", got.Policy.MaxTotalBytes)
+	}
+	if ids := strings.Join(snapshotIDs(got.Candidates), ","); ids != "snap-old" {
+		t.Fatalf("candidate IDs = %s, want snap-old", ids)
+	}
+	candidate := got.Candidates[0]
+	if candidate.Reason != "max_total_bytes" {
+		t.Fatalf("candidate reason = %q, want max_total_bytes", candidate.Reason)
+	}
+	if candidate.SizeBytes != 10 {
+		t.Fatalf("candidate size_bytes = %d, want 10", candidate.SizeBytes)
+	}
+
+	protected, ok := gcEntryByID(got.Protected, "snap-base")
+	if !ok {
+		t.Fatal("snap-base was not protected")
+	}
+	if protected.SizeBytes != 22 {
+		t.Fatalf("protected size_bytes = %d, want 22", protected.SizeBytes)
+	}
+}
+
+func TestPlanSnapshotGCSizeOnlyDoesNotSelectAllAgeCandidates(t *testing.T) {
+	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
+	cp := newTestCP(t)
+
+	old := testSnapshotMeta("snap-old", "vm-1", "full", now.Add(-3*time.Hour))
+	mid := testSnapshotMeta("snap-mid", "vm-1", "full", now.Add(-2*time.Hour))
+	newer := testSnapshotMeta("snap-new", "vm-1", "full", now.Add(-1*time.Hour))
+	for _, meta := range []storage.SnapshotMetadata{old, mid, newer} {
+		addTestSnapshot(t, cp, meta)
+		writeSnapshotFile(t, cp, meta.SnapshotID, "rootfs.ext4", 8)
+	}
+
+	got := cp.planSnapshotGC(SnapshotGCPolicy{
+		MaxTotalBytes: 15,
+	}, now)
+
+	if ids := strings.Join(snapshotIDs(got.Candidates), ","); ids != "snap-old,snap-mid" {
+		t.Fatalf("candidate IDs = %s, want snap-old,snap-mid", ids)
+	}
+	for _, candidate := range got.Candidates {
+		if candidate.Reason != "max_total_bytes" {
+			t.Fatalf("%s reason = %q, want max_total_bytes", candidate.SnapshotID, candidate.Reason)
+		}
+		if candidate.SizeBytes != 10 {
+			t.Fatalf("%s size_bytes = %d, want 10", candidate.SnapshotID, candidate.SizeBytes)
+		}
+	}
+}
+
 func TestHandleSnapshotGCDryRunDoesNotDelete(t *testing.T) {
 	now := time.Now().UTC()
 	cp := newTestCP(t)
@@ -343,6 +426,12 @@ func TestHandleSnapshotGCRejectsInvalidPolicy(t *testing.T) {
 			wantStatus: http.StatusBadRequest,
 			wantBody:   "keep_last_per_vm must be non-negative",
 		},
+		{
+			name:       "negative max_total_bytes",
+			body:       `{"max_total_bytes":-1}`,
+			wantStatus: http.StatusBadRequest,
+			wantBody:   "max_total_bytes must be non-negative",
+		},
 	}
 
 	for _, tt := range tests {
@@ -396,6 +485,63 @@ func TestHandleSnapshotGCApplyDeletesCandidates(t *testing.T) {
 	}
 	if _, err := os.Stat(storage.SnapshotDir(cp.workDir, "snap-new")); err != nil {
 		t.Fatalf("snap-new directory missing: %v", err)
+	}
+}
+
+func TestHandleSnapshotGCAuditWrittenOnlyOnApply(t *testing.T) {
+	now := time.Now().UTC()
+	cp := newTestCP(t)
+	meta := testSnapshotMeta("snap-old", "vm-1", "full", now.Add(-10*24*time.Hour))
+	meta.AgentToken = "secret-token"
+	addTestSnapshot(t, cp, meta)
+	addTestSnapshot(t, cp, testSnapshotMeta("snap-new", "vm-1", "full", now.Add(-1*time.Hour)))
+	auditPath := filepath.Join(cp.workDir, "snapshots", "gc-audit.jsonl")
+
+	dryRunReq := httptest.NewRequest(http.MethodPost, "/snapshots/gc", bytes.NewReader([]byte(`{"older_than_seconds":604800}`)))
+	dryRunRR := httptest.NewRecorder()
+	cp.handleSnapshotGC(dryRunRR, dryRunReq)
+
+	if dryRunRR.Code != http.StatusOK {
+		t.Fatalf("dry-run status = %d, body = %q; want 200", dryRunRR.Code, dryRunRR.Body.String())
+	}
+	if _, err := os.Stat(auditPath); !os.IsNotExist(err) {
+		t.Fatalf("dry-run audit stat err = %v, want not exist", err)
+	}
+
+	applyReq := httptest.NewRequest(http.MethodPost, "/snapshots/gc", bytes.NewReader([]byte(`{"older_than_seconds":604800,"apply":true}`)))
+	applyRR := httptest.NewRecorder()
+	cp.handleSnapshotGC(applyRR, applyReq)
+
+	if applyRR.Code != http.StatusOK {
+		t.Fatalf("apply status = %d, body = %q; want 200", applyRR.Code, applyRR.Body.String())
+	}
+	resp := decodeGCResponse(t, applyRR)
+	if len(resp.Candidates) != 1 || len(resp.Deleted) != 1 || len(resp.Errors) != 0 {
+		t.Fatalf("gc counts candidates=%d deleted=%d errors=%d, want 1/1/0", len(resp.Candidates), len(resp.Deleted), len(resp.Errors))
+	}
+
+	data, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatalf("read audit file: %v", err)
+	}
+	if strings.Contains(string(data), "secret-token") || strings.Contains(string(data), "agent_token") {
+		t.Fatalf("audit file includes sensitive metadata: %q", string(data))
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("audit lines = %d, want 1: %q", len(lines), string(data))
+	}
+	var record struct {
+		Applied         bool `json:"applied"`
+		CandidatesCount int  `json:"candidates_count"`
+		DeletedCount    int  `json:"deleted_count"`
+		ErrorsCount     int  `json:"errors_count"`
+	}
+	if err := json.Unmarshal([]byte(lines[0]), &record); err != nil {
+		t.Fatalf("parse audit line: %v", err)
+	}
+	if !record.Applied || record.CandidatesCount != 1 || record.DeletedCount != 1 || record.ErrorsCount != 0 {
+		t.Fatalf("audit record = %+v, want applied=true counts 1/1/0", record)
 	}
 }
 
