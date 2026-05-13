@@ -326,6 +326,7 @@ snapshots/             snapshot 저장 디렉터리, gitignore
 artifacts/             runtime artifact 디렉터리, gitignore
 e2e_test.sh            50단계 통합 테스트
 scripts/build_image.sh golden image build script
+scripts/anvil-mcp-e2e.sh daemon 기반 MCP smoke wrapper
 ```
 
 ## 문서 지도
@@ -583,24 +584,44 @@ Restore 후 `session_name` bind가 실패하면 adapter는 restored VM을 자동
 정확한 입력/출력 계약은 `docs/architecture/mcp-architecture.md`를 참조한다.
 
 문서 기준 MCP smoke test는 실제 daemon과 `anvil-mcp` stdio server를 함께
-사용한다. 먼저 root 권한으로 daemon을 실행한다.
+사용한다. 일반 CI에서는 KVM/root가 필요한 daemon 실행을 요구하지 않고
+`go test ./...`, `go build ./cmd/anvil-mcp` 같은 CI-safe 검증만 수행한다.
+MCP smoke는 Firecracker를 실행할 수 있는 host에서 별도로 수행한다.
+
+먼저 root 권한으로 daemon을 실행한다.
 
 ```bash
 sudo ANVIL_API_ADDR=127.0.0.1:3000 ./anvil-daemon
 ```
 
-다른 터미널에서 smoke client를 실행한다.
+다른 터미널에서 smoke wrapper를 실행한다. wrapper는
+`go build -o /tmp/anvil-mcp ./cmd/anvil-mcp`로 adapter를 빌드한 뒤 smoke client가
+해당 binary를 stdio MCP server로 실행하게 한다.
 
 ```bash
-go run scripts/anvil-mcp-smoke.go -session smoke
+scripts/anvil-mcp-e2e.sh lifecycle
+scripts/anvil-mcp-e2e.sh semantic
 ```
 
-이 검사는 `anvil_spawn_vm`, `anvil_copy_in`, `anvil_copy_out`,
+`lifecycle`은 기본 모드이며 내부적으로
+`go run ./scripts/anvil-mcp-smoke.go -command /tmp/anvil-mcp -expect-output ""`를
+실행한다. `semantic`은
+`go run ./scripts/anvil-mcp-smoke.go -command /tmp/anvil-mcp -expect-output "anvil-smoke-ok"`를
+실행한다.
+
+두 모드 모두 `anvil_spawn_vm`, `anvil_copy_in`, `anvil_copy_out`,
 `anvil_run_task`, `anvil_get_vm_health`, `anvil_stop_vm`,
-`anvil_delete_vm` 순서로 tool call을 수행한다. 기본값은 workspace copy
-round-trip과 `anvil_run_task` 응답의 `anvil-smoke-ok` 포함 여부를 확인한다.
-provider credential이 아직 유효하지 않은 환경에서 MCP lifecycle과 workspace
-copy만 확인하려면 `-expect-output ""`를 사용한다.
+`anvil_delete_vm` 순서로 tool call을 수행한다. `lifecycle`은 workspace copy
+round-trip과 VM cleanup 경로를 확인하되 `anvil_run_task` 응답 body의 의미적
+marker는 검사하지 않는다. `semantic`은 같은 flow에 더해 `anvil-smoke-ok`
+포함 여부를 확인한다.
+
+daemon은 smoke 실행 전에 이미 떠 있어야 하며 `ANVIL_DAEMON_URL`과 필요한 경우
+`ANVIL_API_TOKEN`으로 adapter가 daemon에 도달할 수 있어야 한다. daemon 실행에는
+`/dev/kvm`, root 권한, Firecracker 실행 가능 host가 필요하다. `semantic`은 유효한
+LLM credential과 provider 응답까지 요구한다. `lifecycle`은 의미적 marker 검사만
+끄므로, 선택한 daemon/profile의 `anvil_run_task` 경로가 2xx로 완료될 수 있어야
+한다.
 
 ---
 

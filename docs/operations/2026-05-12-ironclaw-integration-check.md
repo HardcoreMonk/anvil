@@ -174,6 +174,21 @@ ironclaw mcp test anvil --no-onboard --cli-only
   - `anvil_stop_vm`
   - `anvil_delete_vm`
 
+반복 가능한 MCP smoke 명령은 wrapper로 고정한다. daemon은 별도 터미널에서
+이미 실행 중이어야 한다.
+
+```bash
+scripts/anvil-mcp-e2e.sh lifecycle
+scripts/anvil-mcp-e2e.sh semantic
+```
+
+`lifecycle`은 `anvil_run_task` 응답의 의미적 marker assertion만 끈다. 이 모드도
+`anvil_run_task`를 호출하므로 task call이 완료될 수 있는 daemon/profile/provider
+경로는 필요하다. `semantic`은 같은 flow에 더해 응답 body의 `anvil-smoke-ok`
+marker를 확인한다. 두 모드 모두 실제 daemon-backed 검증이므로 KVM/root가 가능한
+host와 daemon에 도달 가능한 `ANVIL_DAEMON_URL`/`ANVIL_API_TOKEN` 설정이 필요하며,
+`semantic`은 기대한 marker를 반환할 수 있는 유효한 LLM credential까지 요구한다.
+
 ## 남은 운영상 주의점
 
 설치, onboarding, MCP 등록, MCP smoke, IronClaw agent E2E는 완료되었다.
