@@ -31,6 +31,9 @@
 - `docs/architecture/`: 런타임 아키텍처, 서비스 로직, MCP 아키텍처 문서.
 - `docs/operations/2026-05-12-ironclaw-integration-check.md`: IronClaw 설치,
   MCP 연결, 실제 IronClaw agent E2E 검증 기록.
+- `docs/operations/release-checklist.md`: ephemera runtime 릴리즈와 anvil
+  integration 릴리즈를 구분하는 게시 전 확인 절차와 `anvil-v0.1.0` GitHub
+  Release 본문 초안.
 
 ## 변경됨
 
@@ -39,8 +42,8 @@
   정리했다.
 - `ANVIL_API_*`, `ANVIL_PUBLIC_URL`, `ANVIL_DAEMON_*` 환경 변수 alias를
   지원해 IronClaw/anvil 문맥에서 daemon 설정을 읽을 수 있게 했다.
-- workspace copy-in/out은 파일 크기 제한, overwrite 정책, binary/base64 거부,
-  표준화된 오류 본문을 적용한다.
+- workspace copy-in/out은 파일 크기 제한, overwrite 정책, text/base64 encoding
+  검증, 표준화된 오류 본문을 적용한다.
 - `artifacts/goose-agent`는 source hash/version stamp 기반으로 재빌드 여부를
   판단한다.
 

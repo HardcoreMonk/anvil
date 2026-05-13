@@ -354,6 +354,10 @@ scripts/build_image.sh golden image build script
 - [anvil redesign handoff](docs/operations/2026-05-11-anvil-redesign-handoff.md):
   재설계 release/operate handoff 근거.
 
+- [anvil release checklist](docs/operations/release-checklist.md):
+  ephemera runtime 릴리즈와 anvil integration 릴리즈를 구분하는 게시 전
+  확인 절차와 `anvil-v0.1.0` GitHub Release 본문 초안.
+
 ---
 
 ## 사전 요구사항
