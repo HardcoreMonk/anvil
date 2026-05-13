@@ -1,3 +1,107 @@
+# v0.3.0 — Goosetown: Multi-Agent Orchestration
+
+**Ephemera** now runs heterogeneous groups of role-specialized MicroVMs as a single addressable unit ("flocks"). One `POST /flocks` call spawns an orchestrator, researchers, workers, and reviewers in parallel, each sized to its role and sharing an append-only **Town Wall** log for coordination. Every v0.2.0 endpoint behaves exactly as before — the new surface is purely additive, so existing clients continue to work without changes.
+
+---
+
+## What's New
+
+### Multi-Agent Flocks
+
+- `POST /flocks` — spawn N role-specialized VMs in one call (max 20 per flock); returns flock metadata, agent records, `townwall_url`, and `post_url`
+- `GET /flocks` — list all live flocks
+- `GET /flocks/{id}` — describe a flock and its agents
+- `DELETE /flocks/{id}` — tear down every member VM **in parallel** (~1 s for a 5-agent flock instead of ~5 s sequential) and unregister the flock
+- Partial-spawn safety: if any VM in the flock fails to come up, all previously spawned VMs are torn down and the flock is removed before the error is returned
+
+### Town Wall — Per-Flock Append-Only Log
+
+- `POST /flocks/{id}/post` — append a message (`{agent_id, body}`) to the flock's shared log
+- `GET /flocks/{id}/wall` — **SSE stream** that emits full history once, then forwards every new post live
+- `GET /flocks/{id}/wall/history` — one-shot dump of the log as JSON
+- Backed by `flocks/<flock-id>/TOWN_WALL.log` on disk (kept as an audit artifact after `DELETE`)
+- Mutex-serialized writes with a buffered subscriber fan-out — slow subscribers are dropped from the current message rather than blocking the writer
+
+### Per-Profile vCPU / Memory Sizing
+
+- `vm.VMConfig` now accepts `VcpuCount` and `MemSizeMib` (zero falls back to the legacy 2 vCPU / 2048 MiB defaults)
+- Built-in role profiles map to canonical sizing:
+
+  | Role | vCPU | Memory (MiB) | Profile dir |
+  |------|------|--------------|-------------|
+  | `researcher` | 1 | 512 | `researcher/` |
+  | `reviewer` | 1 | 512 | `reviewer/` |
+  | `worker` | 2 | 2048 | `worker/` |
+  | `orchestrator` | 2 | 2048 | `orchestrator/` |
+  | `builder` | 4 | 4096 | `worker/` |
+
+- Unknown profile names continue to spawn at the default sizing and resolve `configs/profiles/{name}/`, so the v0.2.0 profile contract is preserved
+
+### Role System Prompts
+
+- Each profile directory can ship a `system.md` that ships role instructions
+- The control plane injects `system.md` content into the VM as `/root/.goose-system-prompt` at provision time
+- In-VM `goose-agent` prepends it to every `/tasks` prompt as `[SYSTEM INSTRUCTIONS]\n...\n\n[USER TASK]\n...` so the role stays in-character even when the orchestrator dispatches plain user prompts
+- Four shipped role prompts: `researcher` (read-only exploration), `worker` (implementation), `reviewer` (adversarial review), `orchestrator` (delegation + synthesis)
+
+### In-VM Flock Context + `gtwall` CLI
+
+- For flock members, `PrepareVM` writes `/root/.ephemera-flock` (`FLOCK_ID`, `AGENT_ID`) so the in-VM agent knows its identity
+- New `goose-agent` endpoint: `POST /townwall/post` reads the flock context and forwards the message to the host control plane's `POST /flocks/{id}/post`
+- New shell wrapper `scripts/gtwall` (installed at `/usr/local/bin/gtwall` in the golden image): one-liner posting from anywhere in the VM — `gtwall "Claiming src/styles/theme.css"`
+
+### Optional COW Spawn Disks (`EPHEMERA_DISK_MODE=cow`)
+
+- Setting `EPHEMERA_DISK_MODE=cow` provisions each new VM via `dm-snapshot` over the golden image instead of a 700 MiB full copy
+- Initial extra disk usage drops from ~700 MiB to ~0 MiB per VM; writes accumulate in a sparse `.cow` exception store
+- Default behavior is unchanged when the variable is unset, so it doubles as a safe rollback path
+- Reuses the existing `SetupDMSnapshot` / `TeardownDMSnapshot` plumbing introduced in v0.2.0 for restore
+
+### Faster Diff Snapshot Restore
+
+- Memory merge during diff restore now writes the temporary 2 GiB `merged.bin` to `/dev/shm` (tmpfs) when available, avoiding disk I/O on the hot path
+- Falls back to `{workDir}/tmp` when `/dev/shm` is not a writable directory (e.g. minimal containers)
+
+### Spawning Internals — `spawnVMInternal`
+
+- Extracted the spawn pipeline (network alloc → disk clone → config inject → Firecracker start → register → wait) into a shared `spawnVMInternal` helper
+- Both the public `POST /vms` handler and the new flock spawner reuse it, so any future spawn change applies to both paths uniformly
+- All cleanup paths consistently undo every resource they allocated before returning
+
+### Configuration
+
+- New env var: `EPHEMERA_DISK_MODE` — set to `cow` to enable the dm-snapshot-backed spawn path described above
+- Inside a flock VM: `EPHEMERA_CONTROL_PLANE` (optional, default `http://10.0.1.1:3000`) — overrides the control plane URL used by `/townwall/post` forwarding for testing
+- Inside a flock VM: `EPHEMERA_CONTROL_PLANE_TOKEN` (optional) — bearer token attached to the forwarded Town Wall post when the control plane runs with auth enabled
+
+### Testing
+
+- `e2e_test.sh` grows from 50 to **58 steps** with a new Goosetown block:
+  - 51 prep `configs/profiles/*/{goose.yaml,goose-secrets.yaml}` from `.example` files
+  - 52 spawn a 5-agent flock (orchestrator / researcher × 2 / worker / reviewer) and validate the returned IDs, URLs, and agent count
+  - 53 confirm `/vms` reflects all flock members
+  - 54 post to the Town Wall through the control plane
+  - 55 assert `/flocks/{id}/wall/history` returns ≥ 2 entries
+  - 56 verify `GET /flocks` lists the new flock
+  - 57 `DELETE /flocks/{id}` and assert every VM is torn down and the flock unregisters
+  - 58 daemon graceful shutdown (renumbered from former 50)
+- New unit tests in `internal/orchestrator/`: Town Wall post/history, subscriber delivery, concurrent posting, line parsing, flock create/get/delete, agent status update, lock-safe JSON marshaling
+
+### Documentation
+
+- README adds an "Architecture" entry per flock endpoint, a "Flock API" section with curl examples (Spawn / Post / SSE Stream / History / List / Describe / Destroy), a built-in role profile table, and an updated Testing section showing the actual passing e2e output for steps 51–58
+
+---
+
+## Upgrade Notes
+
+- **Backward compatible**: `POST /vms`, `POST /vms/{id}/snapshot`, `POST /snapshots/{id}/restore`, and the agent proxy endpoints behave exactly as in v0.2.0
+- **Golden image**: rebuild to ship `gtwall` and `iproute2` inside the VM — `rm artifacts/golden-image.ext4 && sudo ./ephemera-daemon`. Existing v0.2.0 images keep working for non-flock VMs
+- **Role profiles**: built-in role names ship `*.yaml.example` files only. Before spawning flocks, copy them and fill in API keys: `cp configs/profiles/<role>/goose.yaml{.example,}` and same for `goose-secrets.yaml`
+- **COW spawn**: opt in with `EPHEMERA_DISK_MODE=cow`. Unset (default) keeps the v0.2.0 full-clone behavior — useful as a single-flag rollback if any platform-specific dm-snapshot issue surfaces
+
+---
+
 # v0.2.0 — Single-Host Feature Complete
 
 **Ephemera** completes the single-host feature set. Every limitation noted in v0.1.0 is resolved: guests shut down gracefully, agent authentication is enforced, tokens reload without a restart, and VMs can be snapshotted and restored in seconds. A new control plane proxy makes goose-agent accessible from external clients without direct access to the private VM subnet.
