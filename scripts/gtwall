@@ -1,0 +1,39 @@
+#!/bin/sh
+# gtwall — post a message to this VM's flock Town Wall.
+#
+# Usage:
+#   gtwall "your message body"
+#
+# Reads:
+#   /root/.ephemera-flock         flock metadata (FLOCK_ID, AGENT_ID)
+#   /root/.ephemera-agent-token   per-VM bearer token
+# Routes through the in-VM goose-agent's /townwall/post which forwards
+# to the host control plane.
+
+set -e
+
+if [ -z "${1-}" ]; then
+    echo "usage: gtwall <message>" >&2
+    exit 1
+fi
+
+if [ ! -f /root/.ephemera-flock ]; then
+    echo "error: this VM is not part of a flock" >&2
+    exit 2
+fi
+
+PORT="${GOOSE_AGENT_PORT:-8080}"
+TOKEN="$(cat /root/.ephemera-agent-token 2>/dev/null || true)"
+
+# Escape backslashes and double quotes for safe JSON embedding.
+BODY=$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
+
+AUTH_HEADER=""
+if [ -n "$TOKEN" ]; then
+    AUTH_HEADER="Authorization: Bearer $TOKEN"
+fi
+
+curl -sf -X POST "http://localhost:${PORT}/townwall/post" \
+    ${AUTH_HEADER:+ -H "$AUTH_HEADER"} \
+    -H "Content-Type: application/json" \
+    -d "{\"body\":\"${BODY}\"}"

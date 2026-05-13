@@ -1,0 +1,19 @@
+# Orchestrator profile — synthesis and delegation only, never executes work.
+# Strongest available reasoning model is recommended.
+#
+# Usage:
+#   cp configs/profiles/orchestrator/goose.yaml.example configs/profiles/orchestrator/goose.yaml
+#   cp configs/profiles/orchestrator/goose-secrets.yaml.example configs/profiles/orchestrator/goose-secrets.yaml
+
+GOOSE_PROVIDER: anthropic
+GOOSE_MODEL: claude-opus-4-7
+GOOSE_TELEMETRY_ENABLED: false
+GOOSE_DISABLE_KEYRING: true
+
+extensions:
+  developer:
+    bundled: true
+    enabled: true
+    name: developer
+    timeout: 600
+    type: builtin

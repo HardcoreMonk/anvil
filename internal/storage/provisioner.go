@@ -78,6 +78,34 @@ func (p *Provisioner) EnsureGoldenImage() error {
 	return nil
 }
 
+// CloneDiskCOW creates a per-VM COW view over the golden image instead of a
+// full byte-for-byte copy. Returns the path Firecracker should open as the
+// rootfs (a regular file bind-mounted to a dm-snapshot device), the sparse
+// COW exception store path, and the DMSnapshotInfo for teardown.
+//
+// On error every resource allocated by this call is rolled back, so callers
+// only need to handle the error path themselves.
+//
+// Activated via EPHEMERA_DISK_MODE=cow; the default behavior (full copy) is
+// preserved when the variable is unset to keep a safe rollback path.
+func (p *Provisioner) CloneDiskCOW(vmID string) (string, string, *DMSnapshotInfo, error) {
+	mountTarget := filepath.Join(p.WorkspaceDir, vmID+".ext4")
+	cowStore := filepath.Join(p.WorkspaceDir, vmID+".cow")
+
+	// Empty regular file that the dm device will be bind-mounted onto.
+	if err := os.WriteFile(mountTarget, nil, 0644); err != nil {
+		return "", "", nil, fmt.Errorf("create COW mount target: %w", err)
+	}
+	info, err := SetupDMSnapshot(p.GoldenImagePath, cowStore, mountTarget)
+	if err != nil {
+		os.Remove(mountTarget)
+		return "", "", nil, err
+	}
+	log.Printf("Provisioned COW rootfs for MicroVM [%s] (base: %s, exception store: %s)",
+		vmID, p.GoldenImagePath, cowStore)
+	return mountTarget, cowStore, info, nil
+}
+
 // CloneDisk creates an isolated copy of the golden image for a specific VM.
 func (p *Provisioner) CloneDisk(vmID string) (string, error) {
 	destPath := filepath.Join(p.WorkspaceDir, fmt.Sprintf("%s.ext4", vmID))
@@ -148,6 +176,12 @@ type VMPrepareOptions struct {
 	HostSecretsPath string // path to goose-secrets.yaml on the host
 	Task            string // optional task prompt written to /root/task.txt
 	AgentToken      string // if non-empty, written to /root/.ephemera-agent-token (mode 0600)
+
+	// Goosetown flock context. Empty FlockID disables flock-context injection,
+	// preserving standalone-VM behavior.
+	FlockID      string
+	AgentID      string
+	SystemPrompt string // optional role system prompt written to /root/.goose-system-prompt
 }
 
 // PrepareVM injects all VM-specific files in a single mount/unmount cycle:
@@ -184,6 +218,24 @@ func (p *Provisioner) PrepareVM(vmID string, opts VMPrepareOptions) error {
 			tokenPath := filepath.Join(mntDir, "root", ".ephemera-agent-token")
 			if err := os.WriteFile(tokenPath, []byte(opts.AgentToken), 0600); err != nil {
 				return fmt.Errorf("failed to write agent token: %w", err)
+			}
+		}
+
+		// Flock context: tells the in-VM agent which flock and agent identity it has.
+		// Mode 0600 because AGENT_ID is enough to address the agent on the wall.
+		if opts.FlockID != "" {
+			flockMeta := fmt.Sprintf("FLOCK_ID=%s\nAGENT_ID=%s\n", opts.FlockID, opts.AgentID)
+			flockPath := filepath.Join(mntDir, "root", ".ephemera-flock")
+			if err := os.WriteFile(flockPath, []byte(flockMeta), 0600); err != nil {
+				return fmt.Errorf("failed to write flock meta: %w", err)
+			}
+		}
+
+		// System prompt: prepended to every /tasks request by goose-agent.
+		if opts.SystemPrompt != "" {
+			spPath := filepath.Join(mntDir, "root", ".goose-system-prompt")
+			if err := os.WriteFile(spPath, []byte(opts.SystemPrompt), 0644); err != nil {
+				return fmt.Errorf("failed to write system prompt: %w", err)
 			}
 		}
 

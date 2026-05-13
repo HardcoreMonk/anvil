@@ -92,3 +92,38 @@ func envInt(key string, defaultVal int) int {
 	}
 	return defaultVal
 }
+
+// AgentProfile bundles per-role VM sizing and the on-disk profile directory.
+// ProfileDir is resolved relative to {workDir}/configs/profiles/{ProfileDir}.
+// An empty ProfileDir signals "use the daemon's default goose config".
+type AgentProfile struct {
+	Name       string
+	VcpuCount  int64
+	MemSizeMib int64
+	ProfileDir string
+}
+
+// agentProfiles maps a profile name to its canonical sizing and profile directory.
+// The empty key "" is the backward-compatible default returned for unset profiles.
+// Unknown names fall back to default sizing with ProfileDir set to the name
+// itself, preserving prior behavior where any directory under configs/profiles
+// could be selected by name.
+var agentProfiles = map[string]AgentProfile{
+	"":             {Name: "default", VcpuCount: 2, MemSizeMib: 2048, ProfileDir: ""},
+	"researcher":   {Name: "researcher", VcpuCount: 1, MemSizeMib: 512, ProfileDir: "researcher"},
+	"reviewer":     {Name: "reviewer", VcpuCount: 1, MemSizeMib: 512, ProfileDir: "reviewer"},
+	"worker":       {Name: "worker", VcpuCount: 2, MemSizeMib: 2048, ProfileDir: "worker"},
+	"orchestrator": {Name: "orchestrator", VcpuCount: 2, MemSizeMib: 2048, ProfileDir: "orchestrator"},
+	"builder":      {Name: "builder", VcpuCount: 4, MemSizeMib: 4096, ProfileDir: "worker"},
+}
+
+// LookupProfile returns the canonical AgentProfile for a known name, or a
+// default-sized profile whose ProfileDir mirrors the requested name when the
+// name is unknown. The latter preserves the legacy "any directory works" behavior
+// so callers that supply ad-hoc profile directories keep functioning.
+func LookupProfile(name string) AgentProfile {
+	if p, ok := agentProfiles[name]; ok {
+		return p
+	}
+	return AgentProfile{Name: name, VcpuCount: 2, MemSizeMib: 2048, ProfileDir: name}
+}
