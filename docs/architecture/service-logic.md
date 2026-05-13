@@ -256,6 +256,30 @@ createSnapshot()
   memory path, state path, base snapshot ID를 보존한다.
 - snapshot API response에는 `agent_token`을 노출하지 않는다.
 
+### Snapshot token 수명 주기
+
+snapshot metadata는 guest agent token을 저장한다. restore된 VM이 기존
+`goose-agent` 인증 계약을 그대로 유지해야 하므로, snapshot에서 복원한 VM은
+metadata에 있던 원래 token을 계속 사용한다.
+
+공개 API 응답은 이 값을 노출하지 않는 것이 정책이며, 허용된 노출 지점은
+`POST /vms` 응답뿐이다. 현재 daemon의 `POST /snapshots/{id}/restore` 응답은 기존
+호환성 때문에 `agent_token`을 포함할 수 있지만, 이는 제거 대상 구현 부채다.
+snapshot 생성, snapshot 목록, snapshot GC, MCP output, audit output은 실제
+`agent_token`을 포함하지 않는다.
+
+snapshot metadata를 반출하거나 백업 workflow에서 신뢰된 host 경계 밖으로
+보낼 때는 먼저 `scripts/snapshot-metadata-scrub.go`로 `agent_token`을 제거한다.
+
+```bash
+go run ./scripts/snapshot-metadata-scrub.go -input snapshots/snap-.../metadata.json > metadata.scrubbed.json
+```
+
+token 회전은 생성 시점에만 명확하다. 새 VM은 새 guest agent token을 받지만,
+기존 snapshot restore는 snapshot metadata의 원래 token을 유지한다. 이미 만들어진
+snapshot의 token을 회전하려면 향후 guest-side rekey와 metadata rewrite 설계가
+필요하며, 이 문서의 구현 범위에는 포함되지 않는다.
+
 ## Snapshot restore 로직
 
 Route: `POST /snapshots/{id}/restore`
@@ -284,11 +308,13 @@ restoreSnapshot()
   -> ReconfigureGuestIP(original vsock path, new IP, gateway)
   -> restored VM을 cp.vms에 등록
   -> 최대 30초 동안 guest agent health 대기
-  -> source_snapshot_id와 agent_token을 포함한 VMRestoreResult 반환
+  -> source_snapshot_id를 포함한 VMRestoreResult 반환
 ```
 
-restore된 VM은 snapshot metadata의 original agent token을 유지한다. 따라서
-caller는 snapshot/restore cycle 뒤에도 같은 agent token으로 접근할 수 있다.
+restore된 VM은 guest agent 연속성을 위해 snapshot metadata의 original agent token을
+내부적으로 유지한다. 외부 client는 guest agent token이 아니라 control-plane
+token과 daemon proxy를 사용해야 한다. 현재 restore 응답의 `agent_token` 노출은
+기존 호환성 때문에 남아 있는 제거 대상 구현 부채다.
 
 restore 실패는 `Content-Type: application/json`인 `RestoreErrorResponse`를
 반환한다.

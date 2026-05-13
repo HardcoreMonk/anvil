@@ -349,6 +349,9 @@ scripts/anvil-mcp-e2e.sh daemon 기반 MCP smoke wrapper
 - [docs/architecture/mcp-architecture.md](docs/architecture/mcp-architecture.md):
   IronClaw MCP adapter 구조와 tool 계약.
 
+- [docs/operations/security-policy.md](docs/operations/security-policy.md):
+  공개 노출, 제어 평면 token, guest agent token, snapshot metadata 반출 보안 정책.
+
 - [docs/analysis/README.md](docs/analysis/README.md):
   ephemera 0.1.0/0.2.0 분석 문서 index.
 
@@ -659,9 +662,10 @@ curl -X POST http://localhost:3000/vms \
 }
 ```
 
-daemon API에서는 `POST /vms`와 `POST /snapshots/{id}/restore` 응답에
-`agent_token`이 포함될 수 있다. MCP output은 restore 응답의 `agent_token`을
-노출하지 않는다.
+보안 불변 조건은 `POST /vms` 외 응답에서 `agent_token`을 노출하지 않는 것이다.
+현재 daemon의 `POST /snapshots/{id}/restore` 응답은 기존 호환성 때문에
+`agent_token`을 포함할 수 있지만, MCP output은 restore 응답의 `agent_token`을
+노출하지 않는다. restore 응답의 token 노출은 제거 대상 구현 부채다.
 
 ### VM 목록
 
@@ -718,6 +722,14 @@ curl -X POST http://localhost:3000/snapshots/snap-1778229000000/restore \
 
 source VM이 아직 실행 중이면 restore는 거부된다. restore된 VM은 새 VM ID와
 새 IP를 받지만 snapshot의 agent token은 유지한다.
+
+snapshot `metadata.json`은 restore 인증 계약을 보존하기 위해 `agent_token`을
+담고 있다. metadata를 반출하거나 백업 산출물이 신뢰된 host 경계 밖으로 나가기
+전에는 scrubber로 token을 제거한다.
+
+```bash
+go run ./scripts/snapshot-metadata-scrub.go -input snapshots/snap-1778229000000/metadata.json > metadata.scrubbed.json
+```
 
 restore 실패는 JSON error body를 반환한다.
 
@@ -853,7 +865,9 @@ profile 이름에는 `/` 또는 `\`를 사용할 수 없다.
   host-only `10.0.1.0/24` network와 `goose-br0` bridge를 사용한다.
 
 - **외부 공개**:
-  TLS 종료 reverse proxy 뒤에서 운영한다.
+  TLS 종료 reverse proxy 뒤에서 운영하고 운영 환경에서는 `EPHEMERA_API_TOKENS`를
+  설정한다. 자세한 정책은
+  [docs/operations/security-policy.md](docs/operations/security-policy.md)를 참조한다.
 
 - **secret**:
   gitignore된 로컬 config에서 guest disk로 주입한다.
