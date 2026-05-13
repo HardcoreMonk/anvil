@@ -24,6 +24,12 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.SessionStorePath != "" {
 		t.Errorf("SessionStorePath = %q, want empty", cfg.SessionStorePath)
 	}
+	if cfg.DefaultTenantID != "" {
+		t.Errorf("DefaultTenantID = %q, want empty", cfg.DefaultTenantID)
+	}
+	if cfg.AuditLogPath != "" {
+		t.Errorf("AuditLogPath = %q, want empty", cfg.AuditLogPath)
+	}
 }
 
 func TestLoadConfigFile(t *testing.T) {
@@ -33,6 +39,8 @@ func TestLoadConfigFile(t *testing.T) {
 			"api_token: file-token",
 			"default_timeout_seconds: 45",
 			"session_store_path: /var/lib/anvil-mcp/sessions.json",
+			"default_tenant_id: tenant.file",
+			"audit_log_path: /var/log/anvil-mcp/audit.jsonl",
 			"",
 		}, "\n"),
 	}
@@ -57,6 +65,12 @@ func TestLoadConfigFile(t *testing.T) {
 	if cfg.SessionStorePath != "/var/lib/anvil-mcp/sessions.json" {
 		t.Errorf("SessionStorePath = %q, want %q", cfg.SessionStorePath, "/var/lib/anvil-mcp/sessions.json")
 	}
+	if cfg.DefaultTenantID != "tenant.file" {
+		t.Errorf("DefaultTenantID = %q, want %q", cfg.DefaultTenantID, "tenant.file")
+	}
+	if cfg.AuditLogPath != "/var/log/anvil-mcp/audit.jsonl" {
+		t.Errorf("AuditLogPath = %q, want %q", cfg.AuditLogPath, "/var/log/anvil-mcp/audit.jsonl")
+	}
 }
 
 func TestLoadConfigEnvOverridesFile(t *testing.T) {
@@ -66,6 +80,8 @@ func TestLoadConfigEnvOverridesFile(t *testing.T) {
 			"api_token: file-token",
 			"default_timeout_seconds: 45",
 			"session_store_path: /var/lib/anvil-mcp/file-sessions.json",
+			"default_tenant_id: tenant.file",
+			"audit_log_path: /var/log/anvil-mcp/file-audit.jsonl",
 			"",
 		}, "\n"),
 	}
@@ -75,6 +91,8 @@ func TestLoadConfigEnvOverridesFile(t *testing.T) {
 		"ANVIL_API_TOKEN":           "env-token",
 		"ANVIL_MCP_DEFAULT_TIMEOUT": "90",
 		"ANVIL_MCP_SESSION_STORE":   "/var/lib/anvil-mcp/env-sessions.json",
+		"ANVIL_MCP_TENANT_ID":       "tenant.env",
+		"ANVIL_MCP_AUDIT_LOG":       "/var/log/anvil-mcp/env-audit.jsonl",
 	}
 
 	cfg, err := LoadConfig(testConfigSource(env, files))
@@ -93,6 +111,12 @@ func TestLoadConfigEnvOverridesFile(t *testing.T) {
 	}
 	if cfg.SessionStorePath != "/var/lib/anvil-mcp/env-sessions.json" {
 		t.Errorf("SessionStorePath = %q, want %q", cfg.SessionStorePath, "/var/lib/anvil-mcp/env-sessions.json")
+	}
+	if cfg.DefaultTenantID != "tenant.env" {
+		t.Errorf("DefaultTenantID = %q, want %q", cfg.DefaultTenantID, "tenant.env")
+	}
+	if cfg.AuditLogPath != "/var/log/anvil-mcp/env-audit.jsonl" {
+		t.Errorf("AuditLogPath = %q, want %q", cfg.AuditLogPath, "/var/log/anvil-mcp/env-audit.jsonl")
 	}
 }
 
@@ -187,6 +211,20 @@ func TestLoadConfigRejectsInvalidFileTimeout(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "default_timeout_seconds") {
 		t.Fatalf("LoadConfig() error = %q, want default_timeout_seconds", err)
+	}
+}
+
+func TestLoadConfigRejectsInvalidTenantID(t *testing.T) {
+	env := map[string]string{
+		"ANVIL_MCP_TENANT_ID": "../tenant",
+	}
+
+	_, err := LoadConfig(testConfigSource(env, nil))
+	if err == nil {
+		t.Fatal("LoadConfig() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "ANVIL_MCP_TENANT_ID") {
+		t.Fatalf("LoadConfig() error = %q, want ANVIL_MCP_TENANT_ID", err)
 	}
 }
 

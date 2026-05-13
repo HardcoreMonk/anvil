@@ -92,6 +92,8 @@ Go 모듈 경로와 기존 API/환경 변수에는 `ephemera` 또는 `goose` 이
 - guest agent port alias 환경 변수: `ANVIL_AGENT_PORT`
 - MCP adapter daemon URL 환경 변수: `ANVIL_DAEMON_URL`
 - MCP adapter token 환경 변수: `ANVIL_API_TOKEN`
+- MCP adapter tenant 기본값 환경 변수: `ANVIL_MCP_TENANT_ID`
+- MCP adapter runtime audit JSONL 환경 변수: `ANVIL_MCP_AUDIT_LOG`
 
 `ANVIL_API_TOKEN`은 프로세스별 의미가 다르다. goose-daemon에서는
 `EPHEMERA_API_TOKEN`의 control-plane token alias이고, `cmd/anvil-mcp`에서는
@@ -99,10 +101,20 @@ daemon으로 보내는 outbound Bearer token이다.
 
 ## 후속 후보
 
-- 공개 tag/release 정리:
-  `docs/operations/release-checklist.md` 기준으로 Git tag와 GitHub Release page
-  상태를 함께 관리
-- MCP v2에서 workspace copy 고도화와 persistent session 지원
-- snapshot retention/GC 이후: size 기반 policy와 retention audit 추가
-- multi-host runtime, scheduler, quota, audit storage 추가:
-  `docs/architecture/multi-tenant-roadmap.md`의 책임 경계 기준으로 진행
+최근 후속 완료 상태:
+
+- `anvil-v0.1.0` 공개 tag와 GitHub Release page는 게시된 상태다.
+- MCP v2 workspace copy-in/out과 persistent session store는 구현된 상태다.
+- snapshot GC는 `max_total_bytes`와 `snapshots/gc-audit.jsonl` audit record를
+  지원한다.
+- multi-tenant foundation은 `internal/anvilmcp/tenant_policy.go` 기준으로
+  tenant ID validation, quota decision, host selection primitive, egress policy,
+  runtime audit JSONL helper를 제공한다.
+
+남은 후속 후보:
+
+- multi-host scheduler service 또는 상위 orchestration 계층 구현
+- daemon API의 explicit tenant contract와 tenant별 quota enforcement
+- host network policy 기반 egress enforcement
+- runtime audit 조회/보관 정책과 운영 API 문서화
+- restore direct response의 `agent_token` 노출 제거

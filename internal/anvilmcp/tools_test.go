@@ -508,6 +508,66 @@ func TestToolsSpawnSavesPersistentSession(t *testing.T) {
 	}
 }
 
+func TestToolsSpawnAuditsDefaultTenant(t *testing.T) {
+	daemon := &fakeDaemon{}
+	auditPath := filepath.Join(t.TempDir(), "runtime-audit.jsonl")
+	tools := NewToolsWithOptions(daemon, NewSessionStore(), time.Second, ToolsOptions{
+		DefaultTenantID: "tenant-1",
+		AuditLogPath:    auditPath,
+	})
+
+	if _, err := tools.SpawnVM(context.Background(), SpawnVMInput{SessionName: "work"}); err != nil {
+		t.Fatalf("SpawnVM returned error: %v", err)
+	}
+
+	data, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatalf("read audit path: %v", err)
+	}
+	var record RuntimeAuditRecord
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &record); err != nil {
+		t.Fatalf("parse audit record: %v", err)
+	}
+	if record.TenantID != "tenant-1" || record.VMID != "vm-1" || record.SessionAlias != "work" {
+		t.Fatalf("audit record = %+v, want tenant-1 vm-1 work", record)
+	}
+	if record.ToolName != "anvil_spawn_vm" || record.DaemonOperation != "POST /vms" || record.ResultCode != "success" {
+		t.Fatalf("audit operation = %+v, want spawn success", record)
+	}
+}
+
+func TestToolsRejectsInvalidTenantInputBeforeDaemonCall(t *testing.T) {
+	daemon := &fakeDaemon{}
+	tools := NewToolsWithOptions(daemon, NewSessionStore(), time.Second, ToolsOptions{})
+
+	_, err := tools.RunTask(context.Background(), RunTaskInput{
+		VMID:     "vm-1",
+		TenantID: "../tenant",
+		Prompt:   "hello",
+	})
+	if err == nil {
+		t.Fatal("RunTask error = nil, want invalid tenant error")
+	}
+	if daemon.runCalls != 0 {
+		t.Fatalf("RunTask daemon calls = %d, want 0", daemon.runCalls)
+	}
+}
+
+func TestToolsAuditLogRequiresTenantID(t *testing.T) {
+	daemon := &fakeDaemon{}
+	tools := NewToolsWithOptions(daemon, NewSessionStore(), time.Second, ToolsOptions{
+		AuditLogPath: filepath.Join(t.TempDir(), "runtime-audit.jsonl"),
+	})
+
+	_, err := tools.Health(context.Background(), VMIdentityInput{VMID: "vm-1"})
+	if err == nil {
+		t.Fatal("Health error = nil, want missing tenant error")
+	}
+	if daemon.healthCalls != 0 {
+		t.Fatalf("Health daemon calls = %d, want 0", daemon.healthCalls)
+	}
+}
+
 func TestToolsConcurrentPersistentSpawnKeepsAllAliasesOnDisk(t *testing.T) {
 	daemon := &concurrentSpawnDaemon{}
 	store := NewSessionStore()
