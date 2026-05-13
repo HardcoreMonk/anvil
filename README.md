@@ -349,6 +349,10 @@ scripts/anvil-mcp-e2e.sh daemon 기반 MCP smoke wrapper
 - [docs/architecture/mcp-architecture.md](docs/architecture/mcp-architecture.md):
   IronClaw MCP adapter 구조와 tool 계약.
 
+- [docs/architecture/multi-tenant-roadmap.md](docs/architecture/multi-tenant-roadmap.md):
+  tenant quota, scheduler, egress policy, audit storage, multi-host runtime의
+  책임 경계와 단계적 확장 기준.
+
 - [docs/operations/security-policy.md](docs/operations/security-policy.md):
   공개 노출, 제어 평면 token, guest agent token, snapshot metadata 반출 보안 정책.
 
