@@ -81,6 +81,8 @@ defaults
 | `ANVIL_API_TOKEN` | daemon request에 사용할 Bearer token |
 | `ANVIL_MCP_DEFAULT_TIMEOUT` | `anvil_run_task` 기본 timeout, 초 단위 |
 | `ANVIL_MCP_SESSION_STORE` | session alias 영속 JSON file path override |
+| `ANVIL_MCP_TENANT_ID` | optional 기본 tenant identifier |
+| `ANVIL_MCP_AUDIT_LOG` | optional runtime audit JSONL file path |
 
 Validation:
 
@@ -89,6 +91,8 @@ Validation:
 - `daemon_url`에는 host가 있어야 한다.
 - `default_timeout_seconds`는 양수여야 한다.
 - `ANVIL_MCP_DEFAULT_TIMEOUT`은 양의 정수로 parse되어야 한다.
+- `default_tenant_id`와 `ANVIL_MCP_TENANT_ID`는 설정된 경우 ASCII letter/digit로
+  시작하고 letter, digit, `.`, `_`, `-`만 포함해야 한다.
 
 ## 도구 계약
 
@@ -106,6 +110,15 @@ Validation:
 | `anvil_restore_snapshot` | `POST /snapshots/{snapshot_id}/restore` | snapshot에서 새 VM restore 및 optional alias binding |
 | `anvil_delete_snapshot` | `DELETE /snapshots/{snapshot_id}` | snapshot 삭제 |
 
+VM/snapshot 관련 tool input은 `anvil_list_snapshots`를 제외하고 optional
+`tenant_id`를 받을 수 있다.
+`tenant_id`가 비어 있으면 `ANVIL_MCP_TENANT_ID` 또는 `default_tenant_id`를 사용한다.
+현재 adapter는 이 값을 검증하고 runtime audit record에 보존하지만 daemon API로
+전달하지 않는다. daemon tenant contract가 추가되기 전까지 `tenant_id`를 header,
+profile, session alias, VM ID에 끼워 넣어 quota 근거로 사용하지 않는다.
+`ANVIL_MCP_AUDIT_LOG`를 켠 상태에서는 input `tenant_id` 또는 기본 tenant ID가
+필요하다.
+
 ### `anvil_spawn_vm`
 
 입력:
@@ -113,7 +126,8 @@ Validation:
 ```json
 {
   "profile": "optional-profile-name",
-  "session_name": "optional-local-alias"
+  "session_name": "optional-local-alias",
+  "tenant_id": "optional-tenant"
 }
 ```
 
@@ -445,6 +459,30 @@ locking 또는 catalog design이 추가되기 전까지 서로 다른 `session_s
 - `session_store_path`가 비어 있으면 `anvil-mcp` process 종료 시 alias는 사라진다.
 - `session_store_path`가 설정되어 있으면 process 재시작 뒤에도 alias를 다시 load한다.
 
+## Runtime audit 모델
+
+`ANVIL_MCP_AUDIT_LOG` 또는 `audit_log_path`가 설정되면 adapter는 성공한 tool
+call마다 JSONL record를 append한다. file은 `0600`으로 만들고 symlink path는
+거부한다.
+
+Record field:
+
+| Field | 의미 |
+|---|---|
+| `timestamp` | audit event 시각 |
+| `tenant_id` | input `tenant_id` 또는 기본 tenant ID |
+| `vm_id` | operation 대상 VM ID. 없으면 생략 |
+| `session_alias` | input `session_name`. 없으면 생략 |
+| `tool_name` | 호출된 MCP tool 이름 |
+| `daemon_operation` | 매핑된 daemon API operation |
+| `result_code` | 현재 성공 path는 `success` |
+
+Runtime audit record에는 snapshot metadata, daemon raw body, secret, `agent_token`을
+저장하지 않는다. 이 audit은 MCP boundary의 append-only 기록이며, multi-host
+scheduler나 daemon tenant quota enforcement를 대체하지 않는다.
+audit log가 설정됐는데 `tenant_id`와 기본 tenant ID가 모두 비어 있으면 adapter는
+daemon call 전에 요청을 거부한다.
+
 ## Daemon client 동작
 
 `DaemonClient`는 설정된 base URL과 tool별 path로 HTTP request를 만든다.
@@ -473,6 +511,8 @@ Response 동작:
 | Daemon 인증 | adapter가 `ANVIL_API_TOKEN`을 daemon Bearer token으로 사용 |
 | Guest agent token | MCP output에는 노출하지 않고 daemon proxy가 주입한다. Restore response decode용 내부 struct에만 존재한다. |
 | Session alias | 기본값은 process-local memory다. `session_store_path` 설정 시 local JSON file에 `0600`으로 저장한다. |
+| Tenant ID | optional `tenant_id` 또는 `ANVIL_MCP_TENANT_ID`를 검증하고 audit에만 보존한다. |
+| Runtime audit | optional JSONL append-only record이며 `agent_token`과 raw metadata를 저장하지 않는다. |
 | Secrets | config file은 `api_token`을 담을 수 있으므로 local config를 git에 넣지 않는다. |
 | Transport | MCP v1은 client와 adapter 사이에서 stdio를 사용 |
 

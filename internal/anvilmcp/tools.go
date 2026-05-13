@@ -46,12 +46,21 @@ type Tools struct {
 	sessions             sessionStore
 	defaultTimeout       time.Duration
 	sessionStorePath     string
+	defaultTenantID      string
+	auditLogPath         string
 	sessionPersistenceMu sync.Mutex
+}
+
+type ToolsOptions struct {
+	SessionStorePath string
+	DefaultTenantID  string
+	AuditLogPath     string
 }
 
 type SpawnVMInput struct {
 	Profile     string `json:"profile,omitempty"`
 	SessionName string `json:"session_name,omitempty"`
+	TenantID    string `json:"tenant_id,omitempty"`
 }
 
 type SpawnVMOutput struct {
@@ -65,6 +74,7 @@ type SpawnVMOutput struct {
 type RunTaskInput struct {
 	VMID           string `json:"vm_id,omitempty"`
 	SessionName    string `json:"session_name,omitempty"`
+	TenantID       string `json:"tenant_id,omitempty"`
 	Prompt         string `json:"prompt"`
 	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
 }
@@ -72,6 +82,7 @@ type RunTaskInput struct {
 type CopyInInput struct {
 	VMID        string `json:"vm_id,omitempty"`
 	SessionName string `json:"session_name,omitempty"`
+	TenantID    string `json:"tenant_id,omitempty"`
 	Path        string `json:"path"`
 	Content     string `json:"content"`
 	Encoding    string `json:"encoding,omitempty"`
@@ -81,6 +92,7 @@ type CopyInInput struct {
 type CopyOutInput struct {
 	VMID        string `json:"vm_id,omitempty"`
 	SessionName string `json:"session_name,omitempty"`
+	TenantID    string `json:"tenant_id,omitempty"`
 	Path        string `json:"path"`
 	Encoding    string `json:"encoding,omitempty"`
 }
@@ -94,11 +106,13 @@ type CopyOutOutput struct {
 type VMIdentityInput struct {
 	VMID        string `json:"vm_id,omitempty"`
 	SessionName string `json:"session_name,omitempty"`
+	TenantID    string `json:"tenant_id,omitempty"`
 }
 
 type CreateSnapshotInput struct {
 	VMID        string `json:"vm_id,omitempty"`
 	SessionName string `json:"session_name,omitempty"`
+	TenantID    string `json:"tenant_id,omitempty"`
 	StopAfter   bool   `json:"stop_after"`
 	Type        string `json:"type,omitempty"`
 }
@@ -110,6 +124,7 @@ type ListSnapshotsOutput struct {
 type RestoreSnapshotInput struct {
 	SnapshotID  string `json:"snapshot_id"`
 	SessionName string `json:"session_name,omitempty"`
+	TenantID    string `json:"tenant_id,omitempty"`
 }
 
 type RestoreSnapshotOutput struct {
@@ -123,6 +138,7 @@ type RestoreSnapshotOutput struct {
 
 type SnapshotIdentityInput struct {
 	SnapshotID string `json:"snapshot_id"`
+	TenantID   string `json:"tenant_id,omitempty"`
 }
 
 type RestoreSessionBindError struct {
@@ -150,29 +166,53 @@ func NewToolsWithSessionStorePath(daemon Daemon, sessions *SessionStore, default
 	if sessions == nil {
 		sessions = NewSessionStore()
 	}
-	return newToolsWithSessionStorePath(daemon, sessions, defaultTimeout, sessionStorePath)
+	return newToolsWithOptions(daemon, sessions, defaultTimeout, ToolsOptions{SessionStorePath: sessionStorePath})
+}
+
+func NewToolsWithOptions(daemon Daemon, sessions *SessionStore, defaultTimeout time.Duration, opts ToolsOptions) *Tools {
+	if sessions == nil {
+		sessions = NewSessionStore()
+	}
+	return newToolsWithOptions(daemon, sessions, defaultTimeout, opts)
 }
 
 func newTools(daemon Daemon, sessions sessionStore, defaultTimeout time.Duration) *Tools {
-	return newToolsWithSessionStorePath(daemon, sessions, defaultTimeout, "")
+	return newToolsWithOptions(daemon, sessions, defaultTimeout, ToolsOptions{})
 }
 
 func newToolsWithSessionStorePath(daemon Daemon, sessions sessionStore, defaultTimeout time.Duration, sessionStorePath string) *Tools {
+	return newToolsWithOptions(daemon, sessions, defaultTimeout, ToolsOptions{SessionStorePath: sessionStorePath})
+}
+
+func newToolsWithOptions(daemon Daemon, sessions sessionStore, defaultTimeout time.Duration, opts ToolsOptions) *Tools {
 	if sessions == nil {
 		sessions = NewSessionStore()
 	}
 	if defaultTimeout <= 0 {
 		defaultTimeout = time.Duration(DefaultTimeoutSeconds) * time.Second
 	}
+	defaultTenantID := strings.TrimSpace(opts.DefaultTenantID)
+	if defaultTenantID != "" {
+		normalized, err := NormalizeTenantID(defaultTenantID)
+		if err == nil {
+			defaultTenantID = normalized
+		}
+	}
 	return &Tools{
 		daemon:           daemon,
 		sessions:         sessions,
 		defaultTimeout:   defaultTimeout,
-		sessionStorePath: strings.TrimSpace(sessionStorePath),
+		sessionStorePath: strings.TrimSpace(opts.SessionStorePath),
+		defaultTenantID:  defaultTenantID,
+		auditLogPath:     strings.TrimSpace(opts.AuditLogPath),
 	}
 }
 
 func (t *Tools) SpawnVM(ctx context.Context, input SpawnVMInput) (*SpawnVMOutput, error) {
+	tenantID, err := t.resolveTenantID(input.TenantID)
+	if err != nil {
+		return nil, err
+	}
 	profile := strings.TrimSpace(input.Profile)
 	sessionName := strings.TrimSpace(input.SessionName)
 	if sessionName != "" && t.sessionExists(sessionName) {
@@ -212,13 +252,17 @@ func (t *Tools) SpawnVM(ctx context.Context, input SpawnVMInput) (*SpawnVMOutput
 		}
 	}
 
-	return &SpawnVMOutput{
+	out := &SpawnVMOutput{
 		VMID:        res.VMID,
 		GuestIP:     res.GuestIP,
 		AgentURL:    res.AgentURL,
 		Profile:     res.Profile,
 		SessionName: sessionName,
-	}, nil
+	}
+	if err := t.auditSuccess(tenantID, res.VMID, sessionName, "anvil_spawn_vm", "POST /vms"); err != nil {
+		return nil, fmt.Errorf("spawn VM %q succeeded but failed to append runtime audit: %w", res.VMID, err)
+	}
+	return out, nil
 }
 
 func (t *Tools) MCPSpawnVM(ctx context.Context, req *mcp.CallToolRequest, input SpawnVMInput) (*mcp.CallToolResult, SpawnVMOutput, error) {
@@ -230,6 +274,10 @@ func (t *Tools) MCPSpawnVM(ctx context.Context, req *mcp.CallToolRequest, input 
 }
 
 func (t *Tools) RunTask(ctx context.Context, input RunTaskInput) (*RawDaemonResponse, error) {
+	tenantID, err := t.resolveTenantID(input.TenantID)
+	if err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(input.Prompt) == "" {
 		return nil, fmt.Errorf("prompt must be non-empty")
 	}
@@ -252,7 +300,14 @@ func (t *Tools) RunTask(ctx context.Context, input RunTaskInput) (*RawDaemonResp
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	return t.daemon.RunTask(ctx, vmID, input.Prompt)
+	out, err := t.daemon.RunTask(ctx, vmID, input.Prompt)
+	if err != nil {
+		return nil, err
+	}
+	if err := t.auditSuccess(tenantID, vmID, input.SessionName, "anvil_run_task", "POST /vms/{vm_id}/tasks"); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (t *Tools) MCPRunTask(ctx context.Context, req *mcp.CallToolRequest, input RunTaskInput) (*mcp.CallToolResult, RawDaemonResponse, error) {
@@ -264,6 +319,10 @@ func (t *Tools) MCPRunTask(ctx context.Context, req *mcp.CallToolRequest, input 
 }
 
 func (t *Tools) CopyIn(ctx context.Context, input CopyInInput) (*RawDaemonResponse, error) {
+	tenantID, err := t.resolveTenantID(input.TenantID)
+	if err != nil {
+		return nil, err
+	}
 	workspacePath, err := normalizeWorkspacePath(input.Path)
 	if err != nil {
 		return nil, err
@@ -287,7 +346,14 @@ func (t *Tools) CopyIn(ctx context.Context, input CopyInInput) (*RawDaemonRespon
 	if err != nil {
 		return nil, err
 	}
-	return t.daemon.CopyIn(ctx, vmID, workspacePath, content, input.Overwrite)
+	out, err := t.daemon.CopyIn(ctx, vmID, workspacePath, content, input.Overwrite)
+	if err != nil {
+		return nil, err
+	}
+	if err := t.auditSuccess(tenantID, vmID, input.SessionName, "anvil_copy_in", "PUT /vms/{vm_id}/workspace"); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (t *Tools) MCPCopyIn(ctx context.Context, req *mcp.CallToolRequest, input CopyInInput) (*mcp.CallToolResult, RawDaemonResponse, error) {
@@ -299,6 +365,10 @@ func (t *Tools) MCPCopyIn(ctx context.Context, req *mcp.CallToolRequest, input C
 }
 
 func (t *Tools) CopyOut(ctx context.Context, input CopyOutInput) (*CopyOutOutput, error) {
+	tenantID, err := t.resolveTenantID(input.TenantID)
+	if err != nil {
+		return nil, err
+	}
 	workspacePath, err := normalizeWorkspacePath(input.Path)
 	if err != nil {
 		return nil, err
@@ -318,6 +388,9 @@ func (t *Tools) CopyOut(ctx context.Context, input CopyOutInput) (*CopyOutOutput
 	if encoding == "base64" {
 		content = base64.StdEncoding.EncodeToString([]byte(content))
 	}
+	if err := t.auditSuccess(tenantID, vmID, input.SessionName, "anvil_copy_out", "GET /vms/{vm_id}/workspace"); err != nil {
+		return nil, err
+	}
 	return &CopyOutOutput{
 		Path:     workspacePath,
 		Content:  content,
@@ -334,11 +407,22 @@ func (t *Tools) MCPCopyOut(ctx context.Context, req *mcp.CallToolRequest, input 
 }
 
 func (t *Tools) Health(ctx context.Context, input VMIdentityInput) (*RawDaemonResponse, error) {
+	tenantID, err := t.resolveTenantID(input.TenantID)
+	if err != nil {
+		return nil, err
+	}
 	vmID, err := t.resolveIdentity(input.VMID, input.SessionName)
 	if err != nil {
 		return nil, err
 	}
-	return t.daemon.Health(ctx, vmID)
+	out, err := t.daemon.Health(ctx, vmID)
+	if err != nil {
+		return nil, err
+	}
+	if err := t.auditSuccess(tenantID, vmID, input.SessionName, "anvil_get_vm_health", "GET /vms/{vm_id}/health"); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (t *Tools) MCPHealth(ctx context.Context, req *mcp.CallToolRequest, input VMIdentityInput) (*mcp.CallToolResult, RawDaemonResponse, error) {
@@ -350,11 +434,22 @@ func (t *Tools) MCPHealth(ctx context.Context, req *mcp.CallToolRequest, input V
 }
 
 func (t *Tools) StopVM(ctx context.Context, input VMIdentityInput) (*RawDaemonResponse, error) {
+	tenantID, err := t.resolveTenantID(input.TenantID)
+	if err != nil {
+		return nil, err
+	}
 	vmID, err := t.resolveIdentity(input.VMID, input.SessionName)
 	if err != nil {
 		return nil, err
 	}
-	return t.daemon.Stop(ctx, vmID)
+	out, err := t.daemon.Stop(ctx, vmID)
+	if err != nil {
+		return nil, err
+	}
+	if err := t.auditSuccess(tenantID, vmID, input.SessionName, "anvil_stop_vm", "POST /vms/{vm_id}/stop"); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (t *Tools) MCPStopVM(ctx context.Context, req *mcp.CallToolRequest, input VMIdentityInput) (*mcp.CallToolResult, RawDaemonResponse, error) {
@@ -366,6 +461,10 @@ func (t *Tools) MCPStopVM(ctx context.Context, req *mcp.CallToolRequest, input V
 }
 
 func (t *Tools) DeleteVM(ctx context.Context, input VMIdentityInput) (*RawDaemonResponse, error) {
+	tenantID, err := t.resolveTenantID(input.TenantID)
+	if err != nil {
+		return nil, err
+	}
 	vmID, err := t.resolveIdentity(input.VMID, input.SessionName)
 	if err != nil {
 		return nil, err
@@ -396,6 +495,9 @@ func (t *Tools) DeleteVM(ctx context.Context, input VMIdentityInput) (*RawDaemon
 		}
 		return nil, fmt.Errorf("delete VM %q succeeded with status %d body %s, but failed to persist removed session aliases: %w", vmID, statusCode, body, saveErr)
 	}
+	if err := t.auditSuccess(tenantID, vmID, input.SessionName, "anvil_delete_vm", "DELETE /vms/{vm_id}"); err != nil {
+		return nil, err
+	}
 	return res, nil
 }
 
@@ -408,6 +510,10 @@ func (t *Tools) MCPDeleteVM(ctx context.Context, req *mcp.CallToolRequest, input
 }
 
 func (t *Tools) CreateSnapshot(ctx context.Context, input CreateSnapshotInput) (*SnapshotInfo, error) {
+	tenantID, err := t.resolveTenantID(input.TenantID)
+	if err != nil {
+		return nil, err
+	}
 	snapshotType, err := normalizeSnapshotType(input.Type)
 	if err != nil {
 		return nil, err
@@ -445,6 +551,9 @@ func (t *Tools) CreateSnapshot(ctx context.Context, input CreateSnapshotInput) (
 			return nil, fmt.Errorf("snapshot %q for VM %q succeeded, but failed to persist removed session aliases: %w", snapshotID, vmID, saveErr)
 		}
 	}
+	if err := t.auditSuccess(tenantID, vmID, input.SessionName, "anvil_create_snapshot", "POST /vms/{vm_id}/snapshot"); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -457,12 +566,19 @@ func (t *Tools) MCPCreateSnapshot(ctx context.Context, req *mcp.CallToolRequest,
 }
 
 func (t *Tools) ListSnapshots(ctx context.Context) (*ListSnapshotsOutput, error) {
+	tenantID, err := t.resolveTenantID("")
+	if err != nil {
+		return nil, err
+	}
 	snapshots, err := t.daemon.ListSnapshots(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if snapshots == nil {
 		snapshots = []SnapshotInfo{}
+	}
+	if err := t.auditSuccess(tenantID, "", "", "anvil_list_snapshots", "GET /snapshots"); err != nil {
+		return nil, err
 	}
 	return &ListSnapshotsOutput{Snapshots: snapshots}, nil
 }
@@ -476,6 +592,10 @@ func (t *Tools) MCPListSnapshots(ctx context.Context, req *mcp.CallToolRequest, 
 }
 
 func (t *Tools) RestoreSnapshot(ctx context.Context, input RestoreSnapshotInput) (*RestoreSnapshotOutput, error) {
+	tenantID, err := t.resolveTenantID(input.TenantID)
+	if err != nil {
+		return nil, err
+	}
 	snapshotID := strings.TrimSpace(input.SnapshotID)
 	if snapshotID == "" {
 		return nil, fmt.Errorf("snapshot_id is required")
@@ -519,14 +639,18 @@ func (t *Tools) RestoreSnapshot(ctx context.Context, input RestoreSnapshotInput)
 		}
 	}
 
-	return &RestoreSnapshotOutput{
+	out := &RestoreSnapshotOutput{
 		VMID:             res.VMID,
 		GuestIP:          res.GuestIP,
 		AgentURL:         res.AgentURL,
 		Profile:          res.Profile,
 		SourceSnapshotID: res.SourceSnapshotID,
 		SessionName:      sessionName,
-	}, nil
+	}
+	if err := t.auditSuccess(tenantID, res.VMID, sessionName, "anvil_restore_snapshot", "POST /snapshots/{snapshot_id}/restore"); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (t *Tools) MCPRestoreSnapshot(ctx context.Context, req *mcp.CallToolRequest, input RestoreSnapshotInput) (*mcp.CallToolResult, RestoreSnapshotOutput, error) {
@@ -538,11 +662,22 @@ func (t *Tools) MCPRestoreSnapshot(ctx context.Context, req *mcp.CallToolRequest
 }
 
 func (t *Tools) DeleteSnapshot(ctx context.Context, input SnapshotIdentityInput) (*RawDaemonResponse, error) {
+	tenantID, err := t.resolveTenantID(input.TenantID)
+	if err != nil {
+		return nil, err
+	}
 	snapshotID := strings.TrimSpace(input.SnapshotID)
 	if snapshotID == "" {
 		return nil, fmt.Errorf("snapshot_id is required")
 	}
-	return t.daemon.DeleteSnapshot(ctx, snapshotID)
+	out, err := t.daemon.DeleteSnapshot(ctx, snapshotID)
+	if err != nil {
+		return nil, err
+	}
+	if err := t.auditSuccess(tenantID, "", "", "anvil_delete_snapshot", "DELETE /snapshots/{snapshot_id}"); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (t *Tools) MCPDeleteSnapshot(ctx context.Context, req *mcp.CallToolRequest, input SnapshotIdentityInput) (*mcp.CallToolResult, RawDaemonResponse, error) {
@@ -592,6 +727,35 @@ func (t *Tools) resolveIdentity(vmID, sessionName string) (string, error) {
 	defer t.sessionPersistenceMu.Unlock()
 
 	return t.sessions.ResolveIdentity(vmID, sessionName)
+}
+
+func (t *Tools) resolveTenantID(inputTenantID string) (string, error) {
+	tenantID := strings.TrimSpace(inputTenantID)
+	if tenantID == "" {
+		tenantID = t.defaultTenantID
+	}
+	if tenantID == "" {
+		if t.auditLogPath != "" {
+			return "", fmt.Errorf("tenant_id or ANVIL_MCP_TENANT_ID is required when runtime audit is enabled")
+		}
+		return "", nil
+	}
+	return NormalizeTenantID(tenantID)
+}
+
+func (t *Tools) auditSuccess(tenantID, vmID, sessionAlias, toolName, daemonOperation string) error {
+	if t.auditLogPath == "" || tenantID == "" {
+		return nil
+	}
+	return AppendRuntimeAudit(t.auditLogPath, RuntimeAuditRecord{
+		Timestamp:       time.Now().UTC(),
+		TenantID:        tenantID,
+		VMID:            vmID,
+		SessionAlias:    strings.TrimSpace(sessionAlias),
+		ToolName:        toolName,
+		DaemonOperation: daemonOperation,
+		ResultCode:      "success",
+	})
 }
 
 func (t *Tools) sessionExists(sessionName string) bool {

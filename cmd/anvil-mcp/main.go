@@ -111,7 +111,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("load session store: %v", err)
 	}
-	tools := anvilmcp.NewToolsWithSessionStorePath(daemon, sessions, time.Duration(cfg.DefaultTimeoutSeconds)*time.Second, cfg.SessionStorePath)
+	tools := anvilmcp.NewToolsWithOptions(daemon, sessions, time.Duration(cfg.DefaultTimeoutSeconds)*time.Second, anvilmcp.ToolsOptions{
+		SessionStorePath: cfg.SessionStorePath,
+		DefaultTenantID:  cfg.DefaultTenantID,
+		AuditLogPath:     cfg.AuditLogPath,
+	})
 	server := mcp.NewServer(&mcp.Implementation{Name: "anvil-mcp", Version: version}, nil)
 
 	for _, registration := range toolRegistrations() {

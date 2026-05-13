@@ -43,6 +43,12 @@
   crash/restart, stale TAP/IP, restore 실패, GC 실패, diff base 누락 대응 playbook.
 - [docs/operations/observability.md](docs/operations/observability.md): 현재
   log/health/audit 기반 관측성과 아직 구현되지 않은 metrics 범위.
+- `internal/anvilmcp` multi-tenant foundation:
+  - `tenant_id` validation
+  - tenant quota decision helper
+  - runtime host selection primitive
+  - `deny_all`/`profile`/`allow_all` egress policy enum
+  - `ANVIL_MCP_AUDIT_LOG` 기반 runtime audit JSONL append helper
 
 ## 변경됨
 

@@ -21,6 +21,8 @@ const (
 	envDefaultTimeout = "ANVIL_MCP_DEFAULT_TIMEOUT"
 	envConfigPath     = "ANVIL_MCP_CONFIG"
 	envSessionStore   = "ANVIL_MCP_SESSION_STORE"
+	envTenantID       = "ANVIL_MCP_TENANT_ID"
+	envAuditLog       = "ANVIL_MCP_AUDIT_LOG"
 )
 
 type Config struct {
@@ -28,6 +30,8 @@ type Config struct {
 	APIToken              string `yaml:"api_token"`
 	DefaultTimeoutSeconds int    `yaml:"default_timeout_seconds"`
 	SessionStorePath      string `yaml:"session_store_path"`
+	DefaultTenantID       string `yaml:"default_tenant_id"`
+	AuditLogPath          string `yaml:"audit_log_path"`
 }
 
 type ConfigSource struct {
@@ -83,10 +87,29 @@ func LoadConfig(src ConfigSource) (Config, error) {
 	if v := getenv(envSessionStore); v != "" {
 		cfg.SessionStorePath = v
 	}
+	if v := getenv(envTenantID); v != "" {
+		cfg.DefaultTenantID = v
+	}
+	if v := getenv(envAuditLog); v != "" {
+		cfg.AuditLogPath = v
+	}
 	if cfg.DefaultTimeoutSeconds <= 0 {
 		return Config{}, fmt.Errorf("default_timeout_seconds must be positive")
 	}
 	cfg.SessionStorePath = strings.TrimSpace(cfg.SessionStorePath)
+	cfg.DefaultTenantID = strings.TrimSpace(cfg.DefaultTenantID)
+	cfg.AuditLogPath = strings.TrimSpace(cfg.AuditLogPath)
+	if cfg.DefaultTenantID != "" {
+		label := "default_tenant_id"
+		if getenv(envTenantID) != "" {
+			label = envTenantID
+		}
+		tenantID, err := NormalizeTenantID(cfg.DefaultTenantID)
+		if err != nil {
+			return Config{}, fmt.Errorf("%s: %w", label, err)
+		}
+		cfg.DefaultTenantID = tenantID
+	}
 
 	daemonURLLabel := "daemon_url"
 	if getenv(envDaemonURL) != "" {
