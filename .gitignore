@@ -36,6 +36,7 @@ vmlinux*
 configs/anvil-mcp.yaml
 configs/goose.yaml
 configs/goose-secrets.yaml
+configs/profiles/*/goose-secrets.yaml
 
 # 6. Claude Code context file
 CLAUDE.md
