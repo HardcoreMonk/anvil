@@ -143,6 +143,13 @@ type ControlPlane struct {
 	// No global timeout — timeouts are controlled by the incoming request's context.
 	agentHTTPClient *http.Client
 
+	allocateForRestore func(tapDeviceName, macAddr string) (tapDevice string, guestIP string, err error)
+	releaseNetwork     func(tapDevice string, guestIP string) error
+	setupDMSnapshot    func(baseDiskPath, exceptionStorePath, mountTargetPath string) (*storage.DMSnapshotInfo, error)
+	teardownDMSnapshot func(info *storage.DMSnapshotInfo)
+	setupBindMount     func(baseDiskPath, newDiskPath, mountTargetPath string) error
+	restoreMachine     func(ctx context.Context, cfg vm.VMConfig, memFilePath, snapshotPath string) (*firecracker.Machine, error)
+
 	stopCh chan struct{}
 	srv    *http.Server
 }
@@ -627,6 +634,12 @@ type VMRestoreResult struct {
 	SourceSnapshotID string `json:"source_snapshot_id"`
 }
 
+type RestoreErrorResponse struct {
+	Error            string `json:"error"`
+	Code             string `json:"code"`
+	SourceSnapshotID string `json:"source_snapshot_id,omitempty"`
+}
+
 // SnapshotRequest is the optional body for POST /vms/{id}/snapshot.
 type SnapshotRequest struct {
 	StopAfter bool   `json:"stop_after"`
@@ -850,6 +863,59 @@ func writeJSONError(w http.ResponseWriter, status int, message string) {
 	json.NewEncoder(w).Encode(map[string]string{"error": message})
 }
 
+func writeRestoreError(w http.ResponseWriter, status int, code string, snapshotID string, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(RestoreErrorResponse{
+		Error:            message,
+		Code:             code,
+		SourceSnapshotID: snapshotID,
+	})
+}
+
+func (cp *ControlPlane) allocateNetworkForRestore(tapDeviceName, macAddr string) (string, string, error) {
+	if cp.allocateForRestore != nil {
+		return cp.allocateForRestore(tapDeviceName, macAddr)
+	}
+	return cp.netManager.AllocateForRestore(tapDeviceName, macAddr)
+}
+
+func (cp *ControlPlane) releaseRestoreNetwork(tapDevice, guestIP string) error {
+	if cp.releaseNetwork != nil {
+		return cp.releaseNetwork(tapDevice, guestIP)
+	}
+	return cp.netManager.Release(tapDevice, guestIP)
+}
+
+func (cp *ControlPlane) setupRestoreDMSnapshot(baseDiskPath, exceptionStorePath, mountTargetPath string) (*storage.DMSnapshotInfo, error) {
+	if cp.setupDMSnapshot != nil {
+		return cp.setupDMSnapshot(baseDiskPath, exceptionStorePath, mountTargetPath)
+	}
+	return storage.SetupDMSnapshot(baseDiskPath, exceptionStorePath, mountTargetPath)
+}
+
+func (cp *ControlPlane) teardownRestoreDMSnapshot(info *storage.DMSnapshotInfo) {
+	if cp.teardownDMSnapshot != nil {
+		cp.teardownDMSnapshot(info)
+		return
+	}
+	storage.TeardownDMSnapshot(info)
+}
+
+func (cp *ControlPlane) setupRestoreBindMount(baseDiskPath, newDiskPath, mountTargetPath string) error {
+	if cp.setupBindMount != nil {
+		return cp.setupBindMount(baseDiskPath, newDiskPath, mountTargetPath)
+	}
+	return storage.SetupBindMount(baseDiskPath, newDiskPath, mountTargetPath)
+}
+
+func (cp *ControlPlane) restoreSnapshotMachine(ctx context.Context, cfg vm.VMConfig, memFilePath, snapshotPath string) (*firecracker.Machine, error) {
+	if cp.restoreMachine != nil {
+		return cp.restoreMachine(ctx, cfg, memFilePath, snapshotPath)
+	}
+	return vm.RestoreMachine(ctx, cfg, memFilePath, snapshotPath)
+}
+
 // POST /snapshots/gc
 func (cp *ControlPlane) handleSnapshotGC(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -1007,7 +1073,10 @@ func (cp *ControlPlane) latestFullSnapshot(vmID string) *storage.SnapshotMetadat
 func (cp *ControlPlane) createSnapshot(w http.ResponseWriter, r *http.Request, vmID string) {
 	var req SnapshotRequest
 	if r.Body != nil && r.ContentLength != 0 {
-		json.NewDecoder(r.Body).Decode(&req)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON body: %v", err))
+			return
+		}
 	}
 
 	cp.mu.RLock()
@@ -1138,7 +1207,7 @@ func (cp *ControlPlane) restoreSnapshot(w http.ResponseWriter, snapID string) {
 	meta, ok := cp.snapshots[snapID]
 	cp.snapshotsMu.RUnlock()
 	if !ok {
-		http.Error(w, `{"error":"snapshot not found"}`, http.StatusNotFound)
+		writeRestoreError(w, http.StatusNotFound, "snapshot_not_found", snapID, "snapshot not found")
 		return
 	}
 
@@ -1147,7 +1216,7 @@ func (cp *ControlPlane) restoreSnapshot(w http.ResponseWriter, snapID string) {
 	for id := range cp.vms {
 		if id == meta.SourceVMID {
 			cp.mu.RUnlock()
-			http.Error(w, fmt.Sprintf(`{"error":"source VM %s is still running (delete it first)"}`, meta.SourceVMID), http.StatusConflict)
+			writeRestoreError(w, http.StatusConflict, "source_vm_running", snapID, fmt.Sprintf("source VM %s is still running (delete it first)", meta.SourceVMID))
 			return
 		}
 	}
@@ -1163,9 +1232,9 @@ func (cp *ControlPlane) restoreSnapshot(w http.ResponseWriter, snapID string) {
 
 	// Allocate any available IP — the guest will be reconfigured to this IP via vsock.
 	log.Printf("Restore [%s]: allocating network (TAP: %s, MAC: %s)...", snapID, meta.TapDevice, meta.MacAddr)
-	tapDevice, newGuestIP, err := cp.netManager.AllocateForRestore(meta.TapDevice, meta.MacAddr)
+	tapDevice, newGuestIP, err := cp.allocateNetworkForRestore(meta.TapDevice, meta.MacAddr)
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"network allocation failed: %v"}`, err), http.StatusConflict)
+		writeRestoreError(w, http.StatusConflict, "network_unavailable", snapID, fmt.Sprintf("network allocation failed: %v", err))
 		return
 	}
 
@@ -1173,18 +1242,17 @@ func (cp *ControlPlane) restoreSnapshot(w http.ResponseWriter, snapID string) {
 	cp.restoreMu.Lock()
 
 	log.Printf("Restore [%s]: setting up dm-snapshot COW (base: %s, store: %s)...", snapID, meta.DiskCopyPath, exceptionStorePath)
-	dmInfo, err := storage.SetupDMSnapshot(meta.DiskCopyPath, exceptionStorePath, meta.DiskPath)
+	dmInfo, err := cp.setupRestoreDMSnapshot(meta.DiskCopyPath, exceptionStorePath, meta.DiskPath)
 	if err != nil {
 		cp.restoreMu.Unlock()
-		cp.netManager.Release(tapDevice, newGuestIP)
 		log.Printf("Restore [%s]: dm-snapshot failed (%v), falling back to bind mount", snapID, err)
 		// Fallback: use the existing bind-mount approach if dm-snapshot is unavailable.
 		newDiskPath := filepath.Join(cp.provisioner.WorkspaceDir, newVMID+".ext4")
 		cp.restoreMu.Lock()
-		if bmErr := storage.SetupBindMount(meta.DiskCopyPath, newDiskPath, meta.DiskPath); bmErr != nil {
+		if bmErr := cp.setupRestoreBindMount(meta.DiskCopyPath, newDiskPath, meta.DiskPath); bmErr != nil {
 			cp.restoreMu.Unlock()
-			cp.netManager.Release(tapDevice, newGuestIP)
-			http.Error(w, fmt.Sprintf(`{"error":"failed to set up disk: dm-snapshot: %v; bind-mount fallback: %v"}`, err, bmErr), http.StatusInternalServerError)
+			cp.releaseRestoreNetwork(tapDevice, newGuestIP)
+			writeRestoreError(w, http.StatusInternalServerError, "firecracker_restore_failed", snapID, fmt.Sprintf("failed to set up disk: dm-snapshot: %v; bind-mount fallback: %v", err, bmErr))
 			return
 		}
 		// Continue with bind-mount path (legacy runningVM fields).
@@ -1203,9 +1271,9 @@ func (cp *ControlPlane) restoreSnapshot(w http.ResponseWriter, snapID string) {
 		cp.snapshotsMu.RUnlock()
 		if !baseOK {
 			cp.restoreMu.Unlock()
-			storage.TeardownDMSnapshot(dmInfo)
-			cp.netManager.Release(tapDevice, newGuestIP)
-			http.Error(w, fmt.Sprintf(`{"error":"base snapshot %s not found (was it deleted?)"}`, meta.BaseSnapshotID), http.StatusConflict)
+			cp.teardownRestoreDMSnapshot(dmInfo)
+			cp.releaseRestoreNetwork(tapDevice, newGuestIP)
+			writeRestoreError(w, http.StatusConflict, "diff_base_missing", snapID, fmt.Sprintf("base snapshot %s not found (was it deleted?)", meta.BaseSnapshotID))
 			return
 		}
 		mergedMemPath = filepath.Join(cp.workDir, "tmp", newVMID+"-merged.bin")
@@ -1213,16 +1281,16 @@ func (cp *ControlPlane) restoreSnapshot(w http.ResponseWriter, snapID string) {
 		log.Printf("Restore [%s]: merging base memory (%s) + diff (%s)...", snapID, base.MemFilePath, meta.MemFilePath)
 		if err := storage.MergeMemoryDiff(base.MemFilePath, meta.MemFilePath, mergedMemPath); err != nil {
 			cp.restoreMu.Unlock()
-			storage.TeardownDMSnapshot(dmInfo)
-			cp.netManager.Release(tapDevice, newGuestIP)
-			http.Error(w, fmt.Sprintf(`{"error":"failed to merge diff snapshot: %v"}`, err), http.StatusInternalServerError)
+			cp.teardownRestoreDMSnapshot(dmInfo)
+			cp.releaseRestoreNetwork(tapDevice, newGuestIP)
+			writeRestoreError(w, http.StatusInternalServerError, "memory_merge_failed", snapID, fmt.Sprintf("failed to merge diff snapshot: %v", err))
 			return
 		}
 		memFileToUse = mergedMemPath
 	}
 
 	log.Printf("Restore [%s]: starting VM [%s] from snapshot (%s)...", snapID, newVMID, meta.SnapshotType)
-	machine, err := vm.RestoreMachine(context.Background(), vm.VMConfig{
+	machine, err := cp.restoreSnapshotMachine(context.Background(), vm.VMConfig{
 		VMID:           newVMID,
 		SocketPath:     socketPath,
 		FirecrackerBin: cp.firecrackerPath,
@@ -1240,9 +1308,9 @@ func (cp *ControlPlane) restoreSnapshot(w http.ResponseWriter, snapID string) {
 	}
 
 	if err != nil {
-		storage.TeardownDMSnapshot(dmInfo)
-		cp.netManager.Release(tapDevice, newGuestIP)
-		http.Error(w, fmt.Sprintf(`{"error":"failed to restore VM: %v"}`, err), http.StatusInternalServerError)
+		cp.teardownRestoreDMSnapshot(dmInfo)
+		cp.releaseRestoreNetwork(tapDevice, newGuestIP)
+		writeRestoreError(w, http.StatusInternalServerError, "firecracker_restore_failed", snapID, fmt.Sprintf("failed to restore VM: %v", err))
 		return
 	}
 
@@ -1251,9 +1319,9 @@ func (cp *ControlPlane) restoreSnapshot(w http.ResponseWriter, snapID string) {
 	if err := vm.ReconfigureGuestIP(meta.VsockPath, newGuestIP+"/24", "10.0.1.1"); err != nil {
 		log.Printf("Restore [%s]: vsock IP reconfigure failed: %v", snapID, err)
 		machine.StopVMM()
-		storage.TeardownDMSnapshot(dmInfo)
-		cp.netManager.Release(tapDevice, newGuestIP)
-		http.Error(w, fmt.Sprintf(`{"error":"vsock IP reconfigure failed: %v"}`, err), http.StatusInternalServerError)
+		cp.teardownRestoreDMSnapshot(dmInfo)
+		cp.releaseRestoreNetwork(tapDevice, newGuestIP)
+		writeRestoreError(w, http.StatusInternalServerError, "guest_reconfigure_failed", snapID, fmt.Sprintf("vsock IP reconfigure failed: %v", err))
 		return
 	}
 	log.Printf("Restore [%s]: guest IP reconfigured to %s (COW exception store: %s)", snapID, newGuestIP, exceptionStorePath)
@@ -1281,7 +1349,7 @@ func (cp *ControlPlane) restoreSnapshot(w http.ResponseWriter, snapID string) {
 	log.Printf("Restore [%s]: waiting for goose-agent at %s...", snapID, info.AgentURL)
 	if err := waitForAgent(newGuestIP, 30*time.Second); err != nil {
 		cp.destroyVM(newVMID)
-		http.Error(w, fmt.Sprintf(`{"error":"goose-agent not ready after restore: %v"}`, err), http.StatusInternalServerError)
+		writeRestoreError(w, http.StatusInternalServerError, "agent_not_ready", snapID, fmt.Sprintf("goose-agent not ready after restore: %v", err))
 		return
 	}
 	log.Printf("Restore [%s]: VM [%s] ready — agent: %s", snapID, newVMID, info.AgentURL)
@@ -1310,22 +1378,22 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 		cp.snapshotsMu.RUnlock()
 		if !baseOK {
 			storage.TeardownBindMount(meta.DiskPath, newDiskPath)
-			cp.netManager.Release(tapDevice, newGuestIP)
-			http.Error(w, fmt.Sprintf(`{"error":"base snapshot %s not found"}`, meta.BaseSnapshotID), http.StatusConflict)
+			cp.releaseRestoreNetwork(tapDevice, newGuestIP)
+			writeRestoreError(w, http.StatusConflict, "diff_base_missing", snapID, fmt.Sprintf("base snapshot %s not found", meta.BaseSnapshotID))
 			return
 		}
 		mergedMemPath = filepath.Join(cp.workDir, "tmp", newVMID+"-merged.bin")
 		os.MkdirAll(filepath.Dir(mergedMemPath), 0755)
 		if err := storage.MergeMemoryDiff(base.MemFilePath, meta.MemFilePath, mergedMemPath); err != nil {
 			storage.TeardownBindMount(meta.DiskPath, newDiskPath)
-			cp.netManager.Release(tapDevice, newGuestIP)
-			http.Error(w, fmt.Sprintf(`{"error":"failed to merge diff: %v"}`, err), http.StatusInternalServerError)
+			cp.releaseRestoreNetwork(tapDevice, newGuestIP)
+			writeRestoreError(w, http.StatusInternalServerError, "memory_merge_failed", snapID, fmt.Sprintf("failed to merge diff: %v", err))
 			return
 		}
 		memFileToUse = mergedMemPath
 	}
 
-	machine, err := vm.RestoreMachine(context.Background(), vm.VMConfig{
+	machine, err := cp.restoreSnapshotMachine(context.Background(), vm.VMConfig{
 		VMID:           newVMID,
 		SocketPath:     socketPath,
 		FirecrackerBin: cp.firecrackerPath,
@@ -1340,16 +1408,16 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 	}
 	if err != nil {
 		storage.TeardownBindMount(meta.DiskPath, newDiskPath)
-		cp.netManager.Release(tapDevice, newGuestIP)
-		http.Error(w, fmt.Sprintf(`{"error":"failed to restore VM: %v"}`, err), http.StatusInternalServerError)
+		cp.releaseRestoreNetwork(tapDevice, newGuestIP)
+		writeRestoreError(w, http.StatusInternalServerError, "firecracker_restore_failed", snapID, fmt.Sprintf("failed to restore VM: %v", err))
 		return
 	}
 
 	if err := vm.ReconfigureGuestIP(meta.VsockPath, newGuestIP+"/24", "10.0.1.1"); err != nil {
 		machine.StopVMM()
 		storage.TeardownBindMount(meta.DiskPath, newDiskPath)
-		cp.netManager.Release(tapDevice, newGuestIP)
-		http.Error(w, fmt.Sprintf(`{"error":"vsock IP reconfigure failed: %v"}`, err), http.StatusInternalServerError)
+		cp.releaseRestoreNetwork(tapDevice, newGuestIP)
+		writeRestoreError(w, http.StatusInternalServerError, "guest_reconfigure_failed", snapID, fmt.Sprintf("vsock IP reconfigure failed: %v", err))
 		return
 	}
 
@@ -1374,7 +1442,7 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 
 	if err := waitForAgent(newGuestIP, 30*time.Second); err != nil {
 		cp.destroyVM(newVMID)
-		http.Error(w, fmt.Sprintf(`{"error":"goose-agent not ready: %v"}`, err), http.StatusInternalServerError)
+		writeRestoreError(w, http.StatusInternalServerError, "agent_not_ready", snapID, fmt.Sprintf("goose-agent not ready: %v", err))
 		return
 	}
 
