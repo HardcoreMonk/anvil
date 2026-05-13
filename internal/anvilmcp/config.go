@@ -20,12 +20,14 @@ const (
 	envAPIToken       = "ANVIL_API_TOKEN"
 	envDefaultTimeout = "ANVIL_MCP_DEFAULT_TIMEOUT"
 	envConfigPath     = "ANVIL_MCP_CONFIG"
+	envSessionStore   = "ANVIL_MCP_SESSION_STORE"
 )
 
 type Config struct {
 	DaemonURL             string `yaml:"daemon_url"`
 	APIToken              string `yaml:"api_token"`
 	DefaultTimeoutSeconds int    `yaml:"default_timeout_seconds"`
+	SessionStorePath      string `yaml:"session_store_path"`
 }
 
 type ConfigSource struct {
@@ -78,9 +80,13 @@ func LoadConfig(src ConfigSource) (Config, error) {
 		}
 		cfg.DefaultTimeoutSeconds = timeout
 	}
+	if v := getenv(envSessionStore); v != "" {
+		cfg.SessionStorePath = v
+	}
 	if cfg.DefaultTimeoutSeconds <= 0 {
 		return Config{}, fmt.Errorf("default_timeout_seconds must be positive")
 	}
+	cfg.SessionStorePath = strings.TrimSpace(cfg.SessionStorePath)
 
 	daemonURLLabel := "daemon_url"
 	if getenv(envDaemonURL) != "" {

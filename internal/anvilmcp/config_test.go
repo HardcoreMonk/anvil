@@ -21,6 +21,9 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.DefaultTimeoutSeconds != 300 {
 		t.Errorf("DefaultTimeoutSeconds = %d, want 300", cfg.DefaultTimeoutSeconds)
 	}
+	if cfg.SessionStorePath != "" {
+		t.Errorf("SessionStorePath = %q, want empty", cfg.SessionStorePath)
+	}
 }
 
 func TestLoadConfigFile(t *testing.T) {
@@ -29,6 +32,7 @@ func TestLoadConfigFile(t *testing.T) {
 			"daemon_url: https://anvil.example.com/",
 			"api_token: file-token",
 			"default_timeout_seconds: 45",
+			"session_store_path: /var/lib/anvil-mcp/sessions.json",
 			"",
 		}, "\n"),
 	}
@@ -50,6 +54,9 @@ func TestLoadConfigFile(t *testing.T) {
 	if cfg.DefaultTimeoutSeconds != 45 {
 		t.Errorf("DefaultTimeoutSeconds = %d, want 45", cfg.DefaultTimeoutSeconds)
 	}
+	if cfg.SessionStorePath != "/var/lib/anvil-mcp/sessions.json" {
+		t.Errorf("SessionStorePath = %q, want %q", cfg.SessionStorePath, "/var/lib/anvil-mcp/sessions.json")
+	}
 }
 
 func TestLoadConfigEnvOverridesFile(t *testing.T) {
@@ -58,6 +65,7 @@ func TestLoadConfigEnvOverridesFile(t *testing.T) {
 			"daemon_url: https://file.example.com/",
 			"api_token: file-token",
 			"default_timeout_seconds: 45",
+			"session_store_path: /var/lib/anvil-mcp/file-sessions.json",
 			"",
 		}, "\n"),
 	}
@@ -66,6 +74,7 @@ func TestLoadConfigEnvOverridesFile(t *testing.T) {
 		"ANVIL_DAEMON_URL":          "http://env.example.com/",
 		"ANVIL_API_TOKEN":           "env-token",
 		"ANVIL_MCP_DEFAULT_TIMEOUT": "90",
+		"ANVIL_MCP_SESSION_STORE":   "/var/lib/anvil-mcp/env-sessions.json",
 	}
 
 	cfg, err := LoadConfig(testConfigSource(env, files))
@@ -81,6 +90,9 @@ func TestLoadConfigEnvOverridesFile(t *testing.T) {
 	}
 	if cfg.DefaultTimeoutSeconds != 90 {
 		t.Errorf("DefaultTimeoutSeconds = %d, want 90", cfg.DefaultTimeoutSeconds)
+	}
+	if cfg.SessionStorePath != "/var/lib/anvil-mcp/env-sessions.json" {
+		t.Errorf("SessionStorePath = %q, want %q", cfg.SessionStorePath, "/var/lib/anvil-mcp/env-sessions.json")
 	}
 }
 
