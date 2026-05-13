@@ -41,7 +41,7 @@ func run() error {
 	session := flag.String("session", "smoke", "session_name alias to bind")
 	profile := flag.String("profile", "", "optional VM profile")
 	prompt := flag.String("prompt", "Reply with exactly: anvil-smoke-ok", "prompt for anvil_run_task")
-	expectOutput := flag.String("expect-output", "anvil-smoke-ok", "substring expected in anvil_run_task response body; empty disables semantic output check")
+	expectOutput := flag.String("expect-output", "anvil-smoke-ok", `substring expected in anvil_run_task response body; use -expect-output "" for lifecycle-only mode without semantic output assertion`)
 	copyPath := flag.String("copy-path", "smoke/input.txt", "workspace path for copy-in/copy-out smoke")
 	copyContent := flag.String("copy-content", "anvil workspace smoke", "workspace content for copy-in/copy-out smoke")
 	timeout := flag.Duration("timeout", 8*time.Minute, "overall smoke test timeout")
