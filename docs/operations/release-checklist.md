@@ -87,9 +87,8 @@ adapter로 그 기능을 IronClaw에 노출한다.
   - `ANVIL_API_TOKEN`
   - `ANVIL_MCP_DEFAULT_TIMEOUT`
 - 보안 경계:
-  - daemon 직접 API의 `POST /vms`와 restore 응답은 VM 접근에 필요한 token 정보를
-    다룰 수 있다.
-  - MCP output은 restore 응답의 `agent_token`을 노출하지 않는다.
+  - daemon 직접 API의 `POST /vms`만 VM 접근에 필요한 `agent_token`을 반환한다.
+  - restore 응답과 MCP output은 `agent_token`을 노출하지 않는다.
   - 외부 client는 daemon proxy와 control-plane token을 기준으로 통합한다.
 
 ## 검증

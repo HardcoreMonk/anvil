@@ -2,6 +2,7 @@ package storage
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -18,12 +19,14 @@ import (
 type SnapshotMetadata struct {
 	SnapshotID     string    `json:"snapshot_id"`
 	SourceVMID     string    `json:"source_vm_id"`
+	TenantID       string    `json:"tenant_id,omitempty"`
 	Profile        string    `json:"profile"`
+	EgressPolicy   string    `json:"egress_policy,omitempty"`
 	SnapshotType   string    `json:"snapshot_type"`              // "full" | "diff"
 	BaseSnapshotID string    `json:"base_snapshot_id,omitempty"` // set for diff snapshots
 	GuestIP        string    `json:"guest_ip"`
-	TapDevice      string    `json:"tap_device"`   // original TAP device name; Firecracker v1.x embeds this in state.bin
-	VsockPath      string    `json:"vsock_path"`   // original vsock UDS path; Firecracker recreates it from snapshot state on restore
+	TapDevice      string    `json:"tap_device"` // original TAP device name; Firecracker v1.x embeds this in state.bin
+	VsockPath      string    `json:"vsock_path"` // original vsock UDS path; Firecracker recreates it from snapshot state on restore
 	MacAddr        string    `json:"mac_addr"`
 	AgentToken     string    `json:"agent_token"`
 	DiskPath       string    `json:"disk_path"`      // original workspace path (required by Firecracker on restore)
@@ -315,24 +318,49 @@ func SetupDMSnapshot(baseDiskPath, exceptionStorePath, mountTargetPath string) (
 // TeardownDMSnapshot releases all kernel resources created by SetupDMSnapshot.
 // Uses lazy unmount so any Firecracker fd that was already opened continues to work
 // until the process exits, at which point the underlying inode is freed.
-func TeardownDMSnapshot(info *DMSnapshotInfo) {
+func TeardownDMSnapshot(info *DMSnapshotInfo) error {
 	if info == nil {
-		return
+		return nil
 	}
-	exec.Command("umount", "-l", info.MountTarget).Run()
-	// Brief wait: dmsetup remove can fail if Firecracker still holds an open fd.
+	var errs []error
+	if out, err := exec.Command("umount", "-l", info.MountTarget).CombinedOutput(); err != nil {
+		errs = append(errs, fmt.Errorf("umount -l %s: %w: %s", info.MountTarget, err, strings.TrimSpace(string(out))))
+	}
+
+	// dmsetup remove can fail if Firecracker still holds an open fd.
 	// The lazy umount detaches the path immediately; the device can be removed once
-	// all fds are closed. We retry a few times to handle the transition.
-	for i := 0; i < 5; i++ {
-		if exec.Command("dmsetup", "remove", info.DMDevice).Run() == nil {
+	// all fds are closed. Wait long enough for concurrent restore teardown paths
+	// where Firecracker process exit can lag behind the HTTP stop/delete request.
+	removed := false
+	var lastRemoveErr error
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if out, err := exec.Command("dmsetup", "remove", "--retry", info.DMDevice).CombinedOutput(); err == nil {
+			removed = true
+			break
+		} else {
+			lastRemoveErr = fmt.Errorf("dmsetup remove --retry %s: %w: %s", info.DMDevice, err, strings.TrimSpace(string(out)))
+		}
+		if time.Now().After(deadline) {
 			break
 		}
-		// Wait for Firecracker to fully exit before retrying.
-		exec.Command("sleep", "0.2").Run()
+		time.Sleep(250 * time.Millisecond)
 	}
-	exec.Command("losetup", "-d", info.COWLoopDevice).Run()
-	exec.Command("losetup", "-d", info.LoopDevice).Run()
-	os.Remove(info.ExceptionStore)
+	if !removed {
+		errs = append(errs, lastRemoveErr)
+		return errors.Join(errs...)
+	}
+
+	if out, err := exec.Command("losetup", "-d", info.COWLoopDevice).CombinedOutput(); err != nil {
+		errs = append(errs, fmt.Errorf("losetup -d %s: %w: %s", info.COWLoopDevice, err, strings.TrimSpace(string(out))))
+	}
+	if out, err := exec.Command("losetup", "-d", info.LoopDevice).CombinedOutput(); err != nil {
+		errs = append(errs, fmt.Errorf("losetup -d %s: %w: %s", info.LoopDevice, err, strings.TrimSpace(string(out))))
+	}
+	if err := os.Remove(info.ExceptionStore); err != nil && !os.IsNotExist(err) {
+		errs = append(errs, fmt.Errorf("remove exception store %s: %w", info.ExceptionStore, err))
+	}
+	return errors.Join(errs...)
 }
 
 // MergeMemoryDiff produces a merged memory file by overlaying dirty pages from a diff

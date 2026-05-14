@@ -107,14 +107,19 @@ daemon으로 보내는 outbound Bearer token이다.
 - MCP v2 workspace copy-in/out과 persistent session store는 구현된 상태다.
 - snapshot GC는 `max_total_bytes`와 `snapshots/gc-audit.jsonl` audit record를
   지원한다.
-- multi-tenant foundation은 `internal/anvilmcp/tenant_policy.go` 기준으로
-  tenant ID validation, quota decision, host selection primitive, egress policy,
-  runtime audit JSONL helper를 제공한다.
+- multi-tenant runtime foundation은 `internal/anvilmcp` 기준으로 tenant ID
+  validation, quota decision, scheduler decision, egress policy, runtime audit
+  JSONL append/read/retention helper를 제공한다.
+- daemon API는 `tenant_id`와 `egress_policy`를 VM/snapshot/restore contract에
+  보존하며, MCP adapter는 tenant/egress 값을 daemon 요청 본문으로 전달한다.
+- `POST /snapshots/{id}/restore` 응답은 더 이상 `agent_token`을 노출하지 않는다.
+- scheduler host inventory polling, runtime router, JSON quota store, daemon tenant
+  API, `deny_all` host egress rule, runtime audit API, `/health`, `/metrics`가
+  후속 control-plane foundation으로 구현된 상태다.
 
 남은 후속 후보:
 
-- multi-host scheduler service 또는 상위 orchestration 계층 구현
-- daemon API의 explicit tenant contract와 tenant별 quota enforcement
-- host network policy 기반 egress enforcement
-- runtime audit 조회/보관 정책과 운영 API 문서화
-- restore direct response의 `agent_token` 노출 제거
+- scheduler daemon/service 분리와 persistent host inventory 운영화
+- snapshot locality, retry/failover, multi-host placement reconciliation
+- `profile` egress proxy allowlist와 DNS policy enforcement
+- per-VM metrics, OpenTelemetry trace, quota dashboard

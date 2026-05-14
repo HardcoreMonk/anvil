@@ -62,7 +62,7 @@ agent proxy를 모두 소유한다.
 | Network manager | `internal/network/manager.go` | `goose-br0` 생성, `10.0.1.0/24` 관리, guest IP/TAP 할당과 재사용, NAT 설정 |
 | Guest init | `cmd/micro-init/main.go` | guest PID 1, virtual filesystem mount, `goose-agent` 시작, 종료/신호 수신 시 clean poweroff |
 | Guest agent | `cmd/goose-agent/main.go` | guest 내부 `/tasks`, `/health`, `/stop` 제공, mutating endpoint token 인증, Goose task 실행 |
-| Image builder | `scripts/build_image.sh` | Debian Bookworm 기반 golden rootfs에 Goose, `goose-agent`, `micro-init` 설치 |
+| Image builder | `scripts/build_image.sh` | Debian Trixie 기반 golden rootfs에 Goose, `goose-agent`, `micro-init` 설치 |
 
 ## 런타임 상태
 

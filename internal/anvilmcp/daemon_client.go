@@ -28,17 +28,27 @@ func (e *DaemonError) Error() string {
 }
 
 type SpawnVMResponse struct {
-	VMID       string `json:"vm_id"`
-	GuestIP    string `json:"guest_ip"`
-	AgentURL   string `json:"agent_url"`
-	Profile    string `json:"profile,omitempty"`
-	AgentToken string `json:"agent_token,omitempty"`
+	VMID         string `json:"vm_id"`
+	GuestIP      string `json:"guest_ip"`
+	AgentURL     string `json:"agent_url"`
+	Profile      string `json:"profile,omitempty"`
+	TenantID     string `json:"tenant_id,omitempty"`
+	EgressPolicy string `json:"egress_policy,omitempty"`
+	AgentToken   string `json:"agent_token,omitempty"`
+}
+
+type SpawnVMRequest struct {
+	Profile      string `json:"profile,omitempty"`
+	TenantID     string `json:"tenant_id,omitempty"`
+	EgressPolicy string `json:"egress_policy,omitempty"`
 }
 
 type SnapshotInfo struct {
 	SnapshotID     string    `json:"snapshot_id"`
 	SourceVMID     string    `json:"source_vm_id"`
+	TenantID       string    `json:"tenant_id,omitempty"`
 	Profile        string    `json:"profile,omitempty"`
+	EgressPolicy   string    `json:"egress_policy,omitempty"`
 	SnapshotType   string    `json:"snapshot_type"`
 	BaseSnapshotID string    `json:"base_snapshot_id,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
@@ -47,6 +57,12 @@ type SnapshotInfo struct {
 type CreateSnapshotRequest struct {
 	StopAfter bool   `json:"stop_after"`
 	Type      string `json:"type,omitempty"`
+	TenantID  string `json:"tenant_id,omitempty"`
+}
+
+type RestoreSnapshotRequest struct {
+	TenantID     string `json:"tenant_id,omitempty"`
+	EgressPolicy string `json:"egress_policy,omitempty"`
 }
 
 type RestoreSnapshotResponse struct {
@@ -54,13 +70,29 @@ type RestoreSnapshotResponse struct {
 	GuestIP          string `json:"guest_ip"`
 	AgentURL         string `json:"agent_url"`
 	Profile          string `json:"profile,omitempty"`
-	AgentToken       string `json:"agent_token,omitempty"`
+	TenantID         string `json:"tenant_id,omitempty"`
+	EgressPolicy     string `json:"egress_policy,omitempty"`
 	SourceSnapshotID string `json:"source_snapshot_id"`
 }
 
 type RawDaemonResponse struct {
 	StatusCode int    `json:"status_code"`
 	Body       string `json:"body"`
+}
+
+type RuntimeAuditListResponse struct {
+	Records []RuntimeAuditRecord `json:"records"`
+}
+
+type DaemonHealthResponse struct {
+	Status        string `json:"status"`
+	VMCount       int    `json:"vm_count"`
+	SnapshotCount int    `json:"snapshot_count"`
+	AuthEnabled   bool   `json:"auth_enabled"`
+}
+
+type TenantUpsertRequest struct {
+	Quota TenantQuota `json:"quota"`
 }
 
 func NewDaemonClient(cfg Config, httpClient *http.Client) *DaemonClient {
@@ -74,13 +106,8 @@ func NewDaemonClient(cfg Config, httpClient *http.Client) *DaemonClient {
 	}
 }
 
-func (c *DaemonClient) SpawnVM(ctx context.Context, profile string) (*SpawnVMResponse, error) {
-	payload := map[string]string{}
-	if profile != "" {
-		payload["profile"] = profile
-	}
-
-	_, body, err := c.do(ctx, http.MethodPost, "/vms", payload)
+func (c *DaemonClient) SpawnVM(ctx context.Context, req SpawnVMRequest) (*SpawnVMResponse, error) {
+	_, body, err := c.do(ctx, http.MethodPost, "/vms", req)
 	if err != nil {
 		return nil, err
 	}
@@ -157,8 +184,8 @@ func (c *DaemonClient) ListSnapshots(ctx context.Context) ([]SnapshotInfo, error
 	return resp, nil
 }
 
-func (c *DaemonClient) RestoreSnapshot(ctx context.Context, snapshotID string) (*RestoreSnapshotResponse, error) {
-	_, body, err := c.do(ctx, http.MethodPost, "/snapshots/"+snapshotID+"/restore", nil)
+func (c *DaemonClient) RestoreSnapshot(ctx context.Context, snapshotID string, req RestoreSnapshotRequest) (*RestoreSnapshotResponse, error) {
+	_, body, err := c.do(ctx, http.MethodPost, "/snapshots/"+snapshotID+"/restore", req)
 	if err != nil {
 		return nil, err
 	}
@@ -172,6 +199,113 @@ func (c *DaemonClient) RestoreSnapshot(ctx context.Context, snapshotID string) (
 
 func (c *DaemonClient) DeleteSnapshot(ctx context.Context, snapshotID string) (*RawDaemonResponse, error) {
 	return c.raw(ctx, http.MethodDelete, "/snapshots/"+snapshotID, nil)
+}
+
+func (c *DaemonClient) DaemonHealth(ctx context.Context) (*DaemonHealthResponse, error) {
+	_, body, err := c.do(ctx, http.MethodGet, "/health", nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp DaemonHealthResponse
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		return nil, fmt.Errorf("decode daemon health response: %w", err)
+	}
+	return &resp, nil
+}
+
+func (c *DaemonClient) Metrics(ctx context.Context) (string, error) {
+	_, body, err := c.do(ctx, http.MethodGet, "/metrics", nil)
+	if err != nil {
+		return "", err
+	}
+	return body, nil
+}
+
+func (c *DaemonClient) ListTenants(ctx context.Context) ([]TenantRecord, error) {
+	_, body, err := c.do(ctx, http.MethodGet, "/tenants", nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp []TenantRecord
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		return nil, fmt.Errorf("decode tenant list response: %w", err)
+	}
+	return resp, nil
+}
+
+func (c *DaemonClient) GetTenant(ctx context.Context, tenantID string) (*TenantRecord, error) {
+	path, err := tenantPath(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	_, body, err := c.do(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp TenantRecord
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		return nil, fmt.Errorf("decode tenant response: %w", err)
+	}
+	return &resp, nil
+}
+
+func (c *DaemonClient) UpsertTenant(ctx context.Context, tenantID string, quota TenantQuota) (*TenantRecord, error) {
+	path, err := tenantPath(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	_, body, err := c.do(ctx, http.MethodPut, path, TenantUpsertRequest{Quota: quota})
+	if err != nil {
+		return nil, err
+	}
+	var resp TenantRecord
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		return nil, fmt.Errorf("decode tenant upsert response: %w", err)
+	}
+	return &resp, nil
+}
+
+func (c *DaemonClient) ListRuntimeAudit(ctx context.Context, tenantID string, limit int) ([]RuntimeAuditRecord, error) {
+	query := url.Values{}
+	if strings.TrimSpace(tenantID) != "" {
+		query.Set("tenant_id", strings.TrimSpace(tenantID))
+	}
+	if limit > 0 {
+		query.Set("limit", fmt.Sprintf("%d", limit))
+	}
+	path := "/audit/runtime"
+	if encoded := query.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	_, body, err := c.do(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp RuntimeAuditListResponse
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		return nil, fmt.Errorf("decode runtime audit response: %w", err)
+	}
+	return resp.Records, nil
+}
+
+func (c *DaemonClient) PruneRuntimeAudit(ctx context.Context, policy RuntimeAuditRetention) ([]RuntimeAuditRecord, error) {
+	_, body, err := c.do(ctx, http.MethodPost, "/audit/runtime/prune", policy)
+	if err != nil {
+		return nil, err
+	}
+	var resp RuntimeAuditListResponse
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		return nil, fmt.Errorf("decode runtime audit prune response: %w", err)
+	}
+	return resp.Records, nil
+}
+
+func tenantPath(tenantID string) (string, error) {
+	tenantID, err := NormalizeTenantID(tenantID)
+	if err != nil {
+		return "", err
+	}
+	return "/tenants/" + url.PathEscape(tenantID), nil
 }
 
 func (c *DaemonClient) raw(ctx context.Context, method, path string, payload any) (*RawDaemonResponse, error) {

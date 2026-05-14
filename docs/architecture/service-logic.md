@@ -252,8 +252,8 @@ createSnapshot()
 
 - disk copy는 VM이 pause된 상태에서 수행한다.
 - diff snapshot도 rootfs는 full copy한다. memory만 sparse/diff다.
-- `metadata.json`은 original TAP name, MAC, vsock path, agent token, disk path,
-  memory path, state path, base snapshot ID를 보존한다.
+- `metadata.json`은 tenant ID, egress policy, original TAP name, MAC, vsock path,
+  agent token, disk path, memory path, state path, base snapshot ID를 보존한다.
 - snapshot API response에는 `agent_token`을 노출하지 않는다.
 
 ### Snapshot token 수명 주기
@@ -263,10 +263,8 @@ snapshot metadata는 guest agent token을 저장한다. restore된 VM이 기존
 metadata에 있던 원래 token을 계속 사용한다.
 
 공개 API 응답은 이 값을 노출하지 않는 것이 정책이며, 허용된 노출 지점은
-`POST /vms` 응답뿐이다. 현재 daemon의 `POST /snapshots/{id}/restore` 응답은 기존
-호환성 때문에 `agent_token`을 포함할 수 있지만, 이는 제거 대상 구현 부채다.
-snapshot 생성, snapshot 목록, snapshot GC, MCP output, audit output은 실제
-`agent_token`을 포함하지 않는다.
+`POST /vms` 응답뿐이다. `POST /snapshots/{id}/restore`, snapshot 생성, snapshot
+목록, snapshot GC, MCP output, audit output은 실제 `agent_token`을 포함하지 않는다.
 
 snapshot metadata를 반출하거나 백업 workflow에서 신뢰된 host 경계 밖으로
 보낼 때는 먼저 `scripts/snapshot-metadata-scrub.go`로 `agent_token`을 제거한다.
@@ -287,6 +285,7 @@ Route: `POST /snapshots/{id}/restore`
 ```text
 restoreSnapshot()
   -> cp.snapshots에서 snapshot metadata load
+  -> request tenant_id/egress_policy가 metadata와 충돌하면 reject
   -> source VM이 아직 실행 중이면 reject
   -> 새 VM ID 할당
   -> stale Firecracker socket 제거
@@ -313,8 +312,9 @@ restoreSnapshot()
 
 restore된 VM은 guest agent 연속성을 위해 snapshot metadata의 original agent token을
 내부적으로 유지한다. 외부 client는 guest agent token이 아니라 control-plane
-token과 daemon proxy를 사용해야 한다. 현재 restore 응답의 `agent_token` 노출은
-기존 호환성 때문에 남아 있는 제거 대상 구현 부채다.
+token과 daemon proxy를 사용해야 한다. restore success response에는
+`source_snapshot_id`, restored VM info, tenant ID, egress policy만 포함하고
+`agent_token`은 포함하지 않는다.
 
 restore 실패는 `Content-Type: application/json`인 `RestoreErrorResponse`를
 반환한다.
@@ -556,7 +556,7 @@ body를 보존하며, 모든 response를 새 domain model로 정규화하지 않
 ## 운영 불변 조건
 
 - 실행 중인 VM disk를 `destroyVM` 밖에서 삭제하거나 변경하지 않는다.
-- list/snapshot response에 guest `agent_token`을 노출하지 않는다.
+- list/snapshot/restore response에 guest `agent_token`을 노출하지 않는다.
 - source VM이 실행 중인 snapshot은 restore하지 않는다.
 - diff가 참조하는 full snapshot은 삭제하지 않는다.
 - VM 생성 또는 restore 실패 시 항상 TAP/IP를 반환한다.

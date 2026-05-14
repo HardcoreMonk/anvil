@@ -129,7 +129,7 @@ IronClaw 관점에서 anvil은 다음 계약을 제공한다.
   IronClaw workflow를 단순화한다.
 
 - **Token redaction**:
-  daemon restore 응답의 `agent_token`은 decode할 수 있지만 MCP output에는
+  `agent_token`은 `POST /vms` 응답에만 노출하며 daemon restore 응답과 MCP output에는
   노출하지 않는다.
 
 - **Restore cleanup 계약**:
@@ -171,7 +171,7 @@ ephemera control plane :3000
       | Firecracker SDK, KVM, TAP, rootfs, snapshot files
       v
 Firecracker MicroVM, ephemera runtime
-  - Debian Bookworm minbase rootfs
+  - Debian Trixie minbase rootfs
   - micro-init, PID 1
   - goose-agent :8080
   - goose CLI task 실행
@@ -254,7 +254,7 @@ DELETE /vms/{id}
   ephemera 첫 실행 시 golden image, kernel, Firecracker binary를 준비하고 검증한다.
 
 - **최소 guest OS**:
-  Debian Bookworm minbase와 Go 기반 `micro-init`으로 구성한다.
+  Debian Trixie minbase와 Go 기반 `micro-init`으로 구성한다.
 
 - **안전한 guest 종료**:
   `micro-init`이 signal을 받아 `poweroff(2)`를 호출해 kernel panic을 피한다.
@@ -363,7 +363,7 @@ scripts/anvil-mcp-e2e.sh daemon 기반 MCP smoke wrapper
   daemon crash, stale TAP/IP, restore 실패, GC 실패, diff base 누락 대응 playbook.
 
 - [docs/operations/observability.md](docs/operations/observability.md):
-  daemon log, health endpoint, snapshot GC audit, 아직 없는 metrics와 향후 지표 후보.
+  daemon log, `/health`, `/metrics`, snapshot GC audit, runtime audit API, 향후 지표 후보.
 
 - [docs/analysis/README.md](docs/analysis/README.md):
   ephemera 0.1.0/0.2.0 분석 문서 index.
@@ -595,20 +595,26 @@ MCP adapter는 얇은 runtime bridge다. 현재 workspace copy는 VM 내부
 `text`이고, binary payload는 `encoding: "base64"`로 전달한다. 단일 파일 크기는
 4 MiB로 제한하며, copy-in은 기본적으로 기존 파일을 덮어쓰지 않는다.
 `overwrite: true`를 명시해야 교체한다. directory sync, snapshot alias,
-session alias 영속화, HTTP MCP transport는 제공하지 않는다. Restore 응답은
-daemon의 `agent_token`을 decode할 수 있지만 MCP output에는 노출하지 않는다.
+HTTP MCP transport는 제공하지 않는다. Restore 응답은 daemon direct response와
+MCP output 모두 `agent_token`을 노출하지 않는다.
 Restore 후 `session_name` bind가 실패하면 adapter는 restored VM을 자동 삭제하지
 않고 error에 restored VM ID를 포함한다.
 
 Multi-tenant foundation은 MCP adapter boundary에서 optional `tenant_id`와
-`ANVIL_MCP_TENANT_ID` 기본값을 검증한다. `ANVIL_MCP_AUDIT_LOG`를 설정하면 성공한
-tool call에 대해 tenant ID, VM ID, session alias, tool name, daemon operation,
-result code, timestamp만 JSONL로 append한다. 이 audit record에는 snapshot
-metadata나 `agent_token`을 저장하지 않는다. 현재 이 값은 daemon API로 전달되지
-않으며, scheduler service와 daemon tenant contract가 추가될 때 quota enforcement와
-host selection의 입력으로 확장한다.
+`ANVIL_MCP_TENANT_ID` 기본값을 검증한 뒤 `POST /vms`,
+`POST /vms/{id}/snapshot`, `POST /snapshots/{id}/restore` daemon body로 전달한다.
+`egress_policy`는 `deny_all`, `profile`, `allow_all` 중 하나이며 VM/snapshot
+metadata에 보존된다. `ANVIL_MCP_AUDIT_LOG`를 설정하면 성공/실패 tool call에 대해
+tenant ID, VM ID, session alias, tool name, daemon operation, result code,
+timestamp, sanitized error만 JSONL로 append한다. 이 audit record에는 snapshot
+metadata, daemon raw body, `agent_token`을 저장하지 않는다.
 `ANVIL_MCP_AUDIT_LOG`를 켠 상태에서는 tool input `tenant_id` 또는
 `ANVIL_MCP_TENANT_ID`가 필요하다.
+
+후속 control-plane foundation은 host inventory polling, scheduler-backed
+`RuntimeRouter`, JSON quota store, daemon `/tenants`, `/audit/runtime`, `/health`,
+`/metrics`를 제공한다. `deny_all` egress policy는 host `iptables` reject rule로
+강제하며, `profile` proxy allowlist와 DNS policy는 별도 후속 network layer다.
 
 정확한 입력/출력 계약은 `docs/architecture/mcp-architecture.md`를 참조한다.
 
@@ -665,17 +671,19 @@ token이 설정되어 있으면 모든 control-plane endpoint는
 POST /vms
 Content-Type: application/json
 
-{ "profile": "anthropic" }
+{ "profile": "anthropic", "tenant_id": "tenant.alpha", "egress_policy": "profile" }
 ```
 
 `profile`을 생략하면 기본 `configs/goose.yaml`과
-`configs/goose-secrets.yaml`을 사용한다.
+`configs/goose-secrets.yaml`을 사용한다. `tenant_id`와 `egress_policy`는 optional
+계약이다. `tenant_id`는 ASCII letter/digit으로 시작해야 하며 letter, digit, `.`,
+`_`, `-`만 허용한다. `egress_policy`는 `deny_all`, `profile`, `allow_all` 중 하나다.
 
 ```bash
 curl -X POST http://localhost:3000/vms \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"profile": "anthropic"}'
+  -d '{"profile": "anthropic", "tenant_id": "tenant.alpha", "egress_policy": "profile"}'
 ```
 
 ```json
@@ -684,14 +692,15 @@ curl -X POST http://localhost:3000/vms \
   "guest_ip": "10.0.1.10",
   "agent_url": "http://10.0.1.10:8080",
   "profile": "anthropic",
+  "tenant_id": "tenant.alpha",
+  "egress_policy": "profile",
   "agent_token": "3f9a2c..."
 }
 ```
 
 보안 불변 조건은 `POST /vms` 외 응답에서 `agent_token`을 노출하지 않는 것이다.
-현재 daemon의 `POST /snapshots/{id}/restore` 응답은 기존 호환성 때문에
-`agent_token`을 포함할 수 있지만, MCP output은 restore 응답의 `agent_token`을
-노출하지 않는다. restore 응답의 token 노출은 제거 대상 구현 부채다.
+daemon의 `POST /snapshots/{id}/restore`, MCP output, audit record는
+`agent_token`을 노출하지 않는다.
 
 ### VM 목록
 
@@ -743,11 +752,15 @@ curl http://localhost:3000/snapshots \
 
 ```bash
 curl -X POST http://localhost:3000/snapshots/snap-1778229000000/restore \
-  -H "Authorization: Bearer $TOKEN"
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"tenant_id": "tenant.alpha", "egress_policy": "profile"}'
 ```
 
 source VM이 아직 실행 중이면 restore는 거부된다. restore된 VM은 새 VM ID와
-새 IP를 받지만 snapshot의 agent token은 유지한다.
+새 IP를 받지만 snapshot의 agent token은 daemon 내부 proxy용으로만 유지한다.
+restore request의 `tenant_id` 또는 `egress_policy`가 snapshot metadata와 충돌하면
+daemon은 restore를 거부한다. restore success response에는 `agent_token`이 없다.
 
 snapshot `metadata.json`은 restore 인증 계약을 보존하기 위해 `agent_token`을
 담고 있다. metadata를 반출하거나 백업 산출물이 신뢰된 host 경계 밖으로 나가기

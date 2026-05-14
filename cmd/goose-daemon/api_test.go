@@ -19,6 +19,7 @@ import (
 
 	firecracker "github.com/firecracker-microvm/firecracker-go-sdk"
 
+	"ephemera/internal/anvilmcp"
 	"ephemera/internal/storage"
 	"ephemera/internal/vm"
 )
@@ -38,6 +39,275 @@ func newTestCP(t *testing.T) *ControlPlane {
 		workDir:          tmp,
 		gooseConfigPath:  defaultCfg,
 		gooseSecretsPath: defaultSec,
+	}
+}
+
+func TestTenantAPIUpsertsAndGetsTenant(t *testing.T) {
+	cp := newTestCP(t)
+	req := httptest.NewRequest(http.MethodPut, "/tenants/tenant-1", strings.NewReader(`{"quota":{"active_vms":2,"snapshot_bytes":4096}}`))
+	rr := httptest.NewRecorder()
+	cp.handleTenantItem(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("PUT /tenants/tenant-1 status = %d body = %s, want 200", rr.Code, rr.Body.String())
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/tenants/tenant-1", nil)
+	getRR := httptest.NewRecorder()
+	cp.handleTenantItem(getRR, getReq)
+	if getRR.Code != http.StatusOK {
+		t.Fatalf("GET /tenants/tenant-1 status = %d body = %s, want 200", getRR.Code, getRR.Body.String())
+	}
+	var record TenantRecord
+	if err := json.Unmarshal(getRR.Body.Bytes(), &record); err != nil {
+		t.Fatalf("decode tenant record: %v", err)
+	}
+	if record.TenantID != "tenant-1" {
+		t.Fatalf("tenant_id = %q, want tenant-1", record.TenantID)
+	}
+	if record.Quota.ActiveVMs != 2 || record.Quota.SnapshotBytes != 4096 {
+		t.Fatalf("quota = %+v, want active=2 snapshot_bytes=4096", record.Quota)
+	}
+}
+
+func TestTenantAPIListTenants(t *testing.T) {
+	cp := newTestCP(t)
+	cp.tenantStore = anvilmcp.NewQuotaStore(filepath.Join(cp.workDir, "tenants", "tenants.json"))
+	if err := cp.tenantStore.SetTenantQuota("tenant-a", anvilmcp.TenantQuota{ActiveVMs: 1}); err != nil {
+		t.Fatalf("SetTenantQuota tenant-a: %v", err)
+	}
+	if err := cp.tenantStore.SetTenantQuota("tenant-b", anvilmcp.TenantQuota{ActiveVMs: 2}); err != nil {
+		t.Fatalf("SetTenantQuota tenant-b: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/tenants", nil)
+	rr := httptest.NewRecorder()
+	cp.handleTenants(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /tenants status = %d body = %s, want 200", rr.Code, rr.Body.String())
+	}
+	var records []TenantRecord
+	if err := json.Unmarshal(rr.Body.Bytes(), &records); err != nil {
+		t.Fatalf("decode tenant list: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("tenant list len = %d, want 2: %+v", len(records), records)
+	}
+	if records[0].TenantID != "tenant-a" || records[1].TenantID != "tenant-b" {
+		t.Fatalf("tenant order = %+v, want tenant-a then tenant-b", records)
+	}
+}
+
+func TestTenantAPIRejectsInvalidTenantBeforeMutation(t *testing.T) {
+	cp := newTestCP(t)
+	req := httptest.NewRequest(http.MethodPut, "/tenants/../bad", strings.NewReader(`{"quota":{"active_vms":2}}`))
+	rr := httptest.NewRecorder()
+	cp.handleTenantItem(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("PUT invalid tenant status = %d body = %s, want 400", rr.Code, rr.Body.String())
+	}
+	records := cp.ensureTenantStore().ListTenants()
+	if len(records) != 0 {
+		t.Fatalf("tenant records = %+v, want empty after invalid request", records)
+	}
+}
+
+func TestCommandEgressEnforcerDenyAllAndCleanup(t *testing.T) {
+	var commands [][]string
+	enforcer := &commandEgressEnforcer{
+		run: func(name string, args ...string) error {
+			commands = append(commands, append([]string{name}, args...))
+			return nil
+		},
+	}
+	if err := enforcer.Apply("vm-1", "tap-vm-1", "10.0.1.10", "deny_all"); err != nil {
+		t.Fatalf("Apply deny_all error = %v", err)
+	}
+	if err := enforcer.Cleanup("vm-1"); err != nil {
+		t.Fatalf("Cleanup error = %v", err)
+	}
+	want := [][]string{
+		{"iptables", "-I", "FORWARD", "-s", "10.0.1.10", "-j", "REJECT", "-m", "comment", "--comment", "anvil-egress-vm-1"},
+		{"iptables", "-D", "FORWARD", "-s", "10.0.1.10", "-j", "REJECT", "-m", "comment", "--comment", "anvil-egress-vm-1"},
+	}
+	if len(commands) != len(want) {
+		t.Fatalf("commands = %#v, want %#v", commands, want)
+	}
+	for i := range want {
+		if strings.Join(commands[i], " ") != strings.Join(want[i], " ") {
+			t.Fatalf("command[%d] = %#v, want %#v", i, commands[i], want[i])
+		}
+	}
+}
+
+func TestCommandEgressEnforcerAllowAllIsNoop(t *testing.T) {
+	var calls int
+	enforcer := &commandEgressEnforcer{
+		run: func(name string, args ...string) error {
+			calls++
+			return nil
+		},
+	}
+	if err := enforcer.Apply("vm-1", "tap-vm-1", "10.0.1.10", "allow_all"); err != nil {
+		t.Fatalf("Apply allow_all error = %v", err)
+	}
+	if err := enforcer.Cleanup("vm-1"); err != nil {
+		t.Fatalf("Cleanup allow_all error = %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("command calls = %d, want 0", calls)
+	}
+}
+
+func TestRuntimeAuditAPIListFiltersAndRedacts(t *testing.T) {
+	cp := newTestCP(t)
+	cp.runtimeAuditPath = filepath.Join(cp.workDir, "audit", "runtime-audit.jsonl")
+	if err := anvilmcp.AppendRuntimeAudit(cp.runtimeAuditPath, anvilmcp.RuntimeAuditRecord{
+		Timestamp:       time.Date(2026, 5, 14, 1, 0, 0, 0, time.UTC),
+		TenantID:        "tenant-1",
+		VMID:            "vm-1",
+		ToolName:        "anvil_spawn_vm",
+		DaemonOperation: "POST /vms",
+		ResultCode:      "error",
+		Error:           "agent_token=secret must not leak",
+	}); err != nil {
+		t.Fatalf("append audit tenant-1: %v", err)
+	}
+	if err := anvilmcp.AppendRuntimeAudit(cp.runtimeAuditPath, anvilmcp.RuntimeAuditRecord{
+		Timestamp:       time.Date(2026, 5, 14, 2, 0, 0, 0, time.UTC),
+		TenantID:        "tenant-2",
+		ToolName:        "anvil_spawn_vm",
+		DaemonOperation: "POST /vms",
+		ResultCode:      "success",
+	}); err != nil {
+		t.Fatalf("append audit tenant-2: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/audit/runtime?tenant_id=tenant-1&limit=10", nil)
+	rr := httptest.NewRecorder()
+	cp.handleRuntimeAudit(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /audit/runtime status = %d body = %s, want 200", rr.Code, rr.Body.String())
+	}
+	var resp RuntimeAuditListResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode audit response: %v", err)
+	}
+	if len(resp.Records) != 1 {
+		t.Fatalf("records len = %d, want 1: %+v", len(resp.Records), resp.Records)
+	}
+	if resp.Records[0].TenantID != "tenant-1" {
+		t.Fatalf("tenant_id = %q, want tenant-1", resp.Records[0].TenantID)
+	}
+	if strings.Contains(rr.Body.String(), "agent_token") || strings.Contains(rr.Body.String(), "secret") {
+		t.Fatalf("audit response leaked token context: %s", rr.Body.String())
+	}
+}
+
+func TestRuntimeAuditAPIPrune(t *testing.T) {
+	cp := newTestCP(t)
+	cp.runtimeAuditPath = filepath.Join(cp.workDir, "audit", "runtime-audit.jsonl")
+	for _, tenantID := range []string{"tenant-1", "tenant-2", "tenant-3"} {
+		if err := anvilmcp.AppendRuntimeAudit(cp.runtimeAuditPath, anvilmcp.RuntimeAuditRecord{
+			TenantID:        tenantID,
+			ToolName:        "anvil_spawn_vm",
+			DaemonOperation: "POST /vms",
+			ResultCode:      "success",
+		}); err != nil {
+			t.Fatalf("append audit %s: %v", tenantID, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/audit/runtime/prune", strings.NewReader(`{"keep_last":2}`))
+	rr := httptest.NewRecorder()
+	cp.handleRuntimeAuditPrune(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("POST /audit/runtime/prune status = %d body = %s, want 200", rr.Code, rr.Body.String())
+	}
+	var resp RuntimeAuditListResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode prune response: %v", err)
+	}
+	if len(resp.Records) != 2 {
+		t.Fatalf("records len = %d, want 2: %+v", len(resp.Records), resp.Records)
+	}
+}
+
+func TestControlPlaneHealthEndpoint(t *testing.T) {
+	cp := newTestCP(t)
+	cp.vms["vm-1"] = &runningVM{VMInfo: VMInfo{VMID: "vm-1"}}
+	cp.snapshots["snap-1"] = storage.SnapshotMetadata{SnapshotID: "snap-1"}
+	cp.clients = []APIClient{{Name: "operator", Token: "secret-token"}}
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rr := httptest.NewRecorder()
+	cp.handleHealth(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /health status = %d body = %s, want 200", rr.Code, rr.Body.String())
+	}
+	var resp HealthResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode health response: %v", err)
+	}
+	if resp.Status != "ok" || resp.VMCount != 1 || resp.SnapshotCount != 1 || !resp.AuthEnabled {
+		t.Fatalf("health response = %+v, want ok vm=1 snapshot=1 auth=true", resp)
+	}
+	if strings.Contains(rr.Body.String(), "secret-token") {
+		t.Fatalf("health response leaked token: %s", rr.Body.String())
+	}
+}
+
+func TestControlPlaneMetricsEndpoint(t *testing.T) {
+	cp := newTestCP(t)
+	cp.metrics.IncVMCreate()
+	cp.metrics.IncVMDelete()
+	cp.metrics.IncCleanupFailure()
+	cp.metrics.IncAuthFailure()
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rr := httptest.NewRecorder()
+	cp.handleMetrics(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /metrics status = %d body = %s, want 200", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	for _, want := range []string{
+		"anvil_vm_create_total 1",
+		"anvil_vm_delete_total 1",
+		"anvil_cleanup_failure_total 1",
+		"anvil_auth_failure_total 1",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("metrics body missing %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "agent_token") || strings.Contains(body, "secret") {
+		t.Fatalf("metrics leaked secret context: %s", body)
+	}
+}
+
+func TestAuthMiddlewareIncrementsAuthFailure(t *testing.T) {
+	var metrics controlPlaneMetrics
+	handler := authMiddleware(
+		func() []APIClient {
+			return []APIClient{{Name: "operator", Token: "secret-token"}}
+		},
+		&metrics,
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Fatal("handler should not run for unauthorized request")
+		}),
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d body = %s, want 401", rr.Code, rr.Body.String())
+	}
+	if got := metrics.snapshot().authFailure; got != 1 {
+		t.Fatalf("authFailure = %d, want 1", got)
+	}
+	if strings.Contains(rr.Body.String(), "secret-token") {
+		t.Fatalf("auth failure response leaked token: %s", rr.Body.String())
 	}
 }
 
@@ -260,6 +530,97 @@ func TestHandleVMWorkspaceProxiesQueryAuthAndBody(t *testing.T) {
 	}
 	if gotBody != "hello" {
 		t.Fatalf("proxied body = %q, want hello", gotBody)
+	}
+}
+
+func TestListVMsIncludesTenantAndEgressPolicy(t *testing.T) {
+	cp := newTestCP(t)
+	cp.vms["vm-1"] = &runningVM{
+		VMInfo: VMInfo{
+			VMID:         "vm-1",
+			GuestIP:      "10.0.1.2",
+			AgentURL:     "http://10.0.1.2:8080",
+			Profile:      "dev",
+			TenantID:     "tenant-1",
+			EgressPolicy: "profile",
+		},
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/vms", nil)
+	cp.handleVMs(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q; want 200", rr.Code, rr.Body.String())
+	}
+	var list []VMInfo
+	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode VM list: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("VM list length = %d, want 1", len(list))
+	}
+	if list[0].TenantID != "tenant-1" || list[0].EgressPolicy != "profile" {
+		t.Fatalf("VM info = %+v, want tenant-1/profile", list[0])
+	}
+}
+
+func TestCreateSnapshotRejectsTenantMismatchBeforePause(t *testing.T) {
+	cp := newTestCP(t)
+	cp.vms["vm-1"] = &runningVM{
+		VMInfo: VMInfo{
+			VMID:         "vm-1",
+			TenantID:     "tenant-1",
+			EgressPolicy: "deny_all",
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/vms/vm-1/snapshot", strings.NewReader(`{"tenant_id":"tenant-2"}`))
+	rr := httptest.NewRecorder()
+	cp.createSnapshot(rr, req, "vm-1")
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, body = %q; want %d", rr.Code, rr.Body.String(), http.StatusForbidden)
+	}
+	if !strings.Contains(rr.Body.String(), "tenant_id does not match VM tenant") {
+		t.Fatalf("body = %q, want tenant mismatch error", rr.Body.String())
+	}
+}
+
+func TestVMRestoreResultOmitsAgentToken(t *testing.T) {
+	data, err := json.Marshal(VMRestoreResult{
+		VMInfo: VMInfo{
+			VMID:         "vm-restored",
+			GuestIP:      "10.0.1.9",
+			AgentURL:     "http://10.0.1.9:8080",
+			TenantID:     "tenant-1",
+			EgressPolicy: "profile",
+		},
+		SourceSnapshotID: "snap-1",
+	})
+	if err != nil {
+		t.Fatalf("marshal restore result: %v", err)
+	}
+	if strings.Contains(string(data), "agent_token") {
+		t.Fatalf("restore result exposes agent_token: %s", string(data))
+	}
+	if !strings.Contains(string(data), `"tenant_id":"tenant-1"`) {
+		t.Fatalf("restore result = %s, want tenant_id", string(data))
+	}
+}
+
+func TestSnapshotInfoIncludesTenantAndEgressPolicy(t *testing.T) {
+	info := snapshotInfoFrom(storage.SnapshotMetadata{
+		SnapshotID:   "snap-1",
+		SourceVMID:   "vm-1",
+		TenantID:     "tenant-1",
+		Profile:      "dev",
+		EgressPolicy: "deny_all",
+		SnapshotType: "full",
+		CreatedAt:    time.Date(2026, 5, 13, 12, 0, 0, 0, time.UTC),
+	})
+	if info.TenantID != "tenant-1" || info.EgressPolicy != "deny_all" {
+		t.Fatalf("snapshot info = %+v, want tenant-1/deny_all", info)
 	}
 }
 
@@ -658,6 +1019,35 @@ func TestRestoreSnapshotMissingSnapshotReturnsJSONError(t *testing.T) {
 	}
 	if resp.Error != "snapshot not found" {
 		t.Fatalf("error = %q, want snapshot not found", resp.Error)
+	}
+}
+
+func TestRestoreSnapshotRejectsTenantMismatchBeforeNetworkAllocation(t *testing.T) {
+	cp := newTestCP(t)
+	cp.provisioner = &storage.Provisioner{WorkspaceDir: t.TempDir()}
+	snapshotID := "snap-tenant"
+	meta := testSnapshotMeta(snapshotID, "vm-source", "full", time.Now().UTC())
+	meta.TenantID = "tenant-1"
+	meta.EgressPolicy = "profile"
+	cp.snapshots[snapshotID] = meta
+	cp.allocateForRestore = func(string, string) (string, string, error) {
+		t.Fatal("allocateForRestore called before tenant mismatch rejection")
+		return "", "", nil
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/snapshots/snap-tenant/restore", strings.NewReader(`{"tenant_id":"tenant-2"}`))
+	cp.restoreSnapshotFromRequest(rr, req, snapshotID)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, body = %q; want %d", rr.Code, rr.Body.String(), http.StatusForbidden)
+	}
+	resp := decodeRestoreErrorResponse(t, rr)
+	if resp.Code != "tenant_mismatch" {
+		t.Fatalf("code = %q, want tenant_mismatch", resp.Code)
+	}
+	if !strings.Contains(resp.Error, "tenant_id does not match snapshot tenant") {
+		t.Fatalf("error = %q, want tenant mismatch", resp.Error)
 	}
 }
 

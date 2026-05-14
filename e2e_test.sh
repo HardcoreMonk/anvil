@@ -14,8 +14,43 @@ fail()       { echo "  ✗ $*"; PASS=false; }
 check_http() { local code=$1 expected=$2 label=$3
                [ "$code" = "$expected" ] && ok "$label (HTTP $code)" \
                                          || fail "$label (HTTP $code, expected $expected)"; }
+check_task_output() {
+    local label=$1
+    local output=$2
+    local normalized
+    normalized=$(echo "$output" | sed 's/  */ /g')
+    if [ -z "$output" ]; then
+        fail "No response from $label"
+        return
+    fi
+    if echo "$output" | grep -Eqi "(/usr/local/bin/goose:|error while loading shared libraries|GLIBC_[0-9.]+|not found \\(required by /usr/local/bin/goose\\))"; then
+        fail "$label runtime error: $normalized"
+        return
+    fi
+    ok "$label response: $normalized"
+}
+cleanup_stale_cow_devices() {
+    while IFS= read -r name; do
+        [ -n "$name" ] && dmsetup remove --retry "$name" 2>/dev/null || true
+    done < <({ dmsetup ls 2>/dev/null || true; } | awk '/^cow-vm-/ {print $1}')
+    while IFS= read -r dev; do
+        [ -n "$dev" ] && losetup -d "$dev" 2>/dev/null || true
+    done < <({ losetup -a 2>/dev/null || true; } | awk -F: '/\/tmp\/goose-workspaces\/.*\.cow|\/snapshots\/snap-.*\/rootfs\.ext4/ {print $1}')
+}
+check_no_cow_devices() {
+    local label=$1
+    local count
+    count=$({ dmsetup ls 2>/dev/null || true; } | awk '/^cow-vm-/ {count++} END {print count + 0}')
+    if [ "$count" = "0" ]; then
+        ok "$label: no cow-vm dm-snapshot devices remain"
+    else
+        fail "$label: cow-vm dm-snapshot device(s) still present (count: $count)"
+        dmsetup ls 2>/dev/null | awk '/^cow-vm-/ {print "  dm device: " $0}' || true
+    fi
+}
 
 # ── Pre-flight: clean up any leftover files from previous test runs ──
+cleanup_stale_cow_devices
 rm -f /tmp/goose-workspaces/*.ext4 2>/dev/null || true
 rm -f /tmp/goose-workspaces/*.cow  2>/dev/null || true
 rm -rf snapshots/snap-* 2>/dev/null || true
@@ -28,9 +63,14 @@ echo "  Log file: $LOG"
 DAEMON_PID=$!
 echo "  Daemon PID: $DAEMON_PID"
 
-# Wait until the control plane API accepts connections
-for i in $(seq 1 30); do
+# Wait until the control plane API accepts connections.
+# First runs may build the golden image before binding the API port.
+API_START_TIMEOUT_SECONDS=${API_START_TIMEOUT_SECONDS:-900}
+for i in $(seq 1 "$API_START_TIMEOUT_SECONDS"); do
     curl -s -o /dev/null "$API/vms" 2>/dev/null && break
+    if [ $((i % 30)) -eq 0 ]; then
+        echo "  Still waiting for control plane API... (${i}s)"
+    fi
     sleep 1
 done
 curl -s -o /dev/null "$API/vms" && ok "Control plane API is responding" || { fail "API not responding"; exit 1; }
@@ -63,7 +103,7 @@ T1=$(curl -s --max-time 90 -X POST "$VM1_AGENT/tasks" \
          -H "Authorization: Bearer $VM1_TOKEN" \
          -d "$TASK")
 T1_OUT=$(echo "$T1" | jq -r '.output' 2>/dev/null | grep -v '^$' | tail -3 | tr '\n' ' ')
-[ -n "$T1_OUT" ] && ok "Response: $(echo "$T1_OUT" | sed 's/  */ /g')" || fail "No response"
+check_task_output "VM1" "$T1_OUT"
 
 # ── 4. Stop goose agent on VM1 ───────────────────────────────────
 step "4. Stop goose agent on VM1"
@@ -121,8 +161,8 @@ wait $PID2; wait $PID3
 
 T2=$(jq -r '.output' /tmp/t2.json 2>/dev/null | grep -v '^$' | tail -2 | tr '\n' ' ')
 T3=$(jq -r '.output' /tmp/t3.json 2>/dev/null | grep -v '^$' | tail -2 | tr '\n' ' ')
-[ -n "$T2" ] && ok "VM2 response: $(echo "$T2" | sed 's/  */ /g')" || fail "No response from VM2"
-[ -n "$T3" ] && ok "VM3 response: $(echo "$T3" | sed 's/  */ /g')" || fail "No response from VM3"
+check_task_output "VM2" "$T2"
+check_task_output "VM3" "$T3"
 
 # ── 8. Stop goose agents on VM2 and VM3 ──────────────────────────
 step "8. Stop goose agents on VM2 and VM3"
@@ -188,22 +228,20 @@ check_http "$RESTORE_CODE" "201" "POST /snapshots/$SNAP_ID/restore"
 [ "$RESTORE_CODE" != "201" ] && echo "  Error body: $RESTORE_BODY"
 RESTORE_VM_ID=$(echo  "$RESTORE_BODY" | jq -r '.vm_id')
 RESTORE_AGENT=$(echo  "$RESTORE_BODY" | jq -r '.agent_url')
-RESTORE_TOKEN=$(echo  "$RESTORE_BODY" | jq -r '.agent_token')
 RESTORE_SRC=$(echo    "$RESTORE_BODY" | jq -r '.source_snapshot_id')
 ok "Restored VM: $RESTORE_VM_ID  Agent: $RESTORE_AGENT"
 ok "Source snapshot: $RESTORE_SRC"
-[ "$RESTORE_TOKEN" = "$SNAPVM_TOKEN" ] \
-    && ok "Agent token matches original ✓" \
-    || fail "Agent token mismatch (got: ${RESTORE_TOKEN:0:8}...  want: ${SNAPVM_TOKEN:0:8}...)"
+[ "$(echo "$RESTORE_BODY" | jq -r 'has("agent_token")')" = "false" ] \
+    && ok "Restore response omits agent_token ✓" \
+    || fail "Restore response unexpectedly exposed agent_token"
 
 # ── 15. Run task on restored VM ───────────────────────────────────
 step "15. Run task on restored VM"
-RT=$(curl -s --max-time 90 -X POST "$RESTORE_AGENT/tasks" \
+RT=$(curl -s --max-time 90 -X POST "$API/vms/$RESTORE_VM_ID/tasks" \
          -H "Content-Type: application/json" \
-         -H "Authorization: Bearer $RESTORE_TOKEN" \
          -d "$TASK")
 RT_OUT=$(echo "$RT" | jq -r '.output' 2>/dev/null | grep -v '^$' | tail -3 | tr '\n' ' ')
-[ -n "$RT_OUT" ] && ok "Response: $(echo "$RT_OUT" | sed 's/  */ /g')" || fail "No response from restored VM"
+check_task_output "restored VM" "$RT_OUT"
 
 # ── 16. Delete restored VM ────────────────────────────────────────
 step "16. Delete restored VM"
@@ -290,22 +328,20 @@ check_http "$CRB_CODE" "201" "Restore B from $SNAPB_ID"
 
 CRA_VM_ID=$(echo "$CRA_BODY" | jq -r '.vm_id')
 CRA_AGENT=$(echo "$CRA_BODY" | jq -r '.agent_url')
-CRA_TOKEN=$(echo "$CRA_BODY" | jq -r '.agent_token')
 CRB_VM_ID=$(echo "$CRB_BODY" | jq -r '.vm_id')
 CRB_AGENT=$(echo "$CRB_BODY" | jq -r '.agent_url')
-CRB_TOKEN=$(echo "$CRB_BODY" | jq -r '.agent_token')
 ok "Restore A: $CRA_VM_ID  Agent: $CRA_AGENT"
 ok "Restore B: $CRB_VM_ID  Agent: $CRB_AGENT"
 
 [ "$CRA_VM_ID" != "$CRB_VM_ID" ] \
     && ok "Restored VMs have distinct vm_ids ✓" \
     || fail "Restored VMs share the same vm_id"
-[ "$CRA_TOKEN" = "$CSA_TOKEN" ] \
-    && ok "Restore A agent token matches source A ✓" \
-    || fail "Restore A token mismatch"
-[ "$CRB_TOKEN" = "$CSB_TOKEN" ] \
-    && ok "Restore B agent token matches source B ✓" \
-    || fail "Restore B token mismatch"
+[ "$(echo "$CRA_BODY" | jq -r 'has("agent_token")')" = "false" ] \
+    && ok "Restore A response omits agent_token ✓" \
+    || fail "Restore A response unexpectedly exposed agent_token"
+[ "$(echo "$CRB_BODY" | jq -r 'has("agent_token")')" = "false" ] \
+    && ok "Restore B response omits agent_token ✓" \
+    || fail "Restore B response unexpectedly exposed agent_token"
 
 # ── 22. Verify both restored VMs are running simultaneously ──────
 step "22. Verify both restored VMs running at the same time"
@@ -317,17 +353,17 @@ curl -s "$API/vms" | jq -r '.[] | "  \(.vm_id)  \(.guest_ip)"'
 
 # ── 23. Health-check both agents ─────────────────────────────────
 step "23. Verify both restored agents respond"
-HA=$(curl -s -o /dev/null -w "%{http_code}" "$CRA_AGENT/health")
+HA=$(curl -s -o /dev/null -w "%{http_code}" "$API/vms/$CRA_VM_ID/health")
 check_http "$HA" "200" "Restore A /health"
-HB=$(curl -s -o /dev/null -w "%{http_code}" "$CRB_AGENT/health")
+HB=$(curl -s -o /dev/null -w "%{http_code}" "$API/vms/$CRB_VM_ID/health")
 check_http "$HB" "200" "Restore B /health"
 
 # ── 24. Cleanup ───────────────────────────────────────────────────
 step "24. Cleanup concurrent restore test"
-check_http "$(curl -s -o /dev/null -w "%{http_code}" -X POST "$CRA_AGENT/stop" \
-              -H "Authorization: Bearer $CRA_TOKEN")" "200" "Restore A /stop"
-check_http "$(curl -s -o /dev/null -w "%{http_code}" -X POST "$CRB_AGENT/stop" \
-              -H "Authorization: Bearer $CRB_TOKEN")" "200" "Restore B /stop"
+check_http "$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/vms/$CRA_VM_ID/stop")" \
+           "200" "Restore A /stop"
+check_http "$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/vms/$CRB_VM_ID/stop")" \
+           "200" "Restore B /stop"
 sleep 3
 
 check_http "$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/vms/$CRA_VM_ID")" \
@@ -346,6 +382,7 @@ FINAL_VM_COUNT=$(curl -s "$API/vms" | jq 'length')
 FINAL_SNAP_COUNT=$(curl -s "$API/snapshots" | jq 'length')
 [ "$FINAL_SNAP_COUNT" = "0" ] && ok "Snapshot count after cleanup: $FINAL_SNAP_COUNT" \
                                || fail "Expected 0 snapshots, got $FINAL_SNAP_COUNT"
+check_no_cow_devices "Concurrent restore cleanup"
 
 # ════════════════════════════════════════════════════════════════
 # Diff Snapshot test: validate multi-checkpoint size optimization.
@@ -444,15 +481,14 @@ check_http "$DIFF_RESTORE_CODE" "201" "POST /snapshots/$DIFF_SNAP_ID/restore"
 [ "$DIFF_RESTORE_CODE" != "201" ] && echo "  Error: $DIFF_RESTORE_BODY"
 DIFF_RESTORE_VM_ID=$(echo  "$DIFF_RESTORE_BODY" | jq -r '.vm_id')
 DIFF_RESTORE_AGENT=$(echo  "$DIFF_RESTORE_BODY" | jq -r '.agent_url')
-DIFF_RESTORE_TOKEN=$(echo  "$DIFF_RESTORE_BODY" | jq -r '.agent_token')
 ok "Restored from Diff: $DIFF_RESTORE_VM_ID  Agent: $DIFF_RESTORE_AGENT"
-[ "$DIFF_RESTORE_TOKEN" = "$DSNAP_VM_TOKEN" ] \
-    && ok "Agent token matches original ✓" \
-    || fail "Token mismatch (got: ${DIFF_RESTORE_TOKEN:0:8}...)"
+[ "$(echo "$DIFF_RESTORE_BODY" | jq -r 'has("agent_token")')" = "false" ] \
+    && ok "Diff restore response omits agent_token ✓" \
+    || fail "Diff restore response unexpectedly exposed agent_token"
 
 # ── 32. Verify restored VM responds ──────────────────────────────
 step "32. Verify Diff-restored agent responds"
-check_http "$(curl -s -o /dev/null -w "%{http_code}" "$DIFF_RESTORE_AGENT/health")" \
+check_http "$(curl -s -o /dev/null -w "%{http_code}" "$API/vms/$DIFF_RESTORE_VM_ID/health")" \
            "200" "Diff-restored VM /health"
 
 # ── 33. Try deleting Full snapshot while Diff references it → 409 ─
@@ -464,8 +500,8 @@ FULL_DEL_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/snapshots
 
 # ── 34. Cleanup diff snapshot test ───────────────────────────────
 step "34. Cleanup diff snapshot test"
-check_http "$(curl -s -o /dev/null -w "%{http_code}" -X POST "$DIFF_RESTORE_AGENT/stop" \
-              -H "Authorization: Bearer $DIFF_RESTORE_TOKEN")" "200" "Diff-restored VM /stop"
+check_http "$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/vms/$DIFF_RESTORE_VM_ID/stop")" \
+           "200" "Diff-restored VM /stop"
 sleep 2
 check_http "$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/vms/$DIFF_RESTORE_VM_ID")" \
            "200" "DELETE Diff-restored VM"
@@ -525,11 +561,10 @@ check_http "$COW_RESTORE_CODE" "201" "POST /snapshots/$COW_SNAP_ID/restore"
 [ "$COW_RESTORE_CODE" != "201" ] && echo "  Error: $COW_RESTORE_BODY"
 COW_RESTORE_VM_ID=$(echo  "$COW_RESTORE_BODY" | jq -r '.vm_id')
 COW_RESTORE_AGENT=$(echo  "$COW_RESTORE_BODY" | jq -r '.agent_url')
-COW_RESTORE_TOKEN=$(echo  "$COW_RESTORE_BODY" | jq -r '.agent_token')
 ok "Restored VM: $COW_RESTORE_VM_ID  Agent: $COW_RESTORE_AGENT"
-[ "$COW_RESTORE_TOKEN" = "$COW_VM_TOKEN" ] \
-    && ok "Agent token matches original ✓" \
-    || fail "Agent token mismatch (got: ${COW_RESTORE_TOKEN:0:8}...  want: ${COW_VM_TOKEN:0:8}...)"
+[ "$(echo "$COW_RESTORE_BODY" | jq -r 'has("agent_token")')" = "false" ] \
+    && ok "COW restore response omits agent_token ✓" \
+    || fail "COW restore response unexpectedly exposed agent_token"
 
 # ── 39. Verify dm-snapshot device is active ──────────────────────
 step "39. Verify dm-snapshot COW device is active"
@@ -556,22 +591,19 @@ fi
 
 # ── 41. Verify restored agent responds ──────────────────────────
 step "41. Verify COW-restored agent responds"
-check_http "$(curl -s -o /dev/null -w "%{http_code}" "$COW_RESTORE_AGENT/health")" \
+check_http "$(curl -s -o /dev/null -w "%{http_code}" "$API/vms/$COW_RESTORE_VM_ID/health")" \
            "200" "COW-restored VM /health"
 
 # ── 42. Delete restored VM and verify full COW cleanup ──────────
 step "42. Delete COW-restored VM and verify kernel resource cleanup"
-check_http "$(curl -s -o /dev/null -w "%{http_code}" -X POST "$COW_RESTORE_AGENT/stop" \
-              -H "Authorization: Bearer $COW_RESTORE_TOKEN")" "200" "COW-restored VM /stop"
+check_http "$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/vms/$COW_RESTORE_VM_ID/stop")" \
+           "200" "COW-restored VM /stop"
 sleep 2
 check_http "$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/vms/$COW_RESTORE_VM_ID")" \
            "200" "DELETE COW-restored VM"
 
 # dm device must be gone
-COW_DEV_AFTER=$(dmsetup ls 2>/dev/null | grep -c "^cow-" || true)
-[ "${COW_DEV_AFTER:-0}" = "0" ] \
-    && ok "dm-snapshot device removed after VM delete ✓" \
-    || fail "dm-snapshot device(s) still present after VM delete (count: $COW_DEV_AFTER)"
+check_no_cow_devices "COW-restored VM cleanup"
 
 # exception store must be removed
 # find always exits 0 (safe under pipefail); tr -d ' ' strips wc's leading spaces

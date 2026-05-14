@@ -23,24 +23,29 @@ func TestDaemonClientSpawnVM(t *testing.T) {
 			t.Fatalf("Authorization = %q, want Bearer test-token", got)
 		}
 
-		var body struct {
-			Profile string `json:"profile"`
-		}
+		var body SpawnVMRequest
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("decode request body: %v", err)
 		}
 		if body.Profile != "dev" {
 			t.Fatalf("profile = %q, want dev", body.Profile)
 		}
+		if body.TenantID != "tenant-1" || body.EgressPolicy != "profile" {
+			t.Fatalf("tenant/egress = %q/%q, want tenant-1/profile", body.TenantID, body.EgressPolicy)
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{"vm_id":"vm-1","guest_ip":"10.0.0.2","agent_url":"http://10.0.0.2:8080","profile":"dev","agent_token":"agent-token"}`))
+		_, _ = w.Write([]byte(`{"vm_id":"vm-1","guest_ip":"10.0.0.2","agent_url":"http://10.0.0.2:8080","profile":"dev","tenant_id":"tenant-1","egress_policy":"profile","agent_token":"agent-token"}`))
 	}))
 	defer server.Close()
 
 	client := NewDaemonClient(Config{DaemonURL: server.URL, APIToken: "test-token"}, server.Client())
-	resp, err := client.SpawnVM(context.Background(), "dev")
+	resp, err := client.SpawnVM(context.Background(), SpawnVMRequest{
+		Profile:      "dev",
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+	})
 	if err != nil {
 		t.Fatalf("SpawnVM returned error: %v", err)
 	}
@@ -56,6 +61,9 @@ func TestDaemonClientSpawnVM(t *testing.T) {
 	}
 	if resp.Profile != "dev" {
 		t.Fatalf("Profile = %q, want dev", resp.Profile)
+	}
+	if resp.TenantID != "tenant-1" || resp.EgressPolicy != "profile" {
+		t.Fatalf("tenant/egress = %q/%q, want tenant-1/profile", resp.TenantID, resp.EgressPolicy)
 	}
 	if resp.AgentToken != "agent-token" {
 		t.Fatalf("AgentToken = %q, want agent-token", resp.AgentToken)
@@ -99,6 +107,127 @@ func TestDaemonClientRawEndpoints(t *testing.T) {
 	for i := range want {
 		if paths[i] != want[i] {
 			t.Fatalf("paths[%d] = %q, want %q; all paths = %v", i, paths[i], want[i], paths)
+		}
+	}
+}
+
+func TestDaemonClientRuntimeAuditEndpoints(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.RequestURI())
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"records":[{"tenant_id":"tenant-1","tool_name":"anvil_spawn_vm","daemon_operation":"POST /vms","result_code":"success","timestamp":"2026-05-14T00:00:00Z"}]}`))
+	}))
+	defer server.Close()
+
+	client := NewDaemonClient(Config{DaemonURL: server.URL}, server.Client())
+	if _, err := client.ListRuntimeAudit(context.Background(), "tenant-1", 5); err != nil {
+		t.Fatalf("ListRuntimeAudit returned error: %v", err)
+	}
+	if _, err := client.PruneRuntimeAudit(context.Background(), RuntimeAuditRetention{KeepLast: 5}); err != nil {
+		t.Fatalf("PruneRuntimeAudit returned error: %v", err)
+	}
+
+	want := []string{
+		"GET /audit/runtime?limit=5&tenant_id=tenant-1",
+		"POST /audit/runtime/prune",
+	}
+	if len(paths) != len(want) {
+		t.Fatalf("paths = %v, want %v", paths, want)
+	}
+	for i := range want {
+		if paths[i] != want[i] {
+			t.Fatalf("paths[%d] = %q, want %q", i, paths[i], want[i])
+		}
+	}
+}
+
+func TestDaemonClientControlPlaneEndpoints(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.RequestURI())
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Fatalf("Authorization = %q, want Bearer test-token", got)
+		}
+		switch r.Method + " " + r.URL.Path {
+		case "GET /health":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"ok","vm_count":1,"snapshot_count":2,"auth_enabled":true}`))
+		case "GET /metrics":
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write([]byte("anvil_vm_create_total 1\n"))
+		case "GET /tenants":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"tenant_id":"tenant-1","quota":{"active_vms":2},"usage":{"active_vms":1}}]`))
+		case "GET /tenants/tenant-1":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"tenant_id":"tenant-1","quota":{"active_vms":2},"usage":{"active_vms":1}}`))
+		case "PUT /tenants/tenant-1":
+			var body TenantUpsertRequest
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode tenant upsert body: %v", err)
+			}
+			if body.Quota.ActiveVMs != 3 {
+				t.Fatalf("active_vms = %d, want 3", body.Quota.ActiveVMs)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"tenant_id":"tenant-1","quota":{"active_vms":3},"usage":{"active_vms":1}}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.RequestURI())
+		}
+	}))
+	defer server.Close()
+
+	client := NewDaemonClient(Config{DaemonURL: server.URL, APIToken: "test-token"}, server.Client())
+	health, err := client.DaemonHealth(context.Background())
+	if err != nil {
+		t.Fatalf("DaemonHealth returned error: %v", err)
+	}
+	if health.Status != "ok" || health.VMCount != 1 || health.SnapshotCount != 2 || !health.AuthEnabled {
+		t.Fatalf("health = %+v, want ok vm=1 snapshot=2 auth=true", health)
+	}
+	metrics, err := client.Metrics(context.Background())
+	if err != nil {
+		t.Fatalf("Metrics returned error: %v", err)
+	}
+	if metrics != "anvil_vm_create_total 1\n" {
+		t.Fatalf("metrics = %q", metrics)
+	}
+	tenants, err := client.ListTenants(context.Background())
+	if err != nil {
+		t.Fatalf("ListTenants returned error: %v", err)
+	}
+	if len(tenants) != 1 || tenants[0].TenantID != "tenant-1" {
+		t.Fatalf("tenants = %+v, want tenant-1", tenants)
+	}
+	tenant, err := client.GetTenant(context.Background(), "tenant-1")
+	if err != nil {
+		t.Fatalf("GetTenant returned error: %v", err)
+	}
+	if tenant.TenantID != "tenant-1" || tenant.Quota.ActiveVMs != 2 || tenant.Usage.ActiveVMs != 1 {
+		t.Fatalf("tenant = %+v, want tenant-1 quota=2 usage=1", tenant)
+	}
+	upserted, err := client.UpsertTenant(context.Background(), "tenant-1", TenantQuota{ActiveVMs: 3})
+	if err != nil {
+		t.Fatalf("UpsertTenant returned error: %v", err)
+	}
+	if upserted.Quota.ActiveVMs != 3 {
+		t.Fatalf("upserted quota = %+v, want active_vms=3", upserted.Quota)
+	}
+
+	want := []string{
+		"GET /health",
+		"GET /metrics",
+		"GET /tenants",
+		"GET /tenants/tenant-1",
+		"PUT /tenants/tenant-1",
+	}
+	if len(paths) != len(want) {
+		t.Fatalf("paths = %v, want %v", paths, want)
+	}
+	for i := range want {
+		if paths[i] != want[i] {
+			t.Fatalf("paths[%d] = %q, want %q", i, paths[i], want[i])
 		}
 	}
 }
@@ -188,10 +317,13 @@ func TestDaemonClientCreateSnapshot(t *testing.T) {
 		if body.Type != "diff" {
 			t.Fatalf("type = %q, want diff", body.Type)
 		}
+		if body.TenantID != "tenant-1" {
+			t.Fatalf("tenant_id = %q, want tenant-1", body.TenantID)
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{"snapshot_id":"snap-1","source_vm_id":"vm-1","profile":"dev","snapshot_type":"diff","base_snapshot_id":"snap-base","created_at":"2026-05-11T00:00:00Z"}`))
+		_, _ = w.Write([]byte(`{"snapshot_id":"snap-1","source_vm_id":"vm-1","tenant_id":"tenant-1","profile":"dev","egress_policy":"profile","snapshot_type":"diff","base_snapshot_id":"snap-base","created_at":"2026-05-11T00:00:00Z"}`))
 	}))
 	defer server.Close()
 
@@ -199,6 +331,7 @@ func TestDaemonClientCreateSnapshot(t *testing.T) {
 	resp, err := client.CreateSnapshot(context.Background(), "vm-1", CreateSnapshotRequest{
 		StopAfter: true,
 		Type:      "diff",
+		TenantID:  "tenant-1",
 	})
 	if err != nil {
 		t.Fatalf("CreateSnapshot returned error: %v", err)
@@ -209,6 +342,9 @@ func TestDaemonClientCreateSnapshot(t *testing.T) {
 	}
 	if resp.SourceVMID != "vm-1" {
 		t.Fatalf("SourceVMID = %q, want vm-1", resp.SourceVMID)
+	}
+	if resp.TenantID != "tenant-1" || resp.EgressPolicy != "profile" {
+		t.Fatalf("tenant/egress = %q/%q, want tenant-1/profile", resp.TenantID, resp.EgressPolicy)
 	}
 	if resp.Profile != "dev" {
 		t.Fatalf("Profile = %q, want dev", resp.Profile)
@@ -256,7 +392,7 @@ func TestDaemonClientListSnapshots(t *testing.T) {
 	}
 }
 
-func TestDaemonClientRestoreSnapshotDecodesAgentToken(t *testing.T) {
+func TestDaemonClientRestoreSnapshotForwardsContractAndOmitsAgentToken(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("method = %s, want %s", r.Method, http.MethodPost)
@@ -264,15 +400,25 @@ func TestDaemonClientRestoreSnapshotDecodesAgentToken(t *testing.T) {
 		if r.URL.Path != "/snapshots/snap-1/restore" {
 			t.Fatalf("path = %s, want /snapshots/snap-1/restore", r.URL.Path)
 		}
+		var body RestoreSnapshotRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		if body.TenantID != "tenant-1" || body.EgressPolicy != "profile" {
+			t.Fatalf("tenant/egress = %q/%q, want tenant-1/profile", body.TenantID, body.EgressPolicy)
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{"vm_id":"vm-restored","guest_ip":"10.0.0.9","agent_url":"http://10.0.0.9:8080","profile":"dev","agent_token":"secret-token","source_snapshot_id":"snap-1"}`))
+		_, _ = w.Write([]byte(`{"vm_id":"vm-restored","guest_ip":"10.0.0.9","agent_url":"http://10.0.0.9:8080","profile":"dev","tenant_id":"tenant-1","egress_policy":"profile","source_snapshot_id":"snap-1"}`))
 	}))
 	defer server.Close()
 
 	client := NewDaemonClient(Config{DaemonURL: server.URL}, server.Client())
-	resp, err := client.RestoreSnapshot(context.Background(), "snap-1")
+	resp, err := client.RestoreSnapshot(context.Background(), "snap-1", RestoreSnapshotRequest{
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+	})
 	if err != nil {
 		t.Fatalf("RestoreSnapshot returned error: %v", err)
 	}
@@ -280,8 +426,8 @@ func TestDaemonClientRestoreSnapshotDecodesAgentToken(t *testing.T) {
 	if resp.VMID != "vm-restored" {
 		t.Fatalf("VMID = %q, want vm-restored", resp.VMID)
 	}
-	if resp.AgentToken != "secret-token" {
-		t.Fatalf("AgentToken = %q, want secret-token", resp.AgentToken)
+	if resp.TenantID != "tenant-1" || resp.EgressPolicy != "profile" {
+		t.Fatalf("tenant/egress = %q/%q, want tenant-1/profile", resp.TenantID, resp.EgressPolicy)
 	}
 	if resp.SourceSnapshotID != "snap-1" {
 		t.Fatalf("SourceSnapshotID = %q, want snap-1", resp.SourceSnapshotID)

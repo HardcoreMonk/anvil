@@ -306,14 +306,14 @@ ephemera는 Firecracker MicroVM 위에서 Goose AI agent를 격리 실행하는 
 | 줄 | 분석 |
 |---:|---|
 | 1-2 | bash script이며 오류, unset 변수, pipe 실패를 즉시 중단한다. |
-| 4-8 | Debian Bookworm minbase를 선택한 이유와 host dependency를 주석으로 설명한다. |
+| 4-8 | Debian Trixie minbase를 선택한 이유와 host dependency를 주석으로 설명한다. |
 | 9-14 | output image, mount directory, Goose download URL, temp 파일 변수를 선언한다. |
 | 16-25 | cleanup trap이다. mount된 pseudo filesystem/rootfs를 해제하고 temp 파일/directory를 제거한다. |
 | 27-37 | host dependency 검사 함수다. curl, debootstrap, ext4 도구가 없으면 설치 명령을 안내하고 종료한다. |
 | 39-40 | dependency를 검사하고 artifact directory를 만든다. |
 | 42-43 | Goose release tarball을 host에서 다운로드한다. checksum 검증은 없다. |
 | 45-50 | 1GB ext4 image를 만들고 format한 뒤 mount한다. 주석의 "512M initial"은 실제 `fallocate -l 1G`와 맞지 않는다. |
-| 52-60 | debootstrap으로 Debian Bookworm minbase를 설치한다. libgomp1, ca-certificates, tzdata를 같이 포함한다. |
+| 52-60 | debootstrap으로 Debian Trixie minbase를 설치한다. libgomp1, libvulkan1, ca-certificates, tzdata, iproute2를 같이 포함한다. |
 | 62-71 | Goose tarball을 풀어 `goose` binary를 찾아 VM image의 `/usr/local/bin/goose`에 설치한다. |
 | 73-79 | daemon이 미리 빌드한 `artifacts/goose-agent`를 VM image에 설치한다. 없으면 실패한다. |
 | 81-88 | `micro-init`의 역할을 주석으로 설명한다. systemd 없이 goose-agent가 PID 1이 된다. |

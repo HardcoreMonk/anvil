@@ -43,7 +43,7 @@ ephemera는 호스트에서 Firecracker MicroVM을 만들고, 각 VM 안에서 G
 1. `cmd/goose-daemon/main.go`가 실행된다.
 2. 현재 작업 디렉터리 기준으로 artifact/config 경로를 잡는다.
 3. `artifacts/goose-agent`가 없으면 `cmd/goose-agent`를 Linux amd64 바이너리로 빌드한다.
-4. golden image가 없으면 `scripts/build_image.sh`로 Debian Bookworm rootfs를 만든다.
+4. golden image가 없으면 `scripts/build_image.sh`로 Debian Trixie rootfs를 만든다.
 5. kernel과 Firecracker binary를 준비한다.
 6. Linux bridge `goose-br0`와 NAT를 준비한다.
 7. `127.0.0.1:3000` 기본 주소로 control plane HTTP API를 시작한다.
@@ -116,7 +116,7 @@ ephemera는 호스트에서 Firecracker MicroVM을 만들고, 각 VM 안에서 G
 - VM process를 시작한다.
 
 `scripts/build_image.sh`
-- Debian Bookworm minbase rootfs를 만든다.
+- Debian Trixie minbase rootfs를 만든다.
 - Goose binary와 goose-agent를 image 안에 넣는다.
 - `micro-init`을 작성한다.
 - image를 shrink한다.

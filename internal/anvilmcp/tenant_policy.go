@@ -1,6 +1,7 @@
 package anvilmcp
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -70,6 +71,13 @@ type RuntimeAuditRecord struct {
 	ToolName        string    `json:"tool_name"`
 	DaemonOperation string    `json:"daemon_operation"`
 	ResultCode      string    `json:"result_code"`
+	Error           string    `json:"error,omitempty"`
+}
+
+type RuntimeAuditRetention struct {
+	KeepLast      int       `json:"keep_last"`
+	MaxAgeSeconds int64     `json:"max_age_seconds"`
+	Now           time.Time `json:"now,omitempty"`
 }
 
 func NormalizeTenantID(value string) (string, error) {
@@ -186,6 +194,7 @@ func AppendRuntimeAudit(auditPath string, record RuntimeAuditRecord) error {
 	record.ToolName = strings.TrimSpace(record.ToolName)
 	record.DaemonOperation = strings.TrimSpace(record.DaemonOperation)
 	record.ResultCode = strings.TrimSpace(record.ResultCode)
+	record.Error = strings.TrimSpace(record.Error)
 	if record.ToolName == "" {
 		return fmt.Errorf("tool_name must be non-empty")
 	}
@@ -242,6 +251,129 @@ func AppendRuntimeAudit(auditPath string, record RuntimeAuditRecord) error {
 		return fmt.Errorf("chmod runtime audit file after append: %w", err)
 	}
 	return nil
+}
+
+func ReadRuntimeAudit(auditPath string) ([]RuntimeAuditRecord, error) {
+	auditPath = strings.TrimSpace(auditPath)
+	if auditPath == "" {
+		return nil, fmt.Errorf("audit path must be non-empty")
+	}
+	if info, err := os.Lstat(auditPath); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("runtime audit file is a symlink")
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("runtime audit file is not regular")
+		}
+	} else if os.IsNotExist(err) {
+		return nil, nil
+	} else {
+		return nil, fmt.Errorf("stat runtime audit file: %w", err)
+	}
+
+	f, err := os.Open(auditPath)
+	if err != nil {
+		return nil, fmt.Errorf("open runtime audit file: %w", err)
+	}
+	defer f.Close()
+
+	var records []RuntimeAuditRecord
+	scanner := bufio.NewScanner(f)
+	lineNo := 0
+	for scanner.Scan() {
+		lineNo++
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var record RuntimeAuditRecord
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			return nil, fmt.Errorf("parse runtime audit line %d: %w", lineNo, err)
+		}
+		records = append(records, record)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read runtime audit file: %w", err)
+	}
+	return records, nil
+}
+
+func PruneRuntimeAudit(auditPath string, policy RuntimeAuditRetention) error {
+	auditPath = strings.TrimSpace(auditPath)
+	if auditPath == "" {
+		return fmt.Errorf("audit path must be non-empty")
+	}
+	if policy.KeepLast < 0 {
+		return fmt.Errorf("keep_last must be non-negative")
+	}
+	if policy.MaxAgeSeconds < 0 {
+		return fmt.Errorf("max_age_seconds must be non-negative")
+	}
+	if _, err := os.Lstat(auditPath); os.IsNotExist(err) {
+		return nil
+	}
+	records, err := ReadRuntimeAudit(auditPath)
+	if err != nil {
+		return err
+	}
+	if records == nil {
+		return nil
+	}
+
+	kept := records
+	if policy.MaxAgeSeconds > 0 {
+		now := policy.Now
+		if now.IsZero() {
+			now = time.Now().UTC()
+		} else {
+			now = now.UTC()
+		}
+		cutoff := now.Add(-time.Duration(policy.MaxAgeSeconds) * time.Second)
+		kept = make([]RuntimeAuditRecord, 0, len(records))
+		for _, record := range records {
+			if record.Timestamp.IsZero() || !record.Timestamp.Before(cutoff) {
+				kept = append(kept, record)
+			}
+		}
+	}
+	if policy.KeepLast > 0 && len(kept) > policy.KeepLast {
+		kept = kept[len(kept)-policy.KeepLast:]
+	}
+	return rewriteRuntimeAudit(auditPath, kept)
+}
+
+func rewriteRuntimeAudit(auditPath string, records []RuntimeAuditRecord) error {
+	dir := filepath.Dir(auditPath)
+	if dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return fmt.Errorf("create runtime audit dir: %w", err)
+		}
+	}
+	tmp, err := os.CreateTemp(dir, ".runtime-audit-*.jsonl")
+	if err != nil {
+		return fmt.Errorf("create runtime audit temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		return fmt.Errorf("chmod runtime audit temp file: %w", err)
+	}
+	enc := json.NewEncoder(tmp)
+	for _, record := range records {
+		if err := enc.Encode(record); err != nil {
+			tmp.Close()
+			return fmt.Errorf("write runtime audit temp file: %w", err)
+		}
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close runtime audit temp file: %w", err)
+	}
+	if err := os.Rename(tmpPath, auditPath); err != nil {
+		return fmt.Errorf("replace runtime audit file: %w", err)
+	}
+	return os.Chmod(auditPath, 0600)
 }
 
 func validateQuotaValues(values ...interface{}) error {
