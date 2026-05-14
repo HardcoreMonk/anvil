@@ -262,7 +262,7 @@ func TestDaemonClientFlockEndpoints(t *testing.T) {
 				t.Fatalf("tenant/egress = %q/%q, want tenant-1/locked", body.TenantID, body.EgressPolicy)
 			}
 			w.WriteHeader(http.StatusCreated)
-			_, _ = w.Write([]byte(`{"flock_id":"flock-1","task":"ship feature","tenant_id":"tenant-1","egress_policy":"locked","agents":null,"town_wall_url":"http://daemon/flocks/flock-1/wall","post_url":"http://daemon/flocks/flock-1/post"}`))
+			_, _ = w.Write([]byte(`{"flock_id":"flock-1","task":"ship feature","tenant_id":"tenant-1","egress_policy":"locked","agents":null,"townwall_url":"http://127.0.0.1:3000/flocks/flock-1/wall","post_url":"http://daemon/flocks/flock-1/post"}`))
 		case "GET /flocks":
 			_, _ = w.Write([]byte(`null`))
 		case "GET /flocks/flock-1":
@@ -307,7 +307,7 @@ func TestDaemonClientFlockEndpoints(t *testing.T) {
 	if created.Agents == nil || len(created.Agents) != 0 {
 		t.Fatalf("created agents = %#v, want empty non-nil slice", created.Agents)
 	}
-	if created.TownWallURL != "http://daemon/flocks/flock-1/wall" || created.PostURL != "http://daemon/flocks/flock-1/post" {
+	if created.TownWallURL != "http://127.0.0.1:3000/flocks/flock-1/wall" || created.PostURL != "http://daemon/flocks/flock-1/post" {
 		t.Fatalf("wall/post urls = %q/%q", created.TownWallURL, created.PostURL)
 	}
 

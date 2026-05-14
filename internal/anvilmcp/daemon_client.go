@@ -96,7 +96,7 @@ type FlockCreateResponse struct {
 	TenantID     string           `json:"tenant_id,omitempty"`
 	EgressPolicy string           `json:"egress_policy,omitempty"`
 	Agents       []FlockAgentInfo `json:"agents"`
-	TownWallURL  string           `json:"town_wall_url"`
+	TownWallURL  string           `json:"townwall_url"`
 	PostURL      string           `json:"post_url"`
 }
 
