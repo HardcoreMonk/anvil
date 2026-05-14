@@ -16,6 +16,7 @@ import (
 type fakeDaemon struct {
 	spawnCalls   int
 	spawnProfile string
+	spawnReq     SpawnVMRequest
 	spawnResp    *SpawnVMResponse
 	spawnErr     error
 	onSpawn      func()
@@ -73,6 +74,7 @@ type fakeDaemon struct {
 
 	restoreSnapshotCalls int
 	restoreSnapshotID    string
+	restoreSnapshotReq   RestoreSnapshotRequest
 	restoreSnapshotResp  *RestoreSnapshotResponse
 	restoreSnapshotErr   error
 
@@ -82,9 +84,10 @@ type fakeDaemon struct {
 	deleteSnapshotErr   error
 }
 
-func (f *fakeDaemon) SpawnVM(_ context.Context, profile string) (*SpawnVMResponse, error) {
+func (f *fakeDaemon) SpawnVM(_ context.Context, req SpawnVMRequest) (*SpawnVMResponse, error) {
 	f.spawnCalls++
-	f.spawnProfile = profile
+	f.spawnProfile = req.Profile
+	f.spawnReq = req
 	if f.onSpawn != nil {
 		f.onSpawn()
 	}
@@ -94,7 +97,14 @@ func (f *fakeDaemon) SpawnVM(_ context.Context, profile string) (*SpawnVMRespons
 	if f.spawnResp != nil {
 		return f.spawnResp, nil
 	}
-	return &SpawnVMResponse{VMID: "vm-1", GuestIP: "10.0.0.2", AgentURL: "http://10.0.0.2:3000", Profile: profile}, nil
+	return &SpawnVMResponse{
+		VMID:         "vm-1",
+		GuestIP:      "10.0.0.2",
+		AgentURL:     "http://10.0.0.2:3000",
+		Profile:      req.Profile,
+		TenantID:     req.TenantID,
+		EgressPolicy: req.EgressPolicy,
+	}, nil
 }
 
 func (f *fakeDaemon) RunTask(ctx context.Context, vmID, prompt string) (*RawDaemonResponse, error) {
@@ -214,9 +224,10 @@ func (f *fakeDaemon) ListSnapshots(_ context.Context) ([]SnapshotInfo, error) {
 	}}, nil
 }
 
-func (f *fakeDaemon) RestoreSnapshot(_ context.Context, snapshotID string) (*RestoreSnapshotResponse, error) {
+func (f *fakeDaemon) RestoreSnapshot(_ context.Context, snapshotID string, req RestoreSnapshotRequest) (*RestoreSnapshotResponse, error) {
 	f.restoreSnapshotCalls++
 	f.restoreSnapshotID = snapshotID
+	f.restoreSnapshotReq = req
 	if f.restoreSnapshotErr != nil {
 		return nil, f.restoreSnapshotErr
 	}
@@ -228,7 +239,8 @@ func (f *fakeDaemon) RestoreSnapshot(_ context.Context, snapshotID string) (*Res
 		GuestIP:          "10.0.0.9",
 		AgentURL:         "http://10.0.0.9:8080",
 		Profile:          "dev",
-		AgentToken:       "secret-token",
+		TenantID:         req.TenantID,
+		EgressPolicy:     req.EgressPolicy,
 		SourceSnapshotID: snapshotID,
 	}, nil
 }
@@ -251,17 +263,19 @@ type concurrentSpawnDaemon struct {
 	next int
 }
 
-func (f *concurrentSpawnDaemon) SpawnVM(_ context.Context, profile string) (*SpawnVMResponse, error) {
+func (f *concurrentSpawnDaemon) SpawnVM(_ context.Context, req SpawnVMRequest) (*SpawnVMResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	f.next++
 	vmID := fmt.Sprintf("vm-%d", f.next)
 	return &SpawnVMResponse{
-		VMID:     vmID,
-		GuestIP:  "10.0.0.2",
-		AgentURL: "http://10.0.0.2:3000",
-		Profile:  profile,
+		VMID:         vmID,
+		GuestIP:      "10.0.0.2",
+		AgentURL:     "http://10.0.0.2:3000",
+		Profile:      req.Profile,
+		TenantID:     req.TenantID,
+		EgressPolicy: req.EgressPolicy,
 	}, nil
 }
 
@@ -485,6 +499,30 @@ func TestToolsSpawnBindsSession(t *testing.T) {
 	}
 }
 
+func TestToolsSpawnForwardsTenantAndEgressToDaemon(t *testing.T) {
+	daemon := &fakeDaemon{}
+	tools := NewTools(daemon, NewSessionStore(), time.Second)
+
+	out, err := tools.SpawnVM(context.Background(), SpawnVMInput{
+		Profile:      "dev",
+		TenantID:     "tenant-1",
+		EgressPolicy: "deny_all",
+	})
+	if err != nil {
+		t.Fatalf("SpawnVM returned error: %v", err)
+	}
+
+	if daemon.spawnReq.Profile != "dev" {
+		t.Fatalf("spawn profile = %q, want dev", daemon.spawnReq.Profile)
+	}
+	if daemon.spawnReq.TenantID != "tenant-1" || daemon.spawnReq.EgressPolicy != "deny_all" {
+		t.Fatalf("spawn tenant/egress = %q/%q, want tenant-1/deny_all", daemon.spawnReq.TenantID, daemon.spawnReq.EgressPolicy)
+	}
+	if out.TenantID != "tenant-1" || out.EgressPolicy != "deny_all" {
+		t.Fatalf("output tenant/egress = %q/%q, want tenant-1/deny_all", out.TenantID, out.EgressPolicy)
+	}
+}
+
 func TestToolsSpawnSavesPersistentSession(t *testing.T) {
 	daemon := &fakeDaemon{}
 	store := NewSessionStore()
@@ -533,6 +571,43 @@ func TestToolsSpawnAuditsDefaultTenant(t *testing.T) {
 	}
 	if record.ToolName != "anvil_spawn_vm" || record.DaemonOperation != "POST /vms" || record.ResultCode != "success" {
 		t.Fatalf("audit operation = %+v, want spawn success", record)
+	}
+}
+
+func TestToolsAuditsDaemonFailureWithoutRawToken(t *testing.T) {
+	daemonErr := &DaemonError{StatusCode: 502, Body: `{"agent_token":"secret-token","error":"bad gateway"}`}
+	daemon := &fakeDaemon{runErr: daemonErr}
+	auditPath := filepath.Join(t.TempDir(), "runtime-audit.jsonl")
+	tools := NewToolsWithOptions(daemon, NewSessionStore(), time.Second, ToolsOptions{
+		DefaultTenantID: "tenant-1",
+		AuditLogPath:    auditPath,
+	})
+
+	_, err := tools.RunTask(context.Background(), RunTaskInput{VMID: "vm-1", Prompt: "do it"})
+	if !errors.Is(err, daemonErr) {
+		t.Fatalf("RunTask error = %v, want daemon error", err)
+	}
+
+	records, err := ReadRuntimeAudit(auditPath)
+	if err != nil {
+		t.Fatalf("ReadRuntimeAudit() error = %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("audit record count = %d, want 1", len(records))
+	}
+	record := records[0]
+	if record.ResultCode != "error" || record.ToolName != "anvil_run_task" || record.VMID != "vm-1" {
+		t.Fatalf("audit record = %+v, want run task error for vm-1", record)
+	}
+	if record.Error != "daemon returned status 502" {
+		t.Fatalf("audit error = %q, want sanitized daemon status", record.Error)
+	}
+	data, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatalf("read audit path: %v", err)
+	}
+	if strings.Contains(string(data), "agent_token") || strings.Contains(string(data), "secret-token") {
+		t.Fatalf("audit log exposes raw daemon token body: %q", string(data))
 	}
 }
 
@@ -1035,6 +1110,7 @@ func TestToolsCreateSnapshotUsesSession(t *testing.T) {
 
 	out, err := tools.CreateSnapshot(context.Background(), CreateSnapshotInput{
 		SessionName: "work",
+		TenantID:    "tenant-1",
 		StopAfter:   true,
 		Type:        "DIFF",
 	})
@@ -1053,6 +1129,9 @@ func TestToolsCreateSnapshotUsesSession(t *testing.T) {
 	}
 	if daemon.createSnapshotReq.Type != "diff" {
 		t.Fatalf("Type = %q, want diff", daemon.createSnapshotReq.Type)
+	}
+	if daemon.createSnapshotReq.TenantID != "tenant-1" {
+		t.Fatalf("TenantID = %q, want tenant-1", daemon.createSnapshotReq.TenantID)
 	}
 	if out.SnapshotID != "snap-1" {
 		t.Fatalf("SnapshotID = %q, want snap-1", out.SnapshotID)
@@ -1220,8 +1299,10 @@ func TestToolsRestoreSnapshotBindsSession(t *testing.T) {
 	tools := NewTools(daemon, store, time.Second)
 
 	out, err := tools.RestoreSnapshot(context.Background(), RestoreSnapshotInput{
-		SnapshotID:  "snap-1",
-		SessionName: "restored",
+		SnapshotID:   "snap-1",
+		SessionName:  "restored",
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
 	})
 	if err != nil {
 		t.Fatalf("RestoreSnapshot returned error: %v", err)
@@ -1233,8 +1314,14 @@ func TestToolsRestoreSnapshotBindsSession(t *testing.T) {
 	if daemon.restoreSnapshotID != "snap-1" {
 		t.Fatalf("RestoreSnapshot snapshotID = %q, want snap-1", daemon.restoreSnapshotID)
 	}
+	if daemon.restoreSnapshotReq.TenantID != "tenant-1" || daemon.restoreSnapshotReq.EgressPolicy != "profile" {
+		t.Fatalf("restore tenant/egress = %q/%q, want tenant-1/profile", daemon.restoreSnapshotReq.TenantID, daemon.restoreSnapshotReq.EgressPolicy)
+	}
 	if out.VMID != "vm-restored" {
 		t.Fatalf("VMID = %q, want vm-restored", out.VMID)
+	}
+	if out.TenantID != "tenant-1" || out.EgressPolicy != "profile" {
+		t.Fatalf("output tenant/egress = %q/%q, want tenant-1/profile", out.TenantID, out.EgressPolicy)
 	}
 	if out.SourceSnapshotID != "snap-1" {
 		t.Fatalf("SourceSnapshotID = %q, want snap-1", out.SourceSnapshotID)

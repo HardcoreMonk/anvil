@@ -1,13 +1,14 @@
 #!/bin/bash
 set -euo pipefail
 
-# Guest OS: Debian Bookworm (12) minbase — native glibc, required for linux-gnu Goose binary.
+# Guest OS: Debian Trixie minbase — native glibc new enough for the linux-gnu Goose binary.
 # Alpine + gcompat was attempted but gcompat lacks internal glibc ABI symbols (_Wind_GetDataRelBase).
 # Supports host OS: Ubuntu 22.04 and 24.04
 # Host dependencies: curl, debootstrap, e2fsprogs, util-linux
 
 IMAGE_NAME="artifacts/golden-image.ext4"
 MNT_DIR="/tmp/goose-rootfs"
+DEBIAN_SUITE="trixie"
 
 GOOSE_URL="https://github.com/aaif-goose/goose/releases/download/stable/goose-x86_64-unknown-linux-gnu.tar.bz2"
 GOOSE_TARBALL="/tmp/goose.tar.bz2"
@@ -49,15 +50,16 @@ mkfs.ext4 -F -L goose-root -m 0 "$IMAGE_NAME"
 mkdir -p "$MNT_DIR"
 mount "$IMAGE_NAME" "$MNT_DIR"
 
-echo "==> 3. Installing Debian Bookworm minbase via debootstrap <=="
+echo "==> 3. Installing Debian Trixie minbase via debootstrap <=="
 # --variant=minbase: essential packages only (~180MB, proper glibc included)
 # --include: batched into the same pass to avoid a separate apt-get run
 #   libgomp1:    OpenMP runtime required by Goose
+#   libvulkan1:  runtime library required by the linux-gnu Goose binary
 #   ca-certificates: for HTTPS LLM API calls from within the VM
 debootstrap \
     --variant=minbase \
-    --include=libgomp1,ca-certificates,tzdata,iproute2 \
-    bookworm "$MNT_DIR" http://deb.debian.org/debian/
+    --include=libgomp1,libvulkan1,ca-certificates,tzdata,iproute2 \
+    "$DEBIAN_SUITE" "$MNT_DIR" http://deb.debian.org/debian/
 
 echo "==> 4. Installing Goose binary and goose-agent <=="
 GOOSE_TMP=$(mktemp -d)

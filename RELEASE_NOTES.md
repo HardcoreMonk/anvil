@@ -46,9 +46,11 @@
 - `internal/anvilmcp` multi-tenant foundation:
   - `tenant_id` validation
   - tenant quota decision helper
-  - runtime host selection primitive
+  - scheduler decision service and runtime host selection primitive
   - `deny_all`/`profile`/`allow_all` egress policy enum
-  - `ANVIL_MCP_AUDIT_LOG` 기반 runtime audit JSONL append helper
+  - daemon tenant/egress contract forwarding for spawn, snapshot, restore
+  - `ANVIL_MCP_AUDIT_LOG` 기반 runtime audit JSONL append/read/retention helper
+  - daemon failure audit records with sanitized error messages
 
 ## 변경됨
 
@@ -59,8 +61,13 @@
   지원해 IronClaw/anvil 문맥에서 daemon 설정을 읽을 수 있게 했다.
 - workspace copy-in/out은 파일 크기 제한, overwrite 정책, text/base64 encoding
   검증, 표준화된 오류 본문을 적용한다.
+- daemon VM/snapshot/restore contract는 optional `tenant_id`와 `egress_policy`를
+  보존한다.
+- `POST /snapshots/{id}/restore` 응답은 더 이상 `agent_token`을 포함하지 않는다.
 - `artifacts/goose-agent`는 source hash/version stamp 기반으로 재빌드 여부를
   판단한다.
+- guest golden image는 현재 linux-gnu Goose 바이너리의 glibc/runtime 의존성을
+  만족하도록 Debian Trixie minbase와 `libvulkan1`을 사용한다.
 
 ## 검증됨
 
@@ -97,7 +104,7 @@ ephemera `v0.2.0`은 v0.1.0의 기본 VM 생성/작업 실행 모델에 snapshot
   주입된다.
 - `POST /tasks`와 `POST /stop`은 VM별 token을 요구한다.
 - `GET /health`는 readiness probe를 위해 인증 없이 유지한다.
-- `POST /vms` 응답에만 `agent_token`을 포함한다. list, snapshot 응답에는
+- `POST /vms` 응답에만 `agent_token`을 포함한다. list, snapshot, restore 응답에는
   노출하지 않는다.
 
 ### 제어 평면 API 인증

@@ -3,6 +3,7 @@ package anvilmcp
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"path"
 	"strings"
@@ -19,7 +20,7 @@ const (
 )
 
 type Daemon interface {
-	SpawnVM(ctx context.Context, profile string) (*SpawnVMResponse, error)
+	SpawnVM(ctx context.Context, req SpawnVMRequest) (*SpawnVMResponse, error)
 	RunTask(ctx context.Context, vmID, prompt string) (*RawDaemonResponse, error)
 	CopyIn(ctx context.Context, vmID, workspacePath, content string, overwrite bool) (*RawDaemonResponse, error)
 	CopyOut(ctx context.Context, vmID, workspacePath string) (string, error)
@@ -28,7 +29,7 @@ type Daemon interface {
 	Delete(ctx context.Context, vmID string) (*RawDaemonResponse, error)
 	CreateSnapshot(ctx context.Context, vmID string, req CreateSnapshotRequest) (*SnapshotInfo, error)
 	ListSnapshots(ctx context.Context) ([]SnapshotInfo, error)
-	RestoreSnapshot(ctx context.Context, snapshotID string) (*RestoreSnapshotResponse, error)
+	RestoreSnapshot(ctx context.Context, snapshotID string, req RestoreSnapshotRequest) (*RestoreSnapshotResponse, error)
 	DeleteSnapshot(ctx context.Context, snapshotID string) (*RawDaemonResponse, error)
 }
 
@@ -58,17 +59,20 @@ type ToolsOptions struct {
 }
 
 type SpawnVMInput struct {
-	Profile     string `json:"profile,omitempty"`
-	SessionName string `json:"session_name,omitempty"`
-	TenantID    string `json:"tenant_id,omitempty"`
+	Profile      string `json:"profile,omitempty"`
+	SessionName  string `json:"session_name,omitempty"`
+	TenantID     string `json:"tenant_id,omitempty"`
+	EgressPolicy string `json:"egress_policy,omitempty"`
 }
 
 type SpawnVMOutput struct {
-	VMID        string `json:"vm_id"`
-	GuestIP     string `json:"guest_ip"`
-	AgentURL    string `json:"agent_url"`
-	Profile     string `json:"profile,omitempty"`
-	SessionName string `json:"session_name,omitempty"`
+	VMID         string `json:"vm_id"`
+	GuestIP      string `json:"guest_ip"`
+	AgentURL     string `json:"agent_url"`
+	Profile      string `json:"profile,omitempty"`
+	TenantID     string `json:"tenant_id,omitempty"`
+	EgressPolicy string `json:"egress_policy,omitempty"`
+	SessionName  string `json:"session_name,omitempty"`
 }
 
 type RunTaskInput struct {
@@ -122,9 +126,10 @@ type ListSnapshotsOutput struct {
 }
 
 type RestoreSnapshotInput struct {
-	SnapshotID  string `json:"snapshot_id"`
-	SessionName string `json:"session_name,omitempty"`
-	TenantID    string `json:"tenant_id,omitempty"`
+	SnapshotID   string `json:"snapshot_id"`
+	SessionName  string `json:"session_name,omitempty"`
+	TenantID     string `json:"tenant_id,omitempty"`
+	EgressPolicy string `json:"egress_policy,omitempty"`
 }
 
 type RestoreSnapshotOutput struct {
@@ -132,6 +137,8 @@ type RestoreSnapshotOutput struct {
 	GuestIP          string `json:"guest_ip"`
 	AgentURL         string `json:"agent_url"`
 	Profile          string `json:"profile,omitempty"`
+	TenantID         string `json:"tenant_id,omitempty"`
+	EgressPolicy     string `json:"egress_policy,omitempty"`
 	SourceSnapshotID string `json:"source_snapshot_id"`
 	SessionName      string `json:"session_name,omitempty"`
 }
@@ -213,15 +220,23 @@ func (t *Tools) SpawnVM(ctx context.Context, input SpawnVMInput) (*SpawnVMOutput
 	if err != nil {
 		return nil, err
 	}
+	egressPolicy, err := NormalizeEgressPolicy(input.EgressPolicy)
+	if err != nil {
+		return nil, err
+	}
 	profile := strings.TrimSpace(input.Profile)
 	sessionName := strings.TrimSpace(input.SessionName)
 	if sessionName != "" && t.sessionExists(sessionName) {
 		return nil, fmt.Errorf("session %q already exists", sessionName)
 	}
 
-	res, err := t.daemon.SpawnVM(ctx, profile)
+	res, err := t.daemon.SpawnVM(ctx, SpawnVMRequest{
+		Profile:      profile,
+		TenantID:     tenantID,
+		EgressPolicy: string(egressPolicy),
+	})
 	if err != nil {
-		return nil, err
+		return nil, t.auditFailureAndReturn(tenantID, "", sessionName, "anvil_spawn_vm", "POST /vms", err)
 	}
 
 	if sessionName != "" {
@@ -253,11 +268,13 @@ func (t *Tools) SpawnVM(ctx context.Context, input SpawnVMInput) (*SpawnVMOutput
 	}
 
 	out := &SpawnVMOutput{
-		VMID:        res.VMID,
-		GuestIP:     res.GuestIP,
-		AgentURL:    res.AgentURL,
-		Profile:     res.Profile,
-		SessionName: sessionName,
+		VMID:         res.VMID,
+		GuestIP:      res.GuestIP,
+		AgentURL:     res.AgentURL,
+		Profile:      res.Profile,
+		TenantID:     res.TenantID,
+		EgressPolicy: res.EgressPolicy,
+		SessionName:  sessionName,
 	}
 	if err := t.auditSuccess(tenantID, res.VMID, sessionName, "anvil_spawn_vm", "POST /vms"); err != nil {
 		return nil, fmt.Errorf("spawn VM %q succeeded but failed to append runtime audit: %w", res.VMID, err)
@@ -302,7 +319,7 @@ func (t *Tools) RunTask(ctx context.Context, input RunTaskInput) (*RawDaemonResp
 
 	out, err := t.daemon.RunTask(ctx, vmID, input.Prompt)
 	if err != nil {
-		return nil, err
+		return nil, t.auditFailureAndReturn(tenantID, vmID, input.SessionName, "anvil_run_task", "POST /vms/{vm_id}/tasks", err)
 	}
 	if err := t.auditSuccess(tenantID, vmID, input.SessionName, "anvil_run_task", "POST /vms/{vm_id}/tasks"); err != nil {
 		return nil, err
@@ -348,7 +365,7 @@ func (t *Tools) CopyIn(ctx context.Context, input CopyInInput) (*RawDaemonRespon
 	}
 	out, err := t.daemon.CopyIn(ctx, vmID, workspacePath, content, input.Overwrite)
 	if err != nil {
-		return nil, err
+		return nil, t.auditFailureAndReturn(tenantID, vmID, input.SessionName, "anvil_copy_in", "PUT /vms/{vm_id}/workspace", err)
 	}
 	if err := t.auditSuccess(tenantID, vmID, input.SessionName, "anvil_copy_in", "PUT /vms/{vm_id}/workspace"); err != nil {
 		return nil, err
@@ -383,7 +400,7 @@ func (t *Tools) CopyOut(ctx context.Context, input CopyOutInput) (*CopyOutOutput
 	}
 	content, err := t.daemon.CopyOut(ctx, vmID, workspacePath)
 	if err != nil {
-		return nil, err
+		return nil, t.auditFailureAndReturn(tenantID, vmID, input.SessionName, "anvil_copy_out", "GET /vms/{vm_id}/workspace", err)
 	}
 	if encoding == "base64" {
 		content = base64.StdEncoding.EncodeToString([]byte(content))
@@ -417,7 +434,7 @@ func (t *Tools) Health(ctx context.Context, input VMIdentityInput) (*RawDaemonRe
 	}
 	out, err := t.daemon.Health(ctx, vmID)
 	if err != nil {
-		return nil, err
+		return nil, t.auditFailureAndReturn(tenantID, vmID, input.SessionName, "anvil_get_vm_health", "GET /vms/{vm_id}/health", err)
 	}
 	if err := t.auditSuccess(tenantID, vmID, input.SessionName, "anvil_get_vm_health", "GET /vms/{vm_id}/health"); err != nil {
 		return nil, err
@@ -444,7 +461,7 @@ func (t *Tools) StopVM(ctx context.Context, input VMIdentityInput) (*RawDaemonRe
 	}
 	out, err := t.daemon.Stop(ctx, vmID)
 	if err != nil {
-		return nil, err
+		return nil, t.auditFailureAndReturn(tenantID, vmID, input.SessionName, "anvil_stop_vm", "POST /vms/{vm_id}/stop", err)
 	}
 	if err := t.auditSuccess(tenantID, vmID, input.SessionName, "anvil_stop_vm", "POST /vms/{vm_id}/stop"); err != nil {
 		return nil, err
@@ -472,7 +489,7 @@ func (t *Tools) DeleteVM(ctx context.Context, input VMIdentityInput) (*RawDaemon
 
 	res, err := t.daemon.Delete(ctx, vmID)
 	if err != nil {
-		return nil, err
+		return nil, t.auditFailureAndReturn(tenantID, vmID, input.SessionName, "anvil_delete_vm", "DELETE /vms/{vm_id}", err)
 	}
 
 	t.sessionPersistenceMu.Lock()
@@ -527,9 +544,10 @@ func (t *Tools) CreateSnapshot(ctx context.Context, input CreateSnapshotInput) (
 	out, err := t.daemon.CreateSnapshot(ctx, vmID, CreateSnapshotRequest{
 		StopAfter: input.StopAfter,
 		Type:      snapshotType,
+		TenantID:  tenantID,
 	})
 	if err != nil {
-		return nil, err
+		return nil, t.auditFailureAndReturn(tenantID, vmID, input.SessionName, "anvil_create_snapshot", "POST /vms/{vm_id}/snapshot", err)
 	}
 	if input.StopAfter {
 		t.sessionPersistenceMu.Lock()
@@ -572,7 +590,7 @@ func (t *Tools) ListSnapshots(ctx context.Context) (*ListSnapshotsOutput, error)
 	}
 	snapshots, err := t.daemon.ListSnapshots(ctx)
 	if err != nil {
-		return nil, err
+		return nil, t.auditFailureAndReturn(tenantID, "", "", "anvil_list_snapshots", "GET /snapshots", err)
 	}
 	if snapshots == nil {
 		snapshots = []SnapshotInfo{}
@@ -600,15 +618,22 @@ func (t *Tools) RestoreSnapshot(ctx context.Context, input RestoreSnapshotInput)
 	if snapshotID == "" {
 		return nil, fmt.Errorf("snapshot_id is required")
 	}
+	egressPolicy, err := NormalizeEgressPolicy(input.EgressPolicy)
+	if err != nil {
+		return nil, err
+	}
 
 	sessionName := strings.TrimSpace(input.SessionName)
 	if sessionName != "" && t.sessionExists(sessionName) {
 		return nil, fmt.Errorf("session %q already exists", sessionName)
 	}
 
-	res, err := t.daemon.RestoreSnapshot(ctx, snapshotID)
+	res, err := t.daemon.RestoreSnapshot(ctx, snapshotID, RestoreSnapshotRequest{
+		TenantID:     tenantID,
+		EgressPolicy: string(egressPolicy),
+	})
 	if err != nil {
-		return nil, err
+		return nil, t.auditFailureAndReturn(tenantID, "", sessionName, "anvil_restore_snapshot", "POST /snapshots/{snapshot_id}/restore", err)
 	}
 
 	if sessionName != "" {
@@ -644,6 +669,8 @@ func (t *Tools) RestoreSnapshot(ctx context.Context, input RestoreSnapshotInput)
 		GuestIP:          res.GuestIP,
 		AgentURL:         res.AgentURL,
 		Profile:          res.Profile,
+		TenantID:         res.TenantID,
+		EgressPolicy:     res.EgressPolicy,
 		SourceSnapshotID: res.SourceSnapshotID,
 		SessionName:      sessionName,
 	}
@@ -672,7 +699,7 @@ func (t *Tools) DeleteSnapshot(ctx context.Context, input SnapshotIdentityInput)
 	}
 	out, err := t.daemon.DeleteSnapshot(ctx, snapshotID)
 	if err != nil {
-		return nil, err
+		return nil, t.auditFailureAndReturn(tenantID, "", "", "anvil_delete_snapshot", "DELETE /snapshots/{snapshot_id}", err)
 	}
 	if err := t.auditSuccess(tenantID, "", "", "anvil_delete_snapshot", "DELETE /snapshots/{snapshot_id}"); err != nil {
 		return nil, err
@@ -756,6 +783,53 @@ func (t *Tools) auditSuccess(tenantID, vmID, sessionAlias, toolName, daemonOpera
 		DaemonOperation: daemonOperation,
 		ResultCode:      "success",
 	})
+}
+
+func (t *Tools) auditFailureAndReturn(tenantID, vmID, sessionAlias, toolName, daemonOperation string, err error) error {
+	if auditErr := t.auditFailure(tenantID, vmID, sessionAlias, toolName, daemonOperation, err); auditErr != nil {
+		return fmt.Errorf("%w; failed to append runtime audit: %v", err, auditErr)
+	}
+	return err
+}
+
+func (t *Tools) auditFailure(tenantID, vmID, sessionAlias, toolName, daemonOperation string, err error) error {
+	if t.auditLogPath == "" || tenantID == "" {
+		return nil
+	}
+	return AppendRuntimeAudit(t.auditLogPath, RuntimeAuditRecord{
+		Timestamp:       time.Now().UTC(),
+		TenantID:        tenantID,
+		VMID:            vmID,
+		SessionAlias:    strings.TrimSpace(sessionAlias),
+		ToolName:        toolName,
+		DaemonOperation: daemonOperation,
+		ResultCode:      "error",
+		Error:           runtimeAuditErrorMessage(err),
+	})
+}
+
+func runtimeAuditErrorMessage(err error) string {
+	if err == nil {
+		return "operation failed"
+	}
+	var daemonErr *DaemonError
+	if errors.As(err, &daemonErr) {
+		return fmt.Sprintf("daemon returned status %d", daemonErr.StatusCode)
+	}
+	msg := strings.TrimSpace(err.Error())
+	if msg == "" {
+		return "operation failed"
+	}
+	lower := strings.ToLower(msg)
+	for _, sensitive := range []string{"agent_token", "authorization", "bearer ", "secret", "token"} {
+		if strings.Contains(lower, sensitive) {
+			return "operation failed"
+		}
+	}
+	if len(msg) > 240 {
+		msg = msg[:240] + "..."
+	}
+	return msg
 }
 
 func (t *Tools) sessionExists(sessionName string) bool {

@@ -67,10 +67,12 @@ func authMiddleware(getClients func() []APIClient, next http.Handler) http.Handl
 
 // VMInfo is stored per-VM and returned by GET /vms (no token).
 type VMInfo struct {
-	VMID     string `json:"vm_id"`
-	GuestIP  string `json:"guest_ip"`
-	AgentURL string `json:"agent_url"` // proxy URL via control plane when EPHEMERA_PUBLIC_URL is set; otherwise http://{private-ip}:8080
-	Profile  string `json:"profile,omitempty"`
+	VMID         string `json:"vm_id"`
+	GuestIP      string `json:"guest_ip"`
+	AgentURL     string `json:"agent_url"` // proxy URL via control plane when EPHEMERA_PUBLIC_URL is set; otherwise http://{private-ip}:8080
+	Profile      string `json:"profile,omitempty"`
+	TenantID     string `json:"tenant_id,omitempty"`
+	EgressPolicy string `json:"egress_policy,omitempty"`
 }
 
 // VMSpawnResult is returned only by POST /vms.
@@ -83,7 +85,9 @@ type VMSpawnResult struct {
 
 // VMSpawnRequest is the optional JSON body for POST /vms.
 type VMSpawnRequest struct {
-	Profile string `json:"profile,omitempty"`
+	Profile      string `json:"profile,omitempty"`
+	TenantID     string `json:"tenant_id,omitempty"`
+	EgressPolicy string `json:"egress_policy,omitempty"`
 }
 
 type runningVM struct {
@@ -398,6 +402,46 @@ func buildAgentURL(vmID, guestIP string) string {
 	return fmt.Sprintf("http://%s:%d", guestIP, agentPort)
 }
 
+func normalizeDaemonTenantID(value string) (string, error) {
+	tenantID := strings.TrimSpace(value)
+	if tenantID == "" {
+		return "", nil
+	}
+	if len(tenantID) > 64 {
+		return "", fmt.Errorf("tenant_id must be <= 64 bytes")
+	}
+	for _, r := range tenantID {
+		if r > 127 {
+			return "", fmt.Errorf("tenant_id must use ASCII letters, digits, dot, underscore, or hyphen")
+		}
+		b := byte(r)
+		if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '.' || b == '_' || b == '-' {
+			continue
+		}
+		return "", fmt.Errorf("tenant_id must use ASCII letters, digits, dot, underscore, or hyphen")
+	}
+	first := tenantID[0]
+	if !((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || (first >= '0' && first <= '9')) {
+		return "", fmt.Errorf("tenant_id must start with an ASCII letter or digit")
+	}
+	if strings.Contains(tenantID, "..") {
+		return "", fmt.Errorf("tenant_id must not contain path traversal")
+	}
+	return tenantID, nil
+}
+
+func normalizeDaemonEgressPolicy(value string) (string, error) {
+	policy := strings.ToLower(strings.TrimSpace(value))
+	switch policy {
+	case "":
+		return "", nil
+	case "deny_all", "profile", "allow_all":
+		return policy, nil
+	default:
+		return "", fmt.Errorf("egress_policy must be empty, deny_all, profile, or allow_all")
+	}
+}
+
 // profileConfigPaths resolves the goose.yaml and goose-secrets.yaml paths for a given profile.
 // An empty profile returns the ControlPlane's default paths (existing behavior).
 // Returns HTTP 400-appropriate errors if the profile name is unsafe or the files are missing.
@@ -431,6 +475,17 @@ func (cp *ControlPlane) spawnVM(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	req.Profile = strings.TrimSpace(req.Profile)
+	var err error
+	req.TenantID, err = normalizeDaemonTenantID(req.TenantID)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	req.EgressPolicy, err = normalizeDaemonEgressPolicy(req.EgressPolicy)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	configPath, secretsPath, err := cp.profileConfigPaths(req.Profile)
 	if err != nil {
@@ -495,10 +550,12 @@ func (cp *ControlPlane) spawnVM(w http.ResponseWriter, r *http.Request) {
 	}
 
 	info := VMInfo{
-		VMID:     vmID,
-		GuestIP:  guestIP,
-		AgentURL: buildAgentURL(vmID, guestIP),
-		Profile:  req.Profile,
+		VMID:         vmID,
+		GuestIP:      guestIP,
+		AgentURL:     buildAgentURL(vmID, guestIP),
+		Profile:      req.Profile,
+		TenantID:     req.TenantID,
+		EgressPolicy: req.EgressPolicy,
 	}
 
 	cp.mu.Lock()
@@ -573,7 +630,9 @@ func (cp *ControlPlane) destroyVM(vmID string) {
 
 	if v.dmSnapshot != nil {
 		// COW-restored VM: release dm-snapshot device, loop device, and exception store.
-		storage.TeardownDMSnapshot(v.dmSnapshot)
+		if err := storage.TeardownDMSnapshot(v.dmSnapshot); err != nil {
+			log.Printf("Warning: failed to teardown COW resources for VM [%s]: %v", vmID, err)
+		}
 	} else if v.bindMountTarget != "" {
 		// Bind-mount restored VM (legacy): lazy-umount + remove per-restore disk copy.
 		storage.TeardownBindMount(v.bindMountTarget, v.diskPath)
@@ -622,7 +681,9 @@ func waitForAgent(guestIP string, timeout time.Duration) error {
 type SnapshotInfo struct {
 	SnapshotID     string    `json:"snapshot_id"`
 	SourceVMID     string    `json:"source_vm_id"`
+	TenantID       string    `json:"tenant_id,omitempty"`
 	Profile        string    `json:"profile,omitempty"`
+	EgressPolicy   string    `json:"egress_policy,omitempty"`
 	SnapshotType   string    `json:"snapshot_type"`              // "full" | "diff"
 	BaseSnapshotID string    `json:"base_snapshot_id,omitempty"` // set for diff snapshots
 	CreatedAt      time.Time `json:"created_at"`
@@ -630,7 +691,7 @@ type SnapshotInfo struct {
 
 // VMRestoreResult is returned by POST /snapshots/{id}/restore.
 type VMRestoreResult struct {
-	VMSpawnResult
+	VMInfo
 	SourceSnapshotID string `json:"source_snapshot_id"`
 }
 
@@ -644,6 +705,13 @@ type RestoreErrorResponse struct {
 type SnapshotRequest struct {
 	StopAfter bool   `json:"stop_after"`
 	Type      string `json:"type,omitempty"` // "full" | "diff" | "" (auto-detect)
+	TenantID  string `json:"tenant_id,omitempty"`
+}
+
+// RestoreSnapshotRequest is the optional body for POST /snapshots/{id}/restore.
+type RestoreSnapshotRequest struct {
+	TenantID     string `json:"tenant_id,omitempty"`
+	EgressPolicy string `json:"egress_policy,omitempty"`
 }
 
 // SnapshotGCRequest is the optional body for POST /snapshots/gc.
@@ -702,7 +770,9 @@ func snapshotInfoFrom(meta storage.SnapshotMetadata) SnapshotInfo {
 	return SnapshotInfo{
 		SnapshotID:     meta.SnapshotID,
 		SourceVMID:     meta.SourceVMID,
+		TenantID:       meta.TenantID,
 		Profile:        meta.Profile,
+		EgressPolicy:   meta.EgressPolicy,
 		SnapshotType:   meta.SnapshotType,
 		BaseSnapshotID: meta.BaseSnapshotID,
 		CreatedAt:      meta.CreatedAt,
@@ -899,7 +969,9 @@ func (cp *ControlPlane) teardownRestoreDMSnapshot(info *storage.DMSnapshotInfo) 
 		cp.teardownDMSnapshot(info)
 		return
 	}
-	storage.TeardownDMSnapshot(info)
+	if err := storage.TeardownDMSnapshot(info); err != nil {
+		log.Printf("Warning: failed to teardown restore COW resources: %v", err)
+	}
 }
 
 func (cp *ControlPlane) setupRestoreBindMount(baseDiskPath, newDiskPath, mountTargetPath string) error {
@@ -1018,7 +1090,7 @@ func (cp *ControlPlane) handleSnapshotItem(w http.ResponseWriter, r *http.Reques
 			http.Error(w, "POST required", http.StatusMethodNotAllowed)
 			return
 		}
-		cp.restoreSnapshot(w, snapID)
+		cp.restoreSnapshotFromRequest(w, r, snapID)
 		return
 	}
 
@@ -1078,6 +1150,12 @@ func (cp *ControlPlane) createSnapshot(w http.ResponseWriter, r *http.Request, v
 			return
 		}
 	}
+	var err error
+	req.TenantID, err = normalizeDaemonTenantID(req.TenantID)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	cp.mu.RLock()
 	v, ok := cp.vms[vmID]
@@ -1085,6 +1163,14 @@ func (cp *ControlPlane) createSnapshot(w http.ResponseWriter, r *http.Request, v
 	if !ok {
 		http.Error(w, `{"error":"VM not found"}`, http.StatusNotFound)
 		return
+	}
+	if req.TenantID != "" && v.VMInfo.TenantID != "" && req.TenantID != v.VMInfo.TenantID {
+		writeJSONError(w, http.StatusForbidden, "tenant_id does not match VM tenant")
+		return
+	}
+	snapshotTenantID := v.VMInfo.TenantID
+	if snapshotTenantID == "" {
+		snapshotTenantID = req.TenantID
 	}
 
 	cp.snapshotLifecycleMu.Lock()
@@ -1160,7 +1246,9 @@ func (cp *ControlPlane) createSnapshot(w http.ResponseWriter, r *http.Request, v
 	meta := storage.SnapshotMetadata{
 		SnapshotID:     snapID,
 		SourceVMID:     vmID,
+		TenantID:       snapshotTenantID,
 		Profile:        v.VMInfo.Profile,
+		EgressPolicy:   v.VMInfo.EgressPolicy,
 		SnapshotType:   snapType,
 		BaseSnapshotID: baseSnapID,
 		GuestIP:        v.VMInfo.GuestIP,
@@ -1199,6 +1287,47 @@ func deriveMACFromTap(tapDevice string) string {
 
 // POST /snapshots/{snapshot_id}/restore
 func (cp *ControlPlane) restoreSnapshot(w http.ResponseWriter, snapID string) {
+	cp.restoreSnapshotWithRequest(w, snapID, RestoreSnapshotRequest{})
+}
+
+func (cp *ControlPlane) restoreSnapshotFromRequest(w http.ResponseWriter, r *http.Request, snapID string) {
+	var req RestoreSnapshotRequest
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+			writeRestoreError(w, http.StatusBadRequest, "invalid_restore_request", snapID, fmt.Sprintf("invalid JSON body: %v", err))
+			return
+		}
+	}
+	cp.restoreSnapshotWithRequest(w, snapID, req)
+}
+
+func restoreTenantAndEgress(meta storage.SnapshotMetadata, req RestoreSnapshotRequest) (tenantID, egressPolicy string, status int, code, message string, ok bool) {
+	reqTenantID, err := normalizeDaemonTenantID(req.TenantID)
+	if err != nil {
+		return "", "", http.StatusBadRequest, "invalid_tenant_id", err.Error(), false
+	}
+	reqEgressPolicy, err := normalizeDaemonEgressPolicy(req.EgressPolicy)
+	if err != nil {
+		return "", "", http.StatusBadRequest, "invalid_egress_policy", err.Error(), false
+	}
+	if meta.TenantID != "" && reqTenantID != "" && reqTenantID != meta.TenantID {
+		return "", "", http.StatusForbidden, "tenant_mismatch", "tenant_id does not match snapshot tenant", false
+	}
+	if meta.EgressPolicy != "" && reqEgressPolicy != "" && reqEgressPolicy != meta.EgressPolicy {
+		return "", "", http.StatusForbidden, "egress_policy_mismatch", "egress_policy does not match snapshot egress policy", false
+	}
+	tenantID = meta.TenantID
+	if tenantID == "" {
+		tenantID = reqTenantID
+	}
+	egressPolicy = meta.EgressPolicy
+	if egressPolicy == "" {
+		egressPolicy = reqEgressPolicy
+	}
+	return tenantID, egressPolicy, 0, "", "", true
+}
+
+func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID string, req RestoreSnapshotRequest) {
 	// Prevent delete/GC from removing snapshot files while restore reads them.
 	cp.snapshotLifecycleMu.Lock()
 	defer cp.snapshotLifecycleMu.Unlock()
@@ -1208,6 +1337,11 @@ func (cp *ControlPlane) restoreSnapshot(w http.ResponseWriter, snapID string) {
 	cp.snapshotsMu.RUnlock()
 	if !ok {
 		writeRestoreError(w, http.StatusNotFound, "snapshot_not_found", snapID, "snapshot not found")
+		return
+	}
+	restoreTenantID, restoreEgressPolicy, status, code, message, ok := restoreTenantAndEgress(meta, req)
+	if !ok {
+		writeRestoreError(w, status, code, snapID, message)
 		return
 	}
 
@@ -1257,7 +1391,7 @@ func (cp *ControlPlane) restoreSnapshot(w http.ResponseWriter, snapID string) {
 		}
 		// Continue with bind-mount path (legacy runningVM fields).
 		cp.restoreMu.Unlock()
-		cp.restoreLegacyBindMount(w, snapID, meta, newVMID, newDiskPath, tapDevice, newGuestIP, socketPath)
+		cp.restoreLegacyBindMount(w, snapID, meta, newVMID, newDiskPath, tapDevice, newGuestIP, socketPath, restoreTenantID, restoreEgressPolicy)
 		return
 	}
 
@@ -1327,10 +1461,12 @@ func (cp *ControlPlane) restoreSnapshot(w http.ResponseWriter, snapID string) {
 	log.Printf("Restore [%s]: guest IP reconfigured to %s (COW exception store: %s)", snapID, newGuestIP, exceptionStorePath)
 
 	info := VMInfo{
-		VMID:     newVMID,
-		GuestIP:  newGuestIP,
-		AgentURL: buildAgentURL(newVMID, newGuestIP),
-		Profile:  meta.Profile,
+		VMID:         newVMID,
+		GuestIP:      newGuestIP,
+		AgentURL:     buildAgentURL(newVMID, newGuestIP),
+		Profile:      meta.Profile,
+		TenantID:     restoreTenantID,
+		EgressPolicy: restoreEgressPolicy,
 	}
 
 	cp.mu.Lock()
@@ -1357,7 +1493,7 @@ func (cp *ControlPlane) restoreSnapshot(w http.ResponseWriter, snapID string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(VMRestoreResult{
-		VMSpawnResult:    VMSpawnResult{VMInfo: info, AgentToken: meta.AgentToken},
+		VMInfo:           info,
 		SourceSnapshotID: snapID,
 	})
 }
@@ -1368,6 +1504,7 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 	w http.ResponseWriter,
 	snapID string, meta storage.SnapshotMetadata,
 	newVMID, newDiskPath, tapDevice, newGuestIP, socketPath string,
+	restoreTenantID, restoreEgressPolicy string,
 ) {
 	// Diff memory merge if needed.
 	memFileToUse := meta.MemFilePath
@@ -1422,10 +1559,12 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 	}
 
 	info := VMInfo{
-		VMID:     newVMID,
-		GuestIP:  newGuestIP,
-		AgentURL: buildAgentURL(newVMID, newGuestIP),
-		Profile:  meta.Profile,
+		VMID:         newVMID,
+		GuestIP:      newGuestIP,
+		AgentURL:     buildAgentURL(newVMID, newGuestIP),
+		Profile:      meta.Profile,
+		TenantID:     restoreTenantID,
+		EgressPolicy: restoreEgressPolicy,
 	}
 	cp.mu.Lock()
 	cp.vms[newVMID] = &runningVM{
@@ -1449,7 +1588,7 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(VMRestoreResult{
-		VMSpawnResult:    VMSpawnResult{VMInfo: info, AgentToken: meta.AgentToken},
+		VMInfo:           info,
 		SourceSnapshotID: snapID,
 	})
 }

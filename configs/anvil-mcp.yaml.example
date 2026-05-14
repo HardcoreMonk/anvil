@@ -17,12 +17,12 @@ default_timeout_seconds: 300
 # file locking/catalog 설계가 추가되기 전까지 process마다 다른 path를 사용한다.
 # session_store_path: /var/lib/anvil-mcp/sessions.json
 
-# 선택 사항: 향후 multi-tenant scheduler/audit 연동에서 사용할 기본 tenant ID.
-# 현재 daemon API contract에는 tenant field를 전달하지 않는다.
+# 선택 사항: multi-tenant scheduler/audit와 daemon tenant contract에 사용할 기본 tenant ID.
+# VM 생성, snapshot 생성, restore 요청 body로 전달된다.
 # default_tenant_id: tenant.alpha
 
 # 선택 사항: MCP boundary/runtime audit JSONL path.
 # append-only record는 tenant ID, VM/session alias, tool name, daemon operation,
-# result code, timestamp만 저장하고 agent_token은 저장하지 않는다.
+# result code, timestamp, sanitized error만 저장하고 agent_token이나 daemon raw body는 저장하지 않는다.
 # 이 값을 켜면 tool input tenant_id 또는 default_tenant_id가 필요하다.
 # audit_log_path: /var/lib/anvil-mcp/runtime-audit.jsonl

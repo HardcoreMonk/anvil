@@ -23,24 +23,29 @@ func TestDaemonClientSpawnVM(t *testing.T) {
 			t.Fatalf("Authorization = %q, want Bearer test-token", got)
 		}
 
-		var body struct {
-			Profile string `json:"profile"`
-		}
+		var body SpawnVMRequest
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("decode request body: %v", err)
 		}
 		if body.Profile != "dev" {
 			t.Fatalf("profile = %q, want dev", body.Profile)
 		}
+		if body.TenantID != "tenant-1" || body.EgressPolicy != "profile" {
+			t.Fatalf("tenant/egress = %q/%q, want tenant-1/profile", body.TenantID, body.EgressPolicy)
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{"vm_id":"vm-1","guest_ip":"10.0.0.2","agent_url":"http://10.0.0.2:8080","profile":"dev","agent_token":"agent-token"}`))
+		_, _ = w.Write([]byte(`{"vm_id":"vm-1","guest_ip":"10.0.0.2","agent_url":"http://10.0.0.2:8080","profile":"dev","tenant_id":"tenant-1","egress_policy":"profile","agent_token":"agent-token"}`))
 	}))
 	defer server.Close()
 
 	client := NewDaemonClient(Config{DaemonURL: server.URL, APIToken: "test-token"}, server.Client())
-	resp, err := client.SpawnVM(context.Background(), "dev")
+	resp, err := client.SpawnVM(context.Background(), SpawnVMRequest{
+		Profile:      "dev",
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+	})
 	if err != nil {
 		t.Fatalf("SpawnVM returned error: %v", err)
 	}
@@ -56,6 +61,9 @@ func TestDaemonClientSpawnVM(t *testing.T) {
 	}
 	if resp.Profile != "dev" {
 		t.Fatalf("Profile = %q, want dev", resp.Profile)
+	}
+	if resp.TenantID != "tenant-1" || resp.EgressPolicy != "profile" {
+		t.Fatalf("tenant/egress = %q/%q, want tenant-1/profile", resp.TenantID, resp.EgressPolicy)
 	}
 	if resp.AgentToken != "agent-token" {
 		t.Fatalf("AgentToken = %q, want agent-token", resp.AgentToken)
@@ -188,10 +196,13 @@ func TestDaemonClientCreateSnapshot(t *testing.T) {
 		if body.Type != "diff" {
 			t.Fatalf("type = %q, want diff", body.Type)
 		}
+		if body.TenantID != "tenant-1" {
+			t.Fatalf("tenant_id = %q, want tenant-1", body.TenantID)
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{"snapshot_id":"snap-1","source_vm_id":"vm-1","profile":"dev","snapshot_type":"diff","base_snapshot_id":"snap-base","created_at":"2026-05-11T00:00:00Z"}`))
+		_, _ = w.Write([]byte(`{"snapshot_id":"snap-1","source_vm_id":"vm-1","tenant_id":"tenant-1","profile":"dev","egress_policy":"profile","snapshot_type":"diff","base_snapshot_id":"snap-base","created_at":"2026-05-11T00:00:00Z"}`))
 	}))
 	defer server.Close()
 
@@ -199,6 +210,7 @@ func TestDaemonClientCreateSnapshot(t *testing.T) {
 	resp, err := client.CreateSnapshot(context.Background(), "vm-1", CreateSnapshotRequest{
 		StopAfter: true,
 		Type:      "diff",
+		TenantID:  "tenant-1",
 	})
 	if err != nil {
 		t.Fatalf("CreateSnapshot returned error: %v", err)
@@ -209,6 +221,9 @@ func TestDaemonClientCreateSnapshot(t *testing.T) {
 	}
 	if resp.SourceVMID != "vm-1" {
 		t.Fatalf("SourceVMID = %q, want vm-1", resp.SourceVMID)
+	}
+	if resp.TenantID != "tenant-1" || resp.EgressPolicy != "profile" {
+		t.Fatalf("tenant/egress = %q/%q, want tenant-1/profile", resp.TenantID, resp.EgressPolicy)
 	}
 	if resp.Profile != "dev" {
 		t.Fatalf("Profile = %q, want dev", resp.Profile)
@@ -256,7 +271,7 @@ func TestDaemonClientListSnapshots(t *testing.T) {
 	}
 }
 
-func TestDaemonClientRestoreSnapshotDecodesAgentToken(t *testing.T) {
+func TestDaemonClientRestoreSnapshotForwardsContractAndOmitsAgentToken(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("method = %s, want %s", r.Method, http.MethodPost)
@@ -264,15 +279,25 @@ func TestDaemonClientRestoreSnapshotDecodesAgentToken(t *testing.T) {
 		if r.URL.Path != "/snapshots/snap-1/restore" {
 			t.Fatalf("path = %s, want /snapshots/snap-1/restore", r.URL.Path)
 		}
+		var body RestoreSnapshotRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		if body.TenantID != "tenant-1" || body.EgressPolicy != "profile" {
+			t.Fatalf("tenant/egress = %q/%q, want tenant-1/profile", body.TenantID, body.EgressPolicy)
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{"vm_id":"vm-restored","guest_ip":"10.0.0.9","agent_url":"http://10.0.0.9:8080","profile":"dev","agent_token":"secret-token","source_snapshot_id":"snap-1"}`))
+		_, _ = w.Write([]byte(`{"vm_id":"vm-restored","guest_ip":"10.0.0.9","agent_url":"http://10.0.0.9:8080","profile":"dev","tenant_id":"tenant-1","egress_policy":"profile","source_snapshot_id":"snap-1"}`))
 	}))
 	defer server.Close()
 
 	client := NewDaemonClient(Config{DaemonURL: server.URL}, server.Client())
-	resp, err := client.RestoreSnapshot(context.Background(), "snap-1")
+	resp, err := client.RestoreSnapshot(context.Background(), "snap-1", RestoreSnapshotRequest{
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+	})
 	if err != nil {
 		t.Fatalf("RestoreSnapshot returned error: %v", err)
 	}
@@ -280,8 +305,8 @@ func TestDaemonClientRestoreSnapshotDecodesAgentToken(t *testing.T) {
 	if resp.VMID != "vm-restored" {
 		t.Fatalf("VMID = %q, want vm-restored", resp.VMID)
 	}
-	if resp.AgentToken != "secret-token" {
-		t.Fatalf("AgentToken = %q, want secret-token", resp.AgentToken)
+	if resp.TenantID != "tenant-1" || resp.EgressPolicy != "profile" {
+		t.Fatalf("tenant/egress = %q/%q, want tenant-1/profile", resp.TenantID, resp.EgressPolicy)
 	}
 	if resp.SourceSnapshotID != "snap-1" {
 		t.Fatalf("SourceSnapshotID = %q, want snap-1", resp.SourceSnapshotID)

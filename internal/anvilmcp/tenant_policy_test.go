@@ -228,3 +228,62 @@ func TestAppendRuntimeAuditRejectsSymlink(t *testing.T) {
 		t.Fatalf("AppendRuntimeAudit() error = %q, want symlink", err)
 	}
 }
+
+func TestReadAndPruneRuntimeAudit(t *testing.T) {
+	auditPath := filepath.Join(t.TempDir(), "audit", "runtime.jsonl")
+	base := time.Date(2026, 5, 13, 12, 0, 0, 0, time.UTC)
+	for _, record := range []RuntimeAuditRecord{
+		{
+			Timestamp:       base.Add(-3 * time.Hour),
+			TenantID:        "tenant-1",
+			ToolName:        "anvil_spawn_vm",
+			DaemonOperation: "POST /vms",
+			ResultCode:      "success",
+		},
+		{
+			Timestamp:       base.Add(-2 * time.Hour),
+			TenantID:        "tenant-1",
+			VMID:            "vm-1",
+			ToolName:        "anvil_run_task",
+			DaemonOperation: "POST /vms/{vm_id}/tasks",
+			ResultCode:      "error",
+			Error:           "daemon returned status 502",
+		},
+		{
+			Timestamp:       base.Add(-1 * time.Hour),
+			TenantID:        "tenant-1",
+			ToolName:        "anvil_list_snapshots",
+			DaemonOperation: "GET /snapshots",
+			ResultCode:      "success",
+		},
+	} {
+		if err := AppendRuntimeAudit(auditPath, record); err != nil {
+			t.Fatalf("AppendRuntimeAudit() error = %v", err)
+		}
+	}
+
+	records, err := ReadRuntimeAudit(auditPath)
+	if err != nil {
+		t.Fatalf("ReadRuntimeAudit() error = %v", err)
+	}
+	if len(records) != 3 {
+		t.Fatalf("record count = %d, want 3", len(records))
+	}
+	if records[1].ResultCode != "error" || records[1].Error != "daemon returned status 502" {
+		t.Fatalf("failure record = %+v, want sanitized error", records[1])
+	}
+
+	if err := PruneRuntimeAudit(auditPath, RuntimeAuditRetention{KeepLast: 2}); err != nil {
+		t.Fatalf("PruneRuntimeAudit() error = %v", err)
+	}
+	records, err = ReadRuntimeAudit(auditPath)
+	if err != nil {
+		t.Fatalf("ReadRuntimeAudit() after prune error = %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("record count after prune = %d, want 2", len(records))
+	}
+	if records[0].ToolName != "anvil_run_task" || records[1].ToolName != "anvil_list_snapshots" {
+		t.Fatalf("records after prune = %+v, want last two records", records)
+	}
+}

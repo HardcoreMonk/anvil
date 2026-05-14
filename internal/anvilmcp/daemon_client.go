@@ -28,17 +28,27 @@ func (e *DaemonError) Error() string {
 }
 
 type SpawnVMResponse struct {
-	VMID       string `json:"vm_id"`
-	GuestIP    string `json:"guest_ip"`
-	AgentURL   string `json:"agent_url"`
-	Profile    string `json:"profile,omitempty"`
-	AgentToken string `json:"agent_token,omitempty"`
+	VMID         string `json:"vm_id"`
+	GuestIP      string `json:"guest_ip"`
+	AgentURL     string `json:"agent_url"`
+	Profile      string `json:"profile,omitempty"`
+	TenantID     string `json:"tenant_id,omitempty"`
+	EgressPolicy string `json:"egress_policy,omitempty"`
+	AgentToken   string `json:"agent_token,omitempty"`
+}
+
+type SpawnVMRequest struct {
+	Profile      string `json:"profile,omitempty"`
+	TenantID     string `json:"tenant_id,omitempty"`
+	EgressPolicy string `json:"egress_policy,omitempty"`
 }
 
 type SnapshotInfo struct {
 	SnapshotID     string    `json:"snapshot_id"`
 	SourceVMID     string    `json:"source_vm_id"`
+	TenantID       string    `json:"tenant_id,omitempty"`
 	Profile        string    `json:"profile,omitempty"`
+	EgressPolicy   string    `json:"egress_policy,omitempty"`
 	SnapshotType   string    `json:"snapshot_type"`
 	BaseSnapshotID string    `json:"base_snapshot_id,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
@@ -47,6 +57,12 @@ type SnapshotInfo struct {
 type CreateSnapshotRequest struct {
 	StopAfter bool   `json:"stop_after"`
 	Type      string `json:"type,omitempty"`
+	TenantID  string `json:"tenant_id,omitempty"`
+}
+
+type RestoreSnapshotRequest struct {
+	TenantID     string `json:"tenant_id,omitempty"`
+	EgressPolicy string `json:"egress_policy,omitempty"`
 }
 
 type RestoreSnapshotResponse struct {
@@ -54,7 +70,8 @@ type RestoreSnapshotResponse struct {
 	GuestIP          string `json:"guest_ip"`
 	AgentURL         string `json:"agent_url"`
 	Profile          string `json:"profile,omitempty"`
-	AgentToken       string `json:"agent_token,omitempty"`
+	TenantID         string `json:"tenant_id,omitempty"`
+	EgressPolicy     string `json:"egress_policy,omitempty"`
 	SourceSnapshotID string `json:"source_snapshot_id"`
 }
 
@@ -74,13 +91,8 @@ func NewDaemonClient(cfg Config, httpClient *http.Client) *DaemonClient {
 	}
 }
 
-func (c *DaemonClient) SpawnVM(ctx context.Context, profile string) (*SpawnVMResponse, error) {
-	payload := map[string]string{}
-	if profile != "" {
-		payload["profile"] = profile
-	}
-
-	_, body, err := c.do(ctx, http.MethodPost, "/vms", payload)
+func (c *DaemonClient) SpawnVM(ctx context.Context, req SpawnVMRequest) (*SpawnVMResponse, error) {
+	_, body, err := c.do(ctx, http.MethodPost, "/vms", req)
 	if err != nil {
 		return nil, err
 	}
@@ -157,8 +169,8 @@ func (c *DaemonClient) ListSnapshots(ctx context.Context) ([]SnapshotInfo, error
 	return resp, nil
 }
 
-func (c *DaemonClient) RestoreSnapshot(ctx context.Context, snapshotID string) (*RestoreSnapshotResponse, error) {
-	_, body, err := c.do(ctx, http.MethodPost, "/snapshots/"+snapshotID+"/restore", nil)
+func (c *DaemonClient) RestoreSnapshot(ctx context.Context, snapshotID string, req RestoreSnapshotRequest) (*RestoreSnapshotResponse, error) {
+	_, body, err := c.do(ctx, http.MethodPost, "/snapshots/"+snapshotID+"/restore", req)
 	if err != nil {
 		return nil, err
 	}

@@ -116,9 +116,8 @@ curl -X DELETE \
   http://127.0.0.1:3000/vms/$VM_ID
 ```
 
-restore 응답 또는 로그를 공유할 때는 `agent_token`이 포함되지 않았는지 먼저 확인한다.
-현재 daemon restore 응답의 `agent_token` 노출은 제거 대상 구현 부채이며 정책상 허용
-출력이 아니다.
+restore 응답은 `agent_token`을 노출하지 않는다. 과거 로그나 오래된 fixture를
+공유할 때는 legacy restore body에 `agent_token`이 남아 있지 않은지 먼저 확인한다.
 
 ## GC apply 실패
 

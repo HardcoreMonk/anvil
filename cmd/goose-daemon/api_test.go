@@ -263,6 +263,97 @@ func TestHandleVMWorkspaceProxiesQueryAuthAndBody(t *testing.T) {
 	}
 }
 
+func TestListVMsIncludesTenantAndEgressPolicy(t *testing.T) {
+	cp := newTestCP(t)
+	cp.vms["vm-1"] = &runningVM{
+		VMInfo: VMInfo{
+			VMID:         "vm-1",
+			GuestIP:      "10.0.1.2",
+			AgentURL:     "http://10.0.1.2:8080",
+			Profile:      "dev",
+			TenantID:     "tenant-1",
+			EgressPolicy: "profile",
+		},
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/vms", nil)
+	cp.handleVMs(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q; want 200", rr.Code, rr.Body.String())
+	}
+	var list []VMInfo
+	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode VM list: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("VM list length = %d, want 1", len(list))
+	}
+	if list[0].TenantID != "tenant-1" || list[0].EgressPolicy != "profile" {
+		t.Fatalf("VM info = %+v, want tenant-1/profile", list[0])
+	}
+}
+
+func TestCreateSnapshotRejectsTenantMismatchBeforePause(t *testing.T) {
+	cp := newTestCP(t)
+	cp.vms["vm-1"] = &runningVM{
+		VMInfo: VMInfo{
+			VMID:         "vm-1",
+			TenantID:     "tenant-1",
+			EgressPolicy: "deny_all",
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/vms/vm-1/snapshot", strings.NewReader(`{"tenant_id":"tenant-2"}`))
+	rr := httptest.NewRecorder()
+	cp.createSnapshot(rr, req, "vm-1")
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, body = %q; want %d", rr.Code, rr.Body.String(), http.StatusForbidden)
+	}
+	if !strings.Contains(rr.Body.String(), "tenant_id does not match VM tenant") {
+		t.Fatalf("body = %q, want tenant mismatch error", rr.Body.String())
+	}
+}
+
+func TestVMRestoreResultOmitsAgentToken(t *testing.T) {
+	data, err := json.Marshal(VMRestoreResult{
+		VMInfo: VMInfo{
+			VMID:         "vm-restored",
+			GuestIP:      "10.0.1.9",
+			AgentURL:     "http://10.0.1.9:8080",
+			TenantID:     "tenant-1",
+			EgressPolicy: "profile",
+		},
+		SourceSnapshotID: "snap-1",
+	})
+	if err != nil {
+		t.Fatalf("marshal restore result: %v", err)
+	}
+	if strings.Contains(string(data), "agent_token") {
+		t.Fatalf("restore result exposes agent_token: %s", string(data))
+	}
+	if !strings.Contains(string(data), `"tenant_id":"tenant-1"`) {
+		t.Fatalf("restore result = %s, want tenant_id", string(data))
+	}
+}
+
+func TestSnapshotInfoIncludesTenantAndEgressPolicy(t *testing.T) {
+	info := snapshotInfoFrom(storage.SnapshotMetadata{
+		SnapshotID:   "snap-1",
+		SourceVMID:   "vm-1",
+		TenantID:     "tenant-1",
+		Profile:      "dev",
+		EgressPolicy: "deny_all",
+		SnapshotType: "full",
+		CreatedAt:    time.Date(2026, 5, 13, 12, 0, 0, 0, time.UTC),
+	})
+	if info.TenantID != "tenant-1" || info.EgressPolicy != "deny_all" {
+		t.Fatalf("snapshot info = %+v, want tenant-1/deny_all", info)
+	}
+}
+
 func TestPlanSnapshotGCProtectsReferencedAndKeepLast(t *testing.T) {
 	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
 	cp := newTestCP(t)
@@ -658,6 +749,35 @@ func TestRestoreSnapshotMissingSnapshotReturnsJSONError(t *testing.T) {
 	}
 	if resp.Error != "snapshot not found" {
 		t.Fatalf("error = %q, want snapshot not found", resp.Error)
+	}
+}
+
+func TestRestoreSnapshotRejectsTenantMismatchBeforeNetworkAllocation(t *testing.T) {
+	cp := newTestCP(t)
+	cp.provisioner = &storage.Provisioner{WorkspaceDir: t.TempDir()}
+	snapshotID := "snap-tenant"
+	meta := testSnapshotMeta(snapshotID, "vm-source", "full", time.Now().UTC())
+	meta.TenantID = "tenant-1"
+	meta.EgressPolicy = "profile"
+	cp.snapshots[snapshotID] = meta
+	cp.allocateForRestore = func(string, string) (string, string, error) {
+		t.Fatal("allocateForRestore called before tenant mismatch rejection")
+		return "", "", nil
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/snapshots/snap-tenant/restore", strings.NewReader(`{"tenant_id":"tenant-2"}`))
+	cp.restoreSnapshotFromRequest(rr, req, snapshotID)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, body = %q; want %d", rr.Code, rr.Body.String(), http.StatusForbidden)
+	}
+	resp := decodeRestoreErrorResponse(t, rr)
+	if resp.Code != "tenant_mismatch" {
+		t.Fatalf("code = %q, want tenant_mismatch", resp.Code)
+	}
+	if !strings.Contains(resp.Error, "tenant_id does not match snapshot tenant") {
+		t.Fatalf("error = %q, want tenant mismatch", resp.Error)
 	}
 }
 
