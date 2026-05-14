@@ -13,9 +13,10 @@ type IronClawToolInputSchema struct {
 }
 
 type IronClawToolInputField struct {
-	Name       string `json:"name"`
-	GeminiType string `json:"gemini_type"`
-	Required   bool   `json:"required"`
+	Name            string `json:"name"`
+	GeminiType      string `json:"gemini_type"`
+	GeminiItemsType string `json:"gemini_items_type,omitempty"`
+	Required        bool   `json:"required"`
 }
 
 func CurrentIronClawToolInputSchemas() []IronClawToolInputSchema {
@@ -52,6 +53,9 @@ func ValidateIronClawToolInputSchemas(schemas []IronClawToolInputSchema) error {
 			if strings.TrimSpace(field.GeminiType) == "" {
 				return fmt.Errorf("tool %s field %s has empty Gemini type", schema.ToolName, field.Name)
 			}
+			if field.GeminiType == "ARRAY" && strings.TrimSpace(field.GeminiItemsType) == "" {
+				return fmt.Errorf("tool %s field %s has empty Gemini items type", schema.ToolName, field.Name)
+			}
 		}
 	}
 	return nil
@@ -73,9 +77,10 @@ func toolInputSchemaFromStruct(toolName string, value any) IronClawToolInputSche
 			continue
 		}
 		fields = append(fields, IronClawToolInputField{
-			Name:       jsonName,
-			GeminiType: geminiTypeFor(field.Type),
-			Required:   !omitempty,
+			Name:            jsonName,
+			GeminiType:      geminiTypeFor(field.Type),
+			GeminiItemsType: geminiItemsTypeFor(field.Type),
+			Required:        !omitempty,
 		})
 	}
 	sort.Slice(fields, func(i, j int) bool { return fields[i].Name < fields[j].Name })
@@ -99,6 +104,18 @@ func jsonFieldName(field reflect.StructField) (string, bool) {
 		}
 	}
 	return name, omitempty
+}
+
+func geminiItemsTypeFor(t reflect.Type) string {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	switch t.Kind() {
+	case reflect.Slice, reflect.Array:
+		return geminiTypeFor(t.Elem())
+	default:
+		return ""
+	}
 }
 
 func geminiTypeFor(t reflect.Type) string {

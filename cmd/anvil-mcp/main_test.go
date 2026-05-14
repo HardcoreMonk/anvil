@@ -57,3 +57,17 @@ func TestToolRegistrationsIncludeSnapshotTools(t *testing.T) {
 		t.Fatalf("registration count = %d, want %d", len(registrations), len(want))
 	}
 }
+
+func TestToolRegistrationsHaveIronClawInputSchemas(t *testing.T) {
+	schemas := anvilmcp.CurrentIronClawToolInputSchemas()
+	schemaNames := make(map[string]bool, len(schemas))
+	for _, schema := range schemas {
+		schemaNames[schema.ToolName] = true
+	}
+
+	for _, registration := range toolRegistrations() {
+		if !schemaNames[registration.name] {
+			t.Fatalf("tool registration %q has no IronClaw input schema; schemas = %v", registration.name, schemaNames)
+		}
+	}
+}
