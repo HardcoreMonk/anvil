@@ -15,6 +15,7 @@ import (
 
 const (
 	maxTimeoutSeconds = int((24 * time.Hour) / time.Second)
+	maxFlockRoles     = 20
 	// MaxWorkspaceFileBytes is the v1 single-file copy size limit.
 	MaxWorkspaceFileBytes = 4 << 20
 )
@@ -31,6 +32,12 @@ type Daemon interface {
 	ListSnapshots(ctx context.Context) ([]SnapshotInfo, error)
 	RestoreSnapshot(ctx context.Context, snapshotID string, req RestoreSnapshotRequest) (*RestoreSnapshotResponse, error)
 	DeleteSnapshot(ctx context.Context, snapshotID string) (*RawDaemonResponse, error)
+	CreateFlock(ctx context.Context, req FlockCreateRequest) (*FlockCreateResponse, error)
+	ListFlocks(ctx context.Context) ([]FlockInfo, error)
+	GetFlock(ctx context.Context, flockID string) (*FlockInfo, error)
+	DeleteFlock(ctx context.Context, flockID string) (*RawDaemonResponse, error)
+	PostTownWall(ctx context.Context, flockID string, req TownWallPostRequest) (*TownWallMessage, error)
+	TownWallHistory(ctx context.Context, flockID string) ([]TownWallMessage, error)
 }
 
 type sessionStore interface {
@@ -146,6 +153,47 @@ type RestoreSnapshotOutput struct {
 type SnapshotIdentityInput struct {
 	SnapshotID string `json:"snapshot_id"`
 	TenantID   string `json:"tenant_id,omitempty"`
+}
+
+type SpawnFlockInput struct {
+	Task         string   `json:"task"`
+	Roles        []string `json:"roles"`
+	TenantID     string   `json:"tenant_id,omitempty"`
+	EgressPolicy string   `json:"egress_policy,omitempty"`
+}
+
+type SpawnFlockOutput struct {
+	FlockID      string           `json:"flock_id"`
+	Task         string           `json:"task"`
+	TenantID     string           `json:"tenant_id,omitempty"`
+	EgressPolicy string           `json:"egress_policy,omitempty"`
+	Agents       []FlockAgentInfo `json:"agents"`
+	TownWallURL  string           `json:"townwall_url"`
+	PostURL      string           `json:"post_url"`
+}
+
+type ListFlocksInput struct {
+	TenantID string `json:"tenant_id,omitempty"`
+}
+
+type ListFlocksOutput struct {
+	Flocks []FlockInfo `json:"flocks"`
+}
+
+type FlockIdentityInput struct {
+	FlockID  string `json:"flock_id"`
+	TenantID string `json:"tenant_id,omitempty"`
+}
+
+type TownWallPostInput struct {
+	FlockID  string `json:"flock_id"`
+	AgentID  string `json:"agent_id"`
+	Body     string `json:"body"`
+	TenantID string `json:"tenant_id,omitempty"`
+}
+
+type TownWallHistoryOutput struct {
+	Messages []TownWallMessage `json:"messages"`
 }
 
 type RestoreSessionBindError struct {
@@ -715,6 +763,208 @@ func (t *Tools) MCPDeleteSnapshot(ctx context.Context, req *mcp.CallToolRequest,
 	return nil, *out, nil
 }
 
+func (t *Tools) SpawnFlock(ctx context.Context, input SpawnFlockInput) (*SpawnFlockOutput, error) {
+	tenantID, err := t.resolveTenantID(input.TenantID)
+	if err != nil {
+		return nil, err
+	}
+	egressPolicy, err := NormalizeEgressPolicy(input.EgressPolicy)
+	if err != nil {
+		return nil, err
+	}
+	task := strings.TrimSpace(input.Task)
+	if task == "" {
+		return nil, fmt.Errorf("task must be non-empty")
+	}
+	roles, err := normalizeFlockRoles(input.Roles)
+	if err != nil {
+		return nil, err
+	}
+
+	res, err := t.daemon.CreateFlock(ctx, FlockCreateRequest{
+		Task:         task,
+		Roles:        roles,
+		TenantID:     tenantID,
+		EgressPolicy: string(egressPolicy),
+	})
+	if err != nil {
+		return nil, t.auditFailureAndReturn(tenantID, "", "", "anvil_spawn_flock", "POST /flocks", err)
+	}
+	agents := []FlockAgentInfo{}
+	if res.Agents != nil {
+		agents = res.Agents
+	}
+	out := &SpawnFlockOutput{
+		FlockID:      res.FlockID,
+		Task:         res.Task,
+		TenantID:     res.TenantID,
+		EgressPolicy: res.EgressPolicy,
+		Agents:       agents,
+		TownWallURL:  res.TownWallURL,
+		PostURL:      res.PostURL,
+	}
+	if err := t.auditSuccess(tenantID, "", "", "anvil_spawn_flock", "POST /flocks"); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (t *Tools) MCPSpawnFlock(ctx context.Context, req *mcp.CallToolRequest, input SpawnFlockInput) (*mcp.CallToolResult, SpawnFlockOutput, error) {
+	out, err := t.SpawnFlock(ctx, input)
+	if err != nil || out == nil {
+		return nil, SpawnFlockOutput{}, err
+	}
+	return nil, *out, nil
+}
+
+func (t *Tools) ListFlocks(ctx context.Context, input ListFlocksInput) (*ListFlocksOutput, error) {
+	tenantID, err := t.resolveTenantID(input.TenantID)
+	if err != nil {
+		return nil, err
+	}
+	flocks, err := t.daemon.ListFlocks(ctx)
+	if err != nil {
+		return nil, t.auditFailureAndReturn(tenantID, "", "", "anvil_list_flocks", "GET /flocks", err)
+	}
+	if flocks == nil {
+		flocks = []FlockInfo{}
+	}
+	if err := t.auditSuccess(tenantID, "", "", "anvil_list_flocks", "GET /flocks"); err != nil {
+		return nil, err
+	}
+	return &ListFlocksOutput{Flocks: flocks}, nil
+}
+
+func (t *Tools) MCPListFlocks(ctx context.Context, req *mcp.CallToolRequest, input ListFlocksInput) (*mcp.CallToolResult, ListFlocksOutput, error) {
+	out, err := t.ListFlocks(ctx, input)
+	if err != nil || out == nil {
+		return nil, ListFlocksOutput{}, err
+	}
+	return nil, *out, nil
+}
+
+func (t *Tools) GetFlock(ctx context.Context, input FlockIdentityInput) (*FlockInfo, error) {
+	tenantID, err := t.resolveTenantID(input.TenantID)
+	if err != nil {
+		return nil, err
+	}
+	flockID, err := requireFlockID(input.FlockID)
+	if err != nil {
+		return nil, err
+	}
+	out, err := t.daemon.GetFlock(ctx, flockID)
+	if err != nil {
+		return nil, t.auditFailureAndReturn(tenantID, "", "", "anvil_get_flock", "GET /flocks/{flock_id}", err)
+	}
+	if err := t.auditSuccess(tenantID, "", "", "anvil_get_flock", "GET /flocks/{flock_id}"); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (t *Tools) MCPGetFlock(ctx context.Context, req *mcp.CallToolRequest, input FlockIdentityInput) (*mcp.CallToolResult, FlockInfo, error) {
+	out, err := t.GetFlock(ctx, input)
+	if err != nil || out == nil {
+		return nil, FlockInfo{}, err
+	}
+	return nil, *out, nil
+}
+
+func (t *Tools) DeleteFlock(ctx context.Context, input FlockIdentityInput) (*RawDaemonResponse, error) {
+	tenantID, err := t.resolveTenantID(input.TenantID)
+	if err != nil {
+		return nil, err
+	}
+	flockID, err := requireFlockID(input.FlockID)
+	if err != nil {
+		return nil, err
+	}
+	out, err := t.daemon.DeleteFlock(ctx, flockID)
+	if err != nil {
+		return nil, t.auditFailureAndReturn(tenantID, "", "", "anvil_delete_flock", "DELETE /flocks/{flock_id}", err)
+	}
+	if err := t.auditSuccess(tenantID, "", "", "anvil_delete_flock", "DELETE /flocks/{flock_id}"); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (t *Tools) MCPDeleteFlock(ctx context.Context, req *mcp.CallToolRequest, input FlockIdentityInput) (*mcp.CallToolResult, RawDaemonResponse, error) {
+	out, err := t.DeleteFlock(ctx, input)
+	if err != nil || out == nil {
+		return nil, RawDaemonResponse{}, err
+	}
+	return nil, *out, nil
+}
+
+func (t *Tools) PostTownWall(ctx context.Context, input TownWallPostInput) (*TownWallMessage, error) {
+	tenantID, err := t.resolveTenantID(input.TenantID)
+	if err != nil {
+		return nil, err
+	}
+	flockID, err := requireFlockID(input.FlockID)
+	if err != nil {
+		return nil, err
+	}
+	agentID := strings.TrimSpace(input.AgentID)
+	if agentID == "" {
+		return nil, fmt.Errorf("agent_id must be non-empty")
+	}
+	body := strings.TrimSpace(input.Body)
+	if body == "" {
+		return nil, fmt.Errorf("body must be non-empty")
+	}
+	out, err := t.daemon.PostTownWall(ctx, flockID, TownWallPostRequest{
+		AgentID: agentID,
+		Body:    body,
+	})
+	if err != nil {
+		return nil, t.auditFailureAndReturn(tenantID, "", "", "anvil_post_townwall", "POST /flocks/{flock_id}/post", err)
+	}
+	if err := t.auditSuccess(tenantID, "", "", "anvil_post_townwall", "POST /flocks/{flock_id}/post"); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (t *Tools) MCPPostTownWall(ctx context.Context, req *mcp.CallToolRequest, input TownWallPostInput) (*mcp.CallToolResult, TownWallMessage, error) {
+	out, err := t.PostTownWall(ctx, input)
+	if err != nil || out == nil {
+		return nil, TownWallMessage{}, err
+	}
+	return nil, *out, nil
+}
+
+func (t *Tools) TownWallHistory(ctx context.Context, input FlockIdentityInput) (*TownWallHistoryOutput, error) {
+	tenantID, err := t.resolveTenantID(input.TenantID)
+	if err != nil {
+		return nil, err
+	}
+	flockID, err := requireFlockID(input.FlockID)
+	if err != nil {
+		return nil, err
+	}
+	messages, err := t.daemon.TownWallHistory(ctx, flockID)
+	if err != nil {
+		return nil, t.auditFailureAndReturn(tenantID, "", "", "anvil_get_townwall_history", "GET /flocks/{flock_id}/wall/history", err)
+	}
+	if messages == nil {
+		messages = []TownWallMessage{}
+	}
+	if err := t.auditSuccess(tenantID, "", "", "anvil_get_townwall_history", "GET /flocks/{flock_id}/wall/history"); err != nil {
+		return nil, err
+	}
+	return &TownWallHistoryOutput{Messages: messages}, nil
+}
+
+func (t *Tools) MCPTownWallHistory(ctx context.Context, req *mcp.CallToolRequest, input FlockIdentityInput) (*mcp.CallToolResult, TownWallHistoryOutput, error) {
+	out, err := t.TownWallHistory(ctx, input)
+	if err != nil || out == nil {
+		return nil, TownWallHistoryOutput{}, err
+	}
+	return nil, *out, nil
+}
+
 func normalizeSnapshotType(value string) (string, error) {
 	snapshotType := strings.ToLower(strings.TrimSpace(value))
 	switch snapshotType {
@@ -723,6 +973,38 @@ func normalizeSnapshotType(value string) (string, error) {
 	default:
 		return "", fmt.Errorf("type must be empty, full, or diff")
 	}
+}
+
+func normalizeFlockRoles(roles []string) ([]string, error) {
+	if len(roles) == 0 {
+		return nil, fmt.Errorf("roles must contain at least one role")
+	}
+	if len(roles) > maxFlockRoles {
+		return nil, fmt.Errorf("roles must contain at most %d roles", maxFlockRoles)
+	}
+	normalized := make([]string, 0, len(roles))
+	for _, role := range roles {
+		role = strings.TrimSpace(role)
+		if role == "" {
+			return nil, fmt.Errorf("roles must not contain empty role")
+		}
+		if strings.Contains(role, "/") || strings.Contains(role, `\`) {
+			return nil, fmt.Errorf("roles must not contain path separators")
+		}
+		normalized = append(normalized, role)
+	}
+	return normalized, nil
+}
+
+func requireFlockID(value string) (string, error) {
+	flockID := strings.TrimSpace(value)
+	if flockID == "" {
+		return "", fmt.Errorf("flock_id is required")
+	}
+	if strings.Contains(flockID, "/") || strings.Contains(flockID, `\`) {
+		return "", fmt.Errorf("flock_id must not contain path separators")
+	}
+	return flockID, nil
 }
 
 func normalizeWorkspacePath(value string) (string, error) {

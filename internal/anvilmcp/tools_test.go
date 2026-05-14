@@ -82,6 +82,38 @@ type fakeDaemon struct {
 	deleteSnapshotID    string
 	deleteSnapshotResp  *RawDaemonResponse
 	deleteSnapshotErr   error
+
+	createFlockCalls int
+	createFlockReq   FlockCreateRequest
+	createFlockResp  *FlockCreateResponse
+	createFlockErr   error
+
+	listFlockCalls     int
+	listFlockResp      []FlockInfo
+	listFlockReturnNil bool
+	listFlockErr       error
+
+	getFlockCalls int
+	getFlockID    string
+	getFlockResp  *FlockInfo
+	getFlockErr   error
+
+	deleteFlockCalls int
+	deleteFlockID    string
+	deleteFlockResp  *RawDaemonResponse
+	deleteFlockErr   error
+
+	postTownWallCalls   int
+	postTownWallFlockID string
+	postTownWallReq     TownWallPostRequest
+	postTownWallResp    *TownWallMessage
+	postTownWallErr     error
+
+	townWallHistoryCalls     int
+	townWallHistoryFlockID   string
+	townWallHistoryResp      []TownWallMessage
+	townWallHistoryReturnNil bool
+	townWallHistoryErr       error
 }
 
 func (f *fakeDaemon) SpawnVM(_ context.Context, req SpawnVMRequest) (*SpawnVMResponse, error) {
@@ -255,6 +287,140 @@ func (f *fakeDaemon) DeleteSnapshot(_ context.Context, snapshotID string) (*RawD
 		return f.deleteSnapshotResp, nil
 	}
 	return &RawDaemonResponse{StatusCode: 200, Body: `{"status":"deleted","snapshot_id":"snap-1"}`}, nil
+}
+
+func (f *fakeDaemon) CreateFlock(_ context.Context, req FlockCreateRequest) (*FlockCreateResponse, error) {
+	f.createFlockCalls++
+	f.createFlockReq = req
+	if f.createFlockErr != nil {
+		return nil, f.createFlockErr
+	}
+	if f.createFlockResp != nil {
+		return f.createFlockResp, nil
+	}
+	return &FlockCreateResponse{
+		FlockID:      "flock-1",
+		Task:         req.Task,
+		TenantID:     req.TenantID,
+		EgressPolicy: req.EgressPolicy,
+		Agents: []FlockAgentInfo{{
+			AgentID:  "agent-worker",
+			Role:     "worker",
+			VMID:     "vm-worker",
+			AgentURL: "http://10.0.0.2:3000",
+			Status:   "running",
+		}},
+		TownWallURL: "http://127.0.0.1:3000/flocks/flock-1/wall",
+		PostURL:     "http://127.0.0.1:3000/flocks/flock-1/post",
+	}, nil
+}
+
+func (f *fakeDaemon) ListFlocks(_ context.Context) ([]FlockInfo, error) {
+	f.listFlockCalls++
+	if f.listFlockErr != nil {
+		return nil, f.listFlockErr
+	}
+	if f.listFlockReturnNil {
+		return nil, nil
+	}
+	if f.listFlockResp != nil {
+		return f.listFlockResp, nil
+	}
+	return []FlockInfo{{
+		FlockID:      "flock-1",
+		Task:         "build town",
+		TenantID:     "tenant-1",
+		EgressPolicy: "deny_all",
+		Agents: map[string]FlockAgentInfo{
+			"agent-worker": {AgentID: "agent-worker", Role: "worker", VMID: "vm-worker", AgentURL: "http://10.0.0.2:3000", Status: "running"},
+		},
+		CreatedAt: time.Date(2026, 5, 12, 0, 0, 0, 0, time.UTC),
+	}}, nil
+}
+
+func (f *fakeDaemon) GetFlock(_ context.Context, flockID string) (*FlockInfo, error) {
+	f.getFlockCalls++
+	f.getFlockID = flockID
+	if f.getFlockErr != nil {
+		return nil, f.getFlockErr
+	}
+	if f.getFlockResp != nil {
+		return f.getFlockResp, nil
+	}
+	return &FlockInfo{
+		FlockID:      flockID,
+		Task:         "build town",
+		TenantID:     "tenant-1",
+		EgressPolicy: "deny_all",
+		Agents: map[string]FlockAgentInfo{
+			"agent-worker": {AgentID: "agent-worker", Role: "worker", VMID: "vm-worker", AgentURL: "http://10.0.0.2:3000", Status: "running"},
+		},
+		CreatedAt: time.Date(2026, 5, 12, 0, 0, 0, 0, time.UTC),
+	}, nil
+}
+
+func (f *fakeDaemon) DeleteFlock(_ context.Context, flockID string) (*RawDaemonResponse, error) {
+	f.deleteFlockCalls++
+	f.deleteFlockID = flockID
+	if f.deleteFlockErr != nil {
+		return nil, f.deleteFlockErr
+	}
+	if f.deleteFlockResp != nil {
+		return f.deleteFlockResp, nil
+	}
+	return &RawDaemonResponse{StatusCode: 200, Body: `{"deleted":true}`}, nil
+}
+
+func (f *fakeDaemon) PostTownWall(_ context.Context, flockID string, req TownWallPostRequest) (*TownWallMessage, error) {
+	f.postTownWallCalls++
+	f.postTownWallFlockID = flockID
+	f.postTownWallReq = req
+	if f.postTownWallErr != nil {
+		return nil, f.postTownWallErr
+	}
+	if f.postTownWallResp != nil {
+		return f.postTownWallResp, nil
+	}
+	return &TownWallMessage{Timestamp: time.Date(2026, 5, 12, 1, 0, 0, 0, time.UTC), AgentID: req.AgentID, Body: req.Body}, nil
+}
+
+func (f *fakeDaemon) TownWallHistory(_ context.Context, flockID string) ([]TownWallMessage, error) {
+	f.townWallHistoryCalls++
+	f.townWallHistoryFlockID = flockID
+	if f.townWallHistoryErr != nil {
+		return nil, f.townWallHistoryErr
+	}
+	if f.townWallHistoryReturnNil {
+		return nil, nil
+	}
+	if f.townWallHistoryResp != nil {
+		return f.townWallHistoryResp, nil
+	}
+	return []TownWallMessage{{Timestamp: time.Date(2026, 5, 12, 1, 0, 0, 0, time.UTC), AgentID: "agent-worker", Body: "hello wall"}}, nil
+}
+
+func (f *routerFakeDaemon) CreateFlock(context.Context, FlockCreateRequest) (*FlockCreateResponse, error) {
+	return &FlockCreateResponse{FlockID: "flock-1", Agents: []FlockAgentInfo{}}, nil
+}
+
+func (f *routerFakeDaemon) ListFlocks(context.Context) ([]FlockInfo, error) {
+	return []FlockInfo{}, nil
+}
+
+func (f *routerFakeDaemon) GetFlock(context.Context, string) (*FlockInfo, error) {
+	return &FlockInfo{}, nil
+}
+
+func (f *routerFakeDaemon) DeleteFlock(context.Context, string) (*RawDaemonResponse, error) {
+	return &RawDaemonResponse{StatusCode: 200, Body: "{}"}, nil
+}
+
+func (f *routerFakeDaemon) PostTownWall(context.Context, string, TownWallPostRequest) (*TownWallMessage, error) {
+	return &TownWallMessage{}, nil
+}
+
+func (f *routerFakeDaemon) TownWallHistory(context.Context, string) ([]TownWallMessage, error) {
+	return []TownWallMessage{}, nil
 }
 
 type concurrentSpawnDaemon struct {
@@ -1522,6 +1688,253 @@ func TestToolsRestoreSnapshotRequiresSnapshotID(t *testing.T) {
 	}
 	if daemon.restoreSnapshotCalls != 0 {
 		t.Fatalf("RestoreSnapshot calls = %d, want 0", daemon.restoreSnapshotCalls)
+	}
+}
+
+func TestToolsSpawnFlockForwardsTenantEgressAndRoles(t *testing.T) {
+	daemon := &fakeDaemon{}
+	tools := NewTools(daemon, NewSessionStore(), time.Second)
+
+	out, err := tools.SpawnFlock(context.Background(), SpawnFlockInput{
+		Task:         "  build town  ",
+		Roles:        []string{" planner ", "worker"},
+		TenantID:     "tenant-1",
+		EgressPolicy: "deny_all",
+	})
+	if err != nil {
+		t.Fatalf("SpawnFlock returned error: %v", err)
+	}
+
+	if daemon.createFlockCalls != 1 {
+		t.Fatalf("CreateFlock calls = %d, want 1", daemon.createFlockCalls)
+	}
+	if daemon.createFlockReq.Task != "build town" {
+		t.Fatalf("Task = %q, want build town", daemon.createFlockReq.Task)
+	}
+	if got, want := daemon.createFlockReq.Roles, []string{"planner", "worker"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("Roles = %#v, want %#v", got, want)
+	}
+	if daemon.createFlockReq.TenantID != "tenant-1" || daemon.createFlockReq.EgressPolicy != "deny_all" {
+		t.Fatalf("tenant/egress = %q/%q, want tenant-1/deny_all", daemon.createFlockReq.TenantID, daemon.createFlockReq.EgressPolicy)
+	}
+	if out.FlockID != "flock-1" || out.Task != "build town" {
+		t.Fatalf("output flock/task = %q/%q, want flock-1/build town", out.FlockID, out.Task)
+	}
+	if out.TenantID != "tenant-1" || out.EgressPolicy != "deny_all" {
+		t.Fatalf("output tenant/egress = %q/%q, want tenant-1/deny_all", out.TenantID, out.EgressPolicy)
+	}
+	if len(out.Agents) != 1 || out.Agents[0].Role != "worker" {
+		t.Fatalf("agents = %#v, want one worker", out.Agents)
+	}
+	if out.TownWallURL == "" || out.PostURL == "" {
+		t.Fatalf("wall/post URLs = %q/%q, want non-empty", out.TownWallURL, out.PostURL)
+	}
+}
+
+func TestToolsSpawnFlockRejectsInvalidInputBeforeDaemonCall(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		input SpawnFlockInput
+	}{
+		{name: "empty task", input: SpawnFlockInput{Roles: []string{"worker"}}},
+		{name: "empty roles", input: SpawnFlockInput{Task: "build"}},
+		{name: "blank role", input: SpawnFlockInput{Task: "build", Roles: []string{"worker", " "}}},
+		{name: "slash role", input: SpawnFlockInput{Task: "build", Roles: []string{"ops/admin"}}},
+		{name: "backslash role", input: SpawnFlockInput{Task: "build", Roles: []string{`ops\admin`}}},
+		{name: "too many roles", input: SpawnFlockInput{Task: "build", Roles: append(make([]string, maxFlockRoles), "overflow")}},
+		{name: "invalid egress", input: SpawnFlockInput{Task: "build", Roles: []string{"worker"}, EgressPolicy: "internet"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.name == "too many roles" {
+				for i := range tc.input.Roles {
+					tc.input.Roles[i] = fmt.Sprintf("role-%d", i)
+				}
+			}
+			daemon := &fakeDaemon{}
+			tools := NewTools(daemon, NewSessionStore(), time.Second)
+
+			_, err := tools.SpawnFlock(context.Background(), tc.input)
+			if err == nil {
+				t.Fatal("SpawnFlock returned nil error for invalid input")
+			}
+			if daemon.createFlockCalls != 0 {
+				t.Fatalf("CreateFlock calls = %d, want 0", daemon.createFlockCalls)
+			}
+		})
+	}
+}
+
+func TestToolsListFlocksWrapsDaemonList(t *testing.T) {
+	createdAt := time.Date(2026, 5, 12, 0, 0, 0, 0, time.UTC)
+	daemon := &fakeDaemon{listFlockResp: []FlockInfo{{
+		FlockID:      "flock-1",
+		Task:         "build town",
+		TenantID:     "tenant-1",
+		EgressPolicy: "deny_all",
+		Agents: map[string]FlockAgentInfo{
+			"agent-worker": {AgentID: "agent-worker", Role: "worker", VMID: "vm-worker", AgentURL: "http://10.0.0.2:3000", Status: "running"},
+		},
+		CreatedAt: createdAt,
+	}}}
+	tools := NewTools(daemon, NewSessionStore(), time.Second)
+
+	out, err := tools.ListFlocks(context.Background(), ListFlocksInput{TenantID: "tenant-1"})
+	if err != nil {
+		t.Fatalf("ListFlocks returned error: %v", err)
+	}
+
+	if daemon.listFlockCalls != 1 {
+		t.Fatalf("ListFlocks calls = %d, want 1", daemon.listFlockCalls)
+	}
+	if len(out.Flocks) != 1 || out.Flocks[0].FlockID != "flock-1" || !out.Flocks[0].CreatedAt.Equal(createdAt) {
+		t.Fatalf("flocks = %#v, want flock-1", out.Flocks)
+	}
+}
+
+func TestToolsListFlocksConvertsNilDaemonSliceToEmptyJSONList(t *testing.T) {
+	daemon := &fakeDaemon{listFlockReturnNil: true}
+	tools := NewTools(daemon, NewSessionStore(), time.Second)
+
+	out, err := tools.ListFlocks(context.Background(), ListFlocksInput{})
+	if err != nil {
+		t.Fatalf("ListFlocks returned error: %v", err)
+	}
+
+	if out.Flocks == nil {
+		t.Fatal("Flocks = nil, want empty non-nil slice")
+	}
+	if len(out.Flocks) != 0 {
+		t.Fatalf("flock count = %d, want 0", len(out.Flocks))
+	}
+	data, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("json.Marshal returned error: %v", err)
+	}
+	if string(data) != `{"flocks":[]}` {
+		t.Fatalf("json = %s, want %s", data, `{"flocks":[]}`)
+	}
+}
+
+func TestToolsGetFlockRequiresFlockID(t *testing.T) {
+	daemon := &fakeDaemon{}
+	tools := NewTools(daemon, NewSessionStore(), time.Second)
+
+	_, err := tools.GetFlock(context.Background(), FlockIdentityInput{FlockID: `bad/flock`})
+	if err == nil {
+		t.Fatal("GetFlock returned nil error for invalid flock_id")
+	}
+	if daemon.getFlockCalls != 0 {
+		t.Fatalf("GetFlock calls = %d, want 0", daemon.getFlockCalls)
+	}
+
+	out, err := tools.GetFlock(context.Background(), FlockIdentityInput{FlockID: " flock-1 "})
+	if err != nil {
+		t.Fatalf("GetFlock returned error: %v", err)
+	}
+	if daemon.getFlockID != "flock-1" || out.FlockID != "flock-1" {
+		t.Fatalf("flock IDs = daemon %q output %q, want flock-1", daemon.getFlockID, out.FlockID)
+	}
+}
+
+func TestToolsDeleteFlockPreservesDaemonError(t *testing.T) {
+	daemonErr := &DaemonError{StatusCode: 409, Body: `{"error":"flock busy"}`}
+	daemon := &fakeDaemon{deleteFlockErr: daemonErr}
+	tools := NewTools(daemon, NewSessionStore(), time.Second)
+
+	_, err := tools.DeleteFlock(context.Background(), FlockIdentityInput{FlockID: "flock-1"})
+	if !errors.Is(err, daemonErr) {
+		t.Fatalf("DeleteFlock error = %v, want %v", err, daemonErr)
+	}
+	if daemon.deleteFlockCalls != 1 || daemon.deleteFlockID != "flock-1" {
+		t.Fatalf("DeleteFlock calls/id = %d/%q, want 1/flock-1", daemon.deleteFlockCalls, daemon.deleteFlockID)
+	}
+}
+
+func TestToolsPostTownWallValidatesInputBeforeDaemonCall(t *testing.T) {
+	for _, tc := range []TownWallPostInput{
+		{FlockID: "", AgentID: "agent-1", Body: "hello"},
+		{FlockID: `flock\1`, AgentID: "agent-1", Body: "hello"},
+		{FlockID: "flock-1", AgentID: "", Body: "hello"},
+		{FlockID: "flock-1", AgentID: "agent-1", Body: ""},
+	} {
+		daemon := &fakeDaemon{}
+		tools := NewTools(daemon, NewSessionStore(), time.Second)
+
+		_, err := tools.PostTownWall(context.Background(), tc)
+		if err == nil {
+			t.Fatalf("PostTownWall(%+v) returned nil error", tc)
+		}
+		if daemon.postTownWallCalls != 0 {
+			t.Fatalf("PostTownWall calls = %d, want 0", daemon.postTownWallCalls)
+		}
+	}
+
+	daemon := &fakeDaemon{}
+	tools := NewTools(daemon, NewSessionStore(), time.Second)
+	out, err := tools.PostTownWall(context.Background(), TownWallPostInput{FlockID: " flock-1 ", AgentID: " agent-1 ", Body: " hello wall "})
+	if err != nil {
+		t.Fatalf("PostTownWall returned error: %v", err)
+	}
+	if daemon.postTownWallFlockID != "flock-1" || daemon.postTownWallReq.AgentID != "agent-1" || daemon.postTownWallReq.Body != "hello wall" {
+		t.Fatalf("post args = %q/%+v, want trimmed flock-1 agent-1 hello wall", daemon.postTownWallFlockID, daemon.postTownWallReq)
+	}
+	if out.AgentID != "agent-1" || out.Body != "hello wall" {
+		t.Fatalf("message = %+v, want agent-1 hello wall", out)
+	}
+}
+
+func TestToolsTownWallHistoryConvertsNilDaemonSliceToEmptyJSONList(t *testing.T) {
+	daemon := &fakeDaemon{townWallHistoryReturnNil: true}
+	tools := NewTools(daemon, NewSessionStore(), time.Second)
+
+	out, err := tools.TownWallHistory(context.Background(), FlockIdentityInput{FlockID: " flock-1 "})
+	if err != nil {
+		t.Fatalf("TownWallHistory returned error: %v", err)
+	}
+
+	if daemon.townWallHistoryFlockID != "flock-1" {
+		t.Fatalf("history flock ID = %q, want flock-1", daemon.townWallHistoryFlockID)
+	}
+	if out.Messages == nil {
+		t.Fatal("Messages = nil, want empty non-nil slice")
+	}
+	if len(out.Messages) != 0 {
+		t.Fatalf("message count = %d, want 0", len(out.Messages))
+	}
+	data, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("json.Marshal returned error: %v", err)
+	}
+	if string(data) != `{"messages":[]}` {
+		t.Fatalf("json = %s, want %s", data, `{"messages":[]}`)
+	}
+}
+
+func TestToolsSpawnFlockAuditsDefaultTenant(t *testing.T) {
+	daemon := &fakeDaemon{}
+	auditPath := filepath.Join(t.TempDir(), "runtime-audit.jsonl")
+	tools := NewToolsWithOptions(daemon, NewSessionStore(), time.Second, ToolsOptions{
+		DefaultTenantID: "tenant-1",
+		AuditLogPath:    auditPath,
+	})
+
+	if _, err := tools.SpawnFlock(context.Background(), SpawnFlockInput{Task: "build town", Roles: []string{"worker"}}); err != nil {
+		t.Fatalf("SpawnFlock returned error: %v", err)
+	}
+
+	records, err := ReadRuntimeAudit(auditPath)
+	if err != nil {
+		t.Fatalf("ReadRuntimeAudit() error = %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("audit record count = %d, want 1", len(records))
+	}
+	record := records[0]
+	if record.TenantID != "tenant-1" || record.VMID != "" || record.SessionAlias != "" {
+		t.Fatalf("audit identity = %+v, want tenant-1 with empty VM/session", record)
+	}
+	if record.ToolName != "anvil_spawn_flock" || record.DaemonOperation != "POST /flocks" || record.ResultCode != "success" {
+		t.Fatalf("audit operation = %+v, want spawn flock success", record)
 	}
 }
 
