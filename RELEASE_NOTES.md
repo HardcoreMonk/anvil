@@ -32,6 +32,13 @@ foundation과 운영 관측성 계약을 추가한다.
   - `/metrics/vms`의 per-VM JSON metric
   - `ANVIL_OTEL_EXPORTER_OTLP_ENDPOINT` 또는 `OTEL_EXPORTER_OTLP_ENDPOINT` 기반
     optional HTTP trace export
+- anvil MCP Goosetown tool surface:
+  - `anvil_spawn_flock`
+  - `anvil_list_flocks`
+  - `anvil_get_flock`
+  - `anvil_delete_flock`
+  - `anvil_post_townwall`
+  - `anvil_get_townwall_history`
 
 ## 변경됨
 
@@ -39,6 +46,8 @@ foundation과 운영 관측성 계약을 추가한다.
   flock, Town Wall, 역할별 VM sizing, system prompt 주입, 선택적 COW spawn disk는
   ephemera runtime 계약으로 유지하고, anvil의 tenant/egress/metrics/trace 계약과
   함께 동작하도록 `spawnVMInternal` 경로에 통합했다.
+- IronClaw/Gemini schema compatibility 검증은 `roles`처럼 array input을 쓰는
+  tool field에 대해 array item type metadata도 기록한다.
 - `profile` egress policy는 policy 파일이 없는 기존 profile에서는 no-op으로 남아
   기존 로컬 profile 호환성을 유지한다.
 - trace export와 runtime audit API는 token, secret, daemon raw body, snapshot

@@ -149,10 +149,13 @@ daemon으로 보내는 outbound Bearer token이다.
   OpenTelemetry-compatible trace export를 제공한다.
 - anvil MCP tool input struct는 IronClaw/Gemini function declaration에서 빈 type이
   나오지 않도록 정적 schema compatibility 검증을 제공한다.
+- Goosetown flock/Town Wall runtime API는 additive `anvil_*` MCP tool surface로
+  노출된 상태이며, 기존 VM/snapshot tool 계약을 대체하지 않는다.
 
 남은 후속 후보:
 
 - scheduler service의 실제 운영 배포와 host inventory polling daemonization
 - snapshot locality의 cross-host snapshot replication
+- scheduler-aware cross-host flock placement
 - egress allow host rule의 L7 proxy/SNI 기반 강화
 - snapshot storage quota dashboard

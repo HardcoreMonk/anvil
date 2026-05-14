@@ -712,6 +712,21 @@ MCP tool:
 - `anvil_delete_snapshot`:
   `snapshot_id`로 snapshot을 삭제한다.
 
+- `anvil_spawn_flock`:
+  `task`, `roles`, optional `tenant_id`, optional `egress_policy`로 Goosetown
+  flock을 생성한다.
+
+- `anvil_list_flocks` / `anvil_get_flock` / `anvil_delete_flock`:
+  live flock 목록, 단일 flock metadata와 agent 상태 조회, flock 소속 VM 삭제를
+  daemon에 위임한다.
+
+- `anvil_post_townwall` / `anvil_get_townwall_history`:
+  flock Town Wall에 message를 append하고 stdio-compatible history를 조회한다.
+
+Goosetown MCP tool은 additive extension이며 기존 VM/snapshot tool 계약을
+대체하지 않는다. VM `session_name` alias는 flock alias로 재사용하지 않고, flock
+작업은 명시적인 `flock_id`를 사용한다.
+
 MCP adapter는 얇은 runtime bridge다. 현재 workspace copy는 VM 내부
 `/workspace` 기준 단일 file copy-in/copy-out만 지원한다. 기본 encoding은
 `text`이고, binary payload는 `encoding: "base64"`로 전달한다. 단일 파일 크기는
@@ -801,6 +816,7 @@ sudo ANVIL_API_ADDR=127.0.0.1:3000 ./anvil-daemon
 ```bash
 scripts/anvil-mcp-e2e.sh lifecycle
 scripts/anvil-mcp-e2e.sh semantic
+scripts/anvil-mcp-e2e.sh flock
 ```
 
 `lifecycle`은 기본 모드이며 내부적으로
@@ -815,6 +831,12 @@ scripts/anvil-mcp-e2e.sh semantic
 round-trip과 VM cleanup 경로를 확인하되 `anvil_run_task` 응답 body의 의미적
 marker는 검사하지 않는다. `semantic`은 같은 flow에 더해 `anvil-smoke-ok`
 포함 여부를 확인한다.
+
+`flock` 모드는 daemon이 이미 실행 중인 상태에서 MCP를 통해
+`anvil_spawn_flock`, `anvil_list_flocks`, `anvil_post_townwall`,
+`anvil_get_townwall_history`, `anvil_delete_flock` 경로를 확인한다. Town Wall
+SSE stream은 MCP smoke 대상이 아니며, history 조회로 stdio-compatible inspection을
+수행한다.
 
 daemon은 smoke 실행 전에 이미 떠 있어야 하며 `ANVIL_DAEMON_URL`과 필요한 경우
 `ANVIL_API_TOKEN`으로 adapter가 daemon에 도달할 수 있어야 한다. daemon 실행에는
