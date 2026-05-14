@@ -120,7 +120,7 @@
 - [x] Run `git diff --check`.
 - [x] Search for `agent_token` and verify no new metrics/audit/trace/schema endpoint exposes it.
 - [x] Run full KVM e2e: `go build -o anvil-daemon ./cmd/goose-daemon/` and `sudo bash e2e_test.sh`.
-- [ ] Commit, push, and create PR.
+- [x] Commit, push, and create PR.
 
 ## Self-Review
 
