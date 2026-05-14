@@ -1871,15 +1871,16 @@ func TestToolsPostTownWallValidatesInputBeforeDaemonCall(t *testing.T) {
 
 	daemon := &fakeDaemon{}
 	tools := NewTools(daemon, NewSessionStore(), time.Second)
-	out, err := tools.PostTownWall(context.Background(), TownWallPostInput{FlockID: " flock-1 ", AgentID: " agent-1 ", Body: " hello wall "})
+	body := "  hello\n"
+	out, err := tools.PostTownWall(context.Background(), TownWallPostInput{FlockID: " flock-1 ", AgentID: " agent-1 ", Body: body})
 	if err != nil {
 		t.Fatalf("PostTownWall returned error: %v", err)
 	}
-	if daemon.postTownWallFlockID != "flock-1" || daemon.postTownWallReq.AgentID != "agent-1" || daemon.postTownWallReq.Body != "hello wall" {
-		t.Fatalf("post args = %q/%+v, want trimmed flock-1 agent-1 hello wall", daemon.postTownWallFlockID, daemon.postTownWallReq)
+	if daemon.postTownWallFlockID != "flock-1" || daemon.postTownWallReq.AgentID != "agent-1" || daemon.postTownWallReq.Body != body {
+		t.Fatalf("post args = %q/%+v, want trimmed flock-1/agent-1 and preserved body %q", daemon.postTownWallFlockID, daemon.postTownWallReq, body)
 	}
-	if out.AgentID != "agent-1" || out.Body != "hello wall" {
-		t.Fatalf("message = %+v, want agent-1 hello wall", out)
+	if out.AgentID != "agent-1" || out.Body != body {
+		t.Fatalf("message = %+v, want agent-1 with preserved body %q", out, body)
 	}
 }
 

@@ -910,13 +910,12 @@ func (t *Tools) PostTownWall(ctx context.Context, input TownWallPostInput) (*Tow
 	if agentID == "" {
 		return nil, fmt.Errorf("agent_id must be non-empty")
 	}
-	body := strings.TrimSpace(input.Body)
-	if body == "" {
+	if strings.TrimSpace(input.Body) == "" {
 		return nil, fmt.Errorf("body must be non-empty")
 	}
 	out, err := t.daemon.PostTownWall(ctx, flockID, TownWallPostRequest{
 		AgentID: agentID,
-		Body:    body,
+		Body:    input.Body,
 	})
 	if err != nil {
 		return nil, t.auditFailureAndReturn(tenantID, "", "", "anvil_post_townwall", "POST /flocks/{flock_id}/post", err)
