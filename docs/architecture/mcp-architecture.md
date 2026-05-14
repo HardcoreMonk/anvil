@@ -588,6 +588,7 @@ client가 `/tmp/anvil-mcp`를 MCP `CommandTransport`로 실행하게 한다.
 ```bash
 scripts/anvil-mcp-e2e.sh lifecycle
 scripts/anvil-mcp-e2e.sh semantic
+scripts/anvil-mcp-e2e.sh flock
 ```
 
 실행 모드:
@@ -596,6 +597,7 @@ scripts/anvil-mcp-e2e.sh semantic
 |---|---|---|
 | `lifecycle` | `go run ./scripts/anvil-mcp-smoke.go -command /tmp/anvil-mcp -expect-output ""` | MCP stdio 연결, tool 목록, VM 생성, workspace copy round-trip, task 호출, health, stop/delete cleanup을 확인한다. `anvil_run_task` 응답 body의 의미적 marker는 검사하지 않는다. |
 | `semantic` | `go run ./scripts/anvil-mcp-smoke.go -command /tmp/anvil-mcp -expect-output "anvil-smoke-ok"` | lifecycle 경로에 더해 `anvil_run_task` 응답 body에 `anvil-smoke-ok`가 포함되는지 확인한다. |
+| `flock` | `go run ./scripts/anvil-mcp-smoke.go -command /tmp/anvil-mcp -mode flock` | MCP를 통해 Goosetown flock 생성, 목록 조회, Town Wall post/history, flock delete cleanup을 확인한다. |
 
 공통 검증 순서:
 
@@ -613,7 +615,9 @@ call anvil_delete_vm
 
 `scripts/anvil-mcp-e2e.sh`의 기본 모드는 `lifecycle`이다. `semantic` 모드와
 `scripts/anvil-mcp-smoke.go`의 기본값은 기존처럼 `anvil-smoke-ok` marker를
-검사한다. 두 모드 모두 daemon이 이미 실행 중이어야 하며, adapter 설정의
+검사한다. `flock` 모드는 `anvil_spawn_flock`, `anvil_list_flocks`,
+`anvil_post_townwall`, `anvil_get_townwall_history`, `anvil_delete_flock`을
+MCP를 통해 호출한다. 모든 모드는 daemon이 이미 실행 중이어야 하며, adapter 설정의
 `ANVIL_DAEMON_URL`과 `ANVIL_API_TOKEN`이 daemon에 도달할 수 있어야 한다.
 daemon 실행에는 `/dev/kvm`, root 권한, Firecracker 실행 가능 host가 필요하다.
 `semantic` 모드는 정상 LLM credential과 provider 응답까지 요구한다.
