@@ -55,6 +55,7 @@ const (
 	flockMetaPath         = "/root/.ephemera-flock"
 	systemPromptPath      = "/root/.goose-system-prompt"
 	maxWorkspaceFileBytes = 4 << 20
+	townWallPostTimeout   = 10 * time.Second
 	// defaultControlPlaneAddr is the gateway IP the host uses inside the VM's
 	// /24 network. Overridable via EPHEMERA_CONTROL_PLANE for testing.
 	defaultControlPlaneAddr = "http://10.0.1.1:3000"
@@ -448,7 +449,9 @@ func handleTownWallPost(w http.ResponseWriter, r *http.Request) {
 
 	payload, _ := json.Marshal(map[string]string{"agent_id": agentID, "body": body.Body})
 	target := controlPlaneAddr() + "/flocks/" + flockID + "/post"
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, target, bytes.NewReader(payload))
+	ctx, cancel := context.WithTimeout(r.Context(), townWallPostTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(payload))
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
 		return

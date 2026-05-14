@@ -30,8 +30,9 @@ type VMConfig struct {
 	GatewayIP      string
 	VsockUDSPath   string // host-side UDS for Firecracker vsock proxy; enables post-restore IP reconfiguration
 
-	// VcpuCount and MemSizeMib allow per-VM resource sizing. Zero values fall back
-	// to the legacy defaults (2 vCPU, 2048 MiB) so existing call sites stay compatible.
+	// VcpuCount and MemSizeMib allow per-VM resource sizing. Non-positive values
+	// fall back to the legacy defaults (2 vCPU, 2048 MiB) so existing call sites
+	// stay compatible.
 	VcpuCount  int64
 	MemSizeMib int64
 }
@@ -44,14 +45,14 @@ const (
 )
 
 // resolveMachineSize returns the vCPU and memory size to use, applying defaults
-// when the caller passed zero.
+// when the caller passed zero or invalid negative values.
 func resolveMachineSize(cfg VMConfig) (int64, int64) {
 	vcpu := cfg.VcpuCount
-	if vcpu == 0 {
+	if vcpu <= 0 {
 		vcpu = defaultVcpuCount
 	}
 	mem := cfg.MemSizeMib
-	if mem == 0 {
+	if mem <= 0 {
 		mem = defaultMemSizeMib
 	}
 	return vcpu, mem
