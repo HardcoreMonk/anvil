@@ -212,14 +212,6 @@ func runFlockSmoke(ctx context.Context, session *mcp.ClientSession) error {
 	}, &spawned); err != nil {
 		return err
 	}
-	fmt.Printf("spawned flock_id=%s agents=%d\n", spawned.FlockID, len(spawned.Agents))
-	if spawned.FlockID == "" {
-		return fmt.Errorf("anvil_spawn_flock returned empty flock_id")
-	}
-	if len(spawned.Agents) != 2 {
-		return fmt.Errorf("anvil_spawn_flock returned %d agents, want 2", len(spawned.Agents))
-	}
-
 	cleanup := true
 	defer func() {
 		if cleanup && spawned.FlockID != "" {
@@ -233,6 +225,14 @@ func runFlockSmoke(ctx context.Context, session *mcp.ClientSession) error {
 			log.Printf("cleanup delete flock status=%d body=%s", out.StatusCode, out.Body)
 		}
 	}()
+
+	fmt.Printf("spawned flock_id=%s agents=%d\n", spawned.FlockID, len(spawned.Agents))
+	if spawned.FlockID == "" {
+		return fmt.Errorf("anvil_spawn_flock returned empty flock_id")
+	}
+	if len(spawned.Agents) != 2 {
+		return fmt.Errorf("anvil_spawn_flock returned %d agents, want 2", len(spawned.Agents))
+	}
 
 	var flocks listFlocksOutput
 	if err := callStructured(ctx, session, "anvil_list_flocks", map[string]any{}, &flocks); err != nil {
