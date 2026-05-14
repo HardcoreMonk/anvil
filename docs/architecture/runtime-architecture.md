@@ -2,7 +2,7 @@
 
 ## 상태
 
-- 기준 버전: `v0.2.0`
+- 기준 버전: `v0.2.0` + anvil runtime control-plane updates
 - anvil 관점: ephemera runtime은 IronClaw 결합 프로젝트의 기반 실행 계층
 - 저장소/모듈 이름: `ephemera`
 - 런타임 소유 파일:
@@ -13,9 +13,9 @@
   - `internal/network/`
   - `internal/vm/`
 
-이 문서는 ephemera runtime 구조만 설명한다. 요청별 서비스 흐름은
-[service-logic.md](service-logic.md), IronClaw MCP 연동은
-[mcp-architecture.md](mcp-architecture.md)에 정리한다.
+이 문서는 ephemera runtime 구조와 anvil runtime scheduler service의 host-side
+상태를 설명한다. 요청별 서비스 흐름은 [service-logic.md](service-logic.md),
+IronClaw MCP 연동은 [mcp-architecture.md](mcp-architecture.md)에 정리한다.
 
 ## 시스템 관점
 
@@ -56,6 +56,7 @@ agent proxy를 모두 소유한다.
 | 구성 요소 | 파일 | 책임 |
 |---|---|---|
 | Control plane daemon | `cmd/goose-daemon/main.go`, `cmd/goose-daemon/api.go`, `cmd/goose-daemon/config.go` | host artifact bootstrap, HTTP API 시작, client 인증, 실행 중인 VM 관리, agent proxy, snapshot 생성/복원/삭제 |
+| Runtime scheduler service | `cmd/anvil-scheduler/main.go`, `internal/anvilmcp/scheduler_service.go` | host inventory, quota store, placement/snapshot locality state를 기준으로 runtime host schedule decision 반환 |
 | Storage provisioner | `internal/storage/provisioner.go` | golden image build/검증, VM별 disk clone, Goose config/secrets 주입, VM별 agent token 작성, timezone data 주입 |
 | Snapshot storage | `internal/storage/snapshot.go` | snapshot metadata 저장, rootfs copy, COW restore device 생성/해제, diff memory snapshot merge |
 | VM wrapper | `internal/vm/machine.go` | Firecracker config 구성, cold VM 시작, snapshot state restore, vsock 기반 guest IP 재설정 |
@@ -73,6 +74,10 @@ Host memory 상태:
 | `ControlPlane.vms` | `cmd/goose-daemon/api.go` | `vm_id` 기준 실행 중인 VM registry |
 | `ControlPlane.snapshots` | `cmd/goose-daemon/api.go` | `snapshot_id` 기준 로드된 snapshot metadata |
 | `ControlPlane.clients` | `cmd/goose-daemon/api.go` | 현재 control-plane API client 목록. `SIGHUP`으로 reload |
+| `ControlPlane.tenantStore` | `cmd/goose-daemon/api.go` | `tenants/tenants.json` 기반 tenant quota/usage store |
+| `ControlPlane.metrics` | `cmd/goose-daemon/api.go` | lifecycle counter, duration, queue depth |
+| `PlacementStore` | `internal/anvilmcp/placement_store.go` | scheduler host, VM placement, snapshot location state |
+| `QuotaStore` | `internal/anvilmcp/quota_store.go` | scheduler와 daemon tenant API에서 사용하는 quota/usage JSON state |
 | `network.Manager.ipInUse` | `internal/network/manager.go` | 할당된 private guest IP |
 | `network.Manager.freeTapIDs` | `internal/network/manager.go` | 재사용 가능한 TAP ID |
 
@@ -86,6 +91,10 @@ Host disk 상태:
 | `artifacts/goose-agent` | VM 내부 HTTP agent binary |
 | `artifacts/goose-agent.sha256` | `cmd/goose-agent`, `go.mod`, `go.sum` 기준 source hash stamp |
 | `artifacts/micro-init` | VM 내부 PID 1 binary |
+| `tenants/tenants.json` | daemon-local tenant quota/usage state, mode `0600` |
+| `audit/runtime-audit.jsonl` | daemon runtime audit 조회/보관 API가 읽는 JSONL record |
+| `ANVIL_SCHEDULER_STATE` path | scheduler service placement/snapshot locality JSON state |
+| `ANVIL_SCHEDULER_QUOTA_STORE` path | scheduler service tenant quota/usage JSON state |
 | `/tmp/goose-workspaces/<vm_id>.ext4` | cold-spawn VM의 writable rootfs clone |
 | `/tmp/goose-workspaces/<vm_id>.cow` | COW-restored VM의 sparse exception store |
 | `snapshots/<snapshot_id>/memory.bin` | Full 또는 sparse diff guest memory snapshot |
@@ -126,10 +135,23 @@ cmd/goose-daemon/main.go
        -> iptables MASQUERADE rule 추가
   -> ControlPlane 생성
        -> snapshots/*/metadata.json에서 snapshot metadata load
+       -> tenants/tenants.json load
+       -> optional trace exporter load
        -> HTTP route 등록
   -> API serve
   -> SIGINT/SIGTERM shutdown 처리
   -> SIGHUP token reload 처리
+```
+
+Scheduler service 시작 흐름:
+
+```text
+cmd/anvil-scheduler/main.go
+  -> ANVIL_SCHEDULER_ADDR 읽기, 기본값 127.0.0.1:3010
+  -> ANVIL_SCHEDULER_STATE에서 PlacementStore load
+  -> ANVIL_SCHEDULER_QUOTA_STORE에서 QuotaStore load
+  -> /health, /hosts, /placements, /reconcile, /schedule/spawn, /schedule/restore 등록
+  -> HTTP serve
 ```
 
 daemon은 self-bootstrapping을 의도한다. 첫 실행에서 image, kernel,
@@ -281,8 +303,14 @@ mutating guest endpoint는 token file이 없을 때를 제외하면 VM별 agent 
 - `cmd/goose-daemon/main.go`
 - `cmd/goose-daemon/api.go`
 - `cmd/goose-daemon/config.go`
+- `cmd/goose-daemon/egress_policy.go`
+- `cmd/goose-daemon/otel.go`
+- `cmd/anvil-scheduler/main.go`
 - `cmd/goose-agent/main.go`
 - `cmd/micro-init/main.go`
+- `internal/anvilmcp/placement_store.go`
+- `internal/anvilmcp/quota_store.go`
+- `internal/anvilmcp/scheduler_service.go`
 - `internal/storage/provisioner.go`
 - `internal/storage/snapshot.go`
 - `internal/network/manager.go`

@@ -46,6 +46,14 @@ curl -H "Authorization: Bearer $TOKEN" \
 guest 내부 endpoint는 `goose-agent`의 `/health`다. 운영 client는 VM private IP에
 직접 접근하지 말고 daemon의 `/vms/{id}/health` proxy를 우선 사용한다.
 
+runtime scheduler service를 별도 process로 운영하면 scheduler 자체 health와
+placement state를 함께 본다.
+
+```bash
+curl http://127.0.0.1:3010/health
+curl http://127.0.0.1:3010/placements
+```
+
 ## Snapshot GC audit
 
 `POST /snapshots/gc`를 `apply:true`로 호출하면 daemon은
@@ -105,8 +113,14 @@ curl -X POST http://127.0.0.1:3000/audit/runtime/prune \
 - `anvil_vm_create_duration_seconds_sum`
 - `anvil_vm_restore_duration_seconds_count`
 - `anvil_vm_restore_duration_seconds_sum`
+- `anvil_vm_delete_duration_seconds_count`
+- `anvil_vm_delete_duration_seconds_sum`
 - `anvil_snapshot_create_duration_seconds_count`
 - `anvil_snapshot_create_duration_seconds_sum`
+- `anvil_snapshot_delete_duration_seconds_count`
+- `anvil_snapshot_delete_duration_seconds_sum`
+- `anvil_snapshot_gc_duration_seconds_count`
+- `anvil_snapshot_gc_duration_seconds_sum`
 - `anvil_agent_health_readiness_duration_seconds_count`
 - `anvil_agent_health_readiness_duration_seconds_sum`
 

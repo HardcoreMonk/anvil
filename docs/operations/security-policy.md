@@ -89,11 +89,39 @@ go run ./scripts/snapshot-metadata-scrub.go -input snapshots/snap-.../metadata.j
 
 snapshot GC audit은 metadata 전체나 `agent_token`을 기록하지 않는다.
 
+## Egress policy
+
+`egress_policy`는 `deny_all`, `profile`, `allow_all` 중 하나다. daemon은 선택된
+policy를 VM/snapshot/restore metadata에 보존하고, host-local network rule 적용에
+사용한다.
+
+- `deny_all`: guest IP 기준 `iptables FORWARD` reject rule을 적용한다.
+- `profile`: `configs/profiles/{profile}/egress.json`,
+  `EPHEMERA_EGRESS_PROFILE_DIR`, `ANVIL_EGRESS_PROFILE_DIR` 아래의 profile별
+  `egress.json`이 있으면 allow CIDR, allow host string match, DNS server allowlist와
+  default reject rule을 적용한다.
+- `allow_all`: 기존 NAT outbound 동작을 유지한다.
+
+`egress.json`은 secret 저장소가 아니다. provider API key, Bearer token, 내부
+credential을 넣지 않는다. `allow_hosts` rule은 packet string match 기반의 coarse
+host allowlist이며, L7 proxy 또는 SNI gateway를 대체하지 않는다. policy 파일이 없는
+`profile`은 기존 profile 호환성을 위해 no-op이다.
+
+## Audit, metrics, trace redaction
+
+runtime audit API, snapshot GC audit, `/metrics`, `/metrics/vms`, optional trace
+export는 daemon raw body, snapshot metadata 전체, secret, `agent_token`을 기록하지
+않는다. trace exporter는 attribute key/value에서 token, secret, authorization 계열
+값을 제거한 뒤 `{endpoint}/v1/traces`로 전송한다.
+
 ## 운영 점검 기준
 
 - 공개 endpoint는 TLS reverse proxy 뒤에 있는가.
 - 운영 daemon에 `EPHEMERA_API_TOKENS`가 설정되어 있는가.
 - `POST /vms` 외 응답과 MCP output에 `agent_token`이 없는가.
+- `deny_all` 또는 `profile` egress policy를 쓰는 profile의 `egress.json`이 의도한
+  CIDR, host, DNS server만 허용하는가.
+- runtime audit, metrics, trace export에 token/secret/metadata raw body가 없는가.
 - snapshot metadata를 host 밖으로 내보내기 전에 scrub했는가.
 - `configs/goose-secrets.yaml`과 profile secrets가 git에 들어가지 않았는가.
 

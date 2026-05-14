@@ -51,7 +51,9 @@ daemon 계약 확장을 필요로 한다.
 
 `deny_all`은 host `iptables FORWARD` reject rule로 강제한다. `profile`은 profile별
 `egress.json`이 있을 때 allow CIDR/host/DNS server rule과 default reject rule을
-적용한다. policy 파일이 없으면 기존 profile 동작과 호환되도록 no-op이다.
+적용한다. lookup directory는 기본 `configs/profiles`이며
+`EPHEMERA_EGRESS_PROFILE_DIR`, `ANVIL_EGRESS_PROFILE_DIR`로 바꿀 수 있다. policy
+파일이 없으면 기존 profile 동작과 호환되도록 no-op이다.
 
 ## 범위
 
@@ -135,6 +137,11 @@ client로 spawn/restore와 VM 후속 호출을 라우팅한다. `PlacementStore`
 snapshot location을 JSON으로 보존하고, `ReconcilePlacements`는 daemon `GET /vms`
 결과로 stale placement를 교체한다.
 
+별도 process인 `cmd/anvil-scheduler`는 `ANVIL_SCHEDULER_ADDR`,
+`ANVIL_SCHEDULER_STATE`, `ANVIL_SCHEDULER_QUOTA_STORE`를 읽는다. HTTP surface는
+`GET /health`, `GET/PUT /hosts`, `GET /placements`, `POST /reconcile`,
+`POST /schedule/spawn`, `POST /schedule/restore`다.
+
 ## Egress 정책
 
 Egress policy는 host network policy에서 먼저 강제되어야 한다. VM profile은 어떤
@@ -154,7 +161,8 @@ Profile 파일을 수정하거나 우회하는 것만으로 egress 제한이 사
 현재 `EgressPolicy` 값은 policy 선택, daemon metadata, audit/debug를 위한 enum이다.
 daemon은 선택된 policy를 VM/snapshot/restore metadata에 보존한다. `deny_all`은
 host-local `iptables` reject rule로 강제한다. `profile`은
-`configs/profiles/{profile}/egress.json` 또는 `ANVIL_EGRESS_PROFILE_DIR` 아래의
+`configs/profiles/{profile}/egress.json`, `EPHEMERA_EGRESS_PROFILE_DIR` 또는
+`ANVIL_EGRESS_PROFILE_DIR` 아래의
 profile별 policy 파일이 있을 때 allow CIDR, allow host string match, DNS server
 allowlist와 DNS/default reject rule을 적용한다. policy 파일이 없으면 기존 profile
 동작과 호환되도록 no-op이다.

@@ -21,6 +21,7 @@ runtime과 anvil 통합 문서를 함께 담고 있다.
   `internal/network`, `internal/vm`
 - 게스트 구성 요소: `cmd/goose-agent`, `cmd/micro-init`
 - IronClaw 연동 MCP 어댑터: `cmd/anvil-mcp`, `internal/anvilmcp`
+- 런타임 스케줄러 서비스: `cmd/anvil-scheduler`, `internal/anvilmcp`
 - 설정 예시: `configs/*.example`, `configs/profiles/*`
 - 런타임 산출물: `artifacts/`, `snapshots/`, `/tmp/goose-workspaces/`
 
@@ -46,6 +47,7 @@ runtime과 anvil 통합 문서를 함께 담고 있다.
 go test ./...
 go build ./cmd/goose-daemon
 go build ./cmd/anvil-mcp
+go build ./cmd/anvil-scheduler
 ```
 
 전체 통합 검증:

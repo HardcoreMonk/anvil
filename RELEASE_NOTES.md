@@ -1,3 +1,58 @@
+# Unreleased — runtime scheduler, network policy, observability
+
+현재 mainline은 anvil `anvil-v0.1.0` 통합 표면 위에 multi-host runtime
+foundation과 운영 관측성 계약을 추가한다.
+
+## 추가됨
+
+- `cmd/anvil-scheduler`: persistent host/quota/placement state를 읽어
+  `/health`, `/hosts`, `/placements`, `/reconcile`, `/schedule/spawn`,
+  `/schedule/restore`를 제공하는 얇은 HTTP scheduler service.
+- `internal/anvilmcp` scheduler 확장:
+  - persistent `PlacementStore`
+  - JSON-backed `QuotaStore`
+  - snapshot locality preferred host
+  - spawn/restore retry/failover
+  - daemon `GET /vms` 기반 placement reconciliation
+  - IronClaw/Gemini function declaration용 tool input schema compatibility 검증
+- daemon 운영 endpoint:
+  - `GET /health`
+  - `GET /metrics`
+  - `GET /metrics/vms`
+  - `GET /tenants`, `GET/PUT /tenants/{tenant_id}`
+  - `GET /audit/runtime`, `POST /audit/runtime/prune`
+- profile egress policy:
+  - `EPHEMERA_EGRESS_PROFILE_DIR` 또는 `ANVIL_EGRESS_PROFILE_DIR` 아래
+    `configs/profiles/{profile}/egress.json` 형식의 allow CIDR, allow host,
+    DNS server allowlist.
+  - `deny_all`과 `profile` policy는 host `iptables` rule로 계획/적용한다.
+- observability:
+  - lifecycle counter와 duration sum/count metric
+  - lifecycle queue depth
+  - `/metrics/vms`의 per-VM JSON metric
+  - `ANVIL_OTEL_EXPORTER_OTLP_ENDPOINT` 또는 `OTEL_EXPORTER_OTLP_ENDPOINT` 기반
+    optional HTTP trace export
+
+## 변경됨
+
+- `profile` egress policy는 policy 파일이 없는 기존 profile에서는 no-op으로 남아
+  기존 로컬 profile 호환성을 유지한다.
+- trace export와 runtime audit API는 token, secret, daemon raw body, snapshot
+  metadata, `agent_token`을 기록하지 않는 redaction 계약을 따른다.
+- release/build 검증 대상에 `go build ./cmd/anvil-scheduler`를 포함한다.
+
+## 검증됨
+
+- `go test -count=1 ./...`
+- `go build ./cmd/goose-daemon`
+- `go build ./cmd/anvil-mcp`
+- `go build ./cmd/anvil-scheduler`
+- `bash -n e2e_test.sh`
+- `bash -n scripts/build_image.sh`
+- `git diff --check`
+- 실제 KVM host에서 `go build -o anvil-daemon ./cmd/goose-daemon/` 후
+  `sudo bash e2e_test.sh`
+
 # anvil v0.1.0 — IronClaw 통합 E2E 완료
 
 `anvil`은 IronClaw와 ephemera를 결합하는 새 프로젝트다. 이 저장소의 공개
@@ -41,8 +96,9 @@
   확인, VM cleanup, snapshot GC dry-run/apply 운영 명령.
 - [docs/operations/disaster-recovery.md](docs/operations/disaster-recovery.md): daemon
   crash/restart, stale TAP/IP, restore 실패, GC 실패, diff base 누락 대응 playbook.
-- [docs/operations/observability.md](docs/operations/observability.md): 현재
-  log/health/audit 기반 관측성과 아직 구현되지 않은 metrics 범위.
+- [docs/operations/observability.md](docs/operations/observability.md): daemon log,
+  `/health`, `/metrics`, `/metrics/vms`, runtime audit, optional trace export 운영
+  기준.
 - `internal/anvilmcp` multi-tenant foundation:
   - `tenant_id` validation
   - tenant quota decision helper

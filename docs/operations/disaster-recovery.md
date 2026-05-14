@@ -21,11 +21,11 @@ snapshot 의존성 문제를 다룰 때의 안전한 절차다. 원칙은 먼저
 EPHEMERA_API_TOKENS="operator:$TOKEN" ./anvil-daemon
 ```
 
-2. daemon API 응답을 확인한다. 현재 top-level `/health` endpoint는 없으므로 목록
-   endpoint로 process와 인증 경로를 확인한다.
+2. daemon API 응답을 확인한다. top-level `/health` endpoint로 process와 인증
+   경로를 확인한다.
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:3000/vms
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:3000/health
 ```
 
 3. daemon이 알고 있는 VM과 snapshot 목록을 확인한다.
@@ -51,6 +51,18 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 daemon 재시작 후 API 목록과 host 상태가 불일치하면 수동 파일 삭제를 하지 말고 먼저
 해당 VM에 `DELETE /vms/{vm_id}`를 호출해 daemon cleanup path를 실행한다.
+
+runtime scheduler service를 별도로 운영한다면 scheduler도 확인한다.
+
+```bash
+curl http://127.0.0.1:3010/health
+curl http://127.0.0.1:3010/placements
+```
+
+`ANVIL_SCHEDULER_STATE`와 `ANVIL_SCHEDULER_QUOTA_STORE` 파일을 직접 편집하지
+않는다. placement가 stale이면 먼저 daemon별 `GET /vms` 결과를 확인하고
+`RuntimeRouter.ReconcilePlacements` 경로 또는 운영자가 승인한 scheduler 재기동
+절차로 정리한다.
 
 ## VM 삭제 실패 후 stale TAP/IP
 

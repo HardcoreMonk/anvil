@@ -57,6 +57,7 @@ Go 모듈 경로와 기존 API/환경 변수에는 `ephemera` 또는 `goose` 이
 | Diff snapshot | 기준 Full snapshot 이후 dirty memory page만 sparse file로 저장한 snapshot | `internal/storage` |
 | COW restore | snapshot rootfs를 read-only base로 두고 per-VM sparse exception store에 쓰기를 기록하는 restore 방식 | `internal/storage` |
 | IronClaw MCP adapter | IronClaw가 ephemera daemon API를 anvil tool로 호출하게 해 주는 stdio bridge | `cmd/anvil-mcp` |
+| anvil scheduler service | host inventory, quota, placement, snapshot locality를 바탕으로 runtime host 선택을 반환하는 얇은 HTTP service | `cmd/anvil-scheduler`, `internal/anvilmcp` |
 
 ## 경계 규칙
 
@@ -94,6 +95,12 @@ Go 모듈 경로와 기존 API/환경 변수에는 `ephemera` 또는 `goose` 이
 - MCP adapter token 환경 변수: `ANVIL_API_TOKEN`
 - MCP adapter tenant 기본값 환경 변수: `ANVIL_MCP_TENANT_ID`
 - MCP adapter runtime audit JSONL 환경 변수: `ANVIL_MCP_AUDIT_LOG`
+- scheduler service 환경 변수: `ANVIL_SCHEDULER_ADDR`,
+  `ANVIL_SCHEDULER_STATE`, `ANVIL_SCHEDULER_QUOTA_STORE`
+- profile egress policy directory 환경 변수: `EPHEMERA_EGRESS_PROFILE_DIR`,
+  `ANVIL_EGRESS_PROFILE_DIR`
+- optional trace export 환경 변수: `ANVIL_OTEL_EXPORTER_OTLP_ENDPOINT`,
+  `OTEL_EXPORTER_OTLP_ENDPOINT`
 
 `ANVIL_API_TOKEN`은 프로세스별 의미가 다르다. goose-daemon에서는
 `EPHEMERA_API_TOKEN`의 control-plane token alias이고, `cmd/anvil-mcp`에서는
@@ -115,7 +122,7 @@ daemon으로 보내는 outbound Bearer token이다.
 - `POST /snapshots/{id}/restore` 응답은 더 이상 `agent_token`을 노출하지 않는다.
 - scheduler host inventory polling, runtime router, JSON quota store, daemon tenant
   API, `deny_all` host egress rule, runtime audit API, `/health`, `/metrics`가
-  후속 control-plane foundation으로 구현된 상태다.
+  runtime control-plane foundation으로 구현된 상태다.
 - `cmd/anvil-scheduler`, persistent `PlacementStore`, snapshot locality preference,
   router retry/failover, placement reconciliation helper가 scheduler service
   foundation으로 구현된 상태다.
