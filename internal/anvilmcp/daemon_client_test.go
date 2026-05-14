@@ -232,6 +232,154 @@ func TestDaemonClientControlPlaneEndpoints(t *testing.T) {
 	}
 }
 
+func TestDaemonClientFlockEndpoints(t *testing.T) {
+	createdAt := "2026-05-15T01:02:03Z"
+	messageAt := "2026-05-15T01:03:04Z"
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Fatalf("Authorization = %q, want Bearer test-token", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.Method + " " + r.URL.Path {
+		case "POST /flocks":
+			if got := r.Header.Get("Content-Type"); got != "application/json" {
+				t.Fatalf("Content-Type = %q, want application/json", got)
+			}
+			var body FlockCreateRequest
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode create flock body: %v", err)
+			}
+			if body.Task != "ship feature" {
+				t.Fatalf("task = %q, want ship feature", body.Task)
+			}
+			if len(body.Roles) != 2 || body.Roles[0] != "planner" || body.Roles[1] != "builder" {
+				t.Fatalf("roles = %v, want [planner builder]", body.Roles)
+			}
+			if body.TenantID != "tenant-1" || body.EgressPolicy != "locked" {
+				t.Fatalf("tenant/egress = %q/%q, want tenant-1/locked", body.TenantID, body.EgressPolicy)
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"flock_id":"flock-1","task":"ship feature","tenant_id":"tenant-1","egress_policy":"locked","agents":null,"town_wall_url":"http://daemon/flocks/flock-1/wall","post_url":"http://daemon/flocks/flock-1/post"}`))
+		case "GET /flocks":
+			_, _ = w.Write([]byte(`null`))
+		case "GET /flocks/flock-1":
+			_, _ = w.Write([]byte(`{"flock_id":"flock-1","task":"ship feature","tenant_id":"tenant-1","egress_policy":"locked","agents":{"planner":{"agent_id":"agent-1","role":"planner","vm_id":"vm-1","agent_url":"http://10.0.0.2:8080","status":"running"}},"created_at":"` + createdAt + `"}`))
+		case "POST /flocks/flock-1/post":
+			if got := r.Header.Get("Content-Type"); got != "application/json" {
+				t.Fatalf("Content-Type = %q, want application/json", got)
+			}
+			var body TownWallPostRequest
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode town wall post body: %v", err)
+			}
+			if body.AgentID != "agent-1" || body.Body != "hello wall" {
+				t.Fatalf("town wall post = %+v, want agent-1 hello wall", body)
+			}
+			_, _ = w.Write([]byte(`{"timestamp":"` + messageAt + `","agent_id":"agent-1","body":"hello wall"}`))
+		case "GET /flocks/flock-1/wall/history":
+			_, _ = w.Write([]byte(`null`))
+		case "DELETE /flocks/flock-1":
+			_, _ = w.Write([]byte(`{"deleted":true}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.RequestURI())
+		}
+	}))
+	defer server.Close()
+
+	client := NewDaemonClient(Config{DaemonURL: server.URL, APIToken: "test-token"}, server.Client())
+	ctx := context.Background()
+
+	created, err := client.CreateFlock(ctx, FlockCreateRequest{
+		Task:         "ship feature",
+		Roles:        []string{"planner", "builder"},
+		TenantID:     "tenant-1",
+		EgressPolicy: "locked",
+	})
+	if err != nil {
+		t.Fatalf("CreateFlock returned error: %v", err)
+	}
+	if created.FlockID != "flock-1" || created.Task != "ship feature" || created.TenantID != "tenant-1" || created.EgressPolicy != "locked" {
+		t.Fatalf("created flock = %+v, want flock-1 ship feature tenant-1 locked", created)
+	}
+	if created.Agents == nil || len(created.Agents) != 0 {
+		t.Fatalf("created agents = %#v, want empty non-nil slice", created.Agents)
+	}
+	if created.TownWallURL != "http://daemon/flocks/flock-1/wall" || created.PostURL != "http://daemon/flocks/flock-1/post" {
+		t.Fatalf("wall/post urls = %q/%q", created.TownWallURL, created.PostURL)
+	}
+
+	flocks, err := client.ListFlocks(ctx)
+	if err != nil {
+		t.Fatalf("ListFlocks returned error: %v", err)
+	}
+	if flocks == nil || len(flocks) != 0 {
+		t.Fatalf("flocks = %#v, want empty non-nil slice", flocks)
+	}
+
+	flock, err := client.GetFlock(ctx, "flock-1")
+	if err != nil {
+		t.Fatalf("GetFlock returned error: %v", err)
+	}
+	wantCreatedAt, err := time.Parse(time.RFC3339, createdAt)
+	if err != nil {
+		t.Fatalf("parse createdAt fixture: %v", err)
+	}
+	if flock.FlockID != "flock-1" || !flock.CreatedAt.Equal(wantCreatedAt) {
+		t.Fatalf("flock = %+v, want flock-1 created_at %v", flock, wantCreatedAt)
+	}
+	if flock.Agents["planner"].AgentID != "agent-1" || flock.Agents["planner"].Status != "running" {
+		t.Fatalf("planner agent = %+v, want agent-1 running", flock.Agents["planner"])
+	}
+
+	message, err := client.PostTownWall(ctx, "flock-1", TownWallPostRequest{AgentID: "agent-1", Body: "hello wall"})
+	if err != nil {
+		t.Fatalf("PostTownWall returned error: %v", err)
+	}
+	wantMessageAt, err := time.Parse(time.RFC3339, messageAt)
+	if err != nil {
+		t.Fatalf("parse messageAt fixture: %v", err)
+	}
+	if message.AgentID != "agent-1" || message.Body != "hello wall" || !message.Timestamp.Equal(wantMessageAt) {
+		t.Fatalf("message = %+v, want agent-1 hello wall at %v", message, wantMessageAt)
+	}
+
+	history, err := client.TownWallHistory(ctx, "flock-1")
+	if err != nil {
+		t.Fatalf("TownWallHistory returned error: %v", err)
+	}
+	if history == nil || len(history) != 0 {
+		t.Fatalf("history = %#v, want empty non-nil slice", history)
+	}
+
+	deleted, err := client.DeleteFlock(ctx, "flock-1")
+	if err != nil {
+		t.Fatalf("DeleteFlock returned error: %v", err)
+	}
+	if deleted.StatusCode != http.StatusOK || deleted.Body != `{"deleted":true}` {
+		t.Fatalf("deleted = %+v, want status 200 body deleted true", deleted)
+	}
+
+	want := []string{
+		"POST /flocks",
+		"GET /flocks",
+		"GET /flocks/flock-1",
+		"POST /flocks/flock-1/post",
+		"GET /flocks/flock-1/wall/history",
+		"DELETE /flocks/flock-1",
+	}
+	if len(paths) != len(want) {
+		t.Fatalf("paths = %v, want %v", paths, want)
+	}
+	for i := range want {
+		if paths[i] != want[i] {
+			t.Fatalf("paths[%d] = %q, want %q; all paths = %v", i, paths[i], want[i], paths)
+		}
+	}
+}
+
 func TestDaemonClientCopyIn(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPut {

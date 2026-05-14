@@ -75,6 +75,51 @@ type RestoreSnapshotResponse struct {
 	SourceSnapshotID string `json:"source_snapshot_id"`
 }
 
+type FlockAgentInfo struct {
+	AgentID  string `json:"agent_id"`
+	Role     string `json:"role"`
+	VMID     string `json:"vm_id"`
+	AgentURL string `json:"agent_url"`
+	Status   string `json:"status"`
+}
+
+type FlockCreateRequest struct {
+	Task         string   `json:"task"`
+	Roles        []string `json:"roles"`
+	TenantID     string   `json:"tenant_id,omitempty"`
+	EgressPolicy string   `json:"egress_policy,omitempty"`
+}
+
+type FlockCreateResponse struct {
+	FlockID      string           `json:"flock_id"`
+	Task         string           `json:"task"`
+	TenantID     string           `json:"tenant_id,omitempty"`
+	EgressPolicy string           `json:"egress_policy,omitempty"`
+	Agents       []FlockAgentInfo `json:"agents"`
+	TownWallURL  string           `json:"town_wall_url"`
+	PostURL      string           `json:"post_url"`
+}
+
+type FlockInfo struct {
+	FlockID      string                    `json:"flock_id"`
+	Task         string                    `json:"task"`
+	TenantID     string                    `json:"tenant_id,omitempty"`
+	EgressPolicy string                    `json:"egress_policy,omitempty"`
+	Agents       map[string]FlockAgentInfo `json:"agents"`
+	CreatedAt    time.Time                 `json:"created_at"`
+}
+
+type TownWallPostRequest struct {
+	AgentID string `json:"agent_id"`
+	Body    string `json:"body"`
+}
+
+type TownWallMessage struct {
+	Timestamp time.Time `json:"timestamp"`
+	AgentID   string    `json:"agent_id"`
+	Body      string    `json:"body"`
+}
+
 type RawDaemonResponse struct {
 	StatusCode int    `json:"status_code"`
 	Body       string `json:"body"`
@@ -213,6 +258,84 @@ func (c *DaemonClient) DeleteSnapshot(ctx context.Context, snapshotID string) (*
 	return c.raw(ctx, http.MethodDelete, "/snapshots/"+snapshotID, nil)
 }
 
+func (c *DaemonClient) CreateFlock(ctx context.Context, req FlockCreateRequest) (*FlockCreateResponse, error) {
+	_, body, err := c.do(ctx, http.MethodPost, "/flocks", req)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp FlockCreateResponse
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		return nil, fmt.Errorf("decode create flock response: %w", err)
+	}
+	if resp.Agents == nil {
+		resp.Agents = []FlockAgentInfo{}
+	}
+	return &resp, nil
+}
+
+func (c *DaemonClient) ListFlocks(ctx context.Context) ([]FlockInfo, error) {
+	_, body, err := c.do(ctx, http.MethodGet, "/flocks", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp []FlockInfo
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		return nil, fmt.Errorf("decode list flocks response: %w", err)
+	}
+	if resp == nil {
+		resp = []FlockInfo{}
+	}
+	return resp, nil
+}
+
+func (c *DaemonClient) GetFlock(ctx context.Context, flockID string) (*FlockInfo, error) {
+	_, body, err := c.do(ctx, http.MethodGet, flockPath(flockID), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp FlockInfo
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		return nil, fmt.Errorf("decode flock response: %w", err)
+	}
+	return &resp, nil
+}
+
+func (c *DaemonClient) DeleteFlock(ctx context.Context, flockID string) (*RawDaemonResponse, error) {
+	return c.raw(ctx, http.MethodDelete, flockPath(flockID), nil)
+}
+
+func (c *DaemonClient) PostTownWall(ctx context.Context, flockID string, req TownWallPostRequest) (*TownWallMessage, error) {
+	_, body, err := c.do(ctx, http.MethodPost, flockPath(flockID)+"/post", req)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp TownWallMessage
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		return nil, fmt.Errorf("decode town wall post response: %w", err)
+	}
+	return &resp, nil
+}
+
+func (c *DaemonClient) TownWallHistory(ctx context.Context, flockID string) ([]TownWallMessage, error) {
+	_, body, err := c.do(ctx, http.MethodGet, flockPath(flockID)+"/wall/history", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp []TownWallMessage
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		return nil, fmt.Errorf("decode town wall history response: %w", err)
+	}
+	if resp == nil {
+		resp = []TownWallMessage{}
+	}
+	return resp, nil
+}
+
 func (c *DaemonClient) DaemonHealth(ctx context.Context) (*DaemonHealthResponse, error) {
 	_, body, err := c.do(ctx, http.MethodGet, "/health", nil)
 	if err != nil {
@@ -318,6 +441,10 @@ func tenantPath(tenantID string) (string, error) {
 		return "", err
 	}
 	return "/tenants/" + url.PathEscape(tenantID), nil
+}
+
+func flockPath(flockID string) string {
+	return "/flocks/" + url.PathEscape(flockID)
 }
 
 func (c *DaemonClient) raw(ctx context.Context, method, path string, payload any) (*RawDaemonResponse, error) {
