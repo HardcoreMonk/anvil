@@ -20,17 +20,21 @@ const maxAgentsPerFlock = 20
 
 // FlockCreateRequest is the POST /flocks body. roles[i] becomes one VM.
 type FlockCreateRequest struct {
-	Task  string   `json:"task"`
-	Roles []string `json:"roles"`
+	Task         string   `json:"task"`
+	Roles        []string `json:"roles"`
+	TenantID     string   `json:"tenant_id,omitempty"`
+	EgressPolicy string   `json:"egress_policy,omitempty"`
 }
 
 // FlockCreateResponse is returned by POST /flocks.
 type FlockCreateResponse struct {
-	FlockID     string                    `json:"flock_id"`
-	Task        string                    `json:"task"`
-	Agents      []*orchestrator.AgentInfo `json:"agents"`
-	TownWallURL string                    `json:"townwall_url"`
-	PostURL     string                    `json:"post_url"`
+	FlockID      string                    `json:"flock_id"`
+	Task         string                    `json:"task"`
+	TenantID     string                    `json:"tenant_id,omitempty"`
+	EgressPolicy string                    `json:"egress_policy,omitempty"`
+	Agents       []*orchestrator.AgentInfo `json:"agents"`
+	TownWallURL  string                    `json:"townwall_url"`
+	PostURL      string                    `json:"post_url"`
 }
 
 // TownWallPostRequest is the POST /flocks/{id}/post body.
@@ -101,6 +105,17 @@ func (cp *ControlPlane) createFlock(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("max %d agents per flock", maxAgentsPerFlock))
 		return
 	}
+	var err error
+	req.TenantID, err = normalizeDaemonTenantID(req.TenantID)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err)
+		return
+	}
+	req.EgressPolicy, err = normalizeDaemonEgressPolicy(req.EgressPolicy)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err)
+		return
+	}
 
 	flockID := fmt.Sprintf("flock-%d", time.Now().UnixNano())
 	townWallPath := filepath.Join(cp.workDir, "flocks", flockID, "TOWN_WALL.log")
@@ -108,7 +123,7 @@ func (cp *ControlPlane) createFlock(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err)
 		return
 	}
-	flock, err := cp.flockMgr.Create(flockID, req.Task, townWallPath)
+	flock, err := cp.flockMgr.Create(flockID, req.Task, req.TenantID, req.EgressPolicy, townWallPath)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err)
 		return
@@ -125,7 +140,7 @@ func (cp *ControlPlane) createFlock(w http.ResponseWriter, r *http.Request) {
 	}
 	for i, role := range req.Roles {
 		agentID := fmt.Sprintf("%s-%d", role, i+1)
-		vmInfo, _, err := cp.spawnVMForFlock(flockID, agentID, role)
+		vmInfo, _, err := cp.spawnVMForFlock(flockID, agentID, role, req.TenantID, req.EgressPolicy)
 		if err != nil {
 			cleanup()
 			writeJSONError(w, http.StatusInternalServerError, fmt.Errorf("spawn %s: %w", agentID, err))
@@ -147,11 +162,13 @@ func (cp *ControlPlane) createFlock(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := FlockCreateResponse{
-		FlockID:     flockID,
-		Task:        req.Task,
-		Agents:      flock.Snapshot(),
-		TownWallURL: buildPublicURLPath("/flocks/" + flockID + "/wall"),
-		PostURL:     buildPublicURLPath("/flocks/" + flockID + "/post"),
+		FlockID:      flockID,
+		Task:         req.Task,
+		TenantID:     req.TenantID,
+		EgressPolicy: req.EgressPolicy,
+		Agents:       flock.Snapshot(),
+		TownWallURL:  buildPublicURLPath("/flocks/" + flockID + "/wall"),
+		PostURL:      buildPublicURLPath("/flocks/" + flockID + "/post"),
 	}
 	writeJSON(w, http.StatusCreated, resp)
 }
@@ -279,7 +296,7 @@ func (cp *ControlPlane) streamTownWall(w http.ResponseWriter, r *http.Request, f
 // spawnVMForFlock spawns one VM as a flock member. role is mapped through
 // LookupProfile to determine VM sizing, the goose config directory, and the
 // system prompt that will be injected at boot.
-func (cp *ControlPlane) spawnVMForFlock(flockID, agentID, role string) (*VMInfo, string, error) {
+func (cp *ControlPlane) spawnVMForFlock(flockID, agentID, role, tenantID, egressPolicy string) (*VMInfo, string, error) {
 	configPath, secretsPath, err := cp.profileConfigPaths(role)
 	if err != nil {
 		return nil, "", err
@@ -289,6 +306,8 @@ func (cp *ControlPlane) spawnVMForFlock(flockID, agentID, role string) (*VMInfo,
 		Profile:      role,
 		ConfigPath:   configPath,
 		SecretsPath:  secretsPath,
+		TenantID:     tenantID,
+		EgressPolicy: egressPolicy,
 		SystemPrompt: cp.loadProfileSystemPrompt(agentProfile.ProfileDir),
 		FlockID:      flockID,
 		AgentID:      agentID,

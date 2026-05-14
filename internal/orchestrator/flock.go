@@ -25,12 +25,14 @@ type AgentInfo struct {
 
 // Flock is a named group of agents sharing one Town Wall.
 type Flock struct {
-	mu        sync.RWMutex
-	ID        string                `json:"flock_id"`
-	Task      string                `json:"task"`
-	Agents    map[string]*AgentInfo `json:"agents"`
-	TownWall  *TownWall             `json:"-"`
-	CreatedAt time.Time             `json:"created_at"`
+	mu           sync.RWMutex
+	ID           string                `json:"flock_id"`
+	Task         string                `json:"task"`
+	TenantID     string                `json:"tenant_id,omitempty"`
+	EgressPolicy string                `json:"egress_policy,omitempty"`
+	Agents       map[string]*AgentInfo `json:"agents"`
+	TownWall     *TownWall             `json:"-"`
+	CreatedAt    time.Time             `json:"created_at"`
 }
 
 // AddAgent inserts or replaces an agent record under lock.
@@ -70,16 +72,20 @@ func (f *Flock) MarshalJSON() ([]byte, error) {
 	defer f.mu.RUnlock()
 	// Use an alias type to avoid recursing back into this MarshalJSON method.
 	type flockJSON struct {
-		ID        string                `json:"flock_id"`
-		Task      string                `json:"task"`
-		Agents    map[string]*AgentInfo `json:"agents"`
-		CreatedAt time.Time             `json:"created_at"`
+		ID           string                `json:"flock_id"`
+		Task         string                `json:"task"`
+		TenantID     string                `json:"tenant_id,omitempty"`
+		EgressPolicy string                `json:"egress_policy,omitempty"`
+		Agents       map[string]*AgentInfo `json:"agents"`
+		CreatedAt    time.Time             `json:"created_at"`
 	}
 	return json.Marshal(flockJSON{
-		ID:        f.ID,
-		Task:      f.Task,
-		Agents:    f.Agents,
-		CreatedAt: f.CreatedAt,
+		ID:           f.ID,
+		Task:         f.Task,
+		TenantID:     f.TenantID,
+		EgressPolicy: f.EgressPolicy,
+		Agents:       f.Agents,
+		CreatedAt:    f.CreatedAt,
 	})
 }
 
@@ -103,17 +109,19 @@ func NewFlockManager(workDir string) *FlockManager {
 func (fm *FlockManager) WorkDir() string { return fm.workDir }
 
 // Create allocates a flock, opens its Town Wall at townWallPath, and registers it.
-func (fm *FlockManager) Create(flockID, task, townWallPath string) (*Flock, error) {
+func (fm *FlockManager) Create(flockID, task, tenantID, egressPolicy, townWallPath string) (*Flock, error) {
 	tw, err := NewTownWall(flockID, townWallPath)
 	if err != nil {
 		return nil, err
 	}
 	f := &Flock{
-		ID:        flockID,
-		Task:      task,
-		Agents:    make(map[string]*AgentInfo),
-		TownWall:  tw,
-		CreatedAt: time.Now().UTC(),
+		ID:           flockID,
+		Task:         task,
+		TenantID:     tenantID,
+		EgressPolicy: egressPolicy,
+		Agents:       make(map[string]*AgentInfo),
+		TownWall:     tw,
+		CreatedAt:    time.Now().UTC(),
 	}
 	fm.mu.Lock()
 	fm.flocks[flockID] = f

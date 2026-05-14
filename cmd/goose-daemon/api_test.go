@@ -20,6 +20,7 @@ import (
 	firecracker "github.com/firecracker-microvm/firecracker-go-sdk"
 
 	"ephemera/internal/anvilmcp"
+	"ephemera/internal/orchestrator"
 	"ephemera/internal/storage"
 	"ephemera/internal/vm"
 )
@@ -39,6 +40,38 @@ func newTestCP(t *testing.T) *ControlPlane {
 		workDir:          tmp,
 		gooseConfigPath:  defaultCfg,
 		gooseSecretsPath: defaultSec,
+	}
+}
+
+func TestCreateFlockRejectsInvalidTenantBeforeRegistration(t *testing.T) {
+	cp := newTestCP(t)
+	cp.flockMgr = orchestrator.NewFlockManager(cp.workDir)
+	req := httptest.NewRequest(http.MethodPost, "/flocks", strings.NewReader(`{"task":"ship review","roles":["worker"],"tenant_id":"../bad"}`))
+	rr := httptest.NewRecorder()
+
+	cp.createFlock(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("POST /flocks invalid tenant status = %d body = %s, want 400", rr.Code, rr.Body.String())
+	}
+	if got := len(cp.flockMgr.List()); got != 0 {
+		t.Fatalf("registered flocks = %d, want 0 after invalid tenant_id", got)
+	}
+}
+
+func TestCreateFlockRejectsInvalidEgressPolicyBeforeRegistration(t *testing.T) {
+	cp := newTestCP(t)
+	cp.flockMgr = orchestrator.NewFlockManager(cp.workDir)
+	req := httptest.NewRequest(http.MethodPost, "/flocks", strings.NewReader(`{"task":"ship review","roles":["worker"],"egress_policy":"internet"}`))
+	rr := httptest.NewRecorder()
+
+	cp.createFlock(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("POST /flocks invalid egress status = %d body = %s, want 400", rr.Code, rr.Body.String())
+	}
+	if got := len(cp.flockMgr.List()); got != 0 {
+		t.Fatalf("registered flocks = %d, want 0 after invalid egress_policy", got)
 	}
 }
 

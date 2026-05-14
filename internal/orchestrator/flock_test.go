@@ -11,7 +11,7 @@ func TestFlockManager_CreateGetDelete(t *testing.T) {
 	tmp := t.TempDir()
 	fm := NewFlockManager(tmp)
 
-	f, err := fm.Create("flock-1", "test task", filepath.Join(tmp, "flock-1", "wall.log"))
+	f, err := fm.Create("flock-1", "test task", "", "", filepath.Join(tmp, "flock-1", "wall.log"))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -37,10 +37,26 @@ func TestFlockManager_CreateGetDelete(t *testing.T) {
 	}
 }
 
+func TestFlockManager_CreateStoresTenantAndEgress(t *testing.T) {
+	tmp := t.TempDir()
+	fm := NewFlockManager(tmp)
+
+	f, err := fm.Create("flock-1", "ship review", "tenant-1", "profile", filepath.Join(tmp, "flock-1", "wall.log"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if f.TenantID != "tenant-1" {
+		t.Fatalf("TenantID = %q, want tenant-1", f.TenantID)
+	}
+	if f.EgressPolicy != "profile" {
+		t.Fatalf("EgressPolicy = %q, want profile", f.EgressPolicy)
+	}
+}
+
 func TestFlock_AddAgentAndStatus(t *testing.T) {
 	tmp := t.TempDir()
 	fm := NewFlockManager(tmp)
-	f, _ := fm.Create("flock-x", "task", filepath.Join(tmp, "wall.log"))
+	f, _ := fm.Create("flock-x", "task", "", "", filepath.Join(tmp, "wall.log"))
 
 	f.AddAgent(&AgentInfo{
 		AgentID: "researcher-1",
@@ -62,7 +78,7 @@ func TestFlock_AddAgentAndStatus(t *testing.T) {
 func TestFlock_MarshalJSON(t *testing.T) {
 	tmp := t.TempDir()
 	fm := NewFlockManager(tmp)
-	f, _ := fm.Create("flock-j", "json task", filepath.Join(tmp, "wall.log"))
+	f, _ := fm.Create("flock-j", "json task", "tenant-json", "deny_all", filepath.Join(tmp, "wall.log"))
 	f.AddAgent(&AgentInfo{AgentID: "a-1", Role: "worker", VMID: "vm-1", Status: AgentStatusReady})
 
 	b, err := json.Marshal(f)
@@ -70,7 +86,7 @@ func TestFlock_MarshalJSON(t *testing.T) {
 		t.Fatalf("Marshal: %v", err)
 	}
 	s := string(b)
-	for _, want := range []string{`"flock_id":"flock-j"`, `"task":"json task"`, `"agent_id":"a-1"`} {
+	for _, want := range []string{`"flock_id":"flock-j"`, `"task":"json task"`, `"tenant_id":"tenant-json"`, `"egress_policy":"deny_all"`, `"agent_id":"a-1"`} {
 		if !strings.Contains(s, want) {
 			t.Errorf("Marshal output missing %q: %s", want, s)
 		}
