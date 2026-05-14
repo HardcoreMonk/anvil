@@ -363,7 +363,8 @@ scripts/anvil-mcp-e2e.sh daemon 기반 MCP smoke wrapper
   daemon crash, stale TAP/IP, restore 실패, GC 실패, diff base 누락 대응 playbook.
 
 - [docs/operations/observability.md](docs/operations/observability.md):
-  daemon log, `/health`, `/metrics`, snapshot GC audit, runtime audit API, 향후 지표 후보.
+  daemon log, `/health`, `/metrics`, `/metrics/vms`, snapshot GC audit, runtime audit
+  API, optional trace export, 향후 지표 후보.
 
 - [docs/analysis/README.md](docs/analysis/README.md):
   ephemera 0.1.0/0.2.0 분석 문서 index.
@@ -611,10 +612,28 @@ metadata, daemon raw body, `agent_token`을 저장하지 않는다.
 `ANVIL_MCP_AUDIT_LOG`를 켠 상태에서는 tool input `tenant_id` 또는
 `ANVIL_MCP_TENANT_ID`가 필요하다.
 
-후속 control-plane foundation은 host inventory polling, scheduler-backed
-`RuntimeRouter`, JSON quota store, daemon `/tenants`, `/audit/runtime`, `/health`,
-`/metrics`를 제공한다. `deny_all` egress policy는 host `iptables` reject rule로
-강제하며, `profile` proxy allowlist와 DNS policy는 별도 후속 network layer다.
+후속 control-plane foundation은 host inventory polling, `cmd/anvil-scheduler`,
+scheduler-backed `RuntimeRouter`, JSON quota store, persistent placement/snapshot
+locality store, daemon `/tenants`, `/audit/runtime`, `/health`, `/metrics`,
+`/metrics/vms`를 제공한다. router는 snapshot locality preferred host, retry/failover,
+placement reconciliation helper를 제공한다.
+
+`deny_all` egress policy는 host `iptables` reject rule로 강제한다. `profile` policy는
+`configs/profiles/{profile}/egress.json` 또는 `ANVIL_EGRESS_PROFILE_DIR` 아래의
+profile별 `egress.json`이 있을 때 allow CIDR/host/DNS rule을 적용하고, policy 파일이
+없으면 기존 profile 호환성을 위해 no-op이다. 예시:
+
+```json
+{
+  "allow_cidrs": ["203.0.113.10/32"],
+  "allow_hosts": ["api.anthropic.com"],
+  "dns_servers": ["1.1.1.1"]
+}
+```
+
+Optional trace export는 `ANVIL_OTEL_EXPORTER_OTLP_ENDPOINT` 또는
+`OTEL_EXPORTER_OTLP_ENDPOINT`를 설정하면 lifecycle span을 `{endpoint}/v1/traces`로
+보낸다. trace attribute는 token/secret 계열 값을 제거한 뒤 전송한다.
 
 정확한 입력/출력 계약은 `docs/architecture/mcp-architecture.md`를 참조한다.
 

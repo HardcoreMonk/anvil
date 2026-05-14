@@ -3,16 +3,18 @@
 ## 상태
 
 - 문서 목적: multi-tenant runtime으로 확장할 때의 책임 경계와 단계적 설계 기준
-- 현재 기준: `feature/multi-tenant-runtime` runtime contract
-- 구현 범위: MCP adapter boundary와 daemon control-plane foundation.
+- 현재 기준: `feature/runtime-scheduler-network-otel` runtime service contract
+- 구현 범위: MCP adapter boundary, scheduler service foundation, daemon
+  control-plane/observability foundation.
   `internal/anvilmcp`는 tenant ID validation, quota decision, scheduler decision,
-  host inventory polling, runtime router, quota JSON store, egress policy, runtime
+  host inventory polling, persistent placement/snapshot locality store, runtime
+  router retry/failover/reconciliation, quota JSON store, egress policy, runtime
   audit JSONL append/read/retention helper를 제공한다. daemon API는 optional
   `tenant_id`와 `egress_policy`를 VM/snapshot/restore contract에 보존하고 tenant
-  API, runtime audit API, `/health`, `/metrics`, `deny_all` host egress rule을
-  제공한다.
-- 비구현 범위: 별도 scheduler daemon, persistent host inventory service, snapshot
-  locality/retry/failover, `profile` egress proxy allowlist/DNS policy, billing, UI.
+  API, runtime audit API, `/health`, `/metrics`, `/metrics/vms`, `deny_all` 및
+  profile allowlist/DNS egress rule을 제공한다.
+- 비구현 범위: scheduler service의 production deployment automation, cross-host
+  snapshot replication, L7 egress proxy, billing, UI.
 
 이 문서는 anvil이 IronClaw와 ephemera runtime을 multi-tenant 실행 기반으로
 확장할 때 필요한 경계를 정리한다. 현재 ephemera daemon의 단일 호스트 VM
@@ -32,7 +34,11 @@ daemon 계약 확장을 필요로 한다.
   기준으로 첫 eligible host 선택
 - `HostInventory.PollOnce`: daemon `/health` polling으로 scheduler host 상태 갱신
 - `RuntimeRouter`: scheduler decision을 daemon mutation 전에 적용하고 VM placement
-  map으로 VM 후속 호출을 host별 daemon client에 라우팅
+  map으로 VM 후속 호출을 host별 daemon client에 라우팅. snapshot locality preferred
+  host, retry/failover, placement reconciliation helper를 포함한다.
+- `PlacementStore`: runtime host, VM placement, snapshot location JSON persistence
+- `cmd/anvil-scheduler`: persistent host/quota state로 schedule decision을 반환하는
+  얇은 HTTP scheduler service
 - `QuotaStore`: tenant quota/usage JSON persistence와 scheduler input 제공
 - `NormalizeEgressPolicy`: `deny_all`, `profile`, `allow_all` policy normalization
 - `AppendRuntimeAudit`, `ReadRuntimeAudit`, `PruneRuntimeAudit`: symlink를 거부하는
@@ -41,10 +47,11 @@ daemon 계약 확장을 필요로 한다.
   tenant/audit 설정
 - daemon VM/snapshot/restore request/response metadata의 `tenant_id`와
   `egress_policy`
-- daemon `/tenants`, `/audit/runtime`, `/health`, `/metrics`
+- daemon `/tenants`, `/audit/runtime`, `/health`, `/metrics`, `/metrics/vms`
 
-`deny_all`은 host `iptables FORWARD` reject rule로 강제한다. `profile` allowlist와
-DNS policy는 아직 별도 host network layer 후속이다.
+`deny_all`은 host `iptables FORWARD` reject rule로 강제한다. `profile`은 profile별
+`egress.json`이 있을 때 allow CIDR/host/DNS server rule과 default reject rule을
+적용한다. policy 파일이 없으면 기존 profile 동작과 호환되도록 no-op이다.
 
 ## 범위
 
@@ -57,9 +64,9 @@ Multi-tenant runtime의 설계 범위는 다음이다.
 - multi-host runtime: 여러 ephemera daemon host를 대상으로 한 실행 배치
 
 이 문서는 위 구성 요소의 책임 경계를 정의한다. 현재 구현은 in-process scheduler
-decision helper, host inventory polling, runtime router, tenant API, `deny_all`
-host enforcement까지 포함하지만, 별도 scheduler daemon과 profile allowlist
-네트워크 정책은 포함하지 않는다.
+decision helper, host inventory polling, runtime router, scheduler service binary,
+tenant API, `deny_all`/`profile` host enforcement까지 포함한다. scheduler service의
+production deployment automation과 cross-host snapshot replication은 포함하지 않는다.
 
 ## Tenant 식별자
 
@@ -121,10 +128,12 @@ TAP, IP, dm-snapshot, loop device, bind mount, sparse COW file 같은 host-local
 정리 의미를 tool contract에 노출하지 않는다.
 
 현재 `Scheduler.Schedule`은 host 목록 중 healthy, capacity, requested snapshot
-bytes, egress policy 조건을 만족하는 첫 host를 고른다. `HostInventory`는 daemon
+bytes, egress policy 조건을 만족하는 host를 고르며, `PreferredHosts`와
+`ExcludedHosts`로 snapshot locality와 failover를 반영한다. `HostInventory`는 daemon
 `/health` polling으로 host 상태를 갱신하고, `RuntimeRouter`는 선택된 host의 daemon
-client로 spawn/restore와 VM 후속 호출을 라우팅한다. snapshot locality,
-retry/failover는 아직 scheduler service 책임으로 남아 있다.
+client로 spawn/restore와 VM 후속 호출을 라우팅한다. `PlacementStore`는 VM placement와
+snapshot location을 JSON으로 보존하고, `ReconcilePlacements`는 daemon `GET /vms`
+결과로 stale placement를 교체한다.
 
 ## Egress 정책
 
@@ -143,9 +152,12 @@ Profile 파일을 수정하거나 우회하는 것만으로 egress 제한이 사
 허용하지 않는다.
 
 현재 `EgressPolicy` 값은 policy 선택, daemon metadata, audit/debug를 위한 enum이다.
-daemon은 선택된 policy를 VM/snapshot/restore metadata에 보존하고 `deny_all`은
-host-local `iptables` reject rule로 강제한다. `profile` proxy allowlist와 DNS policy는
-아직 구현하지 않았다.
+daemon은 선택된 policy를 VM/snapshot/restore metadata에 보존한다. `deny_all`은
+host-local `iptables` reject rule로 강제한다. `profile`은
+`configs/profiles/{profile}/egress.json` 또는 `ANVIL_EGRESS_PROFILE_DIR` 아래의
+profile별 policy 파일이 있을 때 allow CIDR, allow host string match, DNS server
+allowlist와 DNS/default reject rule을 적용한다. policy 파일이 없으면 기존 profile
+동작과 호환되도록 no-op이다.
 
 ## 감사 저장소
 
@@ -197,9 +209,9 @@ restore 경로의 direct token exposure는 제거됐다. 새로운 audit record,
 이 roadmap의 non-goals는 다음이다.
 
 - 완전한 multi-tenant runtime 즉시 구현
-- 별도 scheduler daemon과 persistent host inventory service 구현
-- snapshot locality, retry/failover, placement reconciliation
-- `profile` egress proxy allowlist와 DNS policy 구현
+- scheduler service production deployment automation
+- cross-host snapshot replication
+- L7 egress proxy 또는 full HTTP CONNECT/SNI gateway
 - billing
 - UI
 - OpenClaw compatibility layer

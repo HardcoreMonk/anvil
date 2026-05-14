@@ -116,10 +116,20 @@ daemon으로 보내는 outbound Bearer token이다.
 - scheduler host inventory polling, runtime router, JSON quota store, daemon tenant
   API, `deny_all` host egress rule, runtime audit API, `/health`, `/metrics`가
   후속 control-plane foundation으로 구현된 상태다.
+- `cmd/anvil-scheduler`, persistent `PlacementStore`, snapshot locality preference,
+  router retry/failover, placement reconciliation helper가 scheduler service
+  foundation으로 구현된 상태다.
+- `profile` egress policy는 profile별 `egress.json` allowlist와 DNS server
+  allowlist를 host `iptables` rule로 계획/적용할 수 있다. policy 파일이 없으면
+  기존 profile 동작과 호환되도록 no-op이다.
+- daemon은 `/metrics/vms`, lifecycle duration/queue depth metrics, optional
+  OpenTelemetry-compatible trace export를 제공한다.
+- anvil MCP tool input struct는 IronClaw/Gemini function declaration에서 빈 type이
+  나오지 않도록 정적 schema compatibility 검증을 제공한다.
 
 남은 후속 후보:
 
-- scheduler daemon/service 분리와 persistent host inventory 운영화
-- snapshot locality, retry/failover, multi-host placement reconciliation
-- `profile` egress proxy allowlist와 DNS policy enforcement
-- per-VM metrics, OpenTelemetry trace, quota dashboard
+- scheduler service의 실제 운영 배포와 host inventory polling daemonization
+- snapshot locality의 cross-host snapshot replication
+- egress allow host rule의 L7 proxy/SNI 기반 강화
+- snapshot storage quota dashboard

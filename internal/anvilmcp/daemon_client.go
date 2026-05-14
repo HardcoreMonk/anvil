@@ -119,6 +119,18 @@ func (c *DaemonClient) SpawnVM(ctx context.Context, req SpawnVMRequest) (*SpawnV
 	return &resp, nil
 }
 
+func (c *DaemonClient) ListVMs(ctx context.Context) ([]VMInfo, error) {
+	_, body, err := c.do(ctx, http.MethodGet, "/vms", nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp []VMInfo
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		return nil, fmt.Errorf("decode list vms response: %w", err)
+	}
+	return resp, nil
+}
+
 func (c *DaemonClient) RunTask(ctx context.Context, vmID, prompt string) (*RawDaemonResponse, error) {
 	return c.raw(ctx, http.MethodPost, "/vms/"+vmID+"/tasks", map[string]string{"prompt": prompt})
 }

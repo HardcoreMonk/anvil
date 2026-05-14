@@ -285,6 +285,66 @@ func TestControlPlaneMetricsEndpoint(t *testing.T) {
 	}
 }
 
+func TestControlPlaneMetricsEndpointIncludesDurationsAndQueueDepth(t *testing.T) {
+	cp := newTestCP(t)
+	cp.metrics.ObserveDuration("vm_create", 1500*time.Millisecond)
+	cp.metrics.ObserveDuration("snapshot_create", 2*time.Second)
+	cp.metrics.IncQueueDepth()
+	cp.metrics.IncQueueDepth()
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rr := httptest.NewRecorder()
+	cp.handleMetrics(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /metrics status = %d body = %s, want 200", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	for _, want := range []string{
+		"anvil_vm_create_duration_seconds_count 1",
+		"anvil_vm_create_duration_seconds_sum 1.500000",
+		"anvil_snapshot_create_duration_seconds_count 1",
+		"anvil_snapshot_create_duration_seconds_sum 2.000000",
+		"anvil_lifecycle_queue_depth 2",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("metrics body missing %q:\n%s", want, body)
+		}
+	}
+}
+
+func TestControlPlanePerVMMetricsEndpoint(t *testing.T) {
+	cp := newTestCP(t)
+	startedAt := time.Date(2026, 5, 14, 9, 0, 0, 0, time.UTC)
+	cp.vms["vm-1"] = &runningVM{
+		VMInfo: VMInfo{
+			VMID:         "vm-1",
+			GuestIP:      "10.0.1.10",
+			Profile:      "anthropic",
+			TenantID:     "tenant-1",
+			EgressPolicy: "profile",
+		},
+		agentToken: "secret-token",
+		startedAt:  startedAt,
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics/vms", nil)
+	rr := httptest.NewRecorder()
+	cp.handleVMMetrics(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /metrics/vms status = %d body = %s, want 200", rr.Code, rr.Body.String())
+	}
+	var resp []VMMetricsResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode VM metrics: %v", err)
+	}
+	if len(resp) != 1 || resp[0].VMID != "vm-1" || resp[0].TenantID != "tenant-1" || !resp[0].StartedAt.Equal(startedAt) {
+		t.Fatalf("vm metrics = %+v, want vm-1 tenant-1 started_at", resp)
+	}
+	if strings.Contains(rr.Body.String(), "secret-token") || strings.Contains(rr.Body.String(), "agent_token") {
+		t.Fatalf("VM metrics leaked token: %s", rr.Body.String())
+	}
+}
+
 func TestAuthMiddlewareIncrementsAuthFailure(t *testing.T) {
 	var metrics controlPlaneMetrics
 	handler := authMiddleware(

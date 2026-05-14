@@ -43,6 +43,10 @@ func (s *QuotaStore) Load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.path == "" {
+		s.state = QuotaStoreState{Tenants: make(map[string]TenantQuotaState)}
+		return nil
+	}
 	data, err := os.ReadFile(s.path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -63,6 +67,9 @@ func (s *QuotaStore) Load() error {
 }
 
 func (s *QuotaStore) Save() error {
+	if s.path == "" {
+		return nil
+	}
 	s.mu.RLock()
 	state := cloneQuotaStoreState(s.state)
 	s.mu.RUnlock()
