@@ -1,0 +1,19 @@
+# Worker profile — code-writing role. Default to a stronger model since
+# the task is implementation, not just exploration.
+#
+# Usage:
+#   cp configs/profiles/worker/goose.yaml.example configs/profiles/worker/goose.yaml
+#   cp configs/profiles/worker/goose-secrets.yaml.example configs/profiles/worker/goose-secrets.yaml
+
+GOOSE_PROVIDER: anthropic
+GOOSE_MODEL: claude-sonnet-4-6
+GOOSE_TELEMETRY_ENABLED: false
+GOOSE_DISABLE_KEYRING: true
+
+extensions:
+  developer:
+    bundled: true
+    enabled: true
+    name: developer
+    timeout: 600
+    type: builtin

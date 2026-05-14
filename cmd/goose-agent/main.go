@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -48,9 +49,17 @@ func agentListenAddr() string {
 	return fmt.Sprintf(":%d", port)
 }
 
-const agentTokenPath = "/root/.ephemera-agent-token"
-const workspaceRoot = "/workspace"
-const maxWorkspaceFileBytes = 4 << 20
+const (
+	agentTokenPath        = "/root/.ephemera-agent-token"
+	workspaceRoot         = "/workspace"
+	flockMetaPath         = "/root/.ephemera-flock"
+	systemPromptPath      = "/root/.goose-system-prompt"
+	maxWorkspaceFileBytes = 4 << 20
+	townWallPostTimeout   = 10 * time.Second
+	// defaultControlPlaneAddr is the gateway IP the host uses inside the VM's
+	// /24 network. Overridable via EPHEMERA_CONTROL_PLANE for testing.
+	defaultControlPlaneAddr = "http://10.0.1.1:3000"
+)
 
 // loadAgentToken reads the per-VM Bearer token written by the control plane at VM provision time.
 // Returns an empty string (auth disabled) if the file does not exist — backward compatible with
@@ -64,6 +73,48 @@ func loadAgentToken() string {
 		return ""
 	}
 	return strings.TrimSpace(string(b))
+}
+
+// loadFlockMeta parses /root/.ephemera-flock if present. Returns ("", "") when
+// the VM is running as a standalone agent (no flock context).
+func loadFlockMeta() (flockID, agentID string) {
+	b, err := os.ReadFile(flockMetaPath)
+	if err != nil {
+		return "", ""
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		key, val, found := strings.Cut(line, "=")
+		if !found {
+			continue
+		}
+		switch key {
+		case "FLOCK_ID":
+			flockID = val
+		case "AGENT_ID":
+			agentID = val
+		}
+	}
+	return
+}
+
+// loadSystemPrompt returns the role's system prompt or "" when absent.
+// Trailing whitespace is preserved as authors of system.md files generally
+// terminate with a newline that does not affect prompting.
+func loadSystemPrompt() string {
+	b, err := os.ReadFile(systemPromptPath)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimRight(string(b), "\n")
+}
+
+// controlPlaneAddr returns the URL of the host control plane reachable from
+// inside the VM. EPHEMERA_CONTROL_PLANE overrides the default for testing.
+func controlPlaneAddr() string {
+	if v := os.Getenv("EPHEMERA_CONTROL_PLANE"); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	return defaultControlPlaneAddr
 }
 
 // agentAuthMiddleware protects next with Bearer token auth.
@@ -100,6 +151,7 @@ func main() {
 	mux.HandleFunc("/tasks", agentAuthMiddleware(token, handleTask))
 	mux.HandleFunc("/workspace", agentAuthMiddleware(token, workspaceHandler(workspaceRoot)))
 	mux.HandleFunc("/stop", agentAuthMiddleware(token, handleStop))
+	mux.HandleFunc("/townwall/post", agentAuthMiddleware(token, handleTownWallPost))
 	mux.HandleFunc("/health", handleHealth) // always unauthenticated
 
 	addr := agentListenAddr()
@@ -344,8 +396,16 @@ func handleTask(w http.ResponseWriter, r *http.Request) {
 		mu.Unlock()
 	}()
 
+	finalPrompt := req.Prompt
+	if sysPrompt := loadSystemPrompt(); sysPrompt != "" {
+		// Prepend the role system prompt as plain text. Goose CLI has no
+		// first-class system-prompt flag, so we delimit with headers a model
+		// can recognize and ignore the prefix as instructions.
+		finalPrompt = "[SYSTEM INSTRUCTIONS]\n" + sysPrompt + "\n\n[USER TASK]\n" + req.Prompt
+	}
+
 	cmd := exec.CommandContext(r.Context(), "/usr/local/bin/goose", "run", "-i", "-")
-	cmd.Stdin = strings.NewReader(req.Prompt)
+	cmd.Stdin = strings.NewReader(finalPrompt)
 	out, err := cmd.CombinedOutput()
 
 	res := TaskResult{Output: string(out)}
@@ -355,6 +415,61 @@ func handleTask(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(res)
+}
+
+// TownWallPostBody is the JSON body accepted by /townwall/post inside the VM.
+type TownWallPostBody struct {
+	Body string `json:"body"`
+}
+
+// handleTownWallPost forwards the agent's message to the control plane's
+// /flocks/{flock_id}/post endpoint. The VM is identified by its flock metadata
+// file written at provision time. The agent token authenticates the local
+// /townwall/post call; EPHEMERA_CONTROL_PLANE_TOKEN is forwarded to the control
+// plane when daemon auth is enabled.
+func handleTownWallPost(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"POST required"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	flockID, agentID := loadFlockMeta()
+	if flockID == "" {
+		http.Error(w, `{"error":"this VM is not part of a flock"}`, http.StatusBadRequest)
+		return
+	}
+	var body TownWallPostBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusBadRequest)
+		return
+	}
+	if body.Body == "" {
+		http.Error(w, `{"error":"body required"}`, http.StatusBadRequest)
+		return
+	}
+
+	payload, _ := json.Marshal(map[string]string{"agent_id": agentID, "body": body.Body})
+	target := controlPlaneAddr() + "/flocks/" + flockID + "/post"
+	ctx, cancel := context.WithTimeout(r.Context(), townWallPostTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(payload))
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if cpTok := os.Getenv("EPHEMERA_CONTROL_PLANE_TOKEN"); cpTok != "" {
+		req.Header.Set("Authorization", "Bearer "+cpTok)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
 }
 
 func handleStop(w http.ResponseWriter, r *http.Request) {

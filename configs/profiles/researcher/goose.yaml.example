@@ -1,0 +1,20 @@
+# Researcher profile — favors a fast, cheap model since the role is
+# read-only exploration and short JSON output.
+#
+# Usage:
+#   cp configs/profiles/researcher/goose.yaml.example configs/profiles/researcher/goose.yaml
+#   cp configs/profiles/researcher/goose-secrets.yaml.example configs/profiles/researcher/goose-secrets.yaml
+#   # Fill in your API key and run the daemon.
+
+GOOSE_PROVIDER: google
+GOOSE_MODEL: gemini-2.5-flash
+GOOSE_TELEMETRY_ENABLED: false
+GOOSE_DISABLE_KEYRING: true
+
+extensions:
+  developer:
+    bundled: true
+    enabled: true
+    name: developer
+    timeout: 300
+    type: builtin

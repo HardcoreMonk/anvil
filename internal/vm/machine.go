@@ -29,6 +29,33 @@ type VMConfig struct {
 	GuestIP        string
 	GatewayIP      string
 	VsockUDSPath   string // host-side UDS for Firecracker vsock proxy; enables post-restore IP reconfiguration
+
+	// VcpuCount and MemSizeMib allow per-VM resource sizing. Non-positive values
+	// fall back to the legacy defaults (2 vCPU, 2048 MiB) so existing call sites
+	// stay compatible.
+	VcpuCount  int64
+	MemSizeMib int64
+}
+
+// defaultVcpuCount and defaultMemSizeMib are the fallback values used when a
+// VMConfig leaves the fields zero. They match the historical hardcoded values.
+const (
+	defaultVcpuCount  int64 = 2
+	defaultMemSizeMib int64 = 2048
+)
+
+// resolveMachineSize returns the vCPU and memory size to use, applying defaults
+// when the caller passed zero or invalid negative values.
+func resolveMachineSize(cfg VMConfig) (int64, int64) {
+	vcpu := cfg.VcpuCount
+	if vcpu <= 0 {
+		vcpu = defaultVcpuCount
+	}
+	mem := cfg.MemSizeMib
+	if mem <= 0 {
+		mem = defaultMemSizeMib
+	}
+	return vcpu, mem
 }
 
 // StartMachine initializes and boots a Firecracker microVM based on the provided VMConfig.
@@ -73,6 +100,7 @@ func StartMachine(ctx context.Context, cfg VMConfig) (*firecracker.Machine, erro
 	logFifoPath := fmt.Sprintf("/tmp/fc-%s-log.fifo", cfg.VMID)
 	os.Remove(logFifoPath)
 
+	vcpu, mem := resolveMachineSize(cfg)
 	fcCfg := firecracker.Config{
 		SocketPath:        cfg.SocketPath,
 		KernelImagePath:   cfg.KernelPath,
@@ -80,8 +108,8 @@ func StartMachine(ctx context.Context, cfg VMConfig) (*firecracker.Machine, erro
 		Drives:            drives,
 		NetworkInterfaces: netIfaces,
 		MachineCfg: models.MachineConfiguration{
-			VcpuCount:       firecracker.Int64(2),
-			MemSizeMib:      firecracker.Int64(2048),
+			VcpuCount:       firecracker.Int64(vcpu),
+			MemSizeMib:      firecracker.Int64(mem),
 			TrackDirtyPages: true, // required for diff snapshot creation
 		},
 		LogFifo:      logFifoPath,
@@ -162,13 +190,18 @@ func RestoreMachine(ctx context.Context, cfg VMConfig, memFilePath, snapshotPath
 	// No KernelImagePath or KernelArgs: snapshot already contains the full running kernel state.
 	// VsockDevices is set so AddVsocksHandler (which runs after LoadSnapshotHandler) updates
 	// the vsock UDS path to the new per-VM path, enabling ReconfigureGuestIP after restore.
+	//
+	// The MachineConfiguration values must match what the snapshot was captured with;
+	// callers restoring snapshots produced by sized VMs should pass the original
+	// VcpuCount/MemSizeMib in cfg. Zero falls back to the legacy 2/2048 defaults.
+	vcpu, mem := resolveMachineSize(cfg)
 	fcCfg := firecracker.Config{
 		SocketPath:        cfg.SocketPath,
 		Drives:            drives,
 		NetworkInterfaces: netIfaces,
 		MachineCfg: models.MachineConfiguration{
-			VcpuCount:       firecracker.Int64(2),
-			MemSizeMib:      firecracker.Int64(2048),
+			VcpuCount:       firecracker.Int64(vcpu),
+			MemSizeMib:      firecracker.Int64(mem),
 			TrackDirtyPages: true, // required for diff snapshot creation
 		},
 		LogFifo:      logFifoPath,
