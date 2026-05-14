@@ -4,7 +4,7 @@
 
 - 분석 대상: `ephemera` runtime
 - anvil 관점: ephemera runtime은 IronClaw 결합 프로젝트의 기반 실행 계층
-- 공식 저장소: `https://github.com/HardcoreMonk/ephemera/`
+- 공식 저장소: `https://github.com/HardcoreMonk/anvil/`
 - 0.1.0 기준 커밋: `157753fb5234679ca7cbebb6658e431c6a748ef6`
 - 0.2.0 기준 커밋: `abcaa86`
 

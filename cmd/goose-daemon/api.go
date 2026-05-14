@@ -99,6 +99,7 @@ type VMSpawnRequest struct {
 type runningVM struct {
 	VMInfo
 	agentToken      string                  // per-VM bearer token; only returned at spawn time, never re-serialized
+	startedAt       time.Time               // host-local start time for structured VM metrics
 	diskPath        string                  // actual disk file to delete on teardown (spawned) or exception store (COW-restored)
 	bindMountTarget string                  // non-empty for bind-mount restored VMs (legacy path)
 	dmSnapshot      *storage.DMSnapshotInfo // non-nil for COW-restored VMs; replaces bindMountTarget
@@ -118,6 +119,13 @@ type controlPlaneMetrics struct {
 	snapshotGC     int64
 	cleanupFailure int64
 	authFailure    int64
+	queueDepth     int64
+	durations      map[string]durationMetric
+}
+
+type durationMetric struct {
+	Count int64
+	Sum   float64
 }
 
 func (m *controlPlaneMetrics) IncVMCreate()       { m.add(&m.vmCreate, 1) }
@@ -128,6 +136,24 @@ func (m *controlPlaneMetrics) IncSnapshotDelete() { m.add(&m.snapshotDelete, 1) 
 func (m *controlPlaneMetrics) IncSnapshotGC()     { m.add(&m.snapshotGC, 1) }
 func (m *controlPlaneMetrics) IncCleanupFailure() { m.add(&m.cleanupFailure, 1) }
 func (m *controlPlaneMetrics) IncAuthFailure()    { m.add(&m.authFailure, 1) }
+func (m *controlPlaneMetrics) IncQueueDepth()     { m.add(&m.queueDepth, 1) }
+func (m *controlPlaneMetrics) DecQueueDepth()     { m.add(&m.queueDepth, -1) }
+
+func (m *controlPlaneMetrics) ObserveDuration(name string, duration time.Duration) {
+	name = strings.TrimSpace(name)
+	if name == "" || duration < 0 {
+		return
+	}
+	m.mu.Lock()
+	if m.durations == nil {
+		m.durations = make(map[string]durationMetric)
+	}
+	metric := m.durations[name]
+	metric.Count++
+	metric.Sum += duration.Seconds()
+	m.durations[name] = metric
+	m.mu.Unlock()
+}
 
 func (m *controlPlaneMetrics) add(target *int64, delta int64) {
 	m.mu.Lock()
@@ -147,7 +173,17 @@ func (m *controlPlaneMetrics) snapshot() controlPlaneMetrics {
 		snapshotGC:     m.snapshotGC,
 		cleanupFailure: m.cleanupFailure,
 		authFailure:    m.authFailure,
+		queueDepth:     m.queueDepth,
+		durations:      cloneDurationMetrics(m.durations),
 	}
+}
+
+func cloneDurationMetrics(in map[string]durationMetric) map[string]durationMetric {
+	out := make(map[string]durationMetric, len(in))
+	for name, metric := range in {
+		out[name] = metric
+	}
+	return out
 }
 
 // generateAgentToken creates a 32-byte cryptographically random token, hex-encoded (64 chars).
@@ -178,6 +214,7 @@ type ControlPlane struct {
 	egress           egressEnforcer
 	runtimeAuditPath string
 	metrics          controlPlaneMetrics
+	traceExporter    *traceExporter
 
 	snapshotLifecycleMu sync.Mutex
 
@@ -222,6 +259,7 @@ func NewControlPlane(
 		tenantStore:      anvilmcp.NewQuotaStore(filepath.Join(workDir, "tenants", "tenants.json")),
 		egress:           newCommandEgressEnforcer(),
 		runtimeAuditPath: filepath.Join(workDir, "audit", "runtime-audit.jsonl"),
+		traceExporter:    newTraceExporterFromEnv(http.DefaultClient),
 		provisioner:      provisioner,
 		netManager:       netManager,
 		kernelPath:       kernelPath,
@@ -250,6 +288,7 @@ func NewControlPlane(
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", cp.handleHealth)
 	mux.HandleFunc("/metrics", cp.handleMetrics)
+	mux.HandleFunc("/metrics/vms", cp.handleVMMetrics)
 	mux.HandleFunc("/vms", cp.handleVMs)
 	mux.HandleFunc("/vms/", cp.handleVM)
 	mux.HandleFunc("/tenants", cp.handleTenants)
@@ -331,6 +370,21 @@ func (cp *ControlPlane) Shutdown() {
 }
 
 func (cp *ControlPlane) StopCh() <-chan struct{} { return cp.stopCh }
+
+func (cp *ControlPlane) observeLifecycle(name string) func() {
+	start := time.Now()
+	cp.metrics.IncQueueDepth()
+	return func() {
+		duration := time.Since(start)
+		cp.metrics.DecQueueDepth()
+		cp.metrics.ObserveDuration(name, duration)
+		if cp.traceExporter != nil {
+			if err := cp.traceExporter.Export(context.Background(), name, start, duration, nil); err != nil {
+				log.Printf("Warning: failed to export trace span %q: %v", name, err)
+			}
+		}
+	}
+}
 
 // POST /vms → spawn VM, return VMInfo with private IP
 // GET  /vms → list running VMs
@@ -419,6 +473,9 @@ func (cp *ControlPlane) handleVM(w http.ResponseWriter, r *http.Request) {
 // per-VM agent token so external callers only need the control plane Bearer token.
 // /health is forwarded without an Authorization header (it is unauthenticated on the agent).
 func (cp *ControlPlane) proxyAgentEndpoint(w http.ResponseWriter, r *http.Request, vmID, agentPath string) {
+	if agentPath == "/health" {
+		defer cp.observeLifecycle("agent_health_readiness")()
+	}
 	cp.mu.RLock()
 	v, ok := cp.vms[vmID]
 	cp.mu.RUnlock()
@@ -536,6 +593,7 @@ func (cp *ControlPlane) profileConfigPaths(profile string) (configPath, secretsP
 }
 
 func (cp *ControlPlane) spawnVM(w http.ResponseWriter, r *http.Request) {
+	defer cp.observeLifecycle("vm_create")()
 	// Parse optional request body. An empty body is valid (uses default profile).
 	var req VMSpawnRequest
 	if r.Body != nil && r.ContentLength != 0 {
@@ -578,7 +636,7 @@ func (cp *ControlPlane) spawnVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := cp.applyEgressPolicy(vmID, tapDevice, guestIP, req.EgressPolicy); err != nil {
+	if err := cp.applyEgressPolicy(vmID, tapDevice, guestIP, req.EgressPolicy, req.Profile); err != nil {
 		cp.netManager.Release(tapDevice, guestIP)
 		http.Error(w, fmt.Sprintf("egress policy failed: %v", err), http.StatusInternalServerError)
 		return
@@ -641,6 +699,7 @@ func (cp *ControlPlane) spawnVM(w http.ResponseWriter, r *http.Request) {
 	cp.vms[vmID] = &runningVM{
 		VMInfo:     info,
 		agentToken: agentToken,
+		startedAt:  time.Now().UTC(),
 		diskPath:   diskPath,
 		vsockPath:  vsockPath,
 		machine:    machine,
@@ -676,6 +735,7 @@ func (cp *ControlPlane) listVMs(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (cp *ControlPlane) stopVM(w http.ResponseWriter, vmID string) {
+	defer cp.observeLifecycle("vm_delete")()
 	cp.mu.RLock()
 	_, ok := cp.vms[vmID]
 	cp.mu.RUnlock()
@@ -812,25 +872,37 @@ type HealthResponse struct {
 	AuthEnabled   bool   `json:"auth_enabled"`
 }
 
+type VMMetricsResponse struct {
+	VMID         string    `json:"vm_id"`
+	GuestIP      string    `json:"guest_ip"`
+	Profile      string    `json:"profile,omitempty"`
+	TenantID     string    `json:"tenant_id,omitempty"`
+	EgressPolicy string    `json:"egress_policy,omitempty"`
+	StartedAt    time.Time `json:"started_at"`
+}
+
 type egressEnforcer interface {
 	Apply(vmID, tapDevice, guestIP, policy string) error
 	Cleanup(vmID string) error
 }
 
 type egressRule struct {
-	GuestIP string
-	Comment string
+	GuestIP  string
+	Comment  string
+	Commands []egressCommand
 }
 
 type commandEgressEnforcer struct {
-	mu    sync.Mutex
-	rules map[string]egressRule
-	run   func(name string, args ...string) error
+	mu         sync.Mutex
+	rules      map[string]egressRule
+	profileDir string
+	run        func(name string, args ...string) error
 }
 
 func newCommandEgressEnforcer() *commandEgressEnforcer {
 	return &commandEgressEnforcer{
-		rules: make(map[string]egressRule),
+		rules:      make(map[string]egressRule),
+		profileDir: egressProfileDir(),
 		run: func(name string, args ...string) error {
 			return exec.Command(name, args...).Run()
 		},
@@ -838,24 +910,48 @@ func newCommandEgressEnforcer() *commandEgressEnforcer {
 }
 
 func (e *commandEgressEnforcer) Apply(vmID, tapDevice, guestIP, policy string) error {
+	return e.ApplyWithProfile(vmID, tapDevice, guestIP, policy, "")
+}
+
+func (e *commandEgressEnforcer) ApplyWithProfile(vmID, tapDevice, guestIP, policy, profileName string) error {
 	_ = tapDevice
 	policy, err := normalizeDaemonEgressPolicy(policy)
 	if err != nil {
 		return err
 	}
-	if policy == "" || policy == "profile" || policy == "allow_all" {
+	if policy == "" || policy == "allow_all" {
 		return nil
 	}
+	var commands []egressCommand
 	comment := "anvil-egress-" + vmID
-	args := []string{"-I", "FORWARD", "-s", guestIP, "-j", "REJECT", "-m", "comment", "--comment", comment}
-	if err := e.command("iptables", args...); err != nil {
-		return fmt.Errorf("apply deny_all egress policy: %w", err)
+	if policy == "profile" {
+		profile, ok, err := loadEgressProfile(e.profileDir, profileName)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return nil
+		}
+		commands, err = planProfileEgressCommands(vmID, guestIP, profile)
+		if err != nil {
+			return err
+		}
+	} else {
+		commands = []egressCommand{{
+			Name: "iptables",
+			Args: []string{"-I", "FORWARD", "-s", guestIP, "-j", "REJECT", "-m", "comment", "--comment", comment},
+		}}
+	}
+	for _, command := range commands {
+		if err := e.command(command.Name, command.Args...); err != nil {
+			return fmt.Errorf("apply egress policy: %w", err)
+		}
 	}
 	e.mu.Lock()
 	if e.rules == nil {
 		e.rules = make(map[string]egressRule)
 	}
-	e.rules[vmID] = egressRule{GuestIP: guestIP, Comment: comment}
+	e.rules[vmID] = egressRule{GuestIP: guestIP, Comment: comment, Commands: commands}
 	e.mu.Unlock()
 	return nil
 }
@@ -870,9 +966,21 @@ func (e *commandEgressEnforcer) Cleanup(vmID string) error {
 	if !ok {
 		return nil
 	}
-	args := []string{"-D", "FORWARD", "-s", rule.GuestIP, "-j", "REJECT", "-m", "comment", "--comment", rule.Comment}
-	if err := e.command("iptables", args...); err != nil {
-		return fmt.Errorf("cleanup egress policy: %w", err)
+	commands := append([]egressCommand(nil), rule.Commands...)
+	for left, right := 0, len(commands)-1; left < right; left, right = left+1, right-1 {
+		commands[left], commands[right] = commands[right], commands[left]
+	}
+	if len(commands) == 0 {
+		commands = []egressCommand{{Name: "iptables", Args: []string{"-I", "FORWARD", "-s", rule.GuestIP, "-j", "REJECT", "-m", "comment", "--comment", rule.Comment}}}
+	}
+	for _, command := range commands {
+		args := append([]string(nil), command.Args...)
+		if len(args) > 0 && args[0] == "-I" {
+			args[0] = "-D"
+		}
+		if err := e.command(command.Name, args...); err != nil {
+			return fmt.Errorf("cleanup egress policy: %w", err)
+		}
 	}
 	return nil
 }
@@ -1121,9 +1229,14 @@ func (cp *ControlPlane) ensureTenantStore() *anvilmcp.QuotaStore {
 	return cp.tenantStore
 }
 
-func (cp *ControlPlane) applyEgressPolicy(vmID, tapDevice, guestIP, policy string) error {
+func (cp *ControlPlane) applyEgressPolicy(vmID, tapDevice, guestIP, policy, profile string) error {
 	if cp.egress == nil {
 		return nil
+	}
+	if profileEnforcer, ok := cp.egress.(interface {
+		ApplyWithProfile(vmID, tapDevice, guestIP, policy, profile string) error
+	}); ok {
+		return profileEnforcer.ApplyWithProfile(vmID, tapDevice, guestIP, policy, profile)
 	}
 	return cp.egress.Apply(vmID, tapDevice, guestIP, policy)
 }
@@ -1173,6 +1286,40 @@ func (cp *ControlPlane) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "anvil_snapshot_gc_total %d\n", m.snapshotGC)
 	fmt.Fprintf(w, "anvil_cleanup_failure_total %d\n", m.cleanupFailure)
 	fmt.Fprintf(w, "anvil_auth_failure_total %d\n", m.authFailure)
+	fmt.Fprintf(w, "anvil_lifecycle_queue_depth %d\n", m.queueDepth)
+	durationNames := make([]string, 0, len(m.durations))
+	for name := range m.durations {
+		durationNames = append(durationNames, name)
+	}
+	sort.Strings(durationNames)
+	for _, name := range durationNames {
+		metric := m.durations[name]
+		fmt.Fprintf(w, "anvil_%s_duration_seconds_count %d\n", name, metric.Count)
+		fmt.Fprintf(w, "anvil_%s_duration_seconds_sum %.6f\n", name, metric.Sum)
+	}
+}
+
+func (cp *ControlPlane) handleVMMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET required", http.StatusMethodNotAllowed)
+		return
+	}
+	cp.mu.RLock()
+	metrics := make([]VMMetricsResponse, 0, len(cp.vms))
+	for _, vm := range cp.vms {
+		metrics = append(metrics, VMMetricsResponse{
+			VMID:         vm.VMID,
+			GuestIP:      vm.GuestIP,
+			Profile:      vm.Profile,
+			TenantID:     vm.TenantID,
+			EgressPolicy: vm.EgressPolicy,
+			StartedAt:    vm.startedAt,
+		})
+	}
+	cp.mu.RUnlock()
+	sort.Slice(metrics, func(i, j int) bool { return metrics[i].VMID < metrics[j].VMID })
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(metrics)
 }
 
 func (cp *ControlPlane) handleTenants(w http.ResponseWriter, r *http.Request) {
@@ -1371,6 +1518,7 @@ func (cp *ControlPlane) restoreSnapshotMachine(ctx context.Context, cfg vm.VMCon
 
 // POST /snapshots/gc
 func (cp *ControlPlane) handleSnapshotGC(w http.ResponseWriter, r *http.Request) {
+	defer cp.observeLifecycle("snapshot_gc")()
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
 		return
@@ -1525,6 +1673,7 @@ func (cp *ControlPlane) latestFullSnapshot(vmID string) *storage.SnapshotMetadat
 
 // POST /vms/{vm_id}/snapshot
 func (cp *ControlPlane) createSnapshot(w http.ResponseWriter, r *http.Request, vmID string) {
+	defer cp.observeLifecycle("snapshot_create")()
 	var req SnapshotRequest
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
@@ -1711,6 +1860,7 @@ func restoreTenantAndEgress(meta storage.SnapshotMetadata, req RestoreSnapshotRe
 }
 
 func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID string, req RestoreSnapshotRequest) {
+	defer cp.observeLifecycle("vm_restore")()
 	// Prevent delete/GC from removing snapshot files while restore reads them.
 	cp.snapshotLifecycleMu.Lock()
 	defer cp.snapshotLifecycleMu.Unlock()
@@ -1806,7 +1956,7 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 		memFileToUse = mergedMemPath
 	}
 
-	if err := cp.applyEgressPolicy(newVMID, tapDevice, newGuestIP, restoreEgressPolicy); err != nil {
+	if err := cp.applyEgressPolicy(newVMID, tapDevice, newGuestIP, restoreEgressPolicy, meta.Profile); err != nil {
 		cp.restoreMu.Unlock()
 		cp.teardownRestoreDMSnapshot(dmInfo)
 		cp.releaseRestoreNetwork(tapDevice, newGuestIP)
@@ -1866,6 +2016,7 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 	cp.vms[newVMID] = &runningVM{
 		VMInfo:     info,
 		agentToken: meta.AgentToken,
+		startedAt:  time.Now().UTC(),
 		diskPath:   exceptionStorePath, // only the COW store needs cleanup (not a full disk copy)
 		dmSnapshot: dmInfo,
 		vsockPath:  meta.VsockPath,
@@ -1924,7 +2075,7 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 		memFileToUse = mergedMemPath
 	}
 
-	if err := cp.applyEgressPolicy(newVMID, tapDevice, newGuestIP, restoreEgressPolicy); err != nil {
+	if err := cp.applyEgressPolicy(newVMID, tapDevice, newGuestIP, restoreEgressPolicy, meta.Profile); err != nil {
 		storage.TeardownBindMount(meta.DiskPath, newDiskPath)
 		cp.releaseRestoreNetwork(tapDevice, newGuestIP)
 		writeRestoreError(w, http.StatusInternalServerError, "egress_policy_failed", snapID, fmt.Sprintf("egress policy failed: %v", err))
@@ -1973,6 +2124,7 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 	cp.vms[newVMID] = &runningVM{
 		VMInfo:          info,
 		agentToken:      meta.AgentToken,
+		startedAt:       time.Now().UTC(),
 		diskPath:        newDiskPath,
 		bindMountTarget: meta.DiskPath,
 		vsockPath:       meta.VsockPath,
@@ -2029,6 +2181,7 @@ func (cp *ControlPlane) deleteSnapshotByID(snapID string) (storage.SnapshotMetad
 
 // DELETE /snapshots/{snapshot_id}
 func (cp *ControlPlane) deleteSnapshot(w http.ResponseWriter, snapID string) {
+	defer cp.observeLifecycle("snapshot_delete")()
 	meta, status, err := cp.deleteSnapshotByID(snapID)
 	if err != nil {
 		if status == http.StatusNotFound {

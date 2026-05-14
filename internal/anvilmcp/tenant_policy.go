@@ -61,6 +61,8 @@ type ScheduleRequest struct {
 	Profile                string       `json:"profile,omitempty"`
 	RequestedSnapshotBytes int64        `json:"requested_snapshot_bytes,omitempty"`
 	EgressPolicy           EgressPolicy `json:"egress_policy"`
+	PreferredHosts         []string     `json:"preferred_hosts,omitempty"`
+	ExcludedHosts          []string     `json:"excluded_hosts,omitempty"`
 }
 
 type RuntimeAuditRecord struct {
@@ -160,22 +162,48 @@ func SelectRuntimeHost(hosts []RuntimeHost, req ScheduleRequest) (RuntimeHost, e
 		return RuntimeHost{}, err
 	}
 
-	for _, host := range hosts {
+	eligible := func(host RuntimeHost) bool {
 		if strings.TrimSpace(host.Name) == "" || strings.TrimSpace(host.Endpoint) == "" {
-			continue
+			return false
 		}
 		if !host.Healthy || host.AvailableVMs <= 0 {
-			continue
+			return false
+		}
+		if hostNameSet(req.ExcludedHosts)[host.Name] {
+			return false
 		}
 		if req.RequestedSnapshotBytes > 0 && host.AvailableSnapshotBytes < req.RequestedSnapshotBytes {
-			continue
+			return false
 		}
 		if !hostSupportsEgress(host, policy) {
-			continue
+			return false
 		}
-		return host, nil
+		return true
+	}
+
+	preferred := hostNameSet(req.PreferredHosts)
+	for _, host := range hosts {
+		if len(preferred) > 0 && preferred[host.Name] && eligible(host) {
+			return host, nil
+		}
+	}
+	for _, host := range hosts {
+		if eligible(host) {
+			return host, nil
+		}
 	}
 	return RuntimeHost{}, fmt.Errorf("no eligible runtime host for tenant %q", req.TenantID)
+}
+
+func hostNameSet(values []string) map[string]bool {
+	out := make(map[string]bool, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			out[value] = true
+		}
+	}
+	return out
 }
 
 func AppendRuntimeAudit(auditPath string, record RuntimeAuditRecord) error {

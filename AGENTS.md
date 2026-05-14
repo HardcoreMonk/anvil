@@ -1,8 +1,10 @@
 # anvil — Codex 프로젝트 지침
 
 `anvil`은 IronClaw와 ephemera를 결합하는 새 프로젝트다. 이 저장소는
-`https://github.com/HardcoreMonk/ephemera/`이며, ephemera 0.1.0/0.2.0 기반
-runtime과 anvil 통합 문서를 함께 담고 있다.
+`https://github.com/HardcoreMonk/anvil/`이며,
+`https://github.com/steve-seungeui/ephemera` fork network를 유지한다. ephemera는
+계속 버전업되는 runtime engine upstream이고, anvil은 그 runtime을 IronClaw 실행
+계층으로 통합하는 downstream product fork다.
 
 ## 진실 기준 문서 순서
 
@@ -21,6 +23,7 @@ runtime과 anvil 통합 문서를 함께 담고 있다.
   `internal/network`, `internal/vm`
 - 게스트 구성 요소: `cmd/goose-agent`, `cmd/micro-init`
 - IronClaw 연동 MCP 어댑터: `cmd/anvil-mcp`, `internal/anvilmcp`
+- 런타임 스케줄러 서비스: `cmd/anvil-scheduler`, `internal/anvilmcp`
 - 설정 예시: `configs/*.example`, `configs/profiles/*`
 - 런타임 산출물: `artifacts/`, `snapshots/`, `/tmp/goose-workspaces/`
 
@@ -37,6 +40,12 @@ runtime과 anvil 통합 문서를 함께 담고 있다.
   릴리즈 분석 문서의 제목을 anvil로 바꾸지 않는다.
 - 실제 API/환경 변수/경로가 `EPHEMERA_*` 또는 `goose-*` 이름을 쓰는 경우에는
   코드의 현재 계약을 그대로 유지한다.
+- fork는 유지한다. `HardcoreMonk/anvil`을 standalone repository로 detach하지
+  않는다.
+- upstream sync는 `sync/ephemera-*` 브랜치에서 merge commit으로 수행한다. upstream
+  runtime 이력을 보존하기 위해 rebase/history rewrite를 하지 않는다.
+- upstream tag 확인은 `git ls-remote --tags upstream`을 사용한다. 기존 `v*` tag를
+  덮어쓰는 강제 tag fetch는 하지 않는다.
 
 ## 명령어
 
@@ -46,6 +55,7 @@ runtime과 anvil 통합 문서를 함께 담고 있다.
 go test ./...
 go build ./cmd/goose-daemon
 go build ./cmd/anvil-mcp
+go build ./cmd/anvil-scheduler
 ```
 
 전체 통합 검증:

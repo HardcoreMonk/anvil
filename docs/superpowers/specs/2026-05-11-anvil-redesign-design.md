@@ -113,7 +113,7 @@ run에서 package 이동을 만들지 않는다.
 - `AGENTS.md`에 `CONTEXT.md`를 source-of-truth hierarchy에 포함하고 재설계
   제약을 명시.
 - `README.md`에서 anvil을 IronClaw+ephemera 결합 프로젝트로 설명. repository
-  link는 `HardcoreMonk/ephemera` 유지 가능.
+  link는 `HardcoreMonk/anvil` 유지 가능.
 - `RELEASE_NOTES.md`에서 ephemera release와 anvil 통합 미릴리즈 변경을 구분.
 - `docs/analysis/README.md`에 분석 문서가 ephemera 0.1.0/0.2.0 runtime 분석임을
   명시.

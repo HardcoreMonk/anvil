@@ -46,6 +46,14 @@ curl -H "Authorization: Bearer $TOKEN" \
 guest 내부 endpoint는 `goose-agent`의 `/health`다. 운영 client는 VM private IP에
 직접 접근하지 말고 daemon의 `/vms/{id}/health` proxy를 우선 사용한다.
 
+runtime scheduler service를 별도 process로 운영하면 scheduler 자체 health와
+placement state를 함께 본다.
+
+```bash
+curl http://127.0.0.1:3010/health
+curl http://127.0.0.1:3010/placements
+```
+
 ## Snapshot GC audit
 
 `POST /snapshots/gc`를 `apply:true`로 호출하면 daemon은
@@ -100,31 +108,63 @@ curl -X POST http://127.0.0.1:3000/audit/runtime/prune \
 - `anvil_snapshot_gc_total`
 - `anvil_cleanup_failure_total`
 - `anvil_auth_failure_total`
+- `anvil_lifecycle_queue_depth`
+- `anvil_vm_create_duration_seconds_count`
+- `anvil_vm_create_duration_seconds_sum`
+- `anvil_vm_restore_duration_seconds_count`
+- `anvil_vm_restore_duration_seconds_sum`
+- `anvil_vm_delete_duration_seconds_count`
+- `anvil_vm_delete_duration_seconds_sum`
+- `anvil_snapshot_create_duration_seconds_count`
+- `anvil_snapshot_create_duration_seconds_sum`
+- `anvil_snapshot_delete_duration_seconds_count`
+- `anvil_snapshot_delete_duration_seconds_sum`
+- `anvil_snapshot_gc_duration_seconds_count`
+- `anvil_snapshot_gc_duration_seconds_sum`
+- `anvil_agent_health_readiness_duration_seconds_count`
+- `anvil_agent_health_readiness_duration_seconds_sum`
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" \
   http://127.0.0.1:3000/metrics
 ```
 
+구조화된 per-VM metrics는 `/metrics/vms`에서 JSON으로 확인한다. 응답에는 VM ID,
+guest IP, profile, tenant ID, egress policy, host-local start time만 포함하며
+`agent_token`은 포함하지 않는다.
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:3000/metrics/vms
+```
+
+## Trace export
+
+`ANVIL_OTEL_EXPORTER_OTLP_ENDPOINT` 또는 `OTEL_EXPORTER_OTLP_ENDPOINT`를 설정하면
+daemon lifecycle span을 `{endpoint}/v1/traces`로 전송한다. 현재 exporter는 host-local
+lifecycle event를 JSON payload로 보내는 optional 운영 hook이며, token/secret 계열
+attribute는 전송 전에 제거한다.
+
+```bash
+ANVIL_OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 ./anvil-daemon
+```
+
 ## 현재 없는 것
 
 다음 기능은 아직 구현되어 있지 않다.
 
-- 구조화된 per-VM metrics endpoint
-- OpenTelemetry trace export
-- daemon 내부 queue depth 또는 lifecycle duration histogram
+- OpenTelemetry SDK/protobuf 기반 exporter
+- label cardinality를 제어한 상세 cleanup failure breakdown
 - snapshot storage quota dashboard
 
 현재 운영 판단은 daemon log, `/health`, `/metrics`, `GET /vms`, `GET /snapshots`,
-VM health endpoint, `snapshots/gc-audit.jsonl`, runtime audit API를 조합해서 수행한다.
+`/metrics/vms`, VM health endpoint, `snapshots/gc-audit.jsonl`, runtime audit API,
+optional trace export를 조합해서 수행한다.
 
 ## 향후 metrics 후보
 
 구현 후보 metrics:
 
-- VM create/restore/delete duration
-- guest `/health` readiness latency
-- snapshot create/restore/delete/GC duration
 - snapshot total bytes와 GC candidate/deleted count
 - TAP/IP allocation failure count
 - dm-snapshot, loop device, bind mount cleanup failure 상세 label

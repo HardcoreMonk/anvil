@@ -10,6 +10,7 @@ type routerFakeDaemon struct {
 	spawnCalls           int
 	spawnReq             SpawnVMRequest
 	spawnResp            *SpawnVMResponse
+	spawnErr             error
 	runTaskCalls         int
 	runTaskVMID          string
 	healthCalls          int
@@ -19,13 +20,18 @@ type routerFakeDaemon struct {
 	restoreSnapshotCalls int
 	restoreSnapshotID    string
 	restoreResp          *RestoreSnapshotResponse
+	restoreErr           error
 	deleteCalls          int
 	deleteVMID           string
+	listVMResp           []VMInfo
 }
 
 func (f *routerFakeDaemon) SpawnVM(_ context.Context, req SpawnVMRequest) (*SpawnVMResponse, error) {
 	f.spawnCalls++
 	f.spawnReq = req
+	if f.spawnErr != nil {
+		return nil, f.spawnErr
+	}
 	if f.spawnResp != nil {
 		return f.spawnResp, nil
 	}
@@ -75,6 +81,9 @@ func (f *routerFakeDaemon) ListSnapshots(context.Context) ([]SnapshotInfo, error
 func (f *routerFakeDaemon) RestoreSnapshot(_ context.Context, snapshotID string, req RestoreSnapshotRequest) (*RestoreSnapshotResponse, error) {
 	f.restoreSnapshotCalls++
 	f.restoreSnapshotID = snapshotID
+	if f.restoreErr != nil {
+		return nil, f.restoreErr
+	}
 	if f.restoreResp != nil {
 		return f.restoreResp, nil
 	}
@@ -83,6 +92,10 @@ func (f *routerFakeDaemon) RestoreSnapshot(_ context.Context, snapshotID string,
 
 func (f *routerFakeDaemon) DeleteSnapshot(context.Context, string) (*RawDaemonResponse, error) {
 	return &RawDaemonResponse{StatusCode: 200, Body: "{}"}, nil
+}
+
+func (f *routerFakeDaemon) ListVMs(context.Context) ([]VMInfo, error) {
+	return f.listVMResp, nil
 }
 
 func TestRuntimeRouterRejectsQuotaBeforeDaemonCall(t *testing.T) {
@@ -170,5 +183,92 @@ func TestRuntimeRouterRestoreRecordsRestoredPlacement(t *testing.T) {
 	}
 	if host, ok := router.Placement("vm-restored"); !ok || host != "host-a" {
 		t.Fatalf("placement = %q,%v want host-a,true", host, ok)
+	}
+}
+
+func TestRuntimeRouterRestorePrefersSnapshotLocalityHost(t *testing.T) {
+	store := NewPlacementStore("")
+	if err := store.SetSnapshotLocation("snap-1", "host-b"); err != nil {
+		t.Fatalf("SetSnapshotLocation: %v", err)
+	}
+	hostA := &routerFakeDaemon{}
+	hostB := &routerFakeDaemon{restoreResp: &RestoreSnapshotResponse{VMID: "vm-restored", SourceSnapshotID: "snap-1", TenantID: "tenant-1", EgressPolicy: "profile"}}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(
+			[]RuntimeHost{
+				{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 1, AvailableSnapshotBytes: 1 << 20, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+				{Name: "host-b", Endpoint: "http://host-b", Healthy: true, AvailableVMs: 1, AvailableSnapshotBytes: 1 << 20, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+			},
+			nil,
+			nil,
+		),
+		map[string]Daemon{"host-a": hostA, "host-b": hostB},
+		RuntimeRouterOptions{PlacementStore: store},
+	)
+
+	resp, err := router.RestoreSnapshot(context.Background(), "snap-1", RestoreSnapshotRequest{TenantID: "tenant-1", EgressPolicy: "profile"}, ScheduleRequest{TenantID: "tenant-1", EgressPolicy: EgressPolicyProfile}, TenantUsage{ActiveVMs: 1})
+	if err != nil {
+		t.Fatalf("RestoreSnapshot returned error: %v", err)
+	}
+	if resp.Host.Name != "host-b" {
+		t.Fatalf("restore host = %q, want locality host-b", resp.Host.Name)
+	}
+	if hostA.restoreSnapshotCalls != 0 || hostB.restoreSnapshotCalls != 1 {
+		t.Fatalf("restore calls hostA/hostB = %d/%d, want 0/1", hostA.restoreSnapshotCalls, hostB.restoreSnapshotCalls)
+	}
+}
+
+func TestRuntimeRouterSpawnRetriesOnNextEligibleHost(t *testing.T) {
+	hostA := &routerFakeDaemon{spawnErr: errors.New("host-a unavailable")}
+	hostB := &routerFakeDaemon{spawnResp: &SpawnVMResponse{VMID: "vm-b", TenantID: "tenant-1", EgressPolicy: "profile"}}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(
+			[]RuntimeHost{
+				{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 1, AvailableSnapshotBytes: 1 << 20, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+				{Name: "host-b", Endpoint: "http://host-b", Healthy: true, AvailableVMs: 1, AvailableSnapshotBytes: 1 << 20, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+			},
+			nil,
+			nil,
+		),
+		map[string]Daemon{"host-a": hostA, "host-b": hostB},
+		RuntimeRouterOptions{MaxAttempts: 2},
+	)
+
+	resp, err := router.SpawnVM(context.Background(), SpawnVMRequest{TenantID: "tenant-1", EgressPolicy: "profile"}, TenantUsage{ActiveVMs: 1})
+	if err != nil {
+		t.Fatalf("SpawnVM returned error: %v", err)
+	}
+	if resp.Host.Name != "host-b" || resp.VMID != "vm-b" {
+		t.Fatalf("resp = %+v, want host-b/vm-b", resp)
+	}
+	if hostA.spawnCalls != 1 || hostB.spawnCalls != 1 {
+		t.Fatalf("spawn calls hostA/hostB = %d/%d, want 1/1", hostA.spawnCalls, hostB.spawnCalls)
+	}
+}
+
+func TestRuntimeRouterReconcilePlacementsFromDaemonVMLists(t *testing.T) {
+	store := NewPlacementStore("")
+	if err := store.SetVMPlacement("stale-vm", "host-a"); err != nil {
+		t.Fatalf("SetVMPlacement: %v", err)
+	}
+	hostA := &routerFakeDaemon{listVMResp: []VMInfo{{VMID: "vm-a"}}}
+	hostB := &routerFakeDaemon{listVMResp: []VMInfo{{VMID: "vm-b"}}}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(nil, nil, nil),
+		map[string]Daemon{"host-a": hostA, "host-b": hostB},
+		RuntimeRouterOptions{PlacementStore: store},
+	)
+
+	if err := router.ReconcilePlacements(context.Background()); err != nil {
+		t.Fatalf("ReconcilePlacements: %v", err)
+	}
+	if _, ok := router.Placement("stale-vm"); ok {
+		t.Fatal("stale-vm still has placement after reconcile")
+	}
+	if host, ok := router.Placement("vm-a"); !ok || host != "host-a" {
+		t.Fatalf("vm-a placement = %q,%v want host-a,true", host, ok)
+	}
+	if host, ok := store.VMHost("vm-b"); !ok || host != "host-b" {
+		t.Fatalf("store vm-b placement = %q,%v want host-b,true", host, ok)
 	}
 }

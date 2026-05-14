@@ -73,7 +73,7 @@ runtime file 변경이 필요해지면 중단하고 사용자에게 scope 재승
 - `AGENTS.md`: `CONTEXT.md`를 source-of-truth order에 추가하고 문서 전용
   재설계 guardrail 명시.
 - `README.md`: anvil을 IronClaw+ephemera 결합 프로젝트로 설명하고 repository
-  link는 `HardcoreMonk/ephemera` 유지.
+  link는 `HardcoreMonk/anvil` 유지.
 - `RELEASE_NOTES.md`: 현재 release wording은 `anvil`로 정리하고 historical
   readability 유지.
 - `docs/analysis/README.md`: 0.1.0/0.2.0 문서가 ephemera runtime 분석임을
@@ -133,7 +133,7 @@ rg -n "CONTEXT.md|runtime|MCP|snapshot|restore" AGENTS.md
 검증:
 
 ```bash
-rg -n "anvil|HardcoreMonk/ephemera|EPHEMERA_PUBLIC_URL|anvil-mcp" README.md
+rg -n "anvil|HardcoreMonk/anvil|EPHEMERA_PUBLIC_URL|anvil-mcp" README.md
 ```
 
 ### 작업 4. Release note와 analysis index 정렬

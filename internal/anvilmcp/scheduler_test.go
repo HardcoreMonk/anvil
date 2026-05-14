@@ -118,3 +118,52 @@ func TestSchedulerRejectsUnsupportedEgress(t *testing.T) {
 		t.Fatalf("decision reason = %q, want no_eligible_host", decision.Reason)
 	}
 }
+
+func TestSchedulerPrefersSnapshotLocalityHost(t *testing.T) {
+	scheduler := NewScheduler(
+		[]RuntimeHost{
+			{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 1, AvailableSnapshotBytes: 1 << 20, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+			{Name: "host-b", Endpoint: "http://host-b", Healthy: true, AvailableVMs: 1, AvailableSnapshotBytes: 1 << 20, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+		},
+		nil,
+		nil,
+	)
+
+	decision, err := scheduler.Schedule(ScheduleRequest{
+		TenantID:       "tenant-1",
+		EgressPolicy:   EgressPolicyProfile,
+		PreferredHosts: []string{"host-b"},
+	}, TenantUsage{ActiveVMs: 1})
+	if err != nil {
+		t.Fatalf("Schedule() error = %v", err)
+	}
+	if !decision.Allowed {
+		t.Fatalf("Schedule() denied: %+v", decision)
+	}
+	if decision.Host.Name != "host-b" {
+		t.Fatalf("selected host = %q, want preferred host-b", decision.Host.Name)
+	}
+}
+
+func TestSchedulerSkipsExcludedHostsForFailover(t *testing.T) {
+	scheduler := NewScheduler(
+		[]RuntimeHost{
+			{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 1, AvailableSnapshotBytes: 1 << 20, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+			{Name: "host-b", Endpoint: "http://host-b", Healthy: true, AvailableVMs: 1, AvailableSnapshotBytes: 1 << 20, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+		},
+		nil,
+		nil,
+	)
+
+	decision, err := scheduler.Schedule(ScheduleRequest{
+		TenantID:      "tenant-1",
+		EgressPolicy:  EgressPolicyProfile,
+		ExcludedHosts: []string{"host-a"},
+	}, TenantUsage{ActiveVMs: 1})
+	if err != nil {
+		t.Fatalf("Schedule() error = %v", err)
+	}
+	if !decision.Allowed || decision.Host.Name != "host-b" {
+		t.Fatalf("decision = %+v, want host-b after excluding host-a", decision)
+	}
+}

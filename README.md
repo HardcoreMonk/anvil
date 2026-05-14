@@ -1,7 +1,7 @@
 # anvil
 
-[![CI](https://github.com/HardcoreMonk/ephemera/actions/workflows/ci.yml/badge.svg)](https://github.com/HardcoreMonk/ephemera/actions/workflows/ci.yml)
-[![Latest Tag](https://img.shields.io/github/v/tag/HardcoreMonk/ephemera?sort=semver&label=tag)](https://github.com/HardcoreMonk/ephemera/tags)
+[![CI](https://github.com/HardcoreMonk/anvil/actions/workflows/ci.yml/badge.svg)](https://github.com/HardcoreMonk/anvil/actions/workflows/ci.yml)
+[![Latest Tag](https://img.shields.io/github/v/tag/HardcoreMonk/anvil?sort=semver&label=tag)](https://github.com/HardcoreMonk/anvil/tags)
 [![Go](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Firecracker](https://img.shields.io/badge/Firecracker-v1.15.1-FF4500?logo=amazonaws&logoColor=white)](https://github.com/firecracker-microvm/firecracker)
@@ -39,8 +39,10 @@ restore/cleanup 의미를 변환한다.
 anvil의 상위 통합 대상은 IronClaw 전용이다. OpenClaw 연동은 anvil의 지원 범위가
 아니며, OpenClaw용 compatibility layer나 운영 계약은 제공하지 않는다.
 
-이 저장소의 현재 URL은 `https://github.com/HardcoreMonk/ephemera/`이다.
-ephemera는 이미 `0.1.0`, `0.2.0`이 릴리즈된 기반 runtime이므로 Go 모듈 경로,
+이 저장소의 현재 URL은 `https://github.com/HardcoreMonk/anvil/`이다.
+이 저장소는 `https://github.com/steve-seungeui/ephemera`의 fork로 유지한다.
+ephemera는 계속 버전업되는 runtime engine upstream이고, anvil은 그 runtime을
+IronClaw 실행 계층으로 통합하는 downstream product fork다. 따라서 Go 모듈 경로,
 daemon 이름, HTTP API, 일부 환경 변수에는 `ephemera` 또는 `goose` 이름이 남아
 있다. README에서는 `anvil`을 IronClaw 통합 프로젝트로, `ephemera`를 분리된 기반
 runtime으로 구분한다.
@@ -67,6 +69,10 @@ tag 기준은 `v0.2.0`이고, IronClaw 통합 프로젝트 anvil의 첫 공개 t
 - **anvil**: IronClaw가 사용할 MCP tool surface와 실행 lifecycle 계약을 제공한다.
   구현 위치는 `cmd/anvil-mcp`, `internal/anvilmcp`다.
 
+- **anvil runtime scheduler**: 여러 ephemera daemon host 후보 중 요청을 실행할
+  host를 고르고 placement/snapshot locality/quota 상태를 보존한다. 구현 위치는
+  `cmd/anvil-scheduler`, `internal/anvilmcp`다.
+
 - **ephemera**: Firecracker MicroVM 생성, agent proxy, snapshot/restore,
   host resource 정리를 담당한다. 구현 위치는 `cmd/goose-daemon`, `internal/vm`,
   `internal/storage`, `internal/network`다.
@@ -78,6 +84,35 @@ anvil은 ephemera를 이름만 바꾼 프로젝트가 아니다. anvil은 IronCl
 연결하는 통합 실행 layer이고, ephemera는 독립적인 runtime 구현과 API 계약을
 가진다. 따라서 runtime API와 환경 변수는 호환성을 위해 ephemera/goose 이름을
 유지하고, IronClaw가 직접 사용하는 표면은 `anvil_*` MCP tool로 노출한다.
+
+## Fork와 upstream 관리
+
+`HardcoreMonk/anvil`은 `steve-seungeui/ephemera`의 fork network를 유지한다. 이
+관계는 의도된 운영 방식이다. ephemera가 runtime engine으로 계속 버전업되기 때문에
+anvil은 upstream runtime 변경을 merge로 받아들이고, IronClaw 통합 계층을 그 위에
+적응시킨다.
+
+권장 remote 설정:
+
+```bash
+git remote -v
+git remote add upstream https://github.com/steve-seungeui/ephemera.git
+git remote set-url upstream https://github.com/steve-seungeui/ephemera.git
+git remote set-url --push upstream DISABLED
+```
+
+upstream sync는 별도 branch에서 수행한다.
+
+```bash
+git fetch upstream main
+git ls-remote --tags upstream
+git checkout -b sync/ephemera-v0.3.0 origin/main
+git merge --no-ff upstream/main
+```
+
+기존 `v*` tag를 덮어쓰는 `git fetch --tags --force`는 사용하지 않는다. ephemera
+runtime release tag는 `v*`, anvil product release tag는 `anvil-v*` prefix를
+사용한다. anvil 작업 branch는 rebase/history rewrite 없이 PR merge로 관리한다.
 
 ## anvil 실행 모델
 
@@ -93,6 +128,13 @@ anvil MCP adapter
   - anvil_run_task
   - anvil_create_snapshot
   - anvil_restore_snapshot
+      |
+      | optional scheduler-backed host selection
+      v
+anvil runtime scheduler
+  - host inventory
+  - quota and placement state
+  - snapshot locality
       |
       | HTTP + optional Bearer token
       v
@@ -157,6 +199,14 @@ Reverse proxy :443
       | HTTP + control-plane Bearer token
       v
 ephemera control plane :3000
+  GET    /health               -> daemon 상태
+  GET    /metrics              -> Prometheus text metrics
+  GET    /metrics/vms          -> 실행 중인 VM별 JSON metrics
+  GET    /tenants              -> tenant quota/usage 목록
+  GET    /tenants/{tenant_id}  -> tenant quota/usage 조회
+  PUT    /tenants/{tenant_id}  -> tenant quota 설정
+  GET    /audit/runtime        -> runtime audit 조회
+  POST   /audit/runtime/prune  -> runtime audit 보관 정책 적용
   POST   /vms                  -> VM 생성
   GET    /vms                  -> 실행 중인 VM 목록
   DELETE /vms/{vm_id}          -> VM 종료 및 리소스 정리
@@ -298,11 +348,13 @@ cmd/
     api.go            VM/snapshot API, auth middleware, proxy
     config.go         환경 변수 기반 설정
   anvil-mcp/          anvil/IronClaw용 stdio MCP adapter entrypoint
+  anvil-scheduler/    runtime host/quota/placement scheduler service
   goose-agent/        VM 내부 HTTP agent
   micro-init/         VM 내부 PID 1
 
 internal/
-  anvilmcp/           MCP config, daemon client, session alias, tool handler
+  anvilmcp/           MCP config, daemon client, session alias, scheduler/router,
+                      quota, placement, runtime audit helper
   vm/machine.go       Firecracker SDK wrapper
   network/manager.go  IP pool, TAP lifecycle, bridge, NAT
   storage/
@@ -338,7 +390,8 @@ scripts/anvil-mcp-e2e.sh daemon 기반 MCP smoke wrapper
   Codex 작업 규약, 검증 명령, 불변 조건.
 
 - [RELEASE_NOTES.md](RELEASE_NOTES.md):
-  ephemera `v0.1.0`, `v0.2.0`, anvil `anvil-v0.1.0` 변경 사항.
+  Unreleased runtime scheduler/network/observability 변경과 ephemera `v0.1.0`,
+  `v0.2.0`, anvil `anvil-v0.1.0` 변경 사항.
 
 - [docs/architecture/runtime-architecture.md](docs/architecture/runtime-architecture.md):
   ephemera daemon, MicroVM, storage, network, guest runtime 구조.
@@ -363,7 +416,8 @@ scripts/anvil-mcp-e2e.sh daemon 기반 MCP smoke wrapper
   daemon crash, stale TAP/IP, restore 실패, GC 실패, diff base 누락 대응 playbook.
 
 - [docs/operations/observability.md](docs/operations/observability.md):
-  daemon log, `/health`, `/metrics`, snapshot GC audit, runtime audit API, 향후 지표 후보.
+  daemon log, `/health`, `/metrics`, `/metrics/vms`, snapshot GC audit, runtime audit
+  API, optional trace export, 향후 지표 후보.
 
 - [docs/analysis/README.md](docs/analysis/README.md):
   ephemera 0.1.0/0.2.0 분석 문서 index.
@@ -374,6 +428,10 @@ scripts/anvil-mcp-e2e.sh daemon 기반 MCP smoke wrapper
 - [anvil release checklist](docs/operations/release-checklist.md):
   ephemera runtime 릴리즈와 anvil integration 릴리즈를 구분하는 게시 전
   확인 절차와 `anvil-v0.1.0` GitHub Release 본문 초안.
+
+- [upstream sync policy](docs/operations/upstream-sync-policy.md):
+  `steve-seungeui/ephemera` fork 유지, upstream merge, tag 충돌 방지, sync PR 운영
+  기준.
 
 ---
 
@@ -401,9 +459,11 @@ Firecracker, Linux kernel, golden image는 첫 실행 시 자동으로 다운로
 ### 1. 복제와 빌드
 
 ```bash
-git clone https://github.com/HardcoreMonk/ephemera.git
-cd ephemera
+git clone https://github.com/HardcoreMonk/anvil.git
+cd anvil
 go build -o anvil-daemon ./cmd/goose-daemon/
+go build -o anvil-mcp ./cmd/anvil-mcp
+go build -o anvil-scheduler ./cmd/anvil-scheduler
 ```
 
 `cmd/anvil-mcp`는 공식 MCP Go SDK를 사용하므로 Go 1.25 이상이 필요하다.
@@ -460,6 +520,7 @@ resolution, agent auth middleware, token generation 등을 검증한다.
 
 ```bash
 go build -o anvil-daemon ./cmd/goose-daemon/
+go build -o anvil-scheduler ./cmd/anvil-scheduler
 sudo bash e2e_test.sh
 ```
 
@@ -514,6 +575,16 @@ rate limit에 따라 보통 15-30분 이상 걸릴 수 있다.
   - 기본값: unset
   - 외부에서 접근 가능한 control plane base URL이다.
   - 설정 시 `agent_url`이 proxy path가 된다.
+
+- `EPHEMERA_EGRESS_PROFILE_DIR` / `ANVIL_EGRESS_PROFILE_DIR`
+  - 기본값: `configs/profiles`
+  - `profile` egress policy가 `egress.json`을 찾는 profile directory다.
+  - canonical `EPHEMERA_EGRESS_PROFILE_DIR`가 alias보다 우선한다.
+
+- `ANVIL_OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_ENDPOINT`
+  - 기본값: unset
+  - 설정 시 daemon lifecycle span을 `{endpoint}/v1/traces`로 전송한다.
+  - `ANVIL_OTEL_EXPORTER_OTLP_ENDPOINT`가 우선한다.
 
 `EPHEMERA_*`는 ephemera runtime의 canonical 변수이고 `ANVIL_*`는 anvil 운영자를
 위한 alias다. 각 변수 쌍에서는 `EPHEMERA_*` 값이 `ANVIL_*` 값보다 우선한다.
@@ -611,16 +682,59 @@ metadata, daemon raw body, `agent_token`을 저장하지 않는다.
 `ANVIL_MCP_AUDIT_LOG`를 켠 상태에서는 tool input `tenant_id` 또는
 `ANVIL_MCP_TENANT_ID`가 필요하다.
 
-후속 control-plane foundation은 host inventory polling, scheduler-backed
-`RuntimeRouter`, JSON quota store, daemon `/tenants`, `/audit/runtime`, `/health`,
-`/metrics`를 제공한다. `deny_all` egress policy는 host `iptables` reject rule로
-강제하며, `profile` proxy allowlist와 DNS policy는 별도 후속 network layer다.
+현재 control-plane foundation은 host inventory polling, `cmd/anvil-scheduler`,
+scheduler-backed `RuntimeRouter`, JSON quota store, persistent placement/snapshot
+locality store, daemon `/tenants`, `/audit/runtime`, `/health`, `/metrics`,
+`/metrics/vms`를 제공한다. router는 snapshot locality preferred host, retry/failover,
+placement reconciliation helper를 제공한다.
+
+Scheduler service를 별도 process로 실행할 때는 다음 환경 변수를 사용한다.
+
+```bash
+go build -o anvil-scheduler ./cmd/anvil-scheduler
+
+ANVIL_SCHEDULER_ADDR=127.0.0.1:3010 \
+ANVIL_SCHEDULER_STATE=/var/lib/anvil/scheduler.json \
+ANVIL_SCHEDULER_QUOTA_STORE=/var/lib/anvil/tenants.json \
+./anvil-scheduler
+```
+
+Scheduler service API는 operator가 host inventory와 placement 상태를 관리하는
+얇은 control-plane surface다.
+
+| Endpoint | 목적 |
+|---|---|
+| `GET /health` | scheduler process 상태 확인 |
+| `GET/PUT /hosts` | runtime host inventory 조회/등록 |
+| `GET /placements` | host, VM placement, snapshot location state 조회 |
+| `POST /reconcile` | 현재 placement state 반환. router reconciliation은 daemon `GET /vms` 기반 helper가 수행 |
+| `POST /schedule/spawn` | spawn 요청의 host decision 반환 |
+| `POST /schedule/restore?snapshot_id=...` | snapshot locality를 반영한 restore host decision 반환 |
+
+`deny_all` egress policy는 host `iptables` reject rule로 강제한다. `profile` policy는
+`configs/profiles/{profile}/egress.json`,
+`EPHEMERA_EGRESS_PROFILE_DIR`, `ANVIL_EGRESS_PROFILE_DIR` 아래의 profile별
+`egress.json`이 있을 때 allow CIDR/host/DNS rule을 적용하고, policy 파일이 없으면
+기존 profile 호환성을 위해 no-op이다. 예시:
+
+```json
+{
+  "allow_cidrs": ["203.0.113.10/32"],
+  "allow_hosts": ["api.anthropic.com"],
+  "dns_servers": ["1.1.1.1"]
+}
+```
+
+Optional trace export는 `ANVIL_OTEL_EXPORTER_OTLP_ENDPOINT` 또는
+`OTEL_EXPORTER_OTLP_ENDPOINT`를 설정하면 lifecycle span을 `{endpoint}/v1/traces`로
+보낸다. trace attribute는 token/secret 계열 값을 제거한 뒤 전송한다.
 
 정확한 입력/출력 계약은 `docs/architecture/mcp-architecture.md`를 참조한다.
 
 문서 기준 MCP smoke test는 실제 daemon과 `anvil-mcp` stdio server를 함께
 사용한다. 일반 CI에서는 KVM/root가 필요한 daemon 실행을 요구하지 않고
-`go test ./...`, `go build ./cmd/anvil-mcp` 같은 CI-safe 검증만 수행한다.
+`go test ./...`, `go build ./cmd/anvil-mcp`, `go build ./cmd/anvil-scheduler` 같은
+CI-safe 검증만 수행한다.
 MCP smoke는 Firecracker를 실행할 수 있는 host에서 별도로 수행한다.
 
 먼저 root 권한으로 daemon을 실행한다.

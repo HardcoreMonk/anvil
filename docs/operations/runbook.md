@@ -8,6 +8,8 @@
 
 ```bash
 go build -o anvil-daemon ./cmd/goose-daemon
+go build -o anvil-mcp ./cmd/anvil-mcp
+go build -o anvil-scheduler ./cmd/anvil-scheduler
 ```
 
 ## 운영 시작
@@ -27,21 +29,29 @@ EPHEMERA_API_TOKENS="operator:$TOKEN,ci:$CI_TOKEN" ./anvil-daemon
 공개 노출은 TLS를 종료하는 reverse proxy 뒤에서만 수행한다. daemon을 인터넷에 직접
 공개하지 않는다.
 
+runtime scheduler service를 별도 process로 운영하는 경우 state path를 명시한다.
+
+```bash
+ANVIL_SCHEDULER_ADDR=127.0.0.1:3010 \
+ANVIL_SCHEDULER_STATE=/var/lib/anvil/scheduler.json \
+ANVIL_SCHEDULER_QUOTA_STORE=/var/lib/anvil/tenants.json \
+./anvil-scheduler
+```
+
 ## Daemon API 확인
 
-현재 `goose-daemon`에는 top-level `/health` endpoint가 없다. daemon process와 API
-인증 경로는 목록 endpoint로 확인한다.
+daemon process 상태와 API 인증 경로는 top-level `/health` endpoint로 확인한다.
 
 로컬 인증이 꺼진 개발 모드:
 
 ```bash
-curl http://127.0.0.1:3000/vms
+curl http://127.0.0.1:3000/health
 ```
 
 운영 token이 필요한 환경:
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:3000/vms
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:3000/health
 ```
 
 VM guest agent health는 daemon proxy를 통해 확인한다.
@@ -51,12 +61,54 @@ curl -H "Authorization: Bearer $TOKEN" \
   http://127.0.0.1:3000/vms/$VM_ID/health
 ```
 
+Prometheus text metrics와 VM별 JSON metrics:
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:3000/metrics
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:3000/metrics/vms
+```
+
+runtime scheduler service 상태:
+
+```bash
+curl http://127.0.0.1:3010/health
+curl http://127.0.0.1:3010/placements
+```
+
+## Tenant, egress, audit 확인
+
+tenant quota/usage state:
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:3000/tenants
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:3000/tenants/$TENANT_ID
+```
+
+profile egress policy를 사용할 때는 profile별 `egress.json`을 먼저 확인한다. 기본
+위치는 `configs/profiles/{profile}/egress.json`이고, 운영 배포에서는
+`EPHEMERA_EGRESS_PROFILE_DIR` 또는 `ANVIL_EGRESS_PROFILE_DIR`로 별도 directory를
+지정할 수 있다.
+
+```bash
+sed -n '1,120p' configs/profiles/$PROFILE/egress.json
+```
+
+runtime audit 조회:
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:3000/audit/runtime?tenant_id=$TENANT_ID&limit=50"
+```
+
 ## 일반 검증
 
 문서와 code path가 함께 맞는지 보는 기본 검증:
 
 ```bash
 go test ./...
+go build ./cmd/goose-daemon
+go build ./cmd/anvil-mcp
+go build ./cmd/anvil-scheduler
 ```
 
 전체 host smoke는 일반 문서 검증에 필요하지 않다. 다음 조건을 갖춘 host에서
@@ -69,6 +121,7 @@ Firecracker/KVM 통합 경로를 확인할 때만 실행한다.
 
 ```bash
 go build -o anvil-daemon ./cmd/goose-daemon/
+go build -o anvil-scheduler ./cmd/anvil-scheduler
 sudo bash e2e_test.sh
 ```
 
