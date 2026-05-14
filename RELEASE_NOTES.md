@@ -35,6 +35,10 @@ foundation과 운영 관측성 계약을 추가한다.
 
 ## 변경됨
 
+- ephemera upstream `v0.3.0` 기반 runtime 변경을 mainline에 병합했다. Goosetown
+  flock, Town Wall, 역할별 VM sizing, system prompt 주입, 선택적 COW spawn disk는
+  ephemera runtime 계약으로 유지하고, anvil의 tenant/egress/metrics/trace 계약과
+  함께 동작하도록 `spawnVMInternal` 경로에 통합했다.
 - `profile` egress policy는 policy 파일이 없는 기존 profile에서는 no-op으로 남아
   기존 로컬 profile 호환성을 유지한다.
 - trace export와 runtime audit API는 token, secret, daemon raw body, snapshot
@@ -53,10 +57,98 @@ foundation과 운영 관측성 계약을 추가한다.
 - 실제 KVM host에서 `go build -o anvil-daemon ./cmd/goose-daemon/` 후
   `sudo bash e2e_test.sh`
 
+# ephemera v0.3.0 — Goosetown multi-agent orchestration
+
+ephemera `v0.3.0`은 `v0.2.0`의 단일 VM lifecycle, snapshot, restore 계약을
+유지하면서 역할별 MicroVM 여러 개를 하나의 flock으로 다루는 Goosetown 실행
+모델을 추가한 runtime 릴리즈다. 기존 `POST /vms`, snapshot/restore, agent proxy
+endpoint는 backward compatible하게 유지된다.
+
+## 새 기능
+
+### Multi-agent flock
+
+- 새 endpoint:
+  - `POST /flocks`
+  - `GET /flocks`
+  - `GET /flocks/{flock_id}`
+  - `DELETE /flocks/{flock_id}`
+- `POST /flocks`는 역할 목록을 받아 orchestrator, researcher, worker, reviewer
+  같은 역할별 VM을 생성하고 하나의 flock ID로 묶는다.
+- 한 flock은 최대 20개 agent를 생성할 수 있다.
+- flock 생성 중 일부 VM이 실패하면 이미 생성된 VM을 삭제하고 flock registry를
+  제거한다.
+- flock 삭제는 소속 VM을 병렬로 teardown한다.
+
+### Town Wall
+
+- flock별 append-only coordination log를 추가했다.
+- 새 endpoint:
+  - `POST /flocks/{flock_id}/post`
+  - `GET /flocks/{flock_id}/wall`
+  - `GET /flocks/{flock_id}/wall/history`
+- `GET /flocks/{flock_id}/wall`은 기존 history를 먼저 내보낸 뒤 새 message를
+  SSE stream으로 전달한다.
+- Town Wall 파일은 `flocks/{flock_id}/TOWN_WALL.log`에 저장되며, flock 삭제 뒤에도
+  audit artifact로 남는다.
+
+### 역할 profile과 system prompt
+
+- `vm.VMConfig`에 `VcpuCount`, `MemSizeMib`를 추가했다. 0 값은 기존 기본값
+  2 vCPU, 2048 MiB로 해석한다.
+- 기본 역할 mapping:
+  - `researcher`: 1 vCPU, 512 MiB, `configs/profiles/researcher/`
+  - `reviewer`: 1 vCPU, 512 MiB, `configs/profiles/reviewer/`
+  - `worker`: 2 vCPU, 2048 MiB, `configs/profiles/worker/`
+  - `orchestrator`: 2 vCPU, 2048 MiB, `configs/profiles/orchestrator/`
+  - `builder`: 4 vCPU, 4096 MiB, `configs/profiles/worker/`
+- 각 profile directory의 `system.md`를 VM 내부 `/root/.goose-system-prompt`로
+  주입한다.
+- `goose-agent`는 system prompt를 task prompt 앞에 붙여 역할 지시를 유지한다.
+
+### VM 내부 flock context와 `gtwall`
+
+- flock VM에는 `/root/.ephemera-flock`이 주입된다.
+- `goose-agent`는 VM 내부 `POST /townwall/post` endpoint를 제공하고, flock context를
+  읽어 host control plane의 `POST /flocks/{id}/post`로 message를 전달한다.
+- `scripts/gtwall`은 guest image 안에 `/usr/local/bin/gtwall`로 설치되는 Town Wall
+  post helper다.
+
+### 선택적 COW spawn disk
+
+- 새 환경 변수: `EPHEMERA_DISK_MODE=cow`
+- 설정 시 새 VM도 golden image full copy 대신 dm-snapshot 기반 sparse COW disk를
+  사용한다.
+- unset 상태에서는 기존 full clone 동작을 유지한다.
+
+### Diff restore 개선
+
+- diff snapshot restore의 임시 merged memory file은 가능하면 `/dev/shm`에 쓴다.
+- `/dev/shm`을 사용할 수 없으면 기존처럼 `{workDir}/tmp`를 사용한다.
+
+## 변경됨
+
+- VM 생성 공통 경로를 `spawnVMInternal`로 추출했다. 일반 `POST /vms`와 flock
+  spawner가 같은 cleanup 경로를 공유한다.
+- `PrepareVM`은 flock metadata와 역할 system prompt 주입을 지원한다.
+- `scripts/build_image.sh`는 guest image에 `gtwall`과 관련 runtime file을 포함한다.
+
+## 검증됨
+
+- `e2e_test.sh`가 50단계에서 58단계로 확장됐다.
+- 추가 검증 범위:
+  - role profile example 준비
+  - 5-agent flock 생성
+  - `/vms`의 flock member 반영 확인
+  - Town Wall post/history/list
+  - flock 삭제와 member VM teardown
+- `internal/orchestrator` unit test가 Town Wall history, subscriber delivery,
+  concurrent post, flock create/get/delete, agent status update를 검증한다.
+
 # anvil v0.1.0 — IronClaw 통합 E2E 완료
 
 `anvil`은 IronClaw와 ephemera를 결합하는 새 프로젝트다. 이 저장소의 공개
-릴리즈 `v0.1.0`, `v0.2.0`은 ephemera runtime 릴리즈이며, anvil 통합
+릴리즈 `v0.1.0`, `v0.2.0`, `v0.3.0`은 ephemera runtime 릴리즈이며, anvil 통합
 릴리즈는 `anvil-v0.1.0` 태그로 분리한다.
 
 ## 추가됨

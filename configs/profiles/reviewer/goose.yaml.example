@@ -1,0 +1,19 @@
+# Reviewer profile — adversarial code review. Same model as worker so
+# reviews are at parity with the diffs they audit.
+#
+# Usage:
+#   cp configs/profiles/reviewer/goose.yaml.example configs/profiles/reviewer/goose.yaml
+#   cp configs/profiles/reviewer/goose-secrets.yaml.example configs/profiles/reviewer/goose-secrets.yaml
+
+GOOSE_PROVIDER: anthropic
+GOOSE_MODEL: claude-sonnet-4-6
+GOOSE_TELEMETRY_ENABLED: false
+GOOSE_DISABLE_KEYRING: true
+
+extensions:
+  developer:
+    bundled: true
+    enabled: true
+    name: developer
+    timeout: 300
+    type: builtin

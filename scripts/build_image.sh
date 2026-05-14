@@ -97,6 +97,11 @@ fi
 mkdir -p "$MNT_DIR/usr/local/sbin"
 install -m 755 "$MICRO_INIT_BIN" "$MNT_DIR/usr/local/sbin/micro-init"
 
+echo "==> 5b. Installing gtwall CLI <=="
+# gtwall posts to the in-VM goose-agent /townwall/post, which forwards to the
+# host control plane /flocks/{id}/post. Available only inside flock-spawned VMs.
+install -m 755 scripts/gtwall "$MNT_DIR/usr/local/bin/gtwall"
+
 printf 'goose-agent\n'                       > "$MNT_DIR/etc/hostname"
 printf '127.0.0.1\tlocalhost goose-agent\n'  > "$MNT_DIR/etc/hosts"
 

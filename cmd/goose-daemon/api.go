@@ -25,6 +25,7 @@ import (
 
 	"ephemera/internal/anvilmcp"
 	"ephemera/internal/network"
+	"ephemera/internal/orchestrator"
 	"ephemera/internal/storage"
 	"ephemera/internal/vm"
 )
@@ -232,6 +233,10 @@ type ControlPlane struct {
 	workDir          string
 	snapshotDir      string
 
+	// flockMgr tracks multi-agent groupings ("flocks") and their Town Wall logs.
+	// Populated lazily by the orchestrator API; standalone VM lifecycle is unaffected.
+	flockMgr *orchestrator.FlockManager
+
 	// agentHTTPClient is used for proxying requests to VM goose-agents.
 	// No global timeout — timeouts are controlled by the incoming request's context.
 	agentHTTPClient *http.Client
@@ -268,6 +273,7 @@ func NewControlPlane(
 		gooseSecretsPath: gooseSecretsPath,
 		workDir:          workDir,
 		snapshotDir:      snapshotDir,
+		flockMgr:         orchestrator.NewFlockManager(workDir),
 		agentHTTPClient:  &http.Client{},
 		stopCh:           make(chan struct{}, 1),
 	}
@@ -298,6 +304,7 @@ func NewControlPlane(
 	mux.HandleFunc("/snapshots", cp.handleSnapshots)
 	mux.HandleFunc("/snapshots/gc", cp.handleSnapshotGC)
 	mux.HandleFunc("/snapshots/", cp.handleSnapshotItem)
+	cp.registerOrchestratorRoutes(mux)
 	cp.srv = &http.Server{Addr: apiAddr, Handler: authMiddleware(cp.getClients, &cp.metrics, mux)}
 	return cp
 }
@@ -357,6 +364,13 @@ func (cp *ControlPlane) Start() error {
 	log.Printf("  POST   /snapshots/gc                     — plan/apply snapshot retention GC")
 	log.Printf("  POST   /snapshots/{snapshot_id}/restore  — restore VM from snapshot")
 	log.Printf("  DELETE /snapshots/{snapshot_id}          — delete snapshot")
+	log.Printf("  POST   /flocks                           — create multi-agent flock")
+	log.Printf("  GET    /flocks                           — list flocks")
+	log.Printf("  GET    /flocks/{flock_id}                — describe flock")
+	log.Printf("  DELETE /flocks/{flock_id}                — destroy flock")
+	log.Printf("  GET    /flocks/{flock_id}/wall           — SSE stream of Town Wall")
+	log.Printf("  GET    /flocks/{flock_id}/wall/history   — full Town Wall log")
+	log.Printf("  POST   /flocks/{flock_id}/post           — post message to Town Wall")
 	if publicURL != "" {
 		log.Printf("  agent_url base: %s (EPHEMERA_PUBLIC_URL)", publicURL)
 	}
@@ -576,11 +590,17 @@ func (cp *ControlPlane) profileConfigPaths(profile string) (configPath, secretsP
 	if profile == "" {
 		return cp.gooseConfigPath, cp.gooseSecretsPath, nil
 	}
-	// Reject path traversal attempts.
+	// Reject path traversal attempts before any filesystem access.
 	if strings.ContainsAny(profile, "/\\") || profile == ".." {
 		return "", "", fmt.Errorf("invalid profile name: %q", profile)
 	}
-	dir := filepath.Join(cp.workDir, "configs", "profiles", profile)
+	// LookupProfile rewrites known aliases (e.g. "builder" → "worker") to a
+	// canonical directory. Unknown names fall back to the name itself.
+	p := LookupProfile(profile)
+	if p.ProfileDir == "" {
+		return cp.gooseConfigPath, cp.gooseSecretsPath, nil
+	}
+	dir := filepath.Join(cp.workDir, "configs", "profiles", p.ProfileDir)
 	configPath = filepath.Join(dir, "goose.yaml")
 	secretsPath = filepath.Join(dir, "goose-secrets.yaml")
 	if _, e := os.Stat(configPath); os.IsNotExist(e) {
@@ -590,6 +610,167 @@ func (cp *ControlPlane) profileConfigPaths(profile string) (configPath, secretsP
 		return "", "", fmt.Errorf("profile %q not found (missing goose-secrets.yaml)", profile)
 	}
 	return configPath, secretsPath, nil
+}
+
+// spawnVMOptions captures all caller-supplied inputs for spawnVMInternal.
+// Callers must pre-resolve the goose config paths so this helper does not need
+// to know about profileConfigPaths' specific error semantics.
+type spawnVMOptions struct {
+	Profile      string // recorded in VMInfo.Profile; used only for logs
+	ConfigPath   string // resolved goose.yaml host path
+	SecretsPath  string // resolved goose-secrets.yaml host path
+	TenantID     string // optional tenant attribution for anvil runtime controls
+	EgressPolicy string // optional anvil egress policy applied to the VM IP
+	SystemPrompt string // optional role system prompt injected into the VM
+	FlockID      string // optional: when set, agent is part of a flock
+	AgentID      string // optional: per-flock agent ID (e.g. "researcher-1")
+	VcpuCount    int64  // 0 → default 2
+	MemSizeMib   int64  // 0 → default 2048
+}
+
+// spawnVMInternal performs the actual VM lifecycle: allocate networking, clone
+// disk, inject config, start Firecracker, register, and wait for goose-agent.
+// On any error it cleans up every resource it allocated and returns.
+// Used by both the public POST /vms handler and the orchestrator's flock spawner.
+func (cp *ControlPlane) spawnVMInternal(opts spawnVMOptions) (*VMInfo, string, error) {
+	agentToken, err := generateAgentToken()
+	if err != nil {
+		return nil, "", fmt.Errorf("token generation: %w", err)
+	}
+	vmID := fmt.Sprintf("vm-%d", time.Now().UnixNano())
+
+	tapDevice, guestIP, macAddr, err := cp.netManager.Allocate()
+	if err != nil {
+		return nil, "", fmt.Errorf("network allocation: %w", err)
+	}
+
+	if err := cp.applyEgressPolicy(vmID, tapDevice, guestIP, opts.EgressPolicy, opts.Profile); err != nil {
+		cp.netManager.Release(tapDevice, guestIP)
+		return nil, "", fmt.Errorf("egress policy: %w", err)
+	}
+
+	// Disk provisioning: full clone (default) vs dm-snapshot COW (env-gated).
+	// COW mode trades per-VM ~700 MiB of writes for a sparse exception store
+	// that grows only as the VM writes. Mode is process-wide so all flock
+	// members share the same provisioning strategy in a given daemon run.
+	var diskPath string
+	var dmInfo *storage.DMSnapshotInfo
+	if os.Getenv("EPHEMERA_DISK_MODE") == "cow" {
+		var cowStore string
+		diskPath, cowStore, dmInfo, err = cp.provisioner.CloneDiskCOW(vmID)
+		_ = cowStore // tracked via dmInfo.ExceptionStore for cleanup
+		if err != nil {
+			cp.cleanupEgressPolicy(vmID)
+			cp.netManager.Release(tapDevice, guestIP)
+			return nil, "", fmt.Errorf("disk provisioning (cow): %w", err)
+		}
+	} else {
+		diskPath, err = cp.provisioner.CloneDisk(vmID)
+		if err != nil {
+			cp.cleanupEgressPolicy(vmID)
+			cp.netManager.Release(tapDevice, guestIP)
+			return nil, "", fmt.Errorf("disk provisioning: %w", err)
+		}
+	}
+
+	if err := cp.provisioner.PrepareVM(vmID, storage.VMPrepareOptions{
+		HostConfigPath:  opts.ConfigPath,
+		HostSecretsPath: opts.SecretsPath,
+		AgentToken:      agentToken,
+		FlockID:         opts.FlockID,
+		AgentID:         opts.AgentID,
+		SystemPrompt:    opts.SystemPrompt,
+	}); err != nil {
+		if dmInfo != nil {
+			storage.TeardownDMSnapshot(dmInfo)
+		} else {
+			cp.provisioner.CleanupDisk(vmID)
+		}
+		cp.cleanupEgressPolicy(vmID)
+		cp.netManager.Release(tapDevice, guestIP)
+		return nil, "", fmt.Errorf("VM preparation: %w", err)
+	}
+
+	socketPath := fmt.Sprintf("/tmp/firecracker-%s.sock", vmID)
+	vsockPath := fmt.Sprintf("/tmp/firecracker-vsock-%s.sock", vmID)
+	os.Remove(socketPath)
+
+	machine, err := vm.StartMachine(context.Background(), vm.VMConfig{
+		VMID:           vmID,
+		SocketPath:     socketPath,
+		FirecrackerBin: cp.firecrackerPath,
+		KernelPath:     cp.kernelPath,
+		RootfsPath:     diskPath,
+		TapDevice:      tapDevice,
+		MacAddress:     macAddr,
+		GuestIP:        guestIP,
+		GatewayIP:      "10.0.1.1",
+		VsockUDSPath:   vsockPath,
+		VcpuCount:      opts.VcpuCount,
+		MemSizeMib:     opts.MemSizeMib,
+	})
+	if err != nil {
+		if dmInfo != nil {
+			storage.TeardownDMSnapshot(dmInfo)
+		} else {
+			cp.provisioner.CleanupDisk(vmID)
+		}
+		cp.cleanupEgressPolicy(vmID)
+		cp.netManager.Release(tapDevice, guestIP)
+		return nil, "", fmt.Errorf("VM start: %w", err)
+	}
+
+	info := VMInfo{
+		VMID:         vmID,
+		GuestIP:      guestIP,
+		AgentURL:     buildAgentURL(vmID, guestIP),
+		Profile:      opts.Profile,
+		TenantID:     opts.TenantID,
+		EgressPolicy: opts.EgressPolicy,
+	}
+
+	// runningVM.dmSnapshot drives the COW teardown branch in destroyVM; when
+	// nil, destroyVM falls back to deleting diskPath as a plain file.
+	cp.mu.Lock()
+	cp.vms[vmID] = &runningVM{
+		VMInfo:     info,
+		agentToken: agentToken,
+		startedAt:  time.Now().UTC(),
+		diskPath:   diskPath,
+		dmSnapshot: dmInfo,
+		vsockPath:  vsockPath,
+		machine:    machine,
+		tapDevice:  tapDevice,
+		socketPath: socketPath,
+	}
+	cp.mu.Unlock()
+
+	log.Printf("VM [%s] booting at %s — waiting for goose-agent...", vmID, info.AgentURL)
+	if err := waitForAgent(guestIP, 60*time.Second); err != nil {
+		cp.destroyVM(vmID)
+		return nil, "", fmt.Errorf("goose-agent not ready: %w", err)
+	}
+	if opts.FlockID != "" {
+		log.Printf("VM [%s] ready — agent: %s  flock: %s/%s", vmID, info.AgentURL, opts.FlockID, opts.AgentID)
+	} else {
+		log.Printf("VM [%s] ready — agent: %s  profile: %q", vmID, info.AgentURL, opts.Profile)
+	}
+	cp.metrics.IncVMCreate()
+	return &info, agentToken, nil
+}
+
+// loadProfileSystemPrompt reads {workDir}/configs/profiles/{dir}/system.md.
+// Returns an empty string when the file is missing or the profile has no dir.
+func (cp *ControlPlane) loadProfileSystemPrompt(profileDir string) string {
+	if profileDir == "" {
+		return ""
+	}
+	path := filepath.Join(cp.workDir, "configs", "profiles", profileDir, "system.md")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 func (cp *ControlPlane) spawnVM(w http.ResponseWriter, r *http.Request) {
@@ -621,105 +802,25 @@ func (cp *ControlPlane) spawnVM(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusBadRequest)
 		return
 	}
+	agentProfile := LookupProfile(req.Profile)
 
-	agentToken, err := generateAgentToken()
-	if err != nil {
-		http.Error(w, fmt.Sprintf("token generation failed: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	vmID := fmt.Sprintf("vm-%d", time.Now().UnixNano())
-
-	tapDevice, guestIP, macAddr, err := cp.netManager.Allocate()
-	if err != nil {
-		http.Error(w, fmt.Sprintf("network allocation failed: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	if err := cp.applyEgressPolicy(vmID, tapDevice, guestIP, req.EgressPolicy, req.Profile); err != nil {
-		cp.netManager.Release(tapDevice, guestIP)
-		http.Error(w, fmt.Sprintf("egress policy failed: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	diskPath, err := cp.provisioner.CloneDisk(vmID)
-	if err != nil {
-		cp.cleanupEgressPolicy(vmID)
-		cp.netManager.Release(tapDevice, guestIP)
-		http.Error(w, fmt.Sprintf("disk provisioning failed: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	if err := cp.provisioner.PrepareVM(vmID, storage.VMPrepareOptions{
-		HostConfigPath:  configPath,
-		HostSecretsPath: secretsPath,
-		AgentToken:      agentToken,
-	}); err != nil {
-		cp.provisioner.CleanupDisk(vmID)
-		cp.cleanupEgressPolicy(vmID)
-		cp.netManager.Release(tapDevice, guestIP)
-		http.Error(w, fmt.Sprintf("VM preparation failed: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	socketPath := fmt.Sprintf("/tmp/firecracker-%s.sock", vmID)
-	vsockPath := fmt.Sprintf("/tmp/firecracker-vsock-%s.sock", vmID)
-	os.Remove(socketPath)
-
-	machine, err := vm.StartMachine(context.Background(), vm.VMConfig{
-		VMID:           vmID,
-		SocketPath:     socketPath,
-		FirecrackerBin: cp.firecrackerPath,
-		KernelPath:     cp.kernelPath,
-		RootfsPath:     diskPath,
-		TapDevice:      tapDevice,
-		MacAddress:     macAddr,
-		GuestIP:        guestIP,
-		GatewayIP:      "10.0.1.1",
-		VsockUDSPath:   vsockPath,
-	})
-	if err != nil {
-		cp.provisioner.CleanupDisk(vmID)
-		cp.cleanupEgressPolicy(vmID)
-		cp.netManager.Release(tapDevice, guestIP)
-		http.Error(w, fmt.Sprintf("VM start failed: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	info := VMInfo{
-		VMID:         vmID,
-		GuestIP:      guestIP,
-		AgentURL:     buildAgentURL(vmID, guestIP),
+	info, agentToken, err := cp.spawnVMInternal(spawnVMOptions{
 		Profile:      req.Profile,
+		ConfigPath:   configPath,
+		SecretsPath:  secretsPath,
 		TenantID:     req.TenantID,
 		EgressPolicy: req.EgressPolicy,
-	}
-
-	cp.mu.Lock()
-	cp.vms[vmID] = &runningVM{
-		VMInfo:     info,
-		agentToken: agentToken,
-		startedAt:  time.Now().UTC(),
-		diskPath:   diskPath,
-		vsockPath:  vsockPath,
-		machine:    machine,
-		tapDevice:  tapDevice,
-		socketPath: socketPath,
-	}
-	cp.mu.Unlock()
-
-	log.Printf("VM [%s] booting at %s — waiting for goose-agent...", vmID, info.AgentURL)
-	if err := waitForAgent(guestIP, 60*time.Second); err != nil {
-		cp.destroyVM(vmID)
-		http.Error(w, fmt.Sprintf("goose-agent not ready: %v", err), http.StatusInternalServerError)
+		VcpuCount:    agentProfile.VcpuCount,
+		MemSizeMib:   agentProfile.MemSizeMib,
+	})
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
 		return
 	}
-	log.Printf("VM [%s] ready — agent: %s  profile: %q", vmID, info.AgentURL, req.Profile)
 
-	cp.metrics.IncVMCreate()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(VMSpawnResult{VMInfo: info, AgentToken: agentToken})
+	json.NewEncoder(w).Encode(VMSpawnResult{VMInfo: *info, AgentToken: agentToken})
 }
 
 func (cp *ControlPlane) listVMs(w http.ResponseWriter, _ *http.Request) {
@@ -1205,10 +1306,14 @@ func (cp *ControlPlane) planSnapshotGC(policy SnapshotGCPolicy, now time.Time) S
 
 // ---- Snapshot handlers ----
 
-func writeJSONError(w http.ResponseWriter, status int, message string) {
+func writeJSONError(w http.ResponseWriter, status int, message any) {
+	text := fmt.Sprint(message)
+	if err, ok := message.(error); ok {
+		text = err.Error()
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]string{"error": message})
+	json.NewEncoder(w).Encode(map[string]string{"error": text})
 }
 
 func writeRestoreError(w http.ResponseWriter, status int, code string, snapshotID string, message string) {
@@ -1809,6 +1914,18 @@ func (cp *ControlPlane) createSnapshot(w http.ResponseWriter, r *http.Request, v
 	json.NewEncoder(w).Encode(snapshotInfoFrom(meta))
 }
 
+// pickMergedMemPath returns the path for a merged memory file used during diff
+// snapshot restore. Prefers /dev/shm (tmpfs, RAM-backed) so the 2 GiB copy does
+// not hit disk; falls back to {workDir}/tmp when /dev/shm is unavailable
+// (e.g. minimal containers) or unwritable.
+func pickMergedMemPath(workDir, newVMID string) string {
+	const tmpfsDir = "/dev/shm"
+	if info, err := os.Stat(tmpfsDir); err == nil && info.IsDir() {
+		return filepath.Join(tmpfsDir, "ephemera-"+newVMID+"-merged.bin")
+	}
+	return filepath.Join(workDir, "tmp", newVMID+"-merged.bin")
+}
+
 // deriveMACFromTap reproduces the MAC address from a tap device name (e.g. "tap3").
 // Must match the formula in network.Manager.Allocate().
 func deriveMACFromTap(tapDevice string) string {
@@ -1943,7 +2060,7 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 			writeRestoreError(w, http.StatusConflict, "diff_base_missing", snapID, fmt.Sprintf("base snapshot %s not found (was it deleted?)", meta.BaseSnapshotID))
 			return
 		}
-		mergedMemPath = filepath.Join(cp.workDir, "tmp", newVMID+"-merged.bin")
+		mergedMemPath = pickMergedMemPath(cp.workDir, newVMID)
 		os.MkdirAll(filepath.Dir(mergedMemPath), 0755)
 		log.Printf("Restore [%s]: merging base memory (%s) + diff (%s)...", snapID, base.MemFilePath, meta.MemFilePath)
 		if err := storage.MergeMemoryDiff(base.MemFilePath, meta.MemFilePath, mergedMemPath); err != nil {
@@ -2064,7 +2181,7 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 			writeRestoreError(w, http.StatusConflict, "diff_base_missing", snapID, fmt.Sprintf("base snapshot %s not found", meta.BaseSnapshotID))
 			return
 		}
-		mergedMemPath = filepath.Join(cp.workDir, "tmp", newVMID+"-merged.bin")
+		mergedMemPath = pickMergedMemPath(cp.workDir, newVMID)
 		os.MkdirAll(filepath.Dir(mergedMemPath), 0755)
 		if err := storage.MergeMemoryDiff(base.MemFilePath, meta.MemFilePath, mergedMemPath); err != nil {
 			storage.TeardownBindMount(meta.DiskPath, newDiskPath)
