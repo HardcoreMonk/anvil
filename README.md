@@ -1,7 +1,7 @@
 # anvil
 
-[![CI](https://github.com/HardcoreMonk/ephemera/actions/workflows/ci.yml/badge.svg)](https://github.com/HardcoreMonk/ephemera/actions/workflows/ci.yml)
-[![Latest Tag](https://img.shields.io/github/v/tag/HardcoreMonk/ephemera?sort=semver&label=tag)](https://github.com/HardcoreMonk/ephemera/tags)
+[![CI](https://github.com/HardcoreMonk/anvil/actions/workflows/ci.yml/badge.svg)](https://github.com/HardcoreMonk/anvil/actions/workflows/ci.yml)
+[![Latest Tag](https://img.shields.io/github/v/tag/HardcoreMonk/anvil?sort=semver&label=tag)](https://github.com/HardcoreMonk/anvil/tags)
 [![Go](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Firecracker](https://img.shields.io/badge/Firecracker-v1.15.1-FF4500?logo=amazonaws&logoColor=white)](https://github.com/firecracker-microvm/firecracker)
@@ -39,7 +39,7 @@ restore/cleanup 의미를 변환한다.
 anvil의 상위 통합 대상은 IronClaw 전용이다. OpenClaw 연동은 anvil의 지원 범위가
 아니며, OpenClaw용 compatibility layer나 운영 계약은 제공하지 않는다.
 
-이 저장소의 현재 URL은 `https://github.com/HardcoreMonk/ephemera/`이다.
+이 저장소의 현재 URL은 `https://github.com/HardcoreMonk/anvil/`이다.
 ephemera는 이미 `0.1.0`, `0.2.0`이 릴리즈된 기반 runtime이므로 Go 모듈 경로,
 daemon 이름, HTTP API, 일부 환경 변수에는 `ephemera` 또는 `goose` 이름이 남아
 있다. README에서는 `anvil`을 IronClaw 통합 프로젝트로, `ephemera`를 분리된 기반
@@ -424,8 +424,8 @@ Firecracker, Linux kernel, golden image는 첫 실행 시 자동으로 다운로
 ### 1. 복제와 빌드
 
 ```bash
-git clone https://github.com/HardcoreMonk/ephemera.git
-cd ephemera
+git clone https://github.com/HardcoreMonk/anvil.git
+cd anvil
 go build -o anvil-daemon ./cmd/goose-daemon/
 go build -o anvil-mcp ./cmd/anvil-mcp
 go build -o anvil-scheduler ./cmd/anvil-scheduler

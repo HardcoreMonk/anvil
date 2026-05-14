@@ -2,7 +2,7 @@
 
 작성일: 2026-05-11
 기준 프로젝트: `anvil`
-기준 저장소: `https://github.com/HardcoreMonk/ephemera/`
+기준 저장소: `https://github.com/HardcoreMonk/anvil/`
 기준 릴리즈: `0.2.0`, commit `abcaa86`
 
 ## 1. 목적

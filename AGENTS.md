@@ -1,7 +1,7 @@
 # anvil — Codex 프로젝트 지침
 
 `anvil`은 IronClaw와 ephemera를 결합하는 새 프로젝트다. 이 저장소는
-`https://github.com/HardcoreMonk/ephemera/`이며, ephemera 0.1.0/0.2.0 기반
+`https://github.com/HardcoreMonk/anvil/`이며, ephemera 0.1.0/0.2.0 기반
 runtime과 anvil 통합 문서를 함께 담고 있다.
 
 ## 진실 기준 문서 순서

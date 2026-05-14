@@ -1,7 +1,7 @@
 # ephemera 0.1.0 소스 줄 단위 분석 보고서
 
 분석 기준:
-- 대상 저장소: `https://github.com/HardcoreMonk/ephemera/`
+- 대상 저장소: `https://github.com/HardcoreMonk/anvil/`
 - 분석 커밋: `157753fb5234679ca7cbebb6658e431c6a748ef6`
 - 로컬 브랜치: `main`
 - 원격 HEAD 확인: 위 커밋과 동일
