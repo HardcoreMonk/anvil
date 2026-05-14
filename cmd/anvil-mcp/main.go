@@ -97,6 +97,48 @@ func toolRegistrations() []toolRegistration {
 				mcp.AddTool(server, tool, tools.MCPDeleteSnapshot)
 			},
 		},
+		{
+			name:        "anvil_spawn_flock",
+			description: "Create a Goosetown flock of ephemera VMs and return its Town Wall endpoints.",
+			register: func(server *mcp.Server, tool *mcp.Tool, tools *anvilmcp.Tools) {
+				mcp.AddTool(server, tool, tools.MCPSpawnFlock)
+			},
+		},
+		{
+			name:        "anvil_list_flocks",
+			description: "List live Goosetown flocks known to the ephemera daemon.",
+			register: func(server *mcp.Server, tool *mcp.Tool, tools *anvilmcp.Tools) {
+				mcp.AddTool(server, tool, tools.MCPListFlocks)
+			},
+		},
+		{
+			name:        "anvil_get_flock",
+			description: "Return a Goosetown flock and its agent status by flock_id.",
+			register: func(server *mcp.Server, tool *mcp.Tool, tools *anvilmcp.Tools) {
+				mcp.AddTool(server, tool, tools.MCPGetFlock)
+			},
+		},
+		{
+			name:        "anvil_delete_flock",
+			description: "Delete a Goosetown flock and let the daemon tear down member VMs.",
+			register: func(server *mcp.Server, tool *mcp.Tool, tools *anvilmcp.Tools) {
+				mcp.AddTool(server, tool, tools.MCPDeleteFlock)
+			},
+		},
+		{
+			name:        "anvil_post_townwall",
+			description: "Append a message to a Goosetown flock Town Wall.",
+			register: func(server *mcp.Server, tool *mcp.Tool, tools *anvilmcp.Tools) {
+				mcp.AddTool(server, tool, tools.MCPPostTownWall)
+			},
+		},
+		{
+			name:        "anvil_get_townwall_history",
+			description: "Return the full Town Wall history for a Goosetown flock.",
+			register: func(server *mcp.Server, tool *mcp.Tool, tools *anvilmcp.Tools) {
+				mcp.AddTool(server, tool, tools.MCPTownWallHistory)
+			},
+		},
 	}
 }
 

@@ -11,17 +11,23 @@ func TestToolRegistrationsIncludeSnapshotTools(t *testing.T) {
 	registrations := toolRegistrations()
 	names := make(map[string]bool, len(registrations))
 	want := map[string]string{
-		"anvil_spawn_vm":         "Create an ephemera VM and optionally bind a local session_name alias.",
-		"anvil_run_task":         "Run a prompt synchronously in an existing ephemera VM using vm_id or session_name.",
-		"anvil_copy_in":          "Write a single file into an ephemera VM workspace using vm_id or session_name.",
-		"anvil_copy_out":         "Read a single file from an ephemera VM workspace using vm_id or session_name.",
-		"anvil_get_vm_health":    "Return health for an existing ephemera VM agent using vm_id or session_name.",
-		"anvil_stop_vm":          "Ask the ephemera VM agent to stop gracefully without deleting VM resources.",
-		"anvil_delete_vm":        "Delete an ephemera VM and release its session_name alias if present.",
-		"anvil_create_snapshot":  "Create a full or diff snapshot for an ephemera VM using vm_id or session_name.",
-		"anvil_list_snapshots":   "List snapshots known to the ephemera daemon.",
-		"anvil_restore_snapshot": "Restore a new ephemera VM from a snapshot and optionally bind a session_name alias.",
-		"anvil_delete_snapshot":  "Delete a snapshot by snapshot_id through the ephemera daemon.",
+		"anvil_spawn_vm":             "Create an ephemera VM and optionally bind a local session_name alias.",
+		"anvil_run_task":             "Run a prompt synchronously in an existing ephemera VM using vm_id or session_name.",
+		"anvil_copy_in":              "Write a single file into an ephemera VM workspace using vm_id or session_name.",
+		"anvil_copy_out":             "Read a single file from an ephemera VM workspace using vm_id or session_name.",
+		"anvil_get_vm_health":        "Return health for an existing ephemera VM agent using vm_id or session_name.",
+		"anvil_stop_vm":              "Ask the ephemera VM agent to stop gracefully without deleting VM resources.",
+		"anvil_delete_vm":            "Delete an ephemera VM and release its session_name alias if present.",
+		"anvil_create_snapshot":      "Create a full or diff snapshot for an ephemera VM using vm_id or session_name.",
+		"anvil_list_snapshots":       "List snapshots known to the ephemera daemon.",
+		"anvil_restore_snapshot":     "Restore a new ephemera VM from a snapshot and optionally bind a session_name alias.",
+		"anvil_delete_snapshot":      "Delete a snapshot by snapshot_id through the ephemera daemon.",
+		"anvil_spawn_flock":          "Create a Goosetown flock of ephemera VMs and return its Town Wall endpoints.",
+		"anvil_list_flocks":          "List live Goosetown flocks known to the ephemera daemon.",
+		"anvil_get_flock":            "Return a Goosetown flock and its agent status by flock_id.",
+		"anvil_delete_flock":         "Delete a Goosetown flock and let the daemon tear down member VMs.",
+		"anvil_post_townwall":        "Append a message to a Goosetown flock Town Wall.",
+		"anvil_get_townwall_history": "Return the full Town Wall history for a Goosetown flock.",
 	}
 
 	for _, registration := range registrations {

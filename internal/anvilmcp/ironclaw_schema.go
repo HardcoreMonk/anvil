@@ -31,6 +31,12 @@ func CurrentIronClawToolInputSchemas() []IronClawToolInputSchema {
 		{ToolName: "anvil_list_snapshots", Fields: nil},
 		toolInputSchemaFromStruct("anvil_restore_snapshot", RestoreSnapshotInput{}),
 		toolInputSchemaFromStruct("anvil_delete_snapshot", SnapshotIdentityInput{}),
+		toolInputSchemaFromStruct("anvil_spawn_flock", SpawnFlockInput{}),
+		toolInputSchemaFromStruct("anvil_list_flocks", ListFlocksInput{}),
+		toolInputSchemaFromStruct("anvil_get_flock", FlockIdentityInput{}),
+		toolInputSchemaFromStruct("anvil_delete_flock", FlockIdentityInput{}),
+		toolInputSchemaFromStruct("anvil_post_townwall", TownWallPostInput{}),
+		toolInputSchemaFromStruct("anvil_get_townwall_history", FlockIdentityInput{}),
 	}
 }
 
