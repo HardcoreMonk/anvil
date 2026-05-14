@@ -11,8 +11,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +23,7 @@ import (
 	models "github.com/firecracker-microvm/firecracker-go-sdk/client/models"
 	ops "github.com/firecracker-microvm/firecracker-go-sdk/client/operations"
 
+	"ephemera/internal/anvilmcp"
 	"ephemera/internal/network"
 	"ephemera/internal/storage"
 	"ephemera/internal/vm"
@@ -36,7 +39,7 @@ import (
 // operands before returning, so response time does not vary with how many leading
 // characters match. All registered tokens are compared on every request (no
 // early-exit after the first match) to prevent leaking which client index was hit.
-func authMiddleware(getClients func() []APIClient, next http.Handler) http.Handler {
+func authMiddleware(getClients func() []APIClient, metrics *controlPlaneMetrics, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		clients := getClients()
 		if len(clients) == 0 {
@@ -55,6 +58,9 @@ func authMiddleware(getClients func() []APIClient, next http.Handler) http.Handl
 		}
 
 		if matchedClient == "" {
+			if metrics != nil {
+				metrics.IncAuthFailure()
+			}
 			w.Header().Set("WWW-Authenticate", `Bearer realm="ephemera"`)
 			w.Header().Set("Content-Type", "application/json")
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
@@ -102,6 +108,48 @@ type runningVM struct {
 	socketPath      string
 }
 
+type controlPlaneMetrics struct {
+	mu             sync.RWMutex
+	vmCreate       int64
+	vmRestore      int64
+	vmDelete       int64
+	snapshotCreate int64
+	snapshotDelete int64
+	snapshotGC     int64
+	cleanupFailure int64
+	authFailure    int64
+}
+
+func (m *controlPlaneMetrics) IncVMCreate()       { m.add(&m.vmCreate, 1) }
+func (m *controlPlaneMetrics) IncVMRestore()      { m.add(&m.vmRestore, 1) }
+func (m *controlPlaneMetrics) IncVMDelete()       { m.add(&m.vmDelete, 1) }
+func (m *controlPlaneMetrics) IncSnapshotCreate() { m.add(&m.snapshotCreate, 1) }
+func (m *controlPlaneMetrics) IncSnapshotDelete() { m.add(&m.snapshotDelete, 1) }
+func (m *controlPlaneMetrics) IncSnapshotGC()     { m.add(&m.snapshotGC, 1) }
+func (m *controlPlaneMetrics) IncCleanupFailure() { m.add(&m.cleanupFailure, 1) }
+func (m *controlPlaneMetrics) IncAuthFailure()    { m.add(&m.authFailure, 1) }
+
+func (m *controlPlaneMetrics) add(target *int64, delta int64) {
+	m.mu.Lock()
+	*target += delta
+	m.mu.Unlock()
+}
+
+func (m *controlPlaneMetrics) snapshot() controlPlaneMetrics {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return controlPlaneMetrics{
+		vmCreate:       m.vmCreate,
+		vmRestore:      m.vmRestore,
+		vmDelete:       m.vmDelete,
+		snapshotCreate: m.snapshotCreate,
+		snapshotDelete: m.snapshotDelete,
+		snapshotGC:     m.snapshotGC,
+		cleanupFailure: m.cleanupFailure,
+		authFailure:    m.authFailure,
+	}
+}
+
 // generateAgentToken creates a 32-byte cryptographically random token, hex-encoded (64 chars).
 func generateAgentToken() (string, error) {
 	b := make([]byte, 32)
@@ -124,8 +172,12 @@ type ControlPlane struct {
 	clientsMu sync.RWMutex
 	clients   []APIClient
 
-	snapshotsMu sync.RWMutex
-	snapshots   map[string]storage.SnapshotMetadata
+	snapshotsMu      sync.RWMutex
+	snapshots        map[string]storage.SnapshotMetadata
+	tenantStore      *anvilmcp.QuotaStore
+	egress           egressEnforcer
+	runtimeAuditPath string
+	metrics          controlPlaneMetrics
 
 	snapshotLifecycleMu sync.Mutex
 
@@ -167,6 +219,9 @@ func NewControlPlane(
 		vms:              make(map[string]*runningVM),
 		clients:          apiClients,
 		snapshots:        make(map[string]storage.SnapshotMetadata),
+		tenantStore:      anvilmcp.NewQuotaStore(filepath.Join(workDir, "tenants", "tenants.json")),
+		egress:           newCommandEgressEnforcer(),
+		runtimeAuditPath: filepath.Join(workDir, "audit", "runtime-audit.jsonl"),
 		provisioner:      provisioner,
 		netManager:       netManager,
 		kernelPath:       kernelPath,
@@ -177,6 +232,9 @@ func NewControlPlane(
 		snapshotDir:      snapshotDir,
 		agentHTTPClient:  &http.Client{},
 		stopCh:           make(chan struct{}, 1),
+	}
+	if err := cp.tenantStore.Load(); err != nil {
+		log.Printf("Warning: failed to load tenant store: %v", err)
 	}
 
 	// Load any snapshots persisted from previous daemon runs.
@@ -190,12 +248,18 @@ func NewControlPlane(
 	}
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/health", cp.handleHealth)
+	mux.HandleFunc("/metrics", cp.handleMetrics)
 	mux.HandleFunc("/vms", cp.handleVMs)
 	mux.HandleFunc("/vms/", cp.handleVM)
+	mux.HandleFunc("/tenants", cp.handleTenants)
+	mux.HandleFunc("/tenants/", cp.handleTenantItem)
+	mux.HandleFunc("/audit/runtime", cp.handleRuntimeAudit)
+	mux.HandleFunc("/audit/runtime/prune", cp.handleRuntimeAuditPrune)
 	mux.HandleFunc("/snapshots", cp.handleSnapshots)
 	mux.HandleFunc("/snapshots/gc", cp.handleSnapshotGC)
 	mux.HandleFunc("/snapshots/", cp.handleSnapshotItem)
-	cp.srv = &http.Server{Addr: apiAddr, Handler: authMiddleware(cp.getClients, mux)}
+	cp.srv = &http.Server{Addr: apiAddr, Handler: authMiddleware(cp.getClients, &cp.metrics, mux)}
 	return cp
 }
 
@@ -236,8 +300,14 @@ func (cp *ControlPlane) Start() error {
 		auth = fmt.Sprintf("Bearer token (%d client(s): %s)", len(clients), strings.Join(names, ", "))
 	}
 	log.Printf("Control plane API on %s  (auth: %s)", apiAddr, auth)
+	log.Printf("  GET    /health                          — daemon health")
+	log.Printf("  GET    /metrics                         — daemon metrics")
 	log.Printf("  POST   /vms                              — spawn VM")
 	log.Printf("  GET    /vms                              — list VMs")
+	log.Printf("  GET    /tenants                          — list tenants")
+	log.Printf("  GET/PUT /tenants/{tenant_id}             — tenant quota state")
+	log.Printf("  GET    /audit/runtime                    — list runtime audit records")
+	log.Printf("  POST   /audit/runtime/prune              — prune runtime audit records")
 	log.Printf("  DELETE /vms/{vm_id}                      — stop VM")
 	log.Printf("  POST   /vms/{vm_id}/snapshot             — create snapshot")
 	log.Printf("  POST   /vms/{vm_id}/tasks                — proxy: run task on agent")
@@ -508,8 +578,15 @@ func (cp *ControlPlane) spawnVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := cp.applyEgressPolicy(vmID, tapDevice, guestIP, req.EgressPolicy); err != nil {
+		cp.netManager.Release(tapDevice, guestIP)
+		http.Error(w, fmt.Sprintf("egress policy failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+
 	diskPath, err := cp.provisioner.CloneDisk(vmID)
 	if err != nil {
+		cp.cleanupEgressPolicy(vmID)
 		cp.netManager.Release(tapDevice, guestIP)
 		http.Error(w, fmt.Sprintf("disk provisioning failed: %v", err), http.StatusInternalServerError)
 		return
@@ -521,6 +598,7 @@ func (cp *ControlPlane) spawnVM(w http.ResponseWriter, r *http.Request) {
 		AgentToken:      agentToken,
 	}); err != nil {
 		cp.provisioner.CleanupDisk(vmID)
+		cp.cleanupEgressPolicy(vmID)
 		cp.netManager.Release(tapDevice, guestIP)
 		http.Error(w, fmt.Sprintf("VM preparation failed: %v", err), http.StatusInternalServerError)
 		return
@@ -544,6 +622,7 @@ func (cp *ControlPlane) spawnVM(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		cp.provisioner.CleanupDisk(vmID)
+		cp.cleanupEgressPolicy(vmID)
 		cp.netManager.Release(tapDevice, guestIP)
 		http.Error(w, fmt.Sprintf("VM start failed: %v", err), http.StatusInternalServerError)
 		return
@@ -578,6 +657,7 @@ func (cp *ControlPlane) spawnVM(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("VM [%s] ready — agent: %s  profile: %q", vmID, info.AgentURL, req.Profile)
 
+	cp.metrics.IncVMCreate()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(VMSpawnResult{VMInfo: info, AgentToken: agentToken})
@@ -627,10 +707,12 @@ func (cp *ControlPlane) destroyVM(vmID string) {
 	if v.vsockPath != "" {
 		os.Remove(v.vsockPath)
 	}
+	cp.cleanupEgressPolicy(vmID)
 
 	if v.dmSnapshot != nil {
 		// COW-restored VM: release dm-snapshot device, loop device, and exception store.
 		if err := storage.TeardownDMSnapshot(v.dmSnapshot); err != nil {
+			cp.metrics.IncCleanupFailure()
 			log.Printf("Warning: failed to teardown COW resources for VM [%s]: %v", vmID, err)
 		}
 	} else if v.bindMountTarget != "" {
@@ -642,6 +724,7 @@ func (cp *ControlPlane) destroyVM(vmID string) {
 		}
 	}
 	cp.netManager.Release(v.tapDevice, v.GuestIP)
+	cp.metrics.IncVMDelete()
 	log.Printf("VM [%s] destroyed.", vmID)
 }
 
@@ -712,6 +795,93 @@ type SnapshotRequest struct {
 type RestoreSnapshotRequest struct {
 	TenantID     string `json:"tenant_id,omitempty"`
 	EgressPolicy string `json:"egress_policy,omitempty"`
+}
+
+type TenantRecord = anvilmcp.TenantRecord
+
+type TenantUpsertRequest struct {
+	Quota anvilmcp.TenantQuota `json:"quota"`
+}
+
+type RuntimeAuditListResponse = anvilmcp.RuntimeAuditListResponse
+
+type HealthResponse struct {
+	Status        string `json:"status"`
+	VMCount       int    `json:"vm_count"`
+	SnapshotCount int    `json:"snapshot_count"`
+	AuthEnabled   bool   `json:"auth_enabled"`
+}
+
+type egressEnforcer interface {
+	Apply(vmID, tapDevice, guestIP, policy string) error
+	Cleanup(vmID string) error
+}
+
+type egressRule struct {
+	GuestIP string
+	Comment string
+}
+
+type commandEgressEnforcer struct {
+	mu    sync.Mutex
+	rules map[string]egressRule
+	run   func(name string, args ...string) error
+}
+
+func newCommandEgressEnforcer() *commandEgressEnforcer {
+	return &commandEgressEnforcer{
+		rules: make(map[string]egressRule),
+		run: func(name string, args ...string) error {
+			return exec.Command(name, args...).Run()
+		},
+	}
+}
+
+func (e *commandEgressEnforcer) Apply(vmID, tapDevice, guestIP, policy string) error {
+	_ = tapDevice
+	policy, err := normalizeDaemonEgressPolicy(policy)
+	if err != nil {
+		return err
+	}
+	if policy == "" || policy == "profile" || policy == "allow_all" {
+		return nil
+	}
+	comment := "anvil-egress-" + vmID
+	args := []string{"-I", "FORWARD", "-s", guestIP, "-j", "REJECT", "-m", "comment", "--comment", comment}
+	if err := e.command("iptables", args...); err != nil {
+		return fmt.Errorf("apply deny_all egress policy: %w", err)
+	}
+	e.mu.Lock()
+	if e.rules == nil {
+		e.rules = make(map[string]egressRule)
+	}
+	e.rules[vmID] = egressRule{GuestIP: guestIP, Comment: comment}
+	e.mu.Unlock()
+	return nil
+}
+
+func (e *commandEgressEnforcer) Cleanup(vmID string) error {
+	e.mu.Lock()
+	rule, ok := e.rules[vmID]
+	if ok {
+		delete(e.rules, vmID)
+	}
+	e.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	args := []string{"-D", "FORWARD", "-s", rule.GuestIP, "-j", "REJECT", "-m", "comment", "--comment", rule.Comment}
+	if err := e.command("iptables", args...); err != nil {
+		return fmt.Errorf("cleanup egress policy: %w", err)
+	}
+	return nil
+}
+
+func (e *commandEgressEnforcer) command(name string, args ...string) error {
+	if e.run != nil {
+		return e.run(name, args...)
+	}
+	return exec.Command(name, args...).Run()
 }
 
 // SnapshotGCRequest is the optional body for POST /snapshots/gc.
@@ -943,6 +1113,217 @@ func writeRestoreError(w http.ResponseWriter, status int, code string, snapshotI
 	})
 }
 
+func (cp *ControlPlane) ensureTenantStore() *anvilmcp.QuotaStore {
+	if cp.tenantStore == nil {
+		cp.tenantStore = anvilmcp.NewQuotaStore(filepath.Join(cp.workDir, "tenants", "tenants.json"))
+		_ = cp.tenantStore.Load()
+	}
+	return cp.tenantStore
+}
+
+func (cp *ControlPlane) applyEgressPolicy(vmID, tapDevice, guestIP, policy string) error {
+	if cp.egress == nil {
+		return nil
+	}
+	return cp.egress.Apply(vmID, tapDevice, guestIP, policy)
+}
+
+func (cp *ControlPlane) cleanupEgressPolicy(vmID string) {
+	if cp.egress == nil {
+		return
+	}
+	if err := cp.egress.Cleanup(vmID); err != nil {
+		cp.metrics.IncCleanupFailure()
+		log.Printf("Warning: failed to cleanup egress policy for VM [%s]: %v", vmID, err)
+	}
+}
+
+func (cp *ControlPlane) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET required", http.StatusMethodNotAllowed)
+		return
+	}
+	cp.mu.RLock()
+	vmCount := len(cp.vms)
+	cp.mu.RUnlock()
+	cp.snapshotsMu.RLock()
+	snapshotCount := len(cp.snapshots)
+	cp.snapshotsMu.RUnlock()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(HealthResponse{
+		Status:        "ok",
+		VMCount:       vmCount,
+		SnapshotCount: snapshotCount,
+		AuthEnabled:   len(cp.getClients()) > 0,
+	})
+}
+
+func (cp *ControlPlane) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET required", http.StatusMethodNotAllowed)
+		return
+	}
+	m := cp.metrics.snapshot()
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	fmt.Fprintf(w, "anvil_vm_create_total %d\n", m.vmCreate)
+	fmt.Fprintf(w, "anvil_vm_restore_total %d\n", m.vmRestore)
+	fmt.Fprintf(w, "anvil_vm_delete_total %d\n", m.vmDelete)
+	fmt.Fprintf(w, "anvil_snapshot_create_total %d\n", m.snapshotCreate)
+	fmt.Fprintf(w, "anvil_snapshot_delete_total %d\n", m.snapshotDelete)
+	fmt.Fprintf(w, "anvil_snapshot_gc_total %d\n", m.snapshotGC)
+	fmt.Fprintf(w, "anvil_cleanup_failure_total %d\n", m.cleanupFailure)
+	fmt.Fprintf(w, "anvil_auth_failure_total %d\n", m.authFailure)
+}
+
+func (cp *ControlPlane) handleTenants(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/tenants" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET required", http.StatusMethodNotAllowed)
+		return
+	}
+	records := cp.ensureTenantStore().ListTenants()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(records)
+}
+
+func (cp *ControlPlane) handleTenantItem(w http.ResponseWriter, r *http.Request) {
+	tenantID := strings.TrimPrefix(r.URL.Path, "/tenants/")
+	tenantID, err := anvilmcp.NormalizeTenantID(tenantID)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	store := cp.ensureTenantStore()
+
+	switch r.Method {
+	case http.MethodGet:
+		record, ok, err := store.GetTenant(tenantID)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if !ok {
+			writeJSONError(w, http.StatusNotFound, "tenant not found")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(record)
+	case http.MethodPut:
+		var req TenantUpsertRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON body: %v", err))
+			return
+		}
+		if err := store.SetTenantQuota(tenantID, req.Quota); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := store.Save(); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("save tenant store: %v", err))
+			return
+		}
+		record, _, err := store.GetTenant(tenantID)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(record)
+	default:
+		http.Error(w, "GET or PUT required", http.StatusMethodNotAllowed)
+	}
+}
+
+func (cp *ControlPlane) handleRuntimeAudit(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/audit/runtime" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET required", http.StatusMethodNotAllowed)
+		return
+	}
+	records, err := anvilmcp.ReadRuntimeAudit(cp.runtimeAuditPath)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	tenantID := strings.TrimSpace(r.URL.Query().Get("tenant_id"))
+	if tenantID != "" {
+		normalized, err := anvilmcp.NormalizeTenantID(tenantID)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		tenantID = normalized
+	}
+	limit := 0
+	if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
+		parsed, err := strconv.Atoi(rawLimit)
+		if err != nil || parsed < 0 {
+			writeJSONError(w, http.StatusBadRequest, "limit must be a non-negative integer")
+			return
+		}
+		limit = parsed
+	}
+	records = filterRuntimeAuditRecords(records, tenantID, limit)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(RuntimeAuditListResponse{Records: records})
+}
+
+func (cp *ControlPlane) handleRuntimeAuditPrune(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/audit/runtime/prune" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	var policy anvilmcp.RuntimeAuditRetention
+	if err := json.NewDecoder(r.Body).Decode(&policy); err != nil && err != io.EOF {
+		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON body: %v", err))
+		return
+	}
+	if err := anvilmcp.PruneRuntimeAudit(cp.runtimeAuditPath, policy); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	records, err := anvilmcp.ReadRuntimeAudit(cp.runtimeAuditPath)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	records = filterRuntimeAuditRecords(records, "", 0)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(RuntimeAuditListResponse{Records: records})
+}
+
+func filterRuntimeAuditRecords(records []anvilmcp.RuntimeAuditRecord, tenantID string, limit int) []anvilmcp.RuntimeAuditRecord {
+	filtered := make([]anvilmcp.RuntimeAuditRecord, 0, len(records))
+	for _, record := range records {
+		if tenantID != "" && record.TenantID != tenantID {
+			continue
+		}
+		filtered = append(filtered, sanitizeRuntimeAuditRecord(record))
+	}
+	if limit > 0 && len(filtered) > limit {
+		filtered = filtered[len(filtered)-limit:]
+	}
+	return filtered
+}
+
+func sanitizeRuntimeAuditRecord(record anvilmcp.RuntimeAuditRecord) anvilmcp.RuntimeAuditRecord {
+	lowerError := strings.ToLower(record.Error)
+	if strings.Contains(lowerError, "agent_token") || strings.Contains(lowerError, "secret") {
+		record.Error = "[redacted]"
+	}
+	return record
+}
+
 func (cp *ControlPlane) allocateNetworkForRestore(tapDeviceName, macAddr string) (string, string, error) {
 	if cp.allocateForRestore != nil {
 		return cp.allocateForRestore(tapDeviceName, macAddr)
@@ -1024,6 +1405,7 @@ func (cp *ControlPlane) handleSnapshotGC(w http.ResponseWriter, r *http.Request)
 	resp.Applied = req.Apply
 	if req.Apply {
 		cp.applySnapshotGC(&resp)
+		cp.metrics.IncSnapshotGC()
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1272,6 +1654,7 @@ func (cp *ControlPlane) createSnapshot(w http.ResponseWriter, r *http.Request, v
 	cp.snapshotsMu.Unlock()
 
 	log.Printf("Snapshot [%s] (%s) created from VM [%s]", snapID, snapType, vmID)
+	cp.metrics.IncSnapshotCreate()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(snapshotInfoFrom(meta))
@@ -1423,6 +1806,14 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 		memFileToUse = mergedMemPath
 	}
 
+	if err := cp.applyEgressPolicy(newVMID, tapDevice, newGuestIP, restoreEgressPolicy); err != nil {
+		cp.restoreMu.Unlock()
+		cp.teardownRestoreDMSnapshot(dmInfo)
+		cp.releaseRestoreNetwork(tapDevice, newGuestIP)
+		writeRestoreError(w, http.StatusInternalServerError, "egress_policy_failed", snapID, fmt.Sprintf("egress policy failed: %v", err))
+		return
+	}
+
 	log.Printf("Restore [%s]: starting VM [%s] from snapshot (%s)...", snapID, newVMID, meta.SnapshotType)
 	machine, err := cp.restoreSnapshotMachine(context.Background(), vm.VMConfig{
 		VMID:           newVMID,
@@ -1442,6 +1833,7 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 	}
 
 	if err != nil {
+		cp.cleanupEgressPolicy(newVMID)
 		cp.teardownRestoreDMSnapshot(dmInfo)
 		cp.releaseRestoreNetwork(tapDevice, newGuestIP)
 		writeRestoreError(w, http.StatusInternalServerError, "firecracker_restore_failed", snapID, fmt.Sprintf("failed to restore VM: %v", err))
@@ -1453,6 +1845,7 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 	if err := vm.ReconfigureGuestIP(meta.VsockPath, newGuestIP+"/24", "10.0.1.1"); err != nil {
 		log.Printf("Restore [%s]: vsock IP reconfigure failed: %v", snapID, err)
 		machine.StopVMM()
+		cp.cleanupEgressPolicy(newVMID)
 		cp.teardownRestoreDMSnapshot(dmInfo)
 		cp.releaseRestoreNetwork(tapDevice, newGuestIP)
 		writeRestoreError(w, http.StatusInternalServerError, "guest_reconfigure_failed", snapID, fmt.Sprintf("vsock IP reconfigure failed: %v", err))
@@ -1490,6 +1883,7 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 	}
 	log.Printf("Restore [%s]: VM [%s] ready — agent: %s", snapID, newVMID, info.AgentURL)
 
+	cp.metrics.IncVMRestore()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(VMRestoreResult{
@@ -1530,6 +1924,13 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 		memFileToUse = mergedMemPath
 	}
 
+	if err := cp.applyEgressPolicy(newVMID, tapDevice, newGuestIP, restoreEgressPolicy); err != nil {
+		storage.TeardownBindMount(meta.DiskPath, newDiskPath)
+		cp.releaseRestoreNetwork(tapDevice, newGuestIP)
+		writeRestoreError(w, http.StatusInternalServerError, "egress_policy_failed", snapID, fmt.Sprintf("egress policy failed: %v", err))
+		return
+	}
+
 	machine, err := cp.restoreSnapshotMachine(context.Background(), vm.VMConfig{
 		VMID:           newVMID,
 		SocketPath:     socketPath,
@@ -1544,6 +1945,7 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 		os.Remove(mergedMemPath)
 	}
 	if err != nil {
+		cp.cleanupEgressPolicy(newVMID)
 		storage.TeardownBindMount(meta.DiskPath, newDiskPath)
 		cp.releaseRestoreNetwork(tapDevice, newGuestIP)
 		writeRestoreError(w, http.StatusInternalServerError, "firecracker_restore_failed", snapID, fmt.Sprintf("failed to restore VM: %v", err))
@@ -1552,6 +1954,7 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 
 	if err := vm.ReconfigureGuestIP(meta.VsockPath, newGuestIP+"/24", "10.0.1.1"); err != nil {
 		machine.StopVMM()
+		cp.cleanupEgressPolicy(newVMID)
 		storage.TeardownBindMount(meta.DiskPath, newDiskPath)
 		cp.releaseRestoreNetwork(tapDevice, newGuestIP)
 		writeRestoreError(w, http.StatusInternalServerError, "guest_reconfigure_failed", snapID, fmt.Sprintf("vsock IP reconfigure failed: %v", err))
@@ -1585,6 +1988,7 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 		return
 	}
 
+	cp.metrics.IncVMRestore()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(VMRestoreResult{
@@ -1619,6 +2023,7 @@ func (cp *ControlPlane) deleteSnapshotByID(snapID string) (storage.SnapshotMetad
 	cp.snapshotsMu.Lock()
 	delete(cp.snapshots, snapID)
 	cp.snapshotsMu.Unlock()
+	cp.metrics.IncSnapshotDelete()
 	return meta, http.StatusOK, nil
 }
 

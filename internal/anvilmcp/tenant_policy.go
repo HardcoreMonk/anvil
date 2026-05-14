@@ -75,9 +75,9 @@ type RuntimeAuditRecord struct {
 }
 
 type RuntimeAuditRetention struct {
-	KeepLast      int
-	MaxAgeSeconds int64
-	Now           time.Time
+	KeepLast      int       `json:"keep_last"`
+	MaxAgeSeconds int64     `json:"max_age_seconds"`
+	Now           time.Time `json:"now,omitempty"`
 }
 
 func NormalizeTenantID(value string) (string, error) {

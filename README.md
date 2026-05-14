@@ -363,7 +363,7 @@ scripts/anvil-mcp-e2e.sh daemon 기반 MCP smoke wrapper
   daemon crash, stale TAP/IP, restore 실패, GC 실패, diff base 누락 대응 playbook.
 
 - [docs/operations/observability.md](docs/operations/observability.md):
-  daemon log, health endpoint, snapshot GC audit, 아직 없는 metrics와 향후 지표 후보.
+  daemon log, `/health`, `/metrics`, snapshot GC audit, runtime audit API, 향후 지표 후보.
 
 - [docs/analysis/README.md](docs/analysis/README.md):
   ephemera 0.1.0/0.2.0 분석 문서 index.
@@ -610,6 +610,11 @@ timestamp, sanitized error만 JSONL로 append한다. 이 audit record에는 snap
 metadata, daemon raw body, `agent_token`을 저장하지 않는다.
 `ANVIL_MCP_AUDIT_LOG`를 켠 상태에서는 tool input `tenant_id` 또는
 `ANVIL_MCP_TENANT_ID`가 필요하다.
+
+후속 control-plane foundation은 host inventory polling, scheduler-backed
+`RuntimeRouter`, JSON quota store, daemon `/tenants`, `/audit/runtime`, `/health`,
+`/metrics`를 제공한다. `deny_all` egress policy는 host `iptables` reject rule로
+강제하며, `profile` proxy allowlist와 DNS policy는 별도 후속 network layer다.
 
 정확한 입력/출력 계약은 `docs/architecture/mcp-architecture.md`를 참조한다.
 
