@@ -111,6 +111,127 @@ func TestDaemonClientRawEndpoints(t *testing.T) {
 	}
 }
 
+func TestDaemonClientRuntimeAuditEndpoints(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.RequestURI())
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"records":[{"tenant_id":"tenant-1","tool_name":"anvil_spawn_vm","daemon_operation":"POST /vms","result_code":"success","timestamp":"2026-05-14T00:00:00Z"}]}`))
+	}))
+	defer server.Close()
+
+	client := NewDaemonClient(Config{DaemonURL: server.URL}, server.Client())
+	if _, err := client.ListRuntimeAudit(context.Background(), "tenant-1", 5); err != nil {
+		t.Fatalf("ListRuntimeAudit returned error: %v", err)
+	}
+	if _, err := client.PruneRuntimeAudit(context.Background(), RuntimeAuditRetention{KeepLast: 5}); err != nil {
+		t.Fatalf("PruneRuntimeAudit returned error: %v", err)
+	}
+
+	want := []string{
+		"GET /audit/runtime?limit=5&tenant_id=tenant-1",
+		"POST /audit/runtime/prune",
+	}
+	if len(paths) != len(want) {
+		t.Fatalf("paths = %v, want %v", paths, want)
+	}
+	for i := range want {
+		if paths[i] != want[i] {
+			t.Fatalf("paths[%d] = %q, want %q", i, paths[i], want[i])
+		}
+	}
+}
+
+func TestDaemonClientControlPlaneEndpoints(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.RequestURI())
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Fatalf("Authorization = %q, want Bearer test-token", got)
+		}
+		switch r.Method + " " + r.URL.Path {
+		case "GET /health":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"ok","vm_count":1,"snapshot_count":2,"auth_enabled":true}`))
+		case "GET /metrics":
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write([]byte("anvil_vm_create_total 1\n"))
+		case "GET /tenants":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"tenant_id":"tenant-1","quota":{"active_vms":2},"usage":{"active_vms":1}}]`))
+		case "GET /tenants/tenant-1":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"tenant_id":"tenant-1","quota":{"active_vms":2},"usage":{"active_vms":1}}`))
+		case "PUT /tenants/tenant-1":
+			var body TenantUpsertRequest
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode tenant upsert body: %v", err)
+			}
+			if body.Quota.ActiveVMs != 3 {
+				t.Fatalf("active_vms = %d, want 3", body.Quota.ActiveVMs)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"tenant_id":"tenant-1","quota":{"active_vms":3},"usage":{"active_vms":1}}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.RequestURI())
+		}
+	}))
+	defer server.Close()
+
+	client := NewDaemonClient(Config{DaemonURL: server.URL, APIToken: "test-token"}, server.Client())
+	health, err := client.DaemonHealth(context.Background())
+	if err != nil {
+		t.Fatalf("DaemonHealth returned error: %v", err)
+	}
+	if health.Status != "ok" || health.VMCount != 1 || health.SnapshotCount != 2 || !health.AuthEnabled {
+		t.Fatalf("health = %+v, want ok vm=1 snapshot=2 auth=true", health)
+	}
+	metrics, err := client.Metrics(context.Background())
+	if err != nil {
+		t.Fatalf("Metrics returned error: %v", err)
+	}
+	if metrics != "anvil_vm_create_total 1\n" {
+		t.Fatalf("metrics = %q", metrics)
+	}
+	tenants, err := client.ListTenants(context.Background())
+	if err != nil {
+		t.Fatalf("ListTenants returned error: %v", err)
+	}
+	if len(tenants) != 1 || tenants[0].TenantID != "tenant-1" {
+		t.Fatalf("tenants = %+v, want tenant-1", tenants)
+	}
+	tenant, err := client.GetTenant(context.Background(), "tenant-1")
+	if err != nil {
+		t.Fatalf("GetTenant returned error: %v", err)
+	}
+	if tenant.TenantID != "tenant-1" || tenant.Quota.ActiveVMs != 2 || tenant.Usage.ActiveVMs != 1 {
+		t.Fatalf("tenant = %+v, want tenant-1 quota=2 usage=1", tenant)
+	}
+	upserted, err := client.UpsertTenant(context.Background(), "tenant-1", TenantQuota{ActiveVMs: 3})
+	if err != nil {
+		t.Fatalf("UpsertTenant returned error: %v", err)
+	}
+	if upserted.Quota.ActiveVMs != 3 {
+		t.Fatalf("upserted quota = %+v, want active_vms=3", upserted.Quota)
+	}
+
+	want := []string{
+		"GET /health",
+		"GET /metrics",
+		"GET /tenants",
+		"GET /tenants/tenant-1",
+		"PUT /tenants/tenant-1",
+	}
+	if len(paths) != len(want) {
+		t.Fatalf("paths = %v, want %v", paths, want)
+	}
+	for i := range want {
+		if paths[i] != want[i] {
+			t.Fatalf("paths[%d] = %q, want %q", i, paths[i], want[i])
+		}
+	}
+}
+
 func TestDaemonClientCopyIn(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPut {

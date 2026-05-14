@@ -113,10 +113,13 @@ daemon으로 보내는 outbound Bearer token이다.
 - daemon API는 `tenant_id`와 `egress_policy`를 VM/snapshot/restore contract에
   보존하며, MCP adapter는 tenant/egress 값을 daemon 요청 본문으로 전달한다.
 - `POST /snapshots/{id}/restore` 응답은 더 이상 `agent_token`을 노출하지 않는다.
+- scheduler host inventory polling, runtime router, JSON quota store, daemon tenant
+  API, `deny_all` host egress rule, runtime audit API, `/health`, `/metrics`가
+  후속 control-plane foundation으로 구현된 상태다.
 
 남은 후속 후보:
 
-- scheduler host inventory/health polling과 multi-host 배포 제어면 구현
-- quota state persistence와 tenant API
-- host network policy 기반 packet filtering/proxy allowlist egress enforcement
-- runtime audit 운영 API와 metrics 연결
+- scheduler daemon/service 분리와 persistent host inventory 운영화
+- snapshot locality, retry/failover, multi-host placement reconciliation
+- `profile` egress proxy allowlist와 DNS policy enforcement
+- per-VM metrics, OpenTelemetry trace, quota dashboard
