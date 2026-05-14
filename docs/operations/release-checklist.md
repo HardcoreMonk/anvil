@@ -27,6 +27,22 @@ git tag --list 'v*' --sort=version:refname
 git tag --list 'anvil-v*' --sort=version:refname
 ```
 
+## Upstream sync 확인
+
+anvil은 `steve-seungeui/ephemera` fork network를 유지한다. ephemera runtime을 새
+baseline으로 올리는 release라면 먼저 upstream 상태를 확인하고 별도 sync PR로
+반영한다.
+
+```bash
+git remote -v
+git fetch upstream main
+git ls-remote --tags upstream
+```
+
+기존 local `v*` tag와 upstream tag가 충돌할 수 있으므로 `git fetch --tags --force`로
+tag를 덮어쓰지 않는다. upstream sync 절차는
+[upstream-sync-policy.md](upstream-sync-policy.md)를 따른다.
+
 ### GitHub Release 상태 확인
 
 ```bash

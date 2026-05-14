@@ -26,11 +26,12 @@ OpenClaw compatibility layer, shared gateway, shared runtime contract를 anvil
 요구사항으로 취급하지 않는다.
 
 현재 GitHub 저장소는 `https://github.com/HardcoreMonk/anvil/`이다.
-ephemera는 이미 `0.1.0`, `0.2.0`이 릴리즈된 기반 runtime이며, 이 저장소의
-Go 모듈 경로와 기존 API/환경 변수에는 `ephemera` 또는 `goose` 이름이 남아
-있다. anvil 통합 릴리즈는 ephemera runtime tag와 충돌하지 않도록
-`anvil-v0.1.0`처럼 별도 prefix를 사용한다. 문서에서는 anvil과 ephemera를 같은
-이름으로 취급하지 않는다.
+이 저장소는 `https://github.com/steve-seungeui/ephemera`의 fork로 유지한다.
+ephemera는 계속 버전업되는 runtime engine upstream이며, anvil은 그 runtime을
+IronClaw 실행 계층으로 통합하는 downstream product fork다. 이 저장소의 Go 모듈
+경로와 기존 API/환경 변수에는 `ephemera` 또는 `goose` 이름이 남아 있다. anvil
+통합 릴리즈는 ephemera runtime tag와 충돌하지 않도록 `anvil-v0.1.0`처럼 별도
+prefix를 사용한다. 문서에서는 anvil과 ephemera를 같은 이름으로 취급하지 않는다.
 
 ## 진실 기준 문서 순서
 
@@ -71,6 +72,21 @@ Go 모듈 경로와 기존 API/환경 변수에는 `ephemera` 또는 `goose` 이
   취급한다. 이것을 anvil 제품명으로 덮어쓰지 않는다.
 - 공개 운영 URL은 reverse proxy/TLS 계층에서 결정한다. 현재 로컬 검증
   환경에서는 사용자가 지정한 `192.168.3.73` 주소를 기준으로 한다.
+
+## Fork와 upstream 정책
+
+- fork network는 유지한다. `HardcoreMonk/anvil`을 standalone repository로 detach하지
+  않는다.
+- local `origin`은 `HardcoreMonk/anvil`, `upstream`은
+  `steve-seungeui/ephemera`를 가리킨다.
+- ephemera upstream 반영은 `sync/ephemera-*` 브랜치에서 merge commit으로 수행한다.
+  upstream runtime 이력을 보존하기 위해 rebase나 history rewrite를 사용하지 않는다.
+- runtime engine 계약이 upstream에서 바뀌면 `cmd/goose-daemon`, `internal/storage`,
+  `internal/network`, `internal/vm`의 의미를 우선 존중하고, anvil MCP adapter와
+  운영 문서를 그 계약에 맞춰 조정한다.
+- upstream tag 확인은 `git ls-remote --tags upstream`을 사용한다. 이미 존재하는
+  `v*` tag를 덮어쓰는 `git fetch --tags --force`는 사용하지 않는다.
+- anvil release tag는 계속 `anvil-v*` prefix를 사용한다.
 
 ## 고정된 런타임 계약
 

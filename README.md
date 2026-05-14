@@ -40,7 +40,9 @@ anvil의 상위 통합 대상은 IronClaw 전용이다. OpenClaw 연동은 anvil
 아니며, OpenClaw용 compatibility layer나 운영 계약은 제공하지 않는다.
 
 이 저장소의 현재 URL은 `https://github.com/HardcoreMonk/anvil/`이다.
-ephemera는 이미 `0.1.0`, `0.2.0`이 릴리즈된 기반 runtime이므로 Go 모듈 경로,
+이 저장소는 `https://github.com/steve-seungeui/ephemera`의 fork로 유지한다.
+ephemera는 계속 버전업되는 runtime engine upstream이고, anvil은 그 runtime을
+IronClaw 실행 계층으로 통합하는 downstream product fork다. 따라서 Go 모듈 경로,
 daemon 이름, HTTP API, 일부 환경 변수에는 `ephemera` 또는 `goose` 이름이 남아
 있다. README에서는 `anvil`을 IronClaw 통합 프로젝트로, `ephemera`를 분리된 기반
 runtime으로 구분한다.
@@ -82,6 +84,35 @@ anvil은 ephemera를 이름만 바꾼 프로젝트가 아니다. anvil은 IronCl
 연결하는 통합 실행 layer이고, ephemera는 독립적인 runtime 구현과 API 계약을
 가진다. 따라서 runtime API와 환경 변수는 호환성을 위해 ephemera/goose 이름을
 유지하고, IronClaw가 직접 사용하는 표면은 `anvil_*` MCP tool로 노출한다.
+
+## Fork와 upstream 관리
+
+`HardcoreMonk/anvil`은 `steve-seungeui/ephemera`의 fork network를 유지한다. 이
+관계는 의도된 운영 방식이다. ephemera가 runtime engine으로 계속 버전업되기 때문에
+anvil은 upstream runtime 변경을 merge로 받아들이고, IronClaw 통합 계층을 그 위에
+적응시킨다.
+
+권장 remote 설정:
+
+```bash
+git remote -v
+git remote add upstream https://github.com/steve-seungeui/ephemera.git
+git remote set-url upstream https://github.com/steve-seungeui/ephemera.git
+git remote set-url --push upstream DISABLED
+```
+
+upstream sync는 별도 branch에서 수행한다.
+
+```bash
+git fetch upstream main
+git ls-remote --tags upstream
+git checkout -b sync/ephemera-v0.3.0 origin/main
+git merge --no-ff upstream/main
+```
+
+기존 `v*` tag를 덮어쓰는 `git fetch --tags --force`는 사용하지 않는다. ephemera
+runtime release tag는 `v*`, anvil product release tag는 `anvil-v*` prefix를
+사용한다. anvil 작업 branch는 rebase/history rewrite 없이 PR merge로 관리한다.
 
 ## anvil 실행 모델
 
@@ -397,6 +428,10 @@ scripts/anvil-mcp-e2e.sh daemon 기반 MCP smoke wrapper
 - [anvil release checklist](docs/operations/release-checklist.md):
   ephemera runtime 릴리즈와 anvil integration 릴리즈를 구분하는 게시 전
   확인 절차와 `anvil-v0.1.0` GitHub Release 본문 초안.
+
+- [upstream sync policy](docs/operations/upstream-sync-policy.md):
+  `steve-seungeui/ephemera` fork 유지, upstream merge, tag 충돌 방지, sync PR 운영
+  기준.
 
 ---
 
