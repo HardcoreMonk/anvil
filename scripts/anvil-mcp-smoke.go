@@ -30,6 +30,47 @@ type copyOutOutput struct {
 	Content string `json:"content"`
 }
 
+type flockAgentInfo struct {
+	AgentID  string `json:"agent_id"`
+	Role     string `json:"role"`
+	VMID     string `json:"vm_id"`
+	AgentURL string `json:"agent_url"`
+	Status   string `json:"status"`
+}
+
+type spawnFlockOutput struct {
+	FlockID      string           `json:"flock_id"`
+	Task         string           `json:"task"`
+	TenantID     string           `json:"tenant_id,omitempty"`
+	EgressPolicy string           `json:"egress_policy,omitempty"`
+	Agents       []flockAgentInfo `json:"agents"`
+	TownWallURL  string           `json:"townwall_url"`
+	PostURL      string           `json:"post_url"`
+}
+
+type flockInfo struct {
+	FlockID      string                    `json:"flock_id"`
+	Task         string                    `json:"task"`
+	TenantID     string                    `json:"tenant_id,omitempty"`
+	EgressPolicy string                    `json:"egress_policy,omitempty"`
+	Agents       map[string]flockAgentInfo `json:"agents"`
+	CreatedAt    time.Time                 `json:"created_at"`
+}
+
+type listFlocksOutput struct {
+	Flocks []flockInfo `json:"flocks"`
+}
+
+type townWallMessage struct {
+	Timestamp time.Time `json:"timestamp"`
+	AgentID   string    `json:"agent_id"`
+	Body      string    `json:"body"`
+}
+
+type townWallHistoryOutput struct {
+	Messages []townWallMessage `json:"messages"`
+}
+
 func main() {
 	if err := run(); err != nil {
 		log.Fatal(err)
@@ -38,6 +79,7 @@ func main() {
 
 func run() error {
 	command := flag.String("command", "./anvil-mcp", "anvil-mcp command to execute")
+	mode := flag.String("mode", "lifecycle", "smoke mode: lifecycle, semantic, or flock")
 	session := flag.String("session", "smoke", "session_name alias to bind")
 	profile := flag.String("profile", "", "optional VM profile")
 	prompt := flag.String("prompt", "Reply with exactly: anvil-smoke-ok", "prompt for anvil_run_task")
@@ -65,6 +107,14 @@ func run() error {
 		return fmt.Errorf("list tools: %w", err)
 	}
 	fmt.Printf("tools: %d\n", len(tools.Tools))
+
+	switch *mode {
+	case "flock":
+		return runFlockSmoke(ctx, clientSession)
+	case "lifecycle", "semantic":
+	default:
+		return fmt.Errorf("unknown mode %q; want lifecycle, semantic, or flock", *mode)
+	}
 
 	var spawned spawnOutput
 	if err := callStructured(ctx, clientSession, "anvil_spawn_vm", map[string]any{
@@ -149,6 +199,83 @@ func run() error {
 	cleanup = false
 	fmt.Printf("delete status=%d body=%s\n", deleted.StatusCode, deleted.Body)
 	fmt.Println("anvil MCP smoke test passed")
+	return nil
+}
+
+func runFlockSmoke(ctx context.Context, session *mcp.ClientSession) error {
+	const smokeBody = "anvil-flock-smoke-ok"
+
+	var spawned spawnFlockOutput
+	if err := callStructured(ctx, session, "anvil_spawn_flock", map[string]any{
+		"task":  "anvil flock smoke",
+		"roles": []string{"orchestrator", "worker"},
+	}, &spawned); err != nil {
+		return err
+	}
+	fmt.Printf("spawned flock_id=%s agents=%d\n", spawned.FlockID, len(spawned.Agents))
+	if spawned.FlockID == "" {
+		return fmt.Errorf("anvil_spawn_flock returned empty flock_id")
+	}
+	if len(spawned.Agents) != 2 {
+		return fmt.Errorf("anvil_spawn_flock returned %d agents, want 2", len(spawned.Agents))
+	}
+
+	cleanup := true
+	defer func() {
+		if cleanup && spawned.FlockID != "" {
+			var out rawOutput
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 45*time.Second)
+			defer cleanupCancel()
+			if err := callStructured(cleanupCtx, session, "anvil_delete_flock", map[string]any{"flock_id": spawned.FlockID}, &out); err != nil {
+				log.Printf("cleanup delete flock failed for %s: %v", spawned.FlockID, err)
+				return
+			}
+			log.Printf("cleanup delete flock status=%d body=%s", out.StatusCode, out.Body)
+		}
+	}()
+
+	var flocks listFlocksOutput
+	if err := callStructured(ctx, session, "anvil_list_flocks", map[string]any{}, &flocks); err != nil {
+		return err
+	}
+	fmt.Printf("flocks: %d\n", len(flocks.Flocks))
+
+	var posted townWallMessage
+	if err := callStructured(ctx, session, "anvil_post_townwall", map[string]any{
+		"flock_id": spawned.FlockID,
+		"agent_id": "orchestrator",
+		"body":     smokeBody,
+	}, &posted); err != nil {
+		return err
+	}
+	fmt.Printf("posted townwall agent_id=%s body=%q\n", posted.AgentID, posted.Body)
+
+	var history townWallHistoryOutput
+	if err := callStructured(ctx, session, "anvil_get_townwall_history", map[string]any{
+		"flock_id": spawned.FlockID,
+	}, &history); err != nil {
+		return err
+	}
+	found := false
+	for _, msg := range history.Messages {
+		if msg.Body == smokeBody {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("townwall history did not contain body %q", smokeBody)
+	}
+
+	var deleted rawOutput
+	if err := callStructured(ctx, session, "anvil_delete_flock", map[string]any{
+		"flock_id": spawned.FlockID,
+	}, &deleted); err != nil {
+		return err
+	}
+	cleanup = false
+	fmt.Printf("delete flock status=%d body=%s\n", deleted.StatusCode, deleted.Body)
+	fmt.Println("anvil MCP flock smoke test passed")
 	return nil
 }
 

@@ -6,7 +6,7 @@ repo_root="$(cd -- "$script_dir/.." && pwd -P)"
 cd "$repo_root"
 
 usage() {
-  printf 'Usage: %s [lifecycle|semantic]\n' "${0##*/}" >&2
+  printf 'Usage: %s [lifecycle|semantic|flock]\n' "${0##*/}" >&2
 }
 
 mode="${1:-lifecycle}"
@@ -16,7 +16,7 @@ if [[ $# -gt 1 ]]; then
 fi
 
 case "$mode" in
-  lifecycle|semantic)
+  lifecycle|semantic|flock)
     ;;
   *)
     usage
@@ -32,5 +32,8 @@ case "$mode" in
     ;;
   semantic)
     go run ./scripts/anvil-mcp-smoke.go -command /tmp/anvil-mcp -expect-output "anvil-smoke-ok"
+    ;;
+  flock)
+    go run ./scripts/anvil-mcp-smoke.go -command /tmp/anvil-mcp -mode flock
     ;;
 esac
