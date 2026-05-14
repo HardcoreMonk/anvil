@@ -90,10 +90,19 @@ func run() error {
 	taskTimeout := flag.Int("task-timeout", 180, "anvil_run_task timeout_seconds")
 	flag.Parse()
 
+	switch *mode {
+	case "lifecycle", "semantic", "flock":
+	default:
+		return fmt.Errorf("unknown mode %q; want lifecycle, semantic, or flock", *mode)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, *command)
+	commandCtx, stopCommand := context.WithCancel(context.Background())
+	defer stopCommand()
+
+	cmd := exec.CommandContext(commandCtx, *command)
 	client := mcp.NewClient(&mcp.Implementation{Name: "anvil-smoke-client", Version: "v0.1.0"}, nil)
 	clientSession, err := client.Connect(ctx, &mcp.CommandTransport{Command: cmd}, nil)
 	if err != nil {
@@ -111,9 +120,6 @@ func run() error {
 	switch *mode {
 	case "flock":
 		return runFlockSmoke(ctx, clientSession)
-	case "lifecycle", "semantic":
-	default:
-		return fmt.Errorf("unknown mode %q; want lifecycle, semantic, or flock", *mode)
 	}
 
 	var spawned spawnOutput
@@ -239,6 +245,16 @@ func runFlockSmoke(ctx context.Context, session *mcp.ClientSession) error {
 		return err
 	}
 	fmt.Printf("flocks: %d\n", len(flocks.Flocks))
+	foundFlock := false
+	for _, flock := range flocks.Flocks {
+		if flock.FlockID == spawned.FlockID {
+			foundFlock = true
+			break
+		}
+	}
+	if !foundFlock {
+		return fmt.Errorf("anvil_list_flocks did not contain spawned flock_id %q", spawned.FlockID)
+	}
 
 	var posted townWallMessage
 	if err := callStructured(ctx, session, "anvil_post_townwall", map[string]any{
@@ -249,6 +265,12 @@ func runFlockSmoke(ctx context.Context, session *mcp.ClientSession) error {
 		return err
 	}
 	fmt.Printf("posted townwall agent_id=%s body=%q\n", posted.AgentID, posted.Body)
+	if posted.AgentID != "orchestrator" {
+		return fmt.Errorf("anvil_post_townwall agent_id = %q, want orchestrator", posted.AgentID)
+	}
+	if posted.Body != smokeBody {
+		return fmt.Errorf("anvil_post_townwall body = %q, want %q", posted.Body, smokeBody)
+	}
 
 	var history townWallHistoryOutput
 	if err := callStructured(ctx, session, "anvil_get_townwall_history", map[string]any{
