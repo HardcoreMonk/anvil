@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	defaultAddr              = "127.0.0.1:8787"
+	defaultAddr              = "192.168.3.73:8787"
 	defaultFullKVMRecording  = "docs/replays/full-kvm-e2e.txt"
 	defaultIronClawRecording = "/tmp/anvil-real-e2e-recording.typescript"
 )
