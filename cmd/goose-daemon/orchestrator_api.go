@@ -97,15 +97,17 @@ func (cp *ControlPlane) createFlock(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err)
 		return
 	}
-	if len(req.Roles) == 0 {
-		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("roles required"))
-		return
-	}
-	if len(req.Roles) > maxAgentsPerFlock {
-		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("max %d agents per flock", maxAgentsPerFlock))
-		return
-	}
 	var err error
+	req.Task, err = normalizeDaemonFlockTask(req.Task)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err)
+		return
+	}
+	req.Roles, err = normalizeDaemonFlockRoles(req.Roles)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err)
+		return
+	}
 	req.TenantID, err = normalizeDaemonTenantID(req.TenantID)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err)
@@ -291,6 +293,38 @@ func (cp *ControlPlane) streamTownWall(w http.ResponseWriter, r *http.Request, f
 			flusher.Flush()
 		}
 	}
+}
+
+func normalizeDaemonFlockTask(task string) (string, error) {
+	task = strings.TrimSpace(task)
+	if task == "" {
+		return "", fmt.Errorf("task must be non-empty")
+	}
+	return task, nil
+}
+
+func normalizeDaemonFlockRoles(roles []string) ([]string, error) {
+	if len(roles) == 0 {
+		return nil, fmt.Errorf("roles required")
+	}
+	if len(roles) > maxAgentsPerFlock {
+		return nil, fmt.Errorf("max %d agents per flock", maxAgentsPerFlock)
+	}
+	normalized := make([]string, 0, len(roles))
+	for idx, role := range roles {
+		role = strings.TrimSpace(role)
+		if role == "" {
+			return nil, fmt.Errorf("roles[%d] must be non-empty", idx)
+		}
+		if strings.ContainsAny(role, `/\`) {
+			return nil, fmt.Errorf("roles[%d] must not contain path separators", idx)
+		}
+		if role == "." || role == ".." {
+			return nil, fmt.Errorf("roles[%d] must not be %q", idx, role)
+		}
+		normalized = append(normalized, role)
+	}
+	return normalized, nil
 }
 
 // spawnVMForFlock spawns one VM as a flock member. role is mapped through

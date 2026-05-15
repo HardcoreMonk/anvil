@@ -48,6 +48,8 @@ foundation과 운영 관측성 계약을 추가한다.
   함께 동작하도록 `spawnVMInternal` 경로에 통합했다.
 - IronClaw/Gemini schema compatibility 검증은 `roles`처럼 array input을 쓰는
   tool field에 대해 array item type metadata도 기록한다.
+- daemon direct `POST /flocks`는 blank `task`, empty role, path separator가 포함된
+  role을 flock registry 생성과 VM spawn 전에 `400`으로 거부한다.
 - `profile` egress policy는 policy 파일이 없는 기존 profile에서는 no-op으로 남아
   기존 로컬 profile 호환성을 유지한다.
 - trace export와 runtime audit API는 token, secret, daemon raw body, snapshot

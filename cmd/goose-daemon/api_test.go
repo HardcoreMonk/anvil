@@ -75,6 +75,56 @@ func TestCreateFlockRejectsInvalidEgressPolicyBeforeRegistration(t *testing.T) {
 	}
 }
 
+func TestCreateFlockRejectsInvalidTaskAndRolesBeforeRegistration(t *testing.T) {
+	cases := []struct {
+		name     string
+		body     string
+		wantBody string
+	}{
+		{
+			name:     "blank task",
+			body:     `{"task":" ","roles":["worker"]}`,
+			wantBody: "task must be non-empty",
+		},
+		{
+			name:     "blank role",
+			body:     `{"task":"ship review","roles":[" "]}`,
+			wantBody: "roles[0] must be non-empty",
+		},
+		{
+			name:     "slash role",
+			body:     `{"task":"ship review","roles":["ops/admin"]}`,
+			wantBody: "roles[0] must not contain path separators",
+		},
+		{
+			name:     "backslash role",
+			body:     `{"task":"ship review","roles":["ops\\admin"]}`,
+			wantBody: "roles[0] must not contain path separators",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cp := newTestCP(t)
+			cp.flockMgr = orchestrator.NewFlockManager(cp.workDir)
+			req := httptest.NewRequest(http.MethodPost, "/flocks", strings.NewReader(tc.body))
+			rr := httptest.NewRecorder()
+
+			cp.createFlock(rr, req)
+
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("POST /flocks status = %d body = %s, want 400", rr.Code, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), tc.wantBody) {
+				t.Fatalf("POST /flocks body = %s, want %q", rr.Body.String(), tc.wantBody)
+			}
+			if got := len(cp.flockMgr.List()); got != 0 {
+				t.Fatalf("registered flocks = %d, want 0 after invalid flock input", got)
+			}
+		})
+	}
+}
+
 func TestTenantAPIUpsertsAndGetsTenant(t *testing.T) {
 	cp := newTestCP(t)
 	req := httptest.NewRequest(http.MethodPut, "/tenants/tenant-1", strings.NewReader(`{"quota":{"active_vms":2,"snapshot_bytes":4096}}`))

@@ -714,7 +714,8 @@ MCP tool:
 
 - `anvil_spawn_flock`:
   `task`, `roles`, optional `tenant_id`, optional `egress_policy`로 Goosetown
-  flock을 생성한다.
+  flock을 생성한다. blank `task`, empty role, `/` 또는 `\`가 포함된 role은
+  daemon VM spawn 전에 거부된다.
 
 - `anvil_list_flocks` / `anvil_get_flock` / `anvil_delete_flock`:
   live flock 목록, 단일 flock metadata와 agent 상태 조회, flock 소속 VM 삭제를
