@@ -13,8 +13,10 @@ import (
 	"time"
 )
 
-// Message is a single Town Wall entry.
+// Message is a single Town Wall entry. Seq is a monotonic per-flock counter
+// starting at 1; subscribers can detect dropped messages by checking for gaps.
 type Message struct {
+	Seq       uint64 `json:"seq"`
 	Timestamp string `json:"timestamp"`
 	AgentID   string `json:"agent_id"`
 	Body      string `json:"body"`
@@ -28,10 +30,13 @@ type TownWall struct {
 	path    string
 	flockID string
 	subs    map[chan Message]struct{}
+	nextSeq uint64
 }
 
 // NewTownWall opens (creating if missing) the log file at path. The file's
-// parent directory is created if it does not already exist.
+// parent directory is created if it does not already exist. If the log already
+// has entries, nextSeq is initialized so that subsequent Post calls keep the
+// monotonic seq sequence across daemon restarts.
 func NewTownWall(flockID, path string) (*TownWall, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return nil, fmt.Errorf("townwall: create parent dir: %w", err)
@@ -41,11 +46,18 @@ func NewTownWall(flockID, path string) (*TownWall, error) {
 		return nil, fmt.Errorf("townwall: open log: %w", err)
 	}
 	f.Close()
-	return &TownWall{
+	tw := &TownWall{
 		path:    path,
 		flockID: flockID,
 		subs:    make(map[chan Message]struct{}),
-	}, nil
+	}
+	// Seed nextSeq from the existing log line count. Read failures are
+	// non-fatal — the file may be missing entries from a corrupt write,
+	// but starting fresh from 0 is preferable to refusing to open.
+	if existing, err := tw.History(); err == nil {
+		tw.nextSeq = uint64(len(existing))
+	}
+	return tw, nil
 }
 
 // FlockID returns the flock identifier this wall belongs to.
@@ -61,7 +73,9 @@ func (tw *TownWall) Post(agentID, body string) (Message, error) {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()
 
+	tw.nextSeq++
 	msg := Message{
+		Seq:       tw.nextSeq,
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		AgentID:   agentID,
 		Body:      body,
@@ -84,7 +98,10 @@ func (tw *TownWall) Post(agentID, body string) (Message, error) {
 	return msg, nil
 }
 
-// History returns every parseable message currently in the log file.
+// History returns every parseable message currently in the log file. Seq
+// values are reassigned 1..N in file order so they are stable across reads
+// regardless of when the underlying log was written (the on-disk format does
+// not store seq, so this is the canonical assignment).
 func (tw *TownWall) History() ([]Message, error) {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()
@@ -95,9 +112,12 @@ func (tw *TownWall) History() ([]Message, error) {
 	defer f.Close()
 
 	var out []Message
+	var seq uint64
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		if m, ok := parseLine(scanner.Text()); ok {
+			seq++
+			m.Seq = seq
 			out = append(out, m)
 		}
 	}

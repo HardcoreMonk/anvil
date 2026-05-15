@@ -25,10 +25,16 @@ type FlockCreateRequest struct {
 }
 
 // FlockCreateResponse is returned by POST /flocks.
+//
+// AgentTokens maps agent_id → per-VM Bearer token for the in-VM goose-agent.
+// Returned only at flock-creation time (parallel to /vms's agent_token field);
+// not persisted on the flock and not surfaced via GET /flocks/{id}, so callers
+// must capture it from the spawn response.
 type FlockCreateResponse struct {
 	FlockID     string                    `json:"flock_id"`
 	Task        string                    `json:"task"`
 	Agents      []*orchestrator.AgentInfo `json:"agents"`
+	AgentTokens map[string]string         `json:"agent_tokens"`
 	TownWallURL string                    `json:"townwall_url"`
 	PostURL     string                    `json:"post_url"`
 }
@@ -116,16 +122,23 @@ func (cp *ControlPlane) createFlock(w http.ResponseWriter, r *http.Request) {
 
 	// Spawn each VM sequentially. On failure, tear everything down so we don't
 	// leak resources or leave an unusable flock registered.
+	//
+	// Agent IDs use per-role indexing (researcher-1, researcher-2, worker-1, ...)
+	// so callers can address agents by role-position rather than the global
+	// position in req.Roles. This matches the README documentation.
 	spawned := make([]string, 0, len(req.Roles))
+	tokens := make(map[string]string, len(req.Roles))
+	roleSeq := make(map[string]int, len(req.Roles))
 	cleanup := func() {
 		for _, vmID := range spawned {
 			cp.destroyVM(vmID)
 		}
 		cp.flockMgr.Delete(flockID)
 	}
-	for i, role := range req.Roles {
-		agentID := fmt.Sprintf("%s-%d", role, i+1)
-		vmInfo, _, err := cp.spawnVMForFlock(flockID, agentID, role)
+	for _, role := range req.Roles {
+		roleSeq[role]++
+		agentID := fmt.Sprintf("%s-%d", role, roleSeq[role])
+		vmInfo, agentToken, err := cp.spawnVMForFlock(flockID, agentID, role)
 		if err != nil {
 			cleanup()
 			writeJSONError(w, http.StatusInternalServerError, fmt.Errorf("spawn %s: %w", agentID, err))
@@ -139,6 +152,7 @@ func (cp *ControlPlane) createFlock(w http.ResponseWriter, r *http.Request) {
 			Status:   orchestrator.AgentStatusReady,
 		})
 		spawned = append(spawned, vmInfo.VMID)
+		tokens[agentID] = agentToken
 	}
 
 	if _, err := flock.TownWall.Post("orchestrator",
@@ -146,10 +160,19 @@ func (cp *ControlPlane) createFlock(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Flock [%s]: failed to post initial Town Wall message: %v", flockID, err)
 	}
 
+	// Persist before responding so a daemon crash between here and the next
+	// request still leaves a recoverable record. Persistence failure is
+	// logged but does not invalidate the spawn — the in-memory flock works
+	// for the duration of this daemon process.
+	if err := orchestrator.SaveFlockMetadata(cp.workDir, flock.ToMetadata()); err != nil {
+		log.Printf("Flock [%s]: failed to persist metadata: %v (still usable in memory)", flockID, err)
+	}
+
 	resp := FlockCreateResponse{
 		FlockID:     flockID,
 		Task:        req.Task,
 		Agents:      flock.Snapshot(),
+		AgentTokens: tokens,
 		TownWallURL: buildPublicURLPath("/flocks/" + flockID + "/wall"),
 		PostURL:     buildPublicURLPath("/flocks/" + flockID + "/post"),
 	}
@@ -183,10 +206,24 @@ func (cp *ControlPlane) deleteFlock(w http.ResponseWriter, flockID string) {
 		wg.Add(1)
 		go func(vmID string) {
 			defer wg.Done()
+			// Recovered flocks reference VMIDs from a previous daemon process
+			// that no longer exist in cp.vms; destroyVM's missing-vm guard
+			// makes this a no-op, but a one-line trace helps when reading
+			// the daemon log to confirm cleanup happened.
+			cp.mu.RLock()
+			_, alive := cp.vms[vmID]
+			cp.mu.RUnlock()
+			if !alive {
+				log.Printf("Flock [%s]: VM %s already absent (recovered or pre-destroyed)", flockID, vmID)
+				return
+			}
 			cp.destroyVM(vmID)
 		}(a.VMID)
 	}
 	wg.Wait()
+	if err := orchestrator.DeleteFlockMetadata(cp.workDir, flockID); err != nil {
+		log.Printf("Flock [%s]: failed to remove persisted metadata: %v", flockID, err)
+	}
 	log.Printf("Flock [%s] destroyed (%d agents)", flockID, len(agents))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "flock_id": flockID})
 }
