@@ -128,6 +128,11 @@ Town Wall message body는 `flocks/<flock_id>/TOWN_WALL.log`와 history 응답에
 남는다. provider token, API key, `agent_token` 같은 secret을 Town Wall에 게시하지
 않는다.
 
+`metadata.json`이 있는 flock은 daemon restart 뒤 read-mostly 상태로 복구될 수 있다.
+이 상태에서는 Town Wall 조회와 flock 삭제는 가능하지만, 이전 Firecracker VM process는
+자동 재시작되지 않는다. agent `status=dead`는 watchdog이 연속 health probe 실패를
+감지했을 때 표시된다.
+
 ## 일반 검증
 
 문서와 code path가 함께 맞는지 보는 기본 검증:

@@ -88,8 +88,11 @@ func main() {
 	defer cp.DestroyAll()
 
 	go func() {
+		// Fatal exit on listener errors (e.g. bind: address already in use).
+		// Logging-and-continuing here would leave a "live" daemon process with
+		// a dead API, which silently masks the failure for any liveness probe.
 		if err := cp.Start(); err != nil && err != http.ErrServerClosed {
-			log.Printf("Control plane API error: %v", err)
+			log.Fatalf("Fatal: control plane API error: %v", err)
 		}
 	}()
 	defer cp.Shutdown()

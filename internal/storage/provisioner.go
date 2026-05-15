@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Provisioner handles the disk lifecycle for MicroVMs.
@@ -44,15 +46,35 @@ func NewProvisioner(goldenImagePath, workspaceDir, buildScriptPath string) (*Pro
 	return p, nil
 }
 
-// EnsureGoldenImage checks if the golden image exists, and if not, builds it from scratch.
+// EnsureGoldenImage checks if the golden image exists and is up to date with
+// its build inputs (build script + bundled in-VM binaries + bundled scripts).
+// If any input is newer than the image, the existing image is removed and
+// rebuilt. This prevents the trap where editing goose-agent / micro-init /
+// build_image.sh / scripts/gtwall leaves a stale image baked with old contents.
+//
+// Build-input paths are derived from the conventional project layout
+// (artifacts/ next to the image, scripts/ next to the build script). Missing
+// inputs are ignored so older project trees still work.
 func (p *Provisioner) EnsureGoldenImage() error {
-	_, err := os.Stat(p.GoldenImagePath)
+	stat, err := os.Stat(p.GoldenImagePath)
 	if err == nil {
-		log.Printf("Golden image found at %s. Skipping build.", p.GoldenImagePath)
-		return nil
-	}
-
-	if !os.IsNotExist(err) {
+		artifactsDir := filepath.Dir(p.GoldenImagePath)
+		scriptDir := filepath.Dir(p.BuildScriptPath)
+		inputs := []string{
+			p.BuildScriptPath,
+			filepath.Join(artifactsDir, "goose-agent"),
+			filepath.Join(artifactsDir, "micro-init"),
+			filepath.Join(scriptDir, "gtwall"),
+		}
+		if !pathsNewerThan(stat.ModTime(), inputs...) {
+			log.Printf("Golden image at %s is up to date.", p.GoldenImagePath)
+			return nil
+		}
+		log.Printf("Golden image at %s is stale (build inputs newer); rebuilding.", p.GoldenImagePath)
+		if err := os.Remove(p.GoldenImagePath); err != nil {
+			return fmt.Errorf("remove stale golden image: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("error checking golden image: %w", err)
 	}
 
@@ -306,13 +328,53 @@ func copyFile(src, dst string) error {
 	return out.Close()
 }
 
-// EnsureMicroInit builds the micro-init binary into binaryPath if it doesn't exist.
+// pathsNewerThan reports whether any file under any of the given paths has an
+// mtime later than refMtime. Each path may be a regular file or a directory
+// (walked recursively). Missing paths and walk errors are ignored — the helper
+// fails open so a disappeared sibling never blocks startup.
+func pathsNewerThan(refMtime time.Time, paths ...string) bool {
+	for _, p := range paths {
+		info, err := os.Stat(p)
+		if err != nil {
+			continue
+		}
+		if !info.IsDir() {
+			if info.ModTime().After(refMtime) {
+				return true
+			}
+			continue
+		}
+		var found bool
+		_ = filepath.WalkDir(p, func(_ string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() || found {
+				return nil
+			}
+			if fi, e := d.Info(); e == nil && fi.ModTime().After(refMtime) {
+				found = true
+			}
+			return nil
+		})
+		if found {
+			return true
+		}
+	}
+	return false
+}
+
+// EnsureMicroInit builds the micro-init binary into binaryPath if it is missing
+// OR any source file under cmd/micro-init/ is newer than the binary on disk.
 // micro-init runs as PID 1 inside each VM; it mounts virtual filesystems, starts
 // goose-agent as a child, and calls poweroff(2) on exit for graceful VM shutdown.
 func EnsureMicroInit(binaryPath, projectRoot string) error {
-	if _, err := os.Stat(binaryPath); err == nil {
-		log.Printf("micro-init found at %s.", binaryPath)
-		return nil
+	srcDir := filepath.Join(projectRoot, "cmd", "micro-init")
+	if stat, err := os.Stat(binaryPath); err == nil {
+		if !pathsNewerThan(stat.ModTime(), srcDir) {
+			log.Printf("micro-init up to date at %s.", binaryPath)
+			return nil
+		}
+		log.Printf("micro-init at %s is stale (sources newer); rebuilding.", binaryPath)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat micro-init: %w", err)
 	}
 
 	log.Printf("Building micro-init at %s ...", binaryPath)

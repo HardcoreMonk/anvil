@@ -64,11 +64,86 @@ bash -n scripts/anvil-mcp-e2e.sh
 ```
 
 `anvil-v0.1.0` Release 본문 초안은 이미 게시된 첫 통합 release의 historical body다.
-현재 mainline의 scheduler, profile egress, `/metrics/vms`, optional trace export
-변경과 Goosetown MCP tool surface는 [RELEASE_NOTES.md](../../RELEASE_NOTES.md)의
-`Unreleased` section을 기준으로 다음 release body에 반영한다. KVM host가 준비된
+현재 mainline의 scheduler, profile egress, `/metrics/vms`, optional trace export,
+ephemera `v0.3.1` Goosetown hardening, Goosetown MCP tool surface는
+[RELEASE_NOTES.md](../../RELEASE_NOTES.md)의 `Unreleased` section과 아래
+`anvil-v0.2.0` draft를 기준으로 다음 release body에 반영한다. KVM host가 준비된
 release candidate에서는 58단계 `sudo bash e2e_test.sh`와
 `scripts/anvil-mcp-e2e.sh flock`을 함께 확인한다.
+
+## `anvil-v0.2.0` GitHub Release 본문 초안
+
+```markdown
+# anvil-v0.2.0 - Runtime scheduler, Goosetown MCP, and observability foundation
+
+`anvil-v0.2.0`은 `anvil-v0.1.0`의 IronClaw MCP integration 위에 runtime scheduler,
+tenant/egress/audit foundation, observability endpoint, ephemera `v0.3.1`
+Goosetown hardening, Goosetown MCP tool surface를 추가한다.
+
+## 포함 내용
+
+- `cmd/anvil-scheduler`: host/quota/placement state 기반 schedule decision service.
+- `internal/anvilmcp` scheduler/runtime foundation:
+  - `PlacementStore`
+  - `QuotaStore`
+  - snapshot locality preferred host
+  - spawn/restore retry/failover
+  - daemon `GET /vms` 기반 placement reconciliation
+  - IronClaw/Gemini tool input schema compatibility 검증
+- daemon control-plane foundation:
+  - `GET /health`
+  - `GET /metrics`
+  - `GET /metrics/vms`
+  - `GET/PUT /tenants/{tenant_id}`
+  - `GET /audit/runtime`
+  - `POST /audit/runtime/prune`
+- profile egress policy:
+  - `deny_all`
+  - `profile`
+  - `allow_all`
+  - profile별 `egress.json` allow CIDR/host/DNS rule
+- observability:
+  - lifecycle counter와 duration sum/count
+  - queue depth
+  - per-VM JSON metrics
+  - optional OTLP-compatible HTTP trace export
+- Goosetown MCP tools:
+  - `anvil_spawn_flock`
+  - `anvil_list_flocks`
+  - `anvil_get_flock`
+  - `anvil_delete_flock`
+  - `anvil_post_townwall`
+  - `anvil_get_townwall_history`
+- ephemera `v0.3.1` Goosetown hardening:
+  - flock member watchdog
+  - flock metadata persistence
+  - daemon restart 후 read-mostly flock recovery
+  - Town Wall monotonic `seq`
+  - fatal bind startup
+
+## 보안/호환성
+
+- `POST /vms` 외 응답과 MCP output은 `agent_token`을 노출하지 않는다.
+- upstream ephemera `v0.3.1`의 `POST /flocks` `agent_tokens` 응답 추가는 anvil
+  downstream에서 채택하지 않는다.
+- `EPHEMERA_*` runtime 환경 변수와 `goose-*` binary/API 이름은 호환성을 위해
+  유지한다.
+- `anvil_*` MCP tool name과 기존 input field 의미는 유지된다.
+
+## 검증
+
+- `go test -count=1 ./...`
+- `go build ./cmd/goose-daemon`
+- `go build ./cmd/anvil-mcp`
+- `go build ./cmd/anvil-scheduler`
+- `bash -n e2e_test.sh`
+- `bash -n scripts/build_image.sh`
+- `bash -n scripts/anvil-mcp-e2e.sh`
+- `git diff --check`
+- KVM host에서 `go build -o anvil-daemon ./cmd/goose-daemon/` 후
+  `sudo bash e2e_test.sh`
+- daemon 실행 상태에서 `scripts/anvil-mcp-e2e.sh flock`
+```
 
 ## `anvil-v0.1.0` GitHub Release 본문 초안
 
@@ -152,8 +227,8 @@ adapter로 그 기능을 IronClaw에 노출한다.
 
 - tag name
 - target commit
-- release body source: `docs/operations/release-checklist.md` 안의 fenced
-  `anvil-v0.1.0` GitHub Release 본문 초안 section
+- release body source: `docs/operations/release-checklist.md` 안의 해당
+  `anvil-v*` GitHub Release 본문 초안 fenced section
 
 `gh release --notes-file`에는 전체 체크리스트 파일을 넘기지 않는다. 게시 전 fenced
 draft만 별도의 검토된 notes file로 추출한 뒤 그 파일을 사용한다.

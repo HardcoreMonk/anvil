@@ -56,32 +56,66 @@ rm -f /tmp/goose-workspaces/*.cow  2>/dev/null || true
 rm -rf snapshots/snap-* 2>/dev/null || true
 rm -rf flocks/flock-* 2>/dev/null || true
 
+# Kill any stale daemon left over from a prior interrupted run. It would still
+# hold port 3000, causing this run's daemon to fail to bind while the test sees
+# the old process answering /vms.
+for daemon_name in anvil-daemon ephemera-daemon; do
+    if pgrep -x "$daemon_name" >/dev/null 2>&1; then
+        echo "Pre-flight: killing stale $daemon_name process(es)"
+        pkill -x "$daemon_name" 2>/dev/null || true
+        for i in $(seq 1 10); do
+            pgrep -x "$daemon_name" >/dev/null 2>&1 || break
+            sleep 1
+        done
+        if pgrep -x "$daemon_name" >/dev/null 2>&1; then
+            echo "Pre-flight: stale $daemon_name refused to die; sending SIGKILL"
+            pkill -9 -x "$daemon_name" 2>/dev/null || true
+            sleep 1
+        fi
+    fi
+done
+
 # ── 1. Start daemon ──────────────────────────────────────────────
 step "1. Start daemon"
 echo "  Working directory: $(pwd)"
 echo "  Log file: $LOG"
-./anvil-daemon >>"$LOG" 2>&1 &
+# Bind 0.0.0.0:3000 so the control plane is reachable both from the host
+# (127.0.0.1) and from inside flock VMs (via the bridge gateway 10.0.1.1).
+# The latter is required for in-VM /townwall/post → /flocks/{id}/post forwarding.
+EPHEMERA_API_ADDR=0.0.0.0:3000 ./anvil-daemon >>"$LOG" 2>&1 &
 DAEMON_PID=$!
 echo "  Daemon PID: $DAEMON_PID"
-
-# Wait until the control plane API accepts connections.
-# First runs may build the golden image before binding the API port.
-API_START_TIMEOUT_SECONDS=${API_START_TIMEOUT_SECONDS:-900}
-for i in $(seq 1 "$API_START_TIMEOUT_SECONDS"); do
-    curl -s -o /dev/null "$API/vms" 2>/dev/null && break
-    if [ $((i % 30)) -eq 0 ]; then
-        echo "  Still waiting for control plane API... (${i}s)"
-    fi
-    sleep 1
-done
-curl -s -o /dev/null "$API/vms" && ok "Control plane API is responding" || { fail "API not responding"; exit 1; }
-
 cleanup() {
     echo; echo "━━━ Cleanup (trap) ━━━"
     kill "$DAEMON_PID" 2>/dev/null || true
     wait "$DAEMON_PID" 2>/dev/null || true
 }
 trap cleanup EXIT
+
+# Wait until the control plane API accepts connections.
+# First-run cold start can rebuild stale artifacts: goose-agent (~5 s),
+# micro-init (~5 s), and the golden image (~5 min if build_image.sh runs).
+# Allow up to 10 minutes; bail early if the daemon process exits.
+DAEMON_WAIT_MAX=600
+echo "  Waiting for API (up to ${DAEMON_WAIT_MAX}s; first run may rebuild golden image)"
+API_READY=false
+for i in $(seq 1 "$DAEMON_WAIT_MAX"); do
+    if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
+        fail "Daemon process exited prematurely (see $LOG)"
+        exit 1
+    fi
+    if curl -s -o /dev/null "$API/vms" 2>/dev/null; then
+        API_READY=true
+        echo "  API ready after ${i}s"
+        break
+    fi
+    if [ $((i % 30)) -eq 0 ]; then
+        echo "  ... still waiting (${i}s elapsed; daemon PID $DAEMON_PID alive)"
+    fi
+    sleep 1
+done
+$API_READY && ok "Control plane API is responding" \
+            || { fail "API not responding after ${DAEMON_WAIT_MAX}s"; exit 1; }
 
 # ── 2. Create one VM ─────────────────────────────────────────────
 step "2. Create one VM"
@@ -658,13 +692,19 @@ check_http "$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/vms/$PROXY_
 # ── 48. Restart daemon with EPHEMERA_PUBLIC_URL ──────────────────
 step "48. Restart daemon with EPHEMERA_PUBLIC_URL=http://localhost:3000"
 kill "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null || true
-EPHEMERA_PUBLIC_URL=http://localhost:3000 ./anvil-daemon >>"$LOG" 2>&1 &
+EPHEMERA_API_ADDR=0.0.0.0:3000 EPHEMERA_PUBLIC_URL=http://localhost:3000 ./anvil-daemon >>"$LOG" 2>&1 &
 DAEMON_PID=$!
+# Restart path skips the cold rebuild (artifacts cached), so 30 s is plenty.
+RESTART_OK=false
 for i in $(seq 1 30); do
-    curl -s -o /dev/null "$API/vms" 2>/dev/null && break
+    if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
+        fail "Daemon exited during restart (see $LOG)"; exit 1
+    fi
+    if curl -s -o /dev/null "$API/vms" 2>/dev/null; then RESTART_OK=true; break; fi
     sleep 1
 done
-ok "Daemon restarted with EPHEMERA_PUBLIC_URL"
+$RESTART_OK && ok "Daemon restarted with EPHEMERA_PUBLIC_URL" \
+             || { fail "Daemon did not respond after restart"; exit 1; }
 
 PUBVM_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/vms" -H "Content-Type: application/json")
 check_http "$(echo "$PUBVM_RESP" | tail -1)" "201" "POST /vms (EPHEMERA_PUBLIC_URL test)"
@@ -749,9 +789,33 @@ echo "$POST_RESP" | head -1 | jq -e '.body' >/dev/null \
     && ok "Town Wall accepted the post" \
     || fail "Post body invalid"
 
+# ── 54b. Verify flock spawn keeps agent tokens redacted ──────────
+# anvil preserves the invariant that POST /vms is the only public response that
+# exposes an agent_token. Flock callers coordinate through /flocks/{id}/post and
+# MCP Town Wall tools, not direct guest-agent tokens.
+step "54b. Verify flock response omits agent tokens"
+TARGET_AGENT_ID="researcher-1"
+TARGET_VM_ID=$(echo "$FLOCK_BODY" | jq -r ".agents[] | select(.agent_id==\"$TARGET_AGENT_ID\") | .vm_id")
+[ "$(echo "$FLOCK_BODY" | jq -r 'has("agent_tokens") or has("agent_token")')" = "false" ] \
+    && ok "Flock spawn response omits agent token fields ✓" \
+    || fail "Flock spawn response unexpectedly exposed agent token fields"
+
+TARGET_GUEST_IP=$(curl -s "$API/vms" | jq -r ".[] | select(.vm_id==\"$TARGET_VM_ID\") | .guest_ip")
+[ -n "$TARGET_GUEST_IP" ] && [ "$TARGET_GUEST_IP" != "null" ] \
+    && ok "Resolved private IP for $TARGET_AGENT_ID: $TARGET_GUEST_IP" \
+    || fail "could not resolve guest_ip for $TARGET_VM_ID"
+TARGET_DIRECT_URL="http://${TARGET_GUEST_IP}:8080"
+
+# Verify the auth wrapper rejects unauthenticated posts.
+NOAUTH_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+    -X POST "$TARGET_DIRECT_URL/townwall/post" \
+    -H "Content-Type: application/json" \
+    -d '{"body":"unauthenticated probe"}')
+check_http "$NOAUTH_CODE" "401" "POST /townwall/post without bearer (must be rejected)"
+
 # ── 55. Retrieve Town Wall history ───────────────────────────────
-# createFlock writes one "orchestrator" entry on spawn; step 54 added
-# another. Expect at least two parseable lines.
+# createFlock writes one "orchestrator" entry on spawn and step 54 added one
+# direct control-plane post. Expect ≥2 parseable lines.
 step "55. Retrieve Town Wall history"
 HIST=$(curl -s "$API/flocks/$FLOCK_ID/wall/history")
 HIST_COUNT=$(echo "$HIST" | jq 'length')
@@ -776,6 +840,107 @@ FINAL_VM_COUNT=$(curl -s "$API/vms" | jq 'length')
 FINAL_FLOCK_COUNT=$(curl -s "$API/flocks" | jq 'length')
 [ "$FINAL_FLOCK_COUNT" = "0" ] && ok "Flock unregistered from manager" \
                                || fail "$FINAL_FLOCK_COUNT flock(s) remain"
+
+# ════════════════════════════════════════════════════════════════
+# v0.3.1 — Goosetown resilience scenarios (sub-steps of 57; the final
+# daemon shutdown stays as step 58).
+# ════════════════════════════════════════════════════════════════
+
+# ── 57a. Create resilience flock ─────────────────────────────────
+step "57a. Create flock for resilience scenarios"
+RESI_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/flocks" \
+    -H "Content-Type: application/json" \
+    -d '{"task":"resilience scenario","roles":["orchestrator","worker","reviewer"]}')
+check_http "$(echo "$RESI_RESP" | tail -1)" "201" "POST /flocks (resilience)"
+RESI_BODY=$(echo "$RESI_RESP" | head -1)
+RESI_FLOCK_ID=$(echo "$RESI_BODY" | jq -r '.flock_id')
+ok "Resilience flock: $RESI_FLOCK_ID"
+
+# ── 57b. SSE seq monotonicity ────────────────────────────────────
+step "57b. Town Wall messages carry monotonic seq"
+SEQ1_RESP=$(curl -s -X POST "$API/flocks/$RESI_FLOCK_ID/post" \
+    -H "Content-Type: application/json" \
+    -d '{"agent_id":"worker-1","body":"seq-check-1"}')
+FIRST_SEQ=$(echo "$SEQ1_RESP" | jq -r '.seq')
+[ "$FIRST_SEQ" != "null" ] && [ "$FIRST_SEQ" -ge "1" ] \
+    && ok "First post has seq=$FIRST_SEQ ✓" \
+    || fail "Expected seq ≥ 1, got: $FIRST_SEQ"
+
+SEQ2_RESP=$(curl -s -X POST "$API/flocks/$RESI_FLOCK_ID/post" \
+    -H "Content-Type: application/json" \
+    -d '{"agent_id":"worker-1","body":"seq-check-2"}')
+SECOND_SEQ=$(echo "$SEQ2_RESP" | jq -r '.seq')
+[ "$SECOND_SEQ" -gt "$FIRST_SEQ" ] \
+    && ok "Seq monotonic: $FIRST_SEQ → $SECOND_SEQ ✓" \
+    || fail "Seq did not increase: $FIRST_SEQ → $SECOND_SEQ"
+
+# ── 57c. metadata.json is written on spawn ───────────────────────
+step "57c. Flock metadata.json persisted to disk"
+META_PATH="$(pwd)/flocks/$RESI_FLOCK_ID/metadata.json"
+[ -f "$META_PATH" ] && ok "metadata.json exists at $META_PATH ✓" \
+                    || fail "metadata.json missing at $META_PATH"
+jq -e ".flock_id == \"$RESI_FLOCK_ID\"" "$META_PATH" >/dev/null \
+    && ok "metadata.json has correct flock_id ✓" \
+    || fail "metadata.json malformed or wrong flock_id"
+jq -e '.schema_version == 1' "$META_PATH" >/dev/null \
+    && ok "schema_version == 1 ✓" \
+    || fail "schema_version not 1"
+
+# ── 57d. Daemon restart preserves flock metadata ─────────────────
+step "57d. Daemon restart recovers flock from disk"
+kill "$DAEMON_PID" 2>/dev/null
+wait "$DAEMON_PID" 2>/dev/null || true
+# Recovered VMs are no longer in cp.vms; the live Firecracker processes
+# from this flock must be cleaned up explicitly so the next daemon start
+# does not collide with stale TAP/IP allocations.
+pkill -f "firecracker --api-sock" 2>/dev/null || true
+sleep 2
+
+EPHEMERA_API_ADDR=0.0.0.0:3000 ./anvil-daemon >>"$LOG" 2>&1 &
+DAEMON_PID=$!
+RESTART_OK=false
+for i in $(seq 1 60); do
+    if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
+        fail "Daemon exited during restart (see $LOG)"; exit 1
+    fi
+    if curl -s -o /dev/null "$API/vms" 2>/dev/null; then RESTART_OK=true; break; fi
+    sleep 1
+done
+$RESTART_OK && ok "Daemon back up after restart" || { fail "Daemon did not respond after restart"; exit 1; }
+
+RECOVERED=$(curl -s "$API/flocks" | jq --arg id "$RESI_FLOCK_ID" \
+    '[.[] | select(.flock_id == $id)] | length')
+[ "$RECOVERED" = "1" ] \
+    && ok "Flock $RESI_FLOCK_ID recovered after daemon restart ✓" \
+    || fail "Flock not recovered after restart (count: $RECOVERED)"
+
+RECOVERED_HIST=$(curl -s "$API/flocks/$RESI_FLOCK_ID/wall/history" | jq 'length')
+[ "$RECOVERED_HIST" -ge "3" ] \
+    && ok "Town Wall history preserved: $RECOVERED_HIST entries ✓" \
+    || fail "Town Wall history lost (got: $RECOVERED_HIST)"
+
+RECOVERED_SEQ=$(curl -s "$API/flocks/$RESI_FLOCK_ID/wall/history" | jq '.[-1].seq')
+[ "$RECOVERED_SEQ" -ge "$SECOND_SEQ" ] \
+    && ok "Recovered history seq $RECOVERED_SEQ ≥ pre-restart seq $SECOND_SEQ ✓" \
+    || fail "Recovered seq $RECOVERED_SEQ regressed below $SECOND_SEQ"
+
+# ── 57e. Delete recovered flock cleans metadata.json ─────────────
+step "57e. DELETE recovered flock removes metadata.json"
+check_http "$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/flocks/$RESI_FLOCK_ID")" \
+    "200" "DELETE recovered flock"
+[ ! -f "$META_PATH" ] \
+    && ok "metadata.json removed after DELETE ✓" \
+    || fail "metadata.json still present after DELETE"
+
+# ── 57f. Watchdog start log line ─────────────────────────────────
+# Watchdog timing-based VM-kill scenarios are flaky in shell; the
+# unit tests cover behavior. Here we only confirm the watchdog was
+# started by both daemon invocations.
+step "57f. Watchdog start log line present"
+WD_COUNT=$(grep -c "Watchdog started" "$LOG" 2>/dev/null || echo 0)
+[ "$WD_COUNT" -ge "2" ] \
+    && ok "Watchdog start log line present in $WD_COUNT daemon run(s) ✓" \
+    || fail "Expected ≥2 'Watchdog started' log lines, got $WD_COUNT"
 
 # ── 58. Shut down daemon ──────────────────────────────────────────
 step "58. Shut down daemon"

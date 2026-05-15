@@ -125,6 +125,30 @@ func TestCreateFlockRejectsInvalidTaskAndRolesBeforeRegistration(t *testing.T) {
 	}
 }
 
+func TestFlockCreateResponseDoesNotExposeAgentTokens(t *testing.T) {
+	data, err := json.Marshal(FlockCreateResponse{
+		FlockID:      "flock-1",
+		Task:         "ship review",
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+		Agents: []*orchestrator.AgentInfo{{
+			AgentID:  "worker-1",
+			Role:     "worker",
+			VMID:     "vm-1",
+			AgentURL: "http://10.0.1.2:8080",
+			Status:   orchestrator.AgentStatusReady,
+		}},
+		TownWallURL: "http://127.0.0.1:3000/flocks/flock-1/wall",
+		PostURL:     "http://127.0.0.1:3000/flocks/flock-1/post",
+	})
+	if err != nil {
+		t.Fatalf("marshal flock response: %v", err)
+	}
+	if strings.Contains(string(data), "agent_token") || strings.Contains(string(data), "agent_tokens") {
+		t.Fatalf("flock create response exposes agent token field: %s", string(data))
+	}
+}
+
 func TestTenantAPIUpsertsAndGetsTenant(t *testing.T) {
 	cp := newTestCP(t)
 	req := httptest.NewRequest(http.MethodPut, "/tenants/tenant-1", strings.NewReader(`{"quota":{"active_vms":2,"snapshot_bytes":4096}}`))

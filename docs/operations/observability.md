@@ -70,6 +70,11 @@ curl -H "Authorization: Bearer $TOKEN" \
 Town Wall SSE stream은 실시간 관찰에 사용할 수 있지만 MCP smoke에서는 history
 endpoint를 사용한다.
 
+ephemera `v0.3.1` 기반 hardening 이후 watchdog은 flock member health 실패를
+`status=dead`와 Town Wall notice로 드러낸다. daemon restart 뒤 복구된 flock은
+read-mostly 상태이므로 Town Wall history와 registry 확인은 가능하지만, 이전 daemon
+process와 함께 종료된 VM process가 자동 재시작된 것으로 해석하지 않는다.
+
 ## Snapshot GC audit
 
 `POST /snapshots/gc`를 `apply:true`로 호출하면 daemon은

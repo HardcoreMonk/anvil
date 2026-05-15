@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // These tests require root (loop mount) and mkfs.ext4.
@@ -93,6 +94,64 @@ func TestPrepareVM_WritesAgentToken(t *testing.T) {
 	content, _ := os.ReadFile(tokenFile)
 	if string(content) != token {
 		t.Errorf("expected token %q, got %q", token, string(content))
+	}
+}
+
+func TestPathsNewerThan(t *testing.T) {
+	tmp := t.TempDir()
+
+	older := filepath.Join(tmp, "older.txt")
+	newer := filepath.Join(tmp, "newer.txt")
+	srcDir := filepath.Join(tmp, "src")
+	os.MkdirAll(srcDir, 0755)
+	srcFile := filepath.Join(srcDir, "main.go")
+
+	if err := os.WriteFile(older, []byte("old"), 0644); err != nil {
+		t.Fatalf("write older: %v", err)
+	}
+	if err := os.WriteFile(newer, []byte("new"), 0644); err != nil {
+		t.Fatalf("write newer: %v", err)
+	}
+	if err := os.WriteFile(srcFile, []byte("pkg main"), 0644); err != nil {
+		t.Fatalf("write srcFile: %v", err)
+	}
+
+	// Reference time strictly between older and newer.
+	pastMtime := time.Now().Add(-1 * time.Hour)
+	futureMtime := time.Now().Add(1 * time.Hour)
+	if err := os.Chtimes(older, pastMtime, pastMtime); err != nil {
+		t.Fatalf("chtimes older: %v", err)
+	}
+	if err := os.Chtimes(newer, futureMtime, futureMtime); err != nil {
+		t.Fatalf("chtimes newer: %v", err)
+	}
+	if err := os.Chtimes(srcFile, futureMtime, futureMtime); err != nil {
+		t.Fatalf("chtimes srcFile: %v", err)
+	}
+
+	now := time.Now()
+
+	cases := []struct {
+		name  string
+		ref   time.Time
+		paths []string
+		want  bool
+	}{
+		{"file older than ref", now, []string{older}, false},
+		{"file newer than ref", now, []string{newer}, true},
+		{"directory with one newer file", now, []string{srcDir}, true},
+		{"missing file is ignored", now, []string{filepath.Join(tmp, "ghost")}, false},
+		{"mix: older + missing", now, []string{older, filepath.Join(tmp, "ghost")}, false},
+		{"mix: older + dir-with-newer", now, []string{older, srcDir}, true},
+		{"empty paths", now, nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := pathsNewerThan(tc.ref, tc.paths...)
+			if got != tc.want {
+				t.Errorf("pathsNewerThan(%v, %v) = %v, want %v", tc.ref, tc.paths, got, tc.want)
+			}
+		})
 	}
 }
 

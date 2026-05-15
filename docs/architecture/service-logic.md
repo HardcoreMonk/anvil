@@ -2,7 +2,7 @@
 
 ## 상태
 
-- 기준 버전: ephemera `v0.3.0` + anvil runtime control-plane updates
+- 기준 버전: ephemera `v0.3.1` + anvil runtime control-plane updates
 - 범위: ephemera daemon HTTP 동작, VM lifecycle, agent proxy, snapshot lifecycle,
   Goosetown flock/Town Wall, tenant/egress/audit/observability endpoint, guest agent 동작
 - 제외 범위: IronClaw MCP client 동작. 해당 내용은
@@ -280,17 +280,19 @@ createFlock()
   -> role trim, empty role과 path separator 포함 role 거부
   -> tenant_id와 egress_policy 검증
   -> flock ID와 flocks/<flock_id>/TOWN_WALL.log 준비
-  -> role마다 spawnVMInternal() 호출
+  -> role별 agent_id 번호를 부여하며 spawnVMInternal() 호출
        profile별 config/secrets/system prompt/sizing 적용
        tenant_id, egress_policy, flock_id, agent_id 전달
   -> 일부 VM spawn 실패 시 이미 생성한 VM을 destroyVM으로 정리하고 flock registry 제거
   -> 초기 Town Wall message append
+  -> flocks/<flock_id>/metadata.json 원자적 저장
   -> flock_id, task, tenant/egress, agents, townwall_url, post_url 반환
 ```
 
 `POST /flocks`는 daemon direct API에서도 validation을 spawn 전에 수행한다. blank
 `task`, empty role, `/` 또는 `\`가 포함된 role은 host resource를 만들지 않고
-`400`으로 거부한다.
+`400`으로 거부한다. anvil downstream에서는 `POST /flocks` 응답에
+`agent_token`/`agent_tokens`를 포함하지 않는다.
 
 Route: `GET /flocks`, `GET /flocks/{flock_id}`
 
@@ -306,6 +308,7 @@ Route: `DELETE /flocks/{flock_id}`
 deleteFlock()
   -> FlockManager에서 live flock 제거
   -> flock agent VM들을 병렬 destroyVM()으로 teardown
+  -> flocks/<flock_id>/metadata.json 삭제
   -> {"status":"deleted","flock_id":"..."} 반환
 ```
 
@@ -315,6 +318,7 @@ Route: `POST /flocks/{flock_id}/post`, `GET /flocks/{flock_id}/wall/history`,
 ```text
 Town Wall
   -> post는 append-only log에 timestamp, agent_id, body 기록
+  -> message는 per-flock monotonic seq 포함
   -> history는 전체 log를 JSON 배열로 반환
   -> SSE stream은 기존 history를 먼저 emit하고 새 message를 subscriber로 전달
 ```
@@ -322,6 +326,10 @@ Town Wall
 Town Wall body는 사용자가 제공한 message다. runtime audit record에는 body를 저장하지
 않지만, Town Wall history와 `TOWN_WALL.log`에는 그대로 남으므로 secret 전달 채널로
 사용하지 않는다.
+
+daemon startup은 `flocks/*/metadata.json`을 scan해 flock registry와 Town Wall log를
+read-mostly 상태로 복구한다. 복구된 flock의 VM process는 자동 재시작하지 않으며,
+watchdog은 live `cp.vms`에 남아 있는 flock member VM만 probe한다.
 
 ## VM 삭제 로직
 

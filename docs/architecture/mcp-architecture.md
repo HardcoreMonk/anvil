@@ -2,7 +2,7 @@
 
 ## 상태
 
-- 기준 버전: ephemera `v0.3.0` + anvil runtime foundation
+- 기준 버전: ephemera `v0.3.1` + anvil runtime foundation
 - MCP 버전: v1 stdio adapter
 - Entrypoint: `cmd/anvil-mcp`
 - 런타임 대상: ephemera control plane daemon HTTP API
@@ -140,6 +140,9 @@ MCP response object로 보존하며, VM/snapshot tool처럼 daemon 의미를 ada
 재해석하지 않는다.
 daemon direct `POST /flocks`도 blank `task`, empty role, `/` 또는 `\`가 포함된
 role을 VM spawn 전에 `400`으로 거부한다.
+anvil downstream은 upstream `v0.3.1`의 `agent_tokens` flock response를 MCP output에
+노출하지 않고, daemon direct response에서도 제거해 `POST /vms` 외 `agent_token`
+비노출 조건을 유지한다.
 
 Town Wall의 `GET /flocks/{flock_id}/wall` SSE stream은 MCP tool로 노출하지 않는다.
 stdio-compatible smoke와 inspection에는 `anvil_get_townwall_history`가 사용하는

@@ -117,8 +117,9 @@ curl -X DELETE \
    `DELETE /vms/{vm_id}` 절차를 따른다. stale TAP/IP, dm-snapshot, COW 파일은 먼저
    daemon cleanup path를 재시도하고, 수동 정리는 inspect 이후 최후 수단으로만 수행한다.
 
-4. Town Wall log는 `flocks/<flock_id>/TOWN_WALL.log`에 남을 수 있다. 장애 분석에는
-   사용할 수 있지만 secret 포함 여부를 확인한 뒤 공유한다.
+4. Town Wall log는 `flocks/<flock_id>/TOWN_WALL.log`에 남을 수 있고,
+   `metadata.json`이 있으면 daemon restart 뒤 read-mostly flock registry가 복구될 수
+   있다. 장애 분석에는 사용할 수 있지만 secret 포함 여부를 확인한 뒤 공유한다.
 
 ## restore 실패
 

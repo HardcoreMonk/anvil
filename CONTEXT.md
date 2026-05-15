@@ -153,6 +153,10 @@ daemon으로 보내는 outbound Bearer token이다.
   노출된 상태이며, 기존 VM/snapshot tool 계약을 대체하지 않는다.
 - daemon direct `POST /flocks`와 MCP `anvil_spawn_flock`은 blank `task`, empty role,
   path separator가 포함된 role을 VM spawn 전에 거부한다.
+- ephemera upstream `v0.3.1`의 Goosetown watchdog, flock metadata persistence,
+  Town Wall monotonic `seq`, fatal bind startup hardening은 anvil branch에 병합됐다.
+  단, upstream의 `POST /flocks` `agent_tokens` 응답 노출은 anvil 보안 불변 조건에
+  맞춰 채택하지 않는다.
 - `scripts/anvil-mcp-e2e.sh flock`과 전체 KVM `sudo bash e2e_test.sh` 58단계가
   Goosetown MCP surface와 daemon flock lifecycle 검증 경로에 포함된다.
 

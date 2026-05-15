@@ -1,7 +1,7 @@
 # Unreleased — runtime scheduler, network policy, observability
 
 현재 mainline은 anvil `anvil-v0.1.0` 통합 표면 위에 multi-host runtime
-foundation과 운영 관측성 계약을 추가한다.
+foundation, Goosetown operational hardening, 운영 관측성 계약을 추가한다.
 
 ## 추가됨
 
@@ -39,17 +39,24 @@ foundation과 운영 관측성 계약을 추가한다.
   - `anvil_delete_flock`
   - `anvil_post_townwall`
   - `anvil_get_townwall_history`
+- ephemera upstream `v0.3.1` Goosetown hardening:
+  - flock member VM health watchdog
+  - flock metadata persistence와 daemon restart 후 read-mostly recovery
+  - Town Wall monotonic `seq`
+  - stale daemon pre-flight cleanup과 bind 실패 fatal startup
 
 ## 변경됨
 
-- ephemera upstream `v0.3.0` 기반 runtime 변경을 mainline에 병합했다. Goosetown
-  flock, Town Wall, 역할별 VM sizing, system prompt 주입, 선택적 COW spawn disk는
-  ephemera runtime 계약으로 유지하고, anvil의 tenant/egress/metrics/trace 계약과
-  함께 동작하도록 `spawnVMInternal` 경로에 통합했다.
+- ephemera upstream `v0.3.0`/`v0.3.1` 기반 runtime 변경을 mainline에 병합했다.
+  Goosetown flock, Town Wall, 역할별 VM sizing, system prompt 주입, 선택적 COW
+  spawn disk, flock persistence/watchdog/seq는 ephemera runtime 계약으로 유지하고,
+  anvil의 tenant/egress/metrics/trace 계약과 함께 동작하도록 통합했다.
 - IronClaw/Gemini schema compatibility 검증은 `roles`처럼 array input을 쓰는
   tool field에 대해 array item type metadata도 기록한다.
 - daemon direct `POST /flocks`는 blank `task`, empty role, path separator가 포함된
   role을 flock registry 생성과 VM spawn 전에 `400`으로 거부한다.
+- upstream `v0.3.1`의 `POST /flocks` `agent_tokens` 응답 노출은 anvil 불변 조건에
+  맞춰 채택하지 않는다. `agent_token`은 계속 `POST /vms` 응답 외에는 노출하지 않는다.
 - `profile` egress policy는 policy 파일이 없는 기존 profile에서는 no-op으로 남아
   기존 로컬 profile 호환성을 유지한다.
 - trace export와 runtime audit API는 token, secret, daemon raw body, snapshot
@@ -69,6 +76,53 @@ foundation과 운영 관측성 계약을 추가한다.
 - 실제 KVM host에서 `go build -o anvil-daemon ./cmd/goose-daemon/` 후
   `sudo bash e2e_test.sh`
 - daemon 실행 상태에서 `scripts/anvil-mcp-e2e.sh flock`
+
+# ephemera v0.3.1 — Goosetown operational hardening
+
+ephemera `v0.3.1`은 `v0.3.0`의 Goosetown flock/Town Wall 계약 위에 장시간 운영
+안정성 보강을 추가한 runtime 릴리즈다. anvil downstream은 이 hardening을 병합하되
+`POST /vms` 외 응답에서 `agent_token`을 노출하지 않는 기존 보안 불변 조건을
+유지한다.
+
+## 새 기능
+
+### Flock member health watchdog
+
+- daemon은 flock member VM의 `/health`를 주기적으로 확인한다.
+- 연속 실패 임계값을 넘으면 agent status를 `dead`로 표시하고 Town Wall에
+  orchestrator notice를 남긴다.
+- standalone VM은 watchdog 대상이 아니다.
+
+### Flock metadata persistence
+
+- `POST /flocks`는 `flocks/<flock_id>/metadata.json`을 원자적으로 기록한다.
+- daemon 시작 시 `metadata.json`을 scan해 flock registry와 Town Wall log를
+  read-mostly 상태로 복구한다.
+- 복구된 flock의 VM process 자체는 재시작하지 않는다. `/post`, `/wall`,
+  `/wall/history`, `DELETE`는 계속 사용할 수 있고 live VM auto-restart는 후속
+  runtime 후보로 남는다.
+
+### Town Wall monotonic sequence
+
+- Town Wall `Message`에 per-flock monotonic `seq`가 추가됐다.
+- subscriber는 `seq` gap을 감지하고 `/wall/history`로 누락 범위를 복구할 수 있다.
+
+## 변경됨
+
+- flock 역할별 `agent_id`는 role별 번호를 사용한다.
+  예: `researcher-1`, `researcher-2`, `worker-1`.
+- daemon startup은 API listener bind 실패 시 fatal로 종료한다.
+- e2e pre-flight는 stale daemon과 `flocks/flock-*` runtime directory를 정리한다.
+- `goose-agent`, `micro-init`, golden image는 source/build input stale 여부를
+  확인해 필요한 경우 자동 재빌드한다.
+
+## anvil downstream 차이
+
+- upstream `v0.3.1`은 `POST /flocks` 응답에 `agent_tokens` map을 추가했지만,
+  anvil은 `POST /vms` 응답 외 `agent_token` 비노출 정책을 유지한다.
+- 외부 caller는 flock member direct token 대신 control-plane `/flocks/{id}/post`,
+  Town Wall history, MCP `anvil_post_townwall`/`anvil_get_townwall_history`를
+  사용한다.
 
 # ephemera v0.3.0 — Goosetown multi-agent orchestration
 
@@ -163,7 +217,7 @@ endpoint는 backward compatible하게 유지된다.
 # anvil v0.1.0 — IronClaw 통합 E2E 완료
 
 `anvil`은 IronClaw와 ephemera를 결합하는 새 프로젝트다. 이 저장소의 공개
-릴리즈 `v0.1.0`, `v0.2.0`, `v0.3.0`은 ephemera runtime 릴리즈이며, anvil 통합
+릴리즈 `v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.3.1`은 ephemera runtime 릴리즈이며, anvil 통합
 릴리즈는 `anvil-v0.1.0` 태그로 분리한다.
 
 ## 추가됨

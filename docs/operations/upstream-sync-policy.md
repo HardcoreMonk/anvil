@@ -31,7 +31,7 @@ ephemera upstream 반영은 `main`에서 직접 하지 않는다. 항상 전용 
 
 ```bash
 git fetch upstream main
-git checkout -b sync/ephemera-v0.3.0 origin/main
+git checkout -b sync/ephemera-v0.3.1 origin/main
 git merge --no-ff upstream/main
 ```
 
@@ -71,10 +71,10 @@ anvil 영역은 upstream runtime 계약에 맞춰 적응한다.
 
 upstream sync PR은 다음 형태를 권장한다.
 
-- branch: `sync/ephemera-v0.3.0`
-- merge commit: `merge: sync ephemera v0.3.0`
-- follow-up adaptation commit: `fix(runtime): adapt anvil to ephemera v0.3.0`
-- docs commit: `docs: document ephemera v0.3.0 baseline`
+- branch: `sync/ephemera-v0.3.1`
+- merge commit: `merge: sync ephemera v0.3.1`
+- follow-up adaptation commit: `fix(runtime): adapt anvil to ephemera v0.3.1`
+- docs commit: `docs: document ephemera v0.3.1 baseline`
 
 sync PR은 upstream merge commit과 anvil adaptation commit을 분리한다. 이렇게 해야
 upstream 변경 자체와 anvil에서 해결한 conflict/적응 작업을 review에서 구분할 수 있다.

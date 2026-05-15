@@ -14,7 +14,8 @@
   `tenant_id`와 `egress_policy`를 VM/snapshot/restore contract에 보존하고 tenant
   API, runtime audit API, `/health`, `/metrics`, `/metrics/vms`, `deny_all` 및
   profile allowlist/DNS egress rule을 제공한다. Goosetown flock spawn도
-  `tenant_id`와 `egress_policy`를 VM 생성 경로에 전달하고 flock metadata에 보존한다.
+  `tenant_id`와 `egress_policy`를 VM 생성 경로에 전달하고 flock metadata와
+  persisted `metadata.json`에 보존한다.
 - 비구현 범위: scheduler service의 production deployment automation, cross-host
   snapshot replication, scheduler-aware cross-host flock placement, L7 egress proxy,
   billing, UI.
@@ -220,8 +221,8 @@ Single-host runtime은 계속 유효하다. Multi-tenant 확장은 현재 epheme
 - ephemera 릴리즈 분석 문서 제목을 anvil 제목으로 바꾸지 않는다.
 
 restore 경로의 direct token exposure는 제거됐다. 새로운 audit record, roadmap
-예제, multi-tenant 계약은 `POST /vms` 외 응답에서 `agent_token`을 노출하지 않는
-불변 조건을 따른다.
+예제, multi-tenant 계약, flock 응답은 `POST /vms` 외 응답에서 `agent_token`을
+노출하지 않는 불변 조건을 따른다.
 
 ## 비목표
 
