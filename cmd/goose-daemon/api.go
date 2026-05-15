@@ -140,6 +140,11 @@ type ControlPlane struct {
 	// Populated lazily by the orchestrator API; standalone VM lifecycle is unaffected.
 	flockMgr *orchestrator.FlockManager
 
+	// watchdog polls each flock-member VM's /health endpoint and marks
+	// non-responsive agents dead. Started in cp.Start, stopped in cp.Shutdown
+	// BEFORE the HTTP server so it cannot observe a half-torn-down vms map.
+	watchdog *orchestrator.Watchdog
+
 	// agentHTTPClient is used for proxying requests to VM goose-agents.
 	// No global timeout — timeouts are controlled by the incoming request's context.
 	agentHTTPClient *http.Client
@@ -179,6 +184,23 @@ func NewControlPlane(
 			log.Printf("Loaded %d existing snapshot(s) from %s", len(existing), snapshotDir)
 		}
 	}
+
+	// Recover flocks persisted from previous daemon runs. Recovered flocks are
+	// read-mostly: their VMID references no longer correspond to live VMs, so
+	// /flocks/{id}/post and /flocks/{id}/wall continue to work, but /tasks
+	// against any member VM will fail until v0.4.0 adds VM auto-restart.
+	if recovered, failed, err := cp.flockMgr.LoadFromDisk(); err != nil {
+		log.Printf("Warning: failed to scan flock metadata: %v", err)
+	} else {
+		if recovered > 0 {
+			log.Printf("Recovered %d flock(s) from %s", recovered, filepath.Join(workDir, "flocks"))
+		}
+		if len(failed) > 0 {
+			log.Printf("Warning: %d flock(s) had metadata but could not be fully restored: %v", len(failed), failed)
+		}
+	}
+
+	cp.watchdog = orchestrator.NewWatchdog(cp.flockMgr, cp.locateFlockAgent, cp.listVMRefs, agentPort)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/vms", cp.handleVMs)
@@ -247,13 +269,46 @@ func (cp *ControlPlane) Start() error {
 	if publicURL != "" {
 		log.Printf("  agent_url base: %s (EPHEMERA_PUBLIC_URL)", publicURL)
 	}
+	cp.watchdog.Start()
+	log.Printf("Watchdog started (interval=5s, threshold=3 fails)")
 	return cp.srv.ListenAndServe()
 }
 
 func (cp *ControlPlane) Shutdown() {
+	// Stop the watchdog BEFORE the HTTP server. The watchdog reads cp.vms
+	// (via listVMRefs) on every tick; tearing down the server first leaves
+	// in-flight ticks racing against any cp.vms cleanup that follows.
+	cp.watchdog.Stop()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cp.srv.Shutdown(ctx)
+}
+
+// locateFlockAgent maps a vmID back to its (flockID, agentID) by scanning
+// every flock. Used by the watchdog so it can update agent status and Town
+// Wall by identity rather than by VM. Returns ok=false for standalone VMs.
+func (cp *ControlPlane) locateFlockAgent(vmID string) (string, string, bool) {
+	for _, f := range cp.flockMgr.List() {
+		for _, a := range f.Snapshot() {
+			if a.VMID == vmID {
+				return f.ID, a.AgentID, true
+			}
+		}
+	}
+	return "", "", false
+}
+
+// listVMRefs snapshots the currently-registered VMs in a form the watchdog
+// can probe (vm_id + guest_ip only). Read-locks cp.mu to keep the snapshot
+// consistent with concurrent destroyVM calls.
+func (cp *ControlPlane) listVMRefs() []orchestrator.VMRef {
+	cp.mu.RLock()
+	defer cp.mu.RUnlock()
+	out := make([]orchestrator.VMRef, 0, len(cp.vms))
+	for _, v := range cp.vms {
+		out = append(out, orchestrator.VMRef{VMID: v.VMID, GuestIP: v.GuestIP})
+	}
+	return out
 }
 
 func (cp *ControlPlane) StopCh() <-chan struct{} { return cp.stopCh }

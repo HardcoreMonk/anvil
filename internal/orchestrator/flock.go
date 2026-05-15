@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -12,6 +13,7 @@ const (
 	AgentStatusReady    = "ready"
 	AgentStatusBusy     = "busy"
 	AgentStatusDone     = "done"
+	AgentStatusDead     = "dead" // assigned by the health watchdog after consecutive probe failures
 )
 
 // AgentInfo is the per-agent record exposed via flock APIs.
@@ -61,6 +63,26 @@ func (f *Flock) Snapshot() []*AgentInfo {
 		out = append(out, &copy)
 	}
 	return out
+}
+
+// ToMetadata converts the flock into its on-disk persistence form. Holds the
+// read lock and defensively copies each AgentInfo so callers can mutate the
+// returned metadata without affecting live state.
+func (f *Flock) ToMetadata() FlockMetadata {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	agents := make(map[string]*AgentInfo, len(f.Agents))
+	for k, v := range f.Agents {
+		copy := *v
+		agents[k] = &copy
+	}
+	return FlockMetadata{
+		FlockID:       f.ID,
+		Task:          f.Task,
+		Agents:        agents,
+		CreatedAt:     f.CreatedAt,
+		SchemaVersion: currentSchemaVersion,
+	}
 }
 
 // MarshalJSON serializes the flock under a read lock so concurrent AddAgent
@@ -149,4 +171,41 @@ func (fm *FlockManager) Delete(flockID string) (*Flock, bool) {
 		delete(fm.flocks, flockID)
 	}
 	return f, ok
+}
+
+// LoadFromDisk scans workDir/flocks/ for metadata.json files and re-registers
+// each recovered flock in memory. Each flock's TownWall is reopened in
+// append mode against the existing log, preserving full history. Returns the
+// number of recovered flocks and the IDs that had metadata but could not be
+// fully restored (e.g. corrupt log file).
+//
+// Recovered flocks are read-mostly: their VMID references no longer correspond
+// to live Firecracker processes (those died with the previous daemon), so
+// DELETE on a recovered flock relies on destroyVM's missing-vm guard. Live VM
+// re-registration is deferred to v0.4.0.
+func (fm *FlockManager) LoadFromDisk() (recovered int, failed []string, err error) {
+	metas, err := ListFlockMetadata(fm.workDir)
+	if err != nil {
+		return 0, nil, err
+	}
+	for _, meta := range metas {
+		twPath := filepath.Join(fm.workDir, "flocks", meta.FlockID, "TOWN_WALL.log")
+		tw, twErr := NewTownWall(meta.FlockID, twPath)
+		if twErr != nil {
+			failed = append(failed, meta.FlockID)
+			continue
+		}
+		f := &Flock{
+			ID:        meta.FlockID,
+			Task:      meta.Task,
+			Agents:    meta.Agents,
+			TownWall:  tw,
+			CreatedAt: meta.CreatedAt,
+		}
+		fm.mu.Lock()
+		fm.flocks[meta.FlockID] = f
+		fm.mu.Unlock()
+		recovered++
+	}
+	return recovered, failed, nil
 }

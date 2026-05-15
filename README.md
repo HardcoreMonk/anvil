@@ -121,7 +121,7 @@ DELETE /vms/{id}
 
 | Feature | Detail |
 |---------|--------|
-| **Self-bootstrapping** | Golden image, kernel, Firecracker downloaded + SHA256-verified on first run |
+| **Self-bootstrapping** | Golden image, kernel, Firecracker downloaded + SHA256-verified on first run; goose-agent / micro-init / golden image are also rebuilt automatically when their sources are newer than the cached artifact (mtime-based staleness check), so editing in-VM Go code or `build_image.sh` does not need a manual `rm artifacts/...` |
 | **Minimal guest OS** | Debian Bookworm minbase — no SSH, no init daemon; `micro-init` (Go binary, PID 1) mounts virtual filesystems and manages goose-agent lifecycle |
 | **Graceful guest shutdown** | `micro-init` traps SIGTERM and calls `poweroff(2)` — no kernel panic on VM exit |
 | **Per-VM LLM profiles** | Each VM spawn can specify a named profile (`configs/profiles/{name}/`) with its own provider, model, and API key |
@@ -139,6 +139,10 @@ DELETE /vms/{id}
 | **NAT for outbound internet** | Host bridge `goose-br0` with iptables MASQUERADE enables VM-to-internet for LLM API calls |
 | **Per-client API auth** | Named Bearer tokens per client (`alice:tok1,bob:tok2`); timing-safe comparison; per-request audit log |
 | **SIGHUP token hot reload** | API token list can be updated without restarting the daemon or interrupting running VMs |
+| **VM health watchdog** (v0.3.1) | Polls every flock-member `/health` every 5 s; 3 consecutive failures → agent `status=dead` + auto Town Wall notice. See [Resilience](#resilience). |
+| **Flock metadata persistence** (v0.3.1) | `flocks/<id>/metadata.json` written atomically on spawn; daemon startup re-registers every flock and reopens its Town Wall log. Read-mostly recovery (live VM auto-restart deferred to v0.4.0). |
+| **Monotonic Town Wall seq** (v0.3.1) | Every `Message` carries `seq` (uint64, 1-based per flock); subscribers can detect dropped messages and recover from `/wall/history`. |
+| **Fatal-on-bind daemon startup** (v0.3.1) | Daemon `log.Fatalf` if the API listener fails to bind (e.g. port already in use), so a stale process never silently masks a fresh one. |
 
 ---
 
@@ -291,10 +295,11 @@ Ephemera has two levels of testing.
 Run automatically on every push and pull request via GitHub Actions. No special hardware required.
 
 ```bash
-go test ./...
+go test ./...           # standard
+go test -race ./...     # mandatory before merging concurrency-sensitive changes
 ```
 
-Covers: API token parsing, LLM profile path resolution, agent auth middleware, token generation.
+Covers: API token parsing, LLM profile path resolution, agent auth middleware, token generation, Town Wall append/history/seq monotonicity, flock metadata persistence round-trip and disk recovery, watchdog dead-marking under failure thresholds, artifact staleness check.
 
 ### End-to-end test (`e2e_test.sh`)
 
@@ -332,9 +337,16 @@ sudo bash e2e_test.sh
 | 52 | **Flock spawn** — `POST /flocks` with 5 roles (orchestrator/researcher×2/worker/reviewer) returns 201, `agents.length == 5`, valid `townwall_url` |
 | 53 | `GET /vms` shows all 5 flock members |
 | 54 | `POST /flocks/{id}/post` accepts a message and persists it |
-| 55 | `GET /flocks/{id}/wall/history` returns ≥ 2 entries (orchestrator init message + step 54 post) |
+| 54b | **In-VM forwarding** — direct `POST $agent_url/townwall/post` (the chain that `gtwall` uses) round-trips through goose-agent → control plane; unauthenticated probe rejected with 401 |
+| 55 | `GET /flocks/{id}/wall/history` returns ≥ 3 entries (orchestrator init + step 54 + step 54b) and the 54b body (escaped quote + backslash) matches verbatim |
 | 56 | `GET /flocks` lists the new flock |
 | 57 | **Flock teardown** — `DELETE /flocks/{id}` returns 200; all 5 VMs and the flock registry entry are gone |
+| 57a | Create a separate resilience flock (3 agents) |
+| 57b | **SSE seq monotonicity** — successive `POST /flocks/{id}/post` responses carry strictly increasing `seq` |
+| 57c | **Persistence** — `flocks/<id>/metadata.json` exists with correct `flock_id` and `schema_version: 1` |
+| 57d | **Recovery** — kill daemon (and Firecrackers); restart with `EPHEMERA_API_ADDR=0.0.0.0:3000`; flock reappears in `GET /flocks`; Town Wall history preserved with seq continuity |
+| 57e | `DELETE` on a recovered flock removes its `metadata.json` |
+| 57f | Daemon log shows the `Watchdog started` line for each daemon invocation |
 | 58 | Daemon graceful shutdown |
 
 **Example output (passing, flock steps 51–58):**
@@ -355,8 +367,15 @@ sudo bash e2e_test.sh
   ✓ POST /flocks/flock-1778665945495324840/post (HTTP 200)
   ✓ Town Wall accepted the post
 
+━━━ 54b. Post via agent /townwall/post (in-VM forwarding path) ━━━
+  ✓ Got agent_token for researcher-1 (64 chars)
+  ✓ Resolved private IP for researcher-1: 10.0.1.3
+  ✓ POST http://10.0.1.3:8080/townwall/post (HTTP 200)
+  ✓ POST /townwall/post without bearer (must be rejected) (HTTP 401)
+
 ━━━ 55. Retrieve Town Wall history ━━━
-  ✓ Town Wall has 2 entries
+  ✓ Town Wall has 3 entries
+  ✓ In-VM /townwall/post entry round-tripped (agent_id+body match) ✓
 
 ━━━ 56. Verify GET /flocks lists the new flock ━━━
   ✓ GET /flocks returns 1 entry(ies)
@@ -365,6 +384,32 @@ sudo bash e2e_test.sh
   ✓ DELETE /flocks/flock-1778665945495324840 (HTTP 200)
   ✓ All flock VMs torn down
   ✓ Flock unregistered from manager
+
+━━━ 57a. Create flock for resilience scenarios ━━━
+  ✓ POST /flocks (resilience) (HTTP 201)
+  ✓ Resilience flock: flock-1778666301234567890
+
+━━━ 57b. Town Wall messages carry monotonic seq ━━━
+  ✓ First post has seq=2 ✓
+  ✓ Seq monotonic: 2 → 3 ✓
+
+━━━ 57c. Flock metadata.json persisted to disk ━━━
+  ✓ metadata.json exists at /home/.../flocks/flock-.../metadata.json ✓
+  ✓ metadata.json has correct flock_id ✓
+  ✓ schema_version == 1 ✓
+
+━━━ 57d. Daemon restart recovers flock from disk ━━━
+  ✓ Daemon back up after restart
+  ✓ Flock flock-... recovered after daemon restart ✓
+  ✓ Town Wall history preserved: 3 entries ✓
+  ✓ Recovered history seq 3 ≥ pre-restart seq 3 ✓
+
+━━━ 57e. DELETE recovered flock removes metadata.json ━━━
+  ✓ DELETE recovered flock (HTTP 200)
+  ✓ metadata.json removed after DELETE ✓
+
+━━━ 57f. Watchdog start log line present ━━━
+  ✓ Watchdog start log line present in 2 daemon run(s) ✓
 
 ━━━ 58. Shut down daemon ━━━
   ✓ Daemon stopped
@@ -382,7 +427,7 @@ All settings are read from environment variables at startup.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `EPHEMERA_API_ADDR` | `127.0.0.1:3000` | Control plane bind address. Set to `0.0.0.0:3000` when behind a reverse proxy. |
+| `EPHEMERA_API_ADDR` | `127.0.0.1:3000` | Control plane bind address. Set to `0.0.0.0:3000` when behind a reverse proxy, or when using flocks: the in-VM `gtwall` / `/townwall/post` forwarder targets `http://10.0.1.1:3000` (the bridge gateway), which is unreachable with the loopback-only default. |
 | `EPHEMERA_API_PORT` | `3000` | Port only (used when `EPHEMERA_API_ADDR` is not set). |
 | `EPHEMERA_API_TOKENS` | *(unset)* | Per-client Bearer tokens: `alice:token1,bob:token2`. Preferred. |
 | `EPHEMERA_API_TOKEN` | *(unset)* | Single Bearer token (backward-compatible fallback). |
@@ -542,6 +587,8 @@ GET  /vms/{vm_id}/health   → proxied to goose-agent /health  (no auth required
 POST /vms/{vm_id}/stop     → proxied to goose-agent /stop
 ```
 
+> The agent's `/townwall/post` is **not** proxied. It is an in-VM convenience used by the bundled `gtwall` CLI, which already has the flock context. External callers should `POST /flocks/{id}/post` directly — they already know the flock ID and can pick the `agent_id` themselves.
+
 When `EPHEMERA_PUBLIC_URL` is configured, `agent_url` in VM responses points directly to the proxy base (`{EPHEMERA_PUBLIC_URL}/vms/{vm_id}`), so clients can use it as-is:
 
 ```bash
@@ -597,10 +644,19 @@ curl -X POST http://localhost:3000/flocks \
     { "agent_id":"worker-1",      "role":"worker",      "vm_id":"vm-...","agent_url":"http://10.0.1.5:8080","status":"ready" },
     { "agent_id":"reviewer-1",    "role":"reviewer",    "vm_id":"vm-...","agent_url":"http://10.0.1.6:8080","status":"ready" }
   ],
+  "agent_tokens": {
+    "orchestrator-1": "3f9a2c...",
+    "researcher-1":   "8b1e74...",
+    "researcher-2":   "c0d51a...",
+    "worker-1":       "2147ef...",
+    "reviewer-1":     "9a36b8..."
+  },
   "townwall_url": "http://localhost:3000/flocks/flock-1778665945495324840/wall",
   "post_url":     "http://localhost:3000/flocks/flock-1778665945495324840/post"
 }
 ```
+
+`agent_tokens` is returned **only here** — store it. Each token authenticates direct calls to that agent's `agent_url` endpoints (e.g. `agent_url/townwall/post`, `agent_url/tasks`) and is identical to the value injected at `/root/.ephemera-agent-token` inside the VM.
 
 If any VM fails to spawn, every VM spawned so far is torn down and the flock is removed before the error response — partial flocks are never left running. The max flock size is **20** to bound IP-pool / TAP exhaustion.
 
@@ -613,14 +669,13 @@ curl -X POST http://localhost:3000/flocks/$FLOCK_ID/post \
   -d '{"agent_id":"researcher-1","body":"Found existing dark mode CSS variables"}'
 ```
 
-Inside a flock VM, the same effect can be achieved via the bundled `gtwall` CLI:
+Inside a flock VM, the same effect can be achieved via the bundled `gtwall` CLI (typically invoked by the goose-agent's `/tasks` execution context — there is no SSH into the guest):
 
 ```bash
-# inside the VM (via SSH-equivalent flow or the agent /tasks shell)
 gtwall "Claiming src/styles/theme.css"
 ```
 
-`gtwall` reads `/root/.ephemera-flock` for the flock context, calls the in-VM `goose-agent /townwall/post`, which forwards to the control plane.
+`gtwall` reads `/root/.ephemera-flock` for the flock context, reads `/root/.ephemera-agent-token` for auth, then calls the in-VM `goose-agent /townwall/post`, which forwards to the control plane's `/flocks/{id}/post`. For this forward to succeed, the control plane must be reachable on the bridge gateway IP `10.0.1.1` — start the daemon with `EPHEMERA_API_ADDR=0.0.0.0:3000` (see [Configuration](#configuration)).
 
 #### Stream the Town Wall (SSE)
 
@@ -1041,6 +1096,53 @@ curl -X POST https://api.example.com/vms \
 
 ---
 
+## Resilience
+
+v0.3.1 hardens Goosetown for long-running flock workloads with three additive features. All preserve v0.3.0 wire compatibility (`seq` is a new JSON field; the watchdog is purely server-side; persistence touches only `flocks/<id>/metadata.json`).
+
+### Health watchdog
+
+A background goroutine polls every flock-member VM's `/health` endpoint every 5 seconds (1 s HTTP timeout). After 3 consecutive failures the agent's status transitions to `"dead"` and a notice is auto-posted to the Town Wall:
+
+```
+[2026-05-15T14:33:12Z] <orchestrator> worker-1 unresponsive after 3 health probes - marked dead
+```
+
+Subscribers on the SSE stream see this in real time. The dead agent is **not** auto-revived even if it transiently recovers — operators decide when to reset by deleting the flock or the individual VM. Standalone (non-flock) VMs are not watched.
+
+### Flock state persistence
+
+`POST /flocks` writes `flocks/<flock-id>/metadata.json` atomically (tmp + rename) before returning the response. On daemon startup the file is rescanned and every flock is re-registered in memory. The Town Wall log is reopened in append mode so full message history is preserved across restarts; `seq` numbering continues monotonically.
+
+> **Recovery scope (v0.3.1)**: only the *flock metadata* is restored. The Firecracker processes themselves are gone after a daemon restart, so calls that need a live VM (`/tasks`, `/stop`) will fail. Recovered flocks are useful for: querying audit history (`/wall/history`), enumerating previously dispatched work, and cleanly `DELETE`-ing the leftover registration. Live VM auto-restart is on the v0.4.0 roadmap.
+
+### Monotonic message sequence numbers
+
+Each Town Wall `Message` carries a `seq` field starting at 1 per flock. A subscriber that reconnects after a network blip can compare its last received `seq` against the newest message it sees and detect any gap; missing entries can be fetched from `/flocks/{id}/wall/history` and filtered by `seq`.
+
+```bash
+LAST_SEQ=42
+curl -N "$API/flocks/$FLOCK_ID/wall" | while read -r line; do
+    case "$line" in
+        data:*)
+            msg="${line#data: }"
+            seq=$(echo "$msg" | jq -r .seq)
+            if [ "$seq" -gt "$((LAST_SEQ + 1))" ]; then
+                # gap — recover from history
+                curl -s "$API/flocks/$FLOCK_ID/wall/history" | \
+                    jq --argjson last "$LAST_SEQ" --argjson seen "$seq" \
+                        '.[] | select(.seq > $last and .seq < $seen)'
+            fi
+            LAST_SEQ=$seq
+            ;;
+    esac
+done
+```
+
+`seq` is reassigned 1..N from the on-disk log each time `History` is read, so it is stable across daemon restarts (the file format itself does not store seq — it is the canonical assignment from line order).
+
+---
+
 ## Known Limitations
 
 | Limitation | Detail |
@@ -1048,6 +1150,15 @@ curl -X POST https://api.example.com/vms \
 | **Single-host** | All VMs run on one physical host. Multi-host clustering is not supported. |
 | **Same-snapshot concurrent restores not supported** | The guest IP is reconfigured via vsock after restore, so different-snapshot concurrent restores each get a fresh IP. However, two VMs from the *same* snapshot would still collide on the Firecracker vsock UDS path (which is fixed in `state.bin`), so same-snapshot concurrent restores are not supported. |
 | **Cross-machine restore** | Supported manually: copy the `snapshots/<id>/` directory to the target host at the same absolute path, then call `POST /snapshots/{id}/restore`. Automated transfer is not built in. |
+| **Recovered flocks are read-mostly** (v0.3.1) | After daemon restart, flock metadata is restored but the underlying Firecracker processes are gone. `/tasks` and `/stop` against a recovered agent's VM will fail; `/post`, `/wall`, `/wall/history`, and `DELETE` continue to work. Live VM auto-restart is on the v0.4.0 roadmap. |
+| **Watchdog state not persisted** (v0.3.1) | A `status=dead` marking set by the watchdog lives only in memory. After a daemon restart, the recovered flock's agents go back to their spawn-time status (typically `ready`) until the watchdog probes them again. Status-update persistence is on the v0.4.0 roadmap. |
+| **In-VM control-plane auth requires env var** (v0.3.1) | When the control plane runs with `EPHEMERA_API_TOKENS` set, the in-VM `/townwall/post` forwarder needs `EPHEMERA_CONTROL_PLANE_TOKEN` set inside the VM to authenticate against the control plane. Automatic per-VM control-plane token injection is on the v0.4.0 roadmap. |
+
+---
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for development setup, test gates, configuration / secrets handling, PR expectations, and the areas of code that need extra care (KVM, networking, snapshots, golden image bake, in-VM auth).
 
 ---
 

@@ -1,3 +1,68 @@
+# v0.3.1 — Goosetown Operational Hardening
+
+**Ephemera** v0.3.1 hardens the Goosetown layer introduced in v0.3.0 for long-running workloads. Three operational risks present in v0.3.0 are addressed: VM death goes from silent to actively surfaced, flock state survives daemon restarts, and Town Wall subscribers can now detect message gaps. The release also folds in Phase 5 verification follow-up that completes the in-VM `gtwall` chain validation, plus a `CONTRIBUTING.md`. All v0.3.0 API responses remain backward compatible — only additive fields and one new internal behavior surface (watchdog).
+
+---
+
+## What's New
+
+### VM health watchdog
+
+- A background goroutine polls every flock-member VM's `/health` endpoint every 5 seconds (1 s per-probe HTTP timeout)
+- After 3 consecutive failures the agent's status transitions to `"dead"` in the flock registry and a notice is auto-posted to the Town Wall as `<orchestrator>`: `worker-1 unresponsive after 3 health probes - marked dead`
+- A revived VM is **not** auto-marked back to `ready` — operators clear dead state by deleting the flock or the individual VM
+- Standalone (non-flock) VMs are not watched (locator returns `ok=false`)
+- Watchdog is stopped before the HTTP server during shutdown to prevent it from observing a half-torn-down `cp.vms`
+
+### Flock state persistence
+
+- `POST /flocks` writes `flocks/<flock-id>/metadata.json` atomically (tmp + rename) before returning the response
+- `DELETE /flocks/{id}` removes the metadata file (the `TOWN_WALL.log` is kept as an audit artifact)
+- Daemon startup scans `flocks/*/metadata.json` and re-registers every flock in memory; the Town Wall log is reopened in append mode so full history (and `seq` numbering) continues across restarts
+- Recovered flocks are read-mostly: their VM IDs no longer correspond to live Firecracker processes (those died with the previous daemon), so `/tasks` against them will fail; `/post`, `/wall`, `/wall/history`, and `DELETE` continue to work
+- Schema versioned (`schema_version: 1`) for future migrations
+- Live VM auto-restart is deferred to v0.4.0
+
+### Monotonic SSE sequence numbers
+
+- Every Town Wall `Message` now carries `seq` (uint64) starting at 1 per flock and incrementing on each post
+- `seq` is preserved across daemon restarts by initializing from `len(History())` when the wall is reopened
+- Subscribers detecting gaps in `seq` can fall back to `/flocks/{id}/wall/history` to recover the missing range
+- The on-disk log format is unchanged (`[ts] <agent> body`); seq is wire-format-only and is reassigned 1..N from line order on each `History` read
+
+### Phase 5 verification follow-up
+
+These items extend the v0.3.0 work to cover what the original e2e couldn't:
+
+- `agent_tokens` in `POST /flocks` response — additive map of `agent_id → bearer token`, lets callers authenticate to in-VM agent endpoints (matches the existing `/vms` spawn pattern)
+- Per-role `agent_id` indexing — `roles=["orchestrator","researcher","researcher","worker","reviewer"]` now produces `orchestrator-1, researcher-1, researcher-2, worker-1, reviewer-1` (matches the README example; previous global indexing produced `researcher-2, researcher-3, worker-4, reviewer-5`)
+- New e2e step **54b** validates the in-VM `/townwall/post` chain end-to-end (the same path `gtwall` takes), including escaped quote/backslash JSON round-trip and 401 on unauthenticated probe
+- `/townwall/post` is documented as intentionally **not** proxied through the control plane — external callers should `POST /flocks/{id}/post` directly
+
+### Daemon and tooling hardening
+
+- mtime-based auto-rebuild for `goose-agent`, `micro-init`, and the golden image — editing in-VM Go code or `build_image.sh` no longer requires a manual `rm artifacts/...`
+- Daemon `log.Fatalf` on `ListenAndServe` error so a `bind: address already in use` doesn't leave a silent zombie process
+- e2e pre-flight kills any stale `ephemera-daemon` from a prior interrupted run, cleans `flocks/flock-*` workdir entries, and waits up to 600 s on cold-start (handles golden-image rebuild)
+- Daemons in the e2e are started with `EPHEMERA_API_ADDR=0.0.0.0:3000` so the bridge gateway IP `10.0.1.1` accepts in-VM `/townwall/post` forwards
+
+### Documentation
+
+- New `CONTRIBUTING.md` focused on this project's specific gotchas (host vs in-VM binary classes, gitignored profile yaml, root/KVM e2e requirements, snapshot lifecycle, golden image bake cost, in-VM auth)
+- README **Resilience** section documents the watchdog, persistence scope, and seq gap-detection pattern
+- README env-var table notes `EPHEMERA_API_ADDR=0.0.0.0:3000` is required for flock /townwall/post forwarding
+
+---
+
+## Upgrade Notes
+
+- **Fully backward compatible** with v0.3.0 clients — `seq`, `agent_tokens`, and the new `metadata.json` are all additive; existing endpoints unchanged
+- **No image rebuild required** unless the daemon detects stale in-VM binaries — the new staleness check handles that automatically on the next start
+- **First boot after upgrade**: existing `flocks/<id>/TOWN_WALL.log` files are preserved; flocks created before v0.3.1 (which have no `metadata.json`) are *not* recovered automatically. Going forward, every flock is recoverable
+- **Production with `EPHEMERA_API_TOKENS` set**: the in-VM `/townwall/post` forwarder still relies on `EPHEMERA_CONTROL_PLANE_TOKEN` being set inside the VM; auto-injection is on the v0.4.0 roadmap
+
+---
+
 # v0.3.0 — Goosetown: Multi-Agent Orchestration
 
 **Ephemera** now runs heterogeneous groups of role-specialized MicroVMs as a single addressable unit ("flocks"). One `POST /flocks` call spawns an orchestrator, researchers, workers, and reviewers in parallel, each sized to its role and sharing an append-only **Town Wall** log for coordination. Every v0.2.0 endpoint behaves exactly as before — the new surface is purely additive, so existing clients continue to work without changes.
