@@ -402,6 +402,7 @@ cmd/
                       flock/Town Wall control-plane API
   anvil-mcp/          anvil/IronClaw용 stdio MCP adapter entrypoint
   anvil-scheduler/    runtime host/quota/placement scheduler service
+  e2e-replay-server/  browser 기반 E2E terminal replay player
   goose-agent/        VM 내부 HTTP agent
   micro-init/         VM 내부 PID 1
 
@@ -429,6 +430,7 @@ docs/
   analysis/            ephemera 버전 비교와 소스 분석
   lifecycle/runs/      계산된 lifecycle 상태 snapshot
   operations/          보안 정책, runbook, DR, 관측성, release/operate 기록
+  replays/             browser replay player용 sanitized E2E recording
   superpowers/         승인된 spec, review, plan 기록
 
 snapshots/             snapshot 저장 디렉터리, gitignore
@@ -603,6 +605,39 @@ rate limit에 따라 보통 15-30분 이상 걸릴 수 있다.
 | 51-57 | Goosetown flock 생성, `/vms` 반영, Town Wall post/history/list/delete, token redaction |
 | 57a-57f | Town Wall seq, flock metadata persistence, daemon restart recovery, watchdog log |
 | 58 | daemon graceful shutdown |
+
+### E2E replay player
+
+`cmd/e2e-replay-server`는 full KVM E2E와 IronClaw E2E terminal recording을
+브라우저에서 line-by-line replay하는 작은 web player다. Recording은 서버에서
+ANSI 제어 문자와 token/API key를 제거한 뒤 `/api/recording`으로 제공한다.
+
+기본 playlist는 다음 두 항목이다.
+
+| Replay | Source | 설명 |
+|---|---|---|
+| `full-kvm-e2e` | `docs/replays/full-kvm-e2e.txt` | `anvil-v0.2.0` full KVM 58단계 replay |
+| `ironclaw-e2e` | `/tmp/anvil-real-e2e-recording.typescript` | 로컬에 recording이 있을 때만 사용 가능한 IronClaw MCP replay |
+
+```bash
+go run ./cmd/e2e-replay-server
+```
+
+기본 주소는 `http://127.0.0.1:8787`이다. 다른 recording을 지정하려면:
+
+```bash
+go run ./cmd/e2e-replay-server \
+  -addr 127.0.0.1:8788 \
+  -full-kvm-recording docs/replays/full-kvm-e2e.txt \
+  -recording /tmp/anvil-real-e2e-recording.typescript
+```
+
+API:
+
+```bash
+curl http://127.0.0.1:8787/api/playlist
+curl 'http://127.0.0.1:8787/api/recording?id=full-kvm-e2e'
+```
 
 ---
 

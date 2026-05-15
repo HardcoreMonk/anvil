@@ -1,0 +1,87 @@
+anvil full KVM E2E test replay
+source run: anvil-v0.2.0 target commit 5b8298f
+recorded: 2026-05-15 17:42:22-17:44:47 KST
+source log: /tmp/ephemera-test-Ylc65L.log -> /tmp/anvil-full-kvm-e2e.log
+result: All test steps passed
+
+== runtime evidence ==
+KVM/Firecracker boot logs captured: 5163 lines
+Watchdog started lines: 3
+goose-agent token auth enabled lines: 18
+daemon API bind: 0.0.0.0:3000
+release tag: anvil-v0.2.0
+
+== full e2e step trace ==
+PASS  1. Start daemon
+PASS  2. Create one VM
+PASS  3. Run a task on VM1
+PASS  4. Stop goose agent on VM1
+PASS  5. Delete VM1
+PASS  6. Create two VMs
+PASS  Verify VM list (should be 2)
+PASS  7. Run tasks on VM2 and VM3 in parallel
+PASS  8. Stop goose agents on VM2 and VM3
+PASS  9. Delete both VMs
+PASS  Verify VM list is empty (should be 0)
+PASS  11. Create VM for snapshot test
+PASS  12. Take snapshot of snap-source VM (stop_after=true)
+PASS  13. Verify snapshot list (should be 1)
+PASS  14. Restore VM from snapshot
+PASS  15. Run task on restored VM
+PASS  16. Delete restored VM
+PASS  17. Delete snapshot
+PASS  19. Create two VMs for concurrent restore test
+PASS  20. Snapshot both VMs (stop_after=true)
+PASS  21. Restore two different snapshots concurrently
+PASS  22. Verify both restored VMs running at the same time
+PASS  23. Verify both restored agents respond
+PASS  24. Cleanup concurrent restore test
+PASS  26. Create VM for diff snapshot test
+PASS  27. Take snapshot #1 (auto-detect -> Full)
+PASS  28. Take snapshot #2 (auto-detect -> Diff)
+PASS  29. Verify Diff memory.bin uses fewer disk blocks than Full (sparse-aware)
+PASS  30. Stop source VM before restoring diff snapshot
+PASS  31. Restore from Diff snapshot
+PASS  32. Verify Diff-restored agent responds
+PASS  33. Attempt to delete Full snapshot (should fail -- Diff depends on it)
+PASS  34. Cleanup diff snapshot test
+PASS  36. Create VM for COW rootfs test
+PASS  37. Take snapshot of COW-test VM (stop_after=true)
+PASS  38. Restore from snapshot (COW path)
+PASS  39. Verify dm-snapshot COW device is active
+PASS  40. Verify exception store initial disk usage is minimal
+PASS  41. Verify COW-restored agent responds
+PASS  42. Delete COW-restored VM and verify kernel resource cleanup
+PASS  43. Delete COW snapshot
+PASS  45. Create VM for agent proxy endpoint test
+PASS  46. Test proxy: GET /vms/$PROXY_VM_ID/health
+PASS  47. Test proxy: POST /vms/$PROXY_VM_ID/stop
+PASS  48. Restart daemon with EPHEMERA_PUBLIC_URL=http://localhost:3000
+PASS  49. Verify proxy access via agent_url
+PASS  51. Prep role profile yaml files
+PASS  52. Create flock with 5 agents
+PASS  53. Verify /vms shows the 5 flock members
+PASS  54. Post a message to the Town Wall
+PASS  54b. Verify flock response omits agent tokens
+PASS  55. Retrieve Town Wall history
+PASS  56. Verify GET /flocks lists the new flock
+PASS  57. Delete flock and verify all member VMs are torn down
+PASS  57a. Create flock for resilience scenarios
+PASS  57b. Town Wall messages carry monotonic seq
+PASS  57c. Flock metadata.json persisted to disk
+PASS  57d. Daemon restart recovers flock from disk
+PASS  57e. DELETE recovered flock removes metadata.json
+PASS  57f. Watchdog start log line present
+PASS  58. Shut down daemon
+
+== security and resilience checkpoints ==
+PASS  Restore responses omit agent_token
+PASS  Flock spawn response omits agent_token and agent_tokens
+PASS  Unauthenticated direct Town Wall guest post returns 401
+PASS  Town Wall seq is monotonic
+PASS  flock metadata.json persisted and recovered after daemon restart
+PASS  DELETE recovered flock removes metadata.json
+PASS  Watchdog start log present across daemon restarts
+
+== final ==
+All test steps passed
