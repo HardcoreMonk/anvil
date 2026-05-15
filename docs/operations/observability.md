@@ -54,6 +54,22 @@ curl http://127.0.0.1:3010/health
 curl http://127.0.0.1:3010/placements
 ```
 
+## Goosetown 상태 확인
+
+Goosetown flock은 live registry와 Town Wall log를 함께 본다.
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:3000/flocks
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:3000/flocks/$FLOCK_ID
+curl -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:3000/flocks/$FLOCK_ID/wall/history
+```
+
+`GET /flocks/{flock_id}`의 agent map에서 `agent_id`, `role`, `vm_id`, `agent_url`,
+`status`를 확인하고, 각 member VM은 `/vms/{vm_id}/health` proxy로 추가 점검한다.
+Town Wall SSE stream은 실시간 관찰에 사용할 수 있지만 MCP smoke에서는 history
+endpoint를 사용한다.
+
 ## Snapshot GC audit
 
 `POST /snapshots/gc`를 `apply:true`로 호출하면 daemon은
@@ -158,8 +174,9 @@ ANVIL_OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 ./anvil-daemon
 - snapshot storage quota dashboard
 
 현재 운영 판단은 daemon log, `/health`, `/metrics`, `GET /vms`, `GET /snapshots`,
-`/metrics/vms`, VM health endpoint, `snapshots/gc-audit.jsonl`, runtime audit API,
-optional trace export를 조합해서 수행한다.
+`GET /flocks`, Town Wall history, `/metrics/vms`, VM health endpoint,
+`snapshots/gc-audit.jsonl`, runtime audit API, optional trace export를 조합해서
+수행한다.
 
 ## 향후 metrics 후보
 

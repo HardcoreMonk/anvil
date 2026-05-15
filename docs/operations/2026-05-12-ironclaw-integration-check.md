@@ -180,6 +180,7 @@ ironclaw mcp test anvil --no-onboard --cli-only
 ```bash
 scripts/anvil-mcp-e2e.sh lifecycle
 scripts/anvil-mcp-e2e.sh semantic
+scripts/anvil-mcp-e2e.sh flock
 ```
 
 `lifecycle`은 `anvil_run_task` 응답의 의미적 marker assertion만 끈다. 이 모드도
@@ -188,6 +189,9 @@ scripts/anvil-mcp-e2e.sh semantic
 marker를 확인한다. 두 모드 모두 실제 daemon-backed 검증이므로 KVM/root가 가능한
 host와 daemon에 도달 가능한 `ANVIL_DAEMON_URL`/`ANVIL_API_TOKEN` 설정이 필요하며,
 `semantic`은 기대한 marker를 반환할 수 있는 유효한 LLM credential까지 요구한다.
+`flock`은 후속 Goosetown MCP surface 보강으로 추가된 모드이며
+`anvil_spawn_flock`, `anvil_list_flocks`, `anvil_post_townwall`,
+`anvil_get_townwall_history`, `anvil_delete_flock`을 확인한다.
 
 ## 남은 운영상 주의점
 

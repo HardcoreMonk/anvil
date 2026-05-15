@@ -2,9 +2,9 @@
 
 ## 상태
 
-- 기준 버전: `v0.2.0` + anvil runtime control-plane updates
+- 기준 버전: ephemera `v0.3.0` + anvil runtime control-plane updates
 - 범위: ephemera daemon HTTP 동작, VM lifecycle, agent proxy, snapshot lifecycle,
-  tenant/egress/audit/observability endpoint, guest agent 동작
+  Goosetown flock/Town Wall, tenant/egress/audit/observability endpoint, guest agent 동작
 - 제외 범위: IronClaw MCP client 동작. 해당 내용은
   [mcp-architecture.md](mcp-architecture.md)를 참조한다.
 
@@ -35,6 +35,11 @@ control plane daemon은 하나의 HTTP service를 노출한다.
 | `/snapshots/gc` | `cmd/goose-daemon/api.go` | snapshot retention GC dry-run/apply |
 | `/snapshots/{id}/restore` | `cmd/goose-daemon/api.go` | snapshot에서 VM restore |
 | `/snapshots/{id}` | `cmd/goose-daemon/api.go` | snapshot 삭제 |
+| `/flocks` | `cmd/goose-daemon/orchestrator_api.go` | Goosetown flock 생성과 live flock 목록 |
+| `/flocks/{flock_id}` | `cmd/goose-daemon/orchestrator_api.go` | flock metadata 조회와 소속 VM teardown |
+| `/flocks/{flock_id}/post` | `cmd/goose-daemon/orchestrator_api.go` | Town Wall message append |
+| `/flocks/{flock_id}/wall` | `cmd/goose-daemon/orchestrator_api.go` | Town Wall SSE stream |
+| `/flocks/{flock_id}/wall/history` | `cmd/goose-daemon/orchestrator_api.go` | Town Wall history 조회 |
 
 VM 내부의 `goose-agent`는 다음 endpoint를 제공한다.
 
@@ -45,6 +50,7 @@ VM 내부의 `goose-agent`는 다음 endpoint를 제공한다.
 | `GET /workspace?path=...` | VM별 Bearer token | `/workspace` 아래 단일 파일 읽기 |
 | `GET /health` | 없음 | `idle` 또는 `busy` 반환 |
 | `POST /stop` | VM별 Bearer token | agent HTTP server graceful stop |
+| `POST /townwall/post` | VM별 Bearer token | flock context를 읽어 host Town Wall에 message 전달 |
 
 외부 caller는 private guest IP에 직접 접근하기보다 control plane proxy endpoint를
 사용해야 한다.
@@ -248,6 +254,74 @@ listVMs()
 ```
 
 목록 응답에는 `agent_token`을 포함하지 않는다.
+
+## Goosetown flock/Town Wall 로직
+
+Route: `POST /flocks`
+
+입력:
+
+```json
+{
+  "task": "release readiness review",
+  "roles": ["orchestrator", "researcher", "worker", "reviewer"],
+  "tenant_id": "optional-tenant",
+  "egress_policy": "profile"
+}
+```
+
+흐름:
+
+```text
+createFlock()
+  -> JSON body decode
+  -> task trim, blank task 거부
+  -> roles 개수 1..20 확인
+  -> role trim, empty role과 path separator 포함 role 거부
+  -> tenant_id와 egress_policy 검증
+  -> flock ID와 flocks/<flock_id>/TOWN_WALL.log 준비
+  -> role마다 spawnVMInternal() 호출
+       profile별 config/secrets/system prompt/sizing 적용
+       tenant_id, egress_policy, flock_id, agent_id 전달
+  -> 일부 VM spawn 실패 시 이미 생성한 VM을 destroyVM으로 정리하고 flock registry 제거
+  -> 초기 Town Wall message append
+  -> flock_id, task, tenant/egress, agents, townwall_url, post_url 반환
+```
+
+`POST /flocks`는 daemon direct API에서도 validation을 spawn 전에 수행한다. blank
+`task`, empty role, `/` 또는 `\`가 포함된 role은 host resource를 만들지 않고
+`400`으로 거부한다.
+
+Route: `GET /flocks`, `GET /flocks/{flock_id}`
+
+```text
+list/get flock
+  -> host-local FlockManager registry snapshot 반환
+  -> agent map에는 agent_id, role, vm_id, agent_url, status 포함
+```
+
+Route: `DELETE /flocks/{flock_id}`
+
+```text
+deleteFlock()
+  -> FlockManager에서 live flock 제거
+  -> flock agent VM들을 병렬 destroyVM()으로 teardown
+  -> {"status":"deleted","flock_id":"..."} 반환
+```
+
+Route: `POST /flocks/{flock_id}/post`, `GET /flocks/{flock_id}/wall/history`,
+`GET /flocks/{flock_id}/wall`
+
+```text
+Town Wall
+  -> post는 append-only log에 timestamp, agent_id, body 기록
+  -> history는 전체 log를 JSON 배열로 반환
+  -> SSE stream은 기존 history를 먼저 emit하고 새 message를 subscriber로 전달
+```
+
+Town Wall body는 사용자가 제공한 message다. runtime audit record에는 body를 저장하지
+않지만, Town Wall history와 `TOWN_WALL.log`에는 그대로 남으므로 secret 전달 채널로
+사용하지 않는다.
 
 ## VM 삭제 로직
 

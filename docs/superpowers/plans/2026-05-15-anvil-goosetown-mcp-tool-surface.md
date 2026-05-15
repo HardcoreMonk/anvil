@@ -1421,3 +1421,32 @@ Type consistency:
 
 - `FlockCreateRequest`, `FlockCreateResponse`, `FlockInfo`, `TownWallPostRequest`, `TownWallMessage` 이름은 daemon client, tool handler, tests에서 동일하게 사용한다
 - tool names는 registration, schema, docs에서 동일하다
+
+## Post-Implementation Gate
+
+2026-05-15 후속 grill-me 결과로 다음 보강을 완료했다.
+
+- daemon direct `POST /flocks`도 blank `task`, empty role, `/` 또는 `\`가 포함된
+  role을 flock registry 생성과 VM spawn 전에 `400`으로 거부한다.
+- `cmd/goose-daemon/api_test.go`에 spawn 전 validation regression test를 추가했다.
+- 이 계획 문서를 feature branch에 포함하고 실행 체크박스를 완료 상태로 현행화했다.
+- 전체 KVM E2E를 재실행해 `sudo bash e2e_test.sh` 58단계가 pass했다.
+
+Fresh verification:
+
+```bash
+go test ./...
+go build ./cmd/goose-daemon
+go build ./cmd/anvil-mcp
+go build ./cmd/anvil-scheduler
+bash -n e2e_test.sh
+bash -n scripts/anvil-mcp-e2e.sh
+git diff --check
+sudo bash e2e_test.sh
+```
+
+MCP flock smoke는 daemon 실행 상태에서 다음 명령으로 검증한다.
+
+```bash
+scripts/anvil-mcp-e2e.sh flock
+```

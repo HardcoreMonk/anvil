@@ -17,7 +17,7 @@ Release 본문에서 두 이름을 섞어 쓰지 않는다.
 |---|---|---|---|
 | ephemera runtime | `v0.2.0` | Firecracker MicroVM runtime source snapshot | `cmd/goose-daemon`, `cmd/goose-agent`, `cmd/micro-init`, `internal/storage`, `internal/network`, `internal/vm` |
 | anvil integration | `anvil-v0.1.0` | IronClaw 통합 MCP adapter와 운영 계약 | `cmd/anvil-mcp`, `internal/anvilmcp`, workspace copy-in/out, snapshot MCP tools, daemon env alias, IronClaw E2E 검증 |
-| anvil runtime foundation | 다음 `anvil-v*` tag | scheduler, network policy, observability foundation | `cmd/anvil-scheduler`, `internal/anvilmcp`, daemon tenant/audit/metrics API, profile egress, optional trace export |
+| anvil runtime foundation | 다음 `anvil-v*` tag | scheduler, network policy, observability, Goosetown MCP foundation | `cmd/anvil-scheduler`, `internal/anvilmcp`, daemon tenant/audit/metrics API, profile egress, optional trace export, Goosetown flock/Town Wall MCP tools |
 
 ## 게시 전 확인 명령
 
@@ -59,12 +59,16 @@ go test ./...
 go build ./cmd/goose-daemon
 go build ./cmd/anvil-mcp
 go build ./cmd/anvil-scheduler
+bash -n e2e_test.sh
+bash -n scripts/anvil-mcp-e2e.sh
 ```
 
 `anvil-v0.1.0` Release 본문 초안은 이미 게시된 첫 통합 release의 historical body다.
 현재 mainline의 scheduler, profile egress, `/metrics/vms`, optional trace export
-변경은 [RELEASE_NOTES.md](../../RELEASE_NOTES.md)의 `Unreleased` section을 기준으로
-다음 release body에 반영한다.
+변경과 Goosetown MCP tool surface는 [RELEASE_NOTES.md](../../RELEASE_NOTES.md)의
+`Unreleased` section을 기준으로 다음 release body에 반영한다. KVM host가 준비된
+release candidate에서는 58단계 `sudo bash e2e_test.sh`와
+`scripts/anvil-mcp-e2e.sh flock`을 함께 확인한다.
 
 ## `anvil-v0.1.0` GitHub Release 본문 초안
 

@@ -94,6 +94,32 @@ ip -brief addr
 resource인지 확인한다. 운영 표준 절차는 daemon API 재시도이며, 임의 파일 삭제나
 device 제거를 자동화하지 않는다.
 
+## flock 삭제 실패 또는 member VM 잔존
+
+1. live flock과 member VM 목록을 확인한다.
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:3000/flocks
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:3000/flocks/$FLOCK_ID
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:3000/vms
+```
+
+2. 먼저 daemon의 flock delete 경로를 재시도한다. 이 경로는 flock registry에서 제거한
+   뒤 member VM들을 병렬로 `destroyVM` 처리한다.
+
+```bash
+curl -X DELETE \
+  -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:3000/flocks/$FLOCK_ID
+```
+
+3. flock은 삭제됐지만 member VM이 남아 있으면 각 VM에 대해 일반
+   `DELETE /vms/{vm_id}` 절차를 따른다. stale TAP/IP, dm-snapshot, COW 파일은 먼저
+   daemon cleanup path를 재시도하고, 수동 정리는 inspect 이후 최후 수단으로만 수행한다.
+
+4. Town Wall log는 `flocks/<flock_id>/TOWN_WALL.log`에 남을 수 있다. 장애 분석에는
+   사용할 수 있지만 secret 포함 여부를 확인한 뒤 공유한다.
+
 ## restore 실패
 
 1. source VM이 실행 중인지 확인한다. 실행 중인 원본 VM의 snapshot은 restore하지

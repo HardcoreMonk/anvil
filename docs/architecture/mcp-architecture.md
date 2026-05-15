@@ -2,7 +2,7 @@
 
 ## 상태
 
-- 기준 버전: `v0.2.0`
+- 기준 버전: ephemera `v0.3.0` + anvil runtime foundation
 - MCP 버전: v1 stdio adapter
 - Entrypoint: `cmd/anvil-mcp`
 - 런타임 대상: ephemera control plane daemon HTTP API

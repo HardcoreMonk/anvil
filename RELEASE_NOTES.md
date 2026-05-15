@@ -64,9 +64,11 @@ foundation과 운영 관측성 계약을 추가한다.
 - `go build ./cmd/anvil-scheduler`
 - `bash -n e2e_test.sh`
 - `bash -n scripts/build_image.sh`
+- `bash -n scripts/anvil-mcp-e2e.sh`
 - `git diff --check`
 - 실제 KVM host에서 `go build -o anvil-daemon ./cmd/goose-daemon/` 후
   `sudo bash e2e_test.sh`
+- daemon 실행 상태에서 `scripts/anvil-mcp-e2e.sh flock`
 
 # ephemera v0.3.0 — Goosetown multi-agent orchestration
 
@@ -86,6 +88,8 @@ endpoint는 backward compatible하게 유지된다.
   - `DELETE /flocks/{flock_id}`
 - `POST /flocks`는 역할 목록을 받아 orchestrator, researcher, worker, reviewer
   같은 역할별 VM을 생성하고 하나의 flock ID로 묶는다.
+- blank `task`, empty role, `/` 또는 `\`가 포함된 role은 flock registry 생성과
+  VM spawn 전에 `400`으로 거부한다.
 - 한 flock은 최대 20개 agent를 생성할 수 있다.
 - flock 생성 중 일부 VM이 실패하면 이미 생성된 VM을 삭제하고 flock registry를
   제거한다.

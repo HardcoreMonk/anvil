@@ -100,6 +100,34 @@ curl -H "Authorization: Bearer $TOKEN" \
   "http://127.0.0.1:3000/audit/runtime?tenant_id=$TENANT_ID&limit=50"
 ```
 
+## Goosetown flock 점검
+
+live flock 목록과 단일 flock 상태:
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:3000/flocks
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:3000/flocks/$FLOCK_ID
+```
+
+Town Wall history 조회:
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:3000/flocks/$FLOCK_ID/wall/history
+```
+
+flock 삭제는 daemon이 소유한 member VM teardown 경로를 실행한다.
+
+```bash
+curl -X DELETE \
+  -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:3000/flocks/$FLOCK_ID
+```
+
+Town Wall message body는 `flocks/<flock_id>/TOWN_WALL.log`와 history 응답에
+남는다. provider token, API key, `agent_token` 같은 secret을 Town Wall에 게시하지
+않는다.
+
 ## 일반 검증
 
 문서와 code path가 함께 맞는지 보는 기본 검증:
@@ -124,6 +152,18 @@ go build -o anvil-daemon ./cmd/goose-daemon/
 go build -o anvil-scheduler ./cmd/anvil-scheduler
 sudo bash e2e_test.sh
 ```
+
+daemon이 이미 실행 중이면 MCP adapter smoke도 별도로 확인할 수 있다.
+
+```bash
+scripts/anvil-mcp-e2e.sh lifecycle
+scripts/anvil-mcp-e2e.sh semantic
+scripts/anvil-mcp-e2e.sh flock
+```
+
+`flock` 모드는 `anvil_spawn_flock`, `anvil_list_flocks`, `anvil_post_townwall`,
+`anvil_get_townwall_history`, `anvil_delete_flock`을 실제 daemon-backed MCP tool
+call로 검증한다.
 
 ## VM 목록과 정리
 

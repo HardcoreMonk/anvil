@@ -21,6 +21,8 @@
 
 - ephemera 호스트 제어 평면: `cmd/goose-daemon`, `internal/storage`,
   `internal/network`, `internal/vm`
+- Goosetown flock/Town Wall runtime: `internal/orchestrator`,
+  `cmd/goose-daemon/orchestrator_api.go`, `configs/profiles/*`
 - 게스트 구성 요소: `cmd/goose-agent`, `cmd/micro-init`
 - IronClaw 연동 MCP 어댑터: `cmd/anvil-mcp`, `internal/anvilmcp`
 - 런타임 스케줄러 서비스: `cmd/anvil-scheduler`, `internal/anvilmcp`
@@ -63,6 +65,14 @@ go build ./cmd/anvil-scheduler
 ```bash
 go build -o anvil-daemon ./cmd/goose-daemon/
 sudo bash e2e_test.sh
+```
+
+MCP smoke 검증:
+
+```bash
+scripts/anvil-mcp-e2e.sh lifecycle
+scripts/anvil-mcp-e2e.sh semantic
+scripts/anvil-mcp-e2e.sh flock
 ```
 
 통합 테스트는 `/dev/kvm`, root 권한, Firecracker 실행 가능 호스트,

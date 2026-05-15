@@ -2,7 +2,7 @@
 
 ## 상태
 
-- 기준 버전: `v0.2.0` + anvil runtime control-plane updates
+- 기준 버전: ephemera `v0.3.0` + anvil runtime control-plane updates
 - anvil 관점: ephemera runtime은 IronClaw 결합 프로젝트의 기반 실행 계층
 - upstream: `https://github.com/steve-seungeui/ephemera`. anvil fork network를
   유지하며 ephemera runtime version을 merge로 반영한다.
@@ -57,8 +57,9 @@ agent proxy를 모두 소유한다.
 
 | 구성 요소 | 파일 | 책임 |
 |---|---|---|
-| Control plane daemon | `cmd/goose-daemon/main.go`, `cmd/goose-daemon/api.go`, `cmd/goose-daemon/config.go` | host artifact bootstrap, HTTP API 시작, client 인증, 실행 중인 VM 관리, agent proxy, snapshot 생성/복원/삭제 |
+| Control plane daemon | `cmd/goose-daemon/main.go`, `cmd/goose-daemon/api.go`, `cmd/goose-daemon/config.go`, `cmd/goose-daemon/orchestrator_api.go` | host artifact bootstrap, HTTP API 시작, client 인증, 실행 중인 VM 관리, agent proxy, snapshot 생성/복원/삭제, Goosetown flock/Town Wall API |
 | Runtime scheduler service | `cmd/anvil-scheduler/main.go`, `internal/anvilmcp/scheduler_service.go` | host inventory, quota store, placement/snapshot locality state를 기준으로 runtime host schedule decision 반환 |
+| Goosetown orchestrator | `internal/orchestrator/` | flock registry, agent 상태 snapshot, Town Wall append-only log와 SSE subscriber 관리 |
 | Storage provisioner | `internal/storage/provisioner.go` | golden image build/검증, VM별 disk clone, Goose config/secrets 주입, VM별 agent token 작성, timezone data 주입 |
 | Snapshot storage | `internal/storage/snapshot.go` | snapshot metadata 저장, rootfs copy, COW restore device 생성/해제, diff memory snapshot merge |
 | VM wrapper | `internal/vm/machine.go` | Firecracker config 구성, cold VM 시작, snapshot state restore, vsock 기반 guest IP 재설정 |
@@ -76,6 +77,7 @@ Host memory 상태:
 | `ControlPlane.vms` | `cmd/goose-daemon/api.go` | `vm_id` 기준 실행 중인 VM registry |
 | `ControlPlane.snapshots` | `cmd/goose-daemon/api.go` | `snapshot_id` 기준 로드된 snapshot metadata |
 | `ControlPlane.clients` | `cmd/goose-daemon/api.go` | 현재 control-plane API client 목록. `SIGHUP`으로 reload |
+| `ControlPlane.flockMgr` | `cmd/goose-daemon/orchestrator_api.go`, `internal/orchestrator` | host-local live flock registry와 Town Wall handle |
 | `ControlPlane.tenantStore` | `cmd/goose-daemon/api.go` | `tenants/tenants.json` 기반 tenant quota/usage store |
 | `ControlPlane.metrics` | `cmd/goose-daemon/api.go` | lifecycle counter, duration, queue depth |
 | `PlacementStore` | `internal/anvilmcp/placement_store.go` | scheduler host, VM placement, snapshot location state |
@@ -95,6 +97,7 @@ Host disk 상태:
 | `artifacts/micro-init` | VM 내부 PID 1 binary |
 | `tenants/tenants.json` | daemon-local tenant quota/usage state, mode `0600` |
 | `audit/runtime-audit.jsonl` | daemon runtime audit 조회/보관 API가 읽는 JSONL record |
+| `flocks/<flock_id>/TOWN_WALL.log` | Goosetown flock별 append-only Town Wall log |
 | `ANVIL_SCHEDULER_STATE` path | scheduler service placement/snapshot locality JSON state |
 | `ANVIL_SCHEDULER_QUOTA_STORE` path | scheduler service tenant quota/usage JSON state |
 | `/tmp/goose-workspaces/<vm_id>.ext4` | cold-spawn VM의 writable rootfs clone |
@@ -111,8 +114,11 @@ Guest disk 상태:
 | `/root/.config/goose/config.yaml` | 주입된 Goose config |
 | `/root/.config/goose/secrets.yaml` | 주입된 Goose secrets |
 | `/root/.ephemera-agent-token` | VM별 guest agent Bearer token, mode `0600` |
+| `/root/.ephemera-flock` | flock member VM의 flock ID, agent ID, role, Town Wall endpoint context |
+| `/root/.goose-system-prompt` | role profile의 system prompt |
 | `/usr/local/bin/goose-agent` | guest task server |
 | `/usr/local/bin/goose-agent.sha256` | golden image에 설치된 guest agent source hash stamp |
+| `/usr/local/bin/gtwall` | VM 내부 Town Wall post helper |
 | `/usr/local/sbin/micro-init` | guest PID 1 |
 
 ## 시작 흐름
@@ -178,6 +184,10 @@ Cold-spawn VM은 `vm.StartMachine`으로 시작한다.
 Restored VM은 Firecracker memory file과 `state.bin`을 사용해
 `vm.RestoreMachine`으로 시작한다. kernel boot path를 다시 타지 않고 snapshot
 state에서 resume한 뒤, vsock reconfiguration channel로 새 IP를 받는다.
+
+Goosetown flock VM도 같은 cold-spawn lifecycle을 사용한다. 차이는 daemon이 역할별
+profile sizing과 `system.md`를 적용하고, VM disk에 flock context와 Town Wall helper
+context를 추가 주입한다는 점이다.
 
 ## 네트워크 모델
 
@@ -285,6 +295,9 @@ mutating guest endpoint는 token file이 없을 때를 제외하면 VM별 agent 
 - `ControlPlane.snapshotsMu`: in-memory snapshot metadata 보호
 - `ControlPlane.clientsMu`: API client token reload 보호
 - `ControlPlane.restoreMu`: restore 중 disk setup과 Firecracker open 구간 직렬화
+- `FlockManager.mu`: host-local flock registry 보호
+- `Flock.mu`: flock agent map과 JSON marshal 보호
+- `TownWall`: append-only log write와 subscriber delivery 보호
 - `network.Manager.mu`: IP/TAP allocation 보호
 - `goose-agent`: VM당 한 번에 하나의 task만 수행. 두 번째 concurrent task는
   `503 agent busy` 반환
@@ -299,17 +312,23 @@ mutating guest endpoint는 token file이 없을 때를 제외하면 VM별 agent 
 - diff restore에는 임시 merged memory file을 만들 disk space가 필요하다.
 - control-plane auth는 API token 환경 변수가 없으면 비활성화된다.
 - MCP v1은 runtime control plane의 일부가 아니라 client adapter다.
+- flock registry는 daemon process memory 상태다. Town Wall log file은 flock 삭제 뒤에도
+  `flocks/<flock_id>/TOWN_WALL.log`에 남을 수 있지만, live flock metadata는 daemon
+  재시작 뒤 자동 복원되지 않는다.
 
 ## 소스 참조
 
 - `cmd/goose-daemon/main.go`
 - `cmd/goose-daemon/api.go`
 - `cmd/goose-daemon/config.go`
+- `cmd/goose-daemon/orchestrator_api.go`
 - `cmd/goose-daemon/egress_policy.go`
 - `cmd/goose-daemon/otel.go`
 - `cmd/anvil-scheduler/main.go`
 - `cmd/goose-agent/main.go`
 - `cmd/micro-init/main.go`
+- `internal/orchestrator/flock.go`
+- `internal/orchestrator/townwall.go`
 - `internal/anvilmcp/placement_store.go`
 - `internal/anvilmcp/quota_store.go`
 - `internal/anvilmcp/scheduler_service.go`

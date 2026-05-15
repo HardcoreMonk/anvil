@@ -352,7 +352,9 @@ DELETE /vms/{id}
 
 - **Multi-agent flock**:
   `POST /flocks`가 역할별 VM 여러 개를 생성하고 하나의 flock ID 아래에서
-  관리한다. 생성 중 일부 VM이 실패하면 이미 생성된 VM과 flock registry를 정리한다.
+  관리한다. blank `task`, empty role, path separator가 포함된 role은 VM spawn
+  전에 거부하고, 생성 중 일부 VM이 실패하면 이미 생성된 VM과 flock registry를
+  정리한다.
 
 - **Town Wall**:
   flock별 append-only coordination log를 제공한다. control plane API,
@@ -1111,7 +1113,9 @@ profile 이름에는 `/` 또는 `\`를 사용할 수 없다.
 - diff restore는 임시 merged memory file을 만들 disk space가 필요하다.
 - control-plane token 환경 변수를 설정하지 않으면 API 인증이 비활성화된다.
 - MCP v1은 snapshot/restore tool을 제공하지만 snapshot alias와 session alias
-  영속화는 제공하지 않는다.
+  영속화는 별개다. snapshot alias는 제공하지 않고, VM `session_name` alias는
+  `session_store_path` 또는 `ANVIL_MCP_SESSION_STORE`가 설정된 경우에만 local JSON
+  file로 영속화한다.
 
 ---
 

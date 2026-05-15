@@ -3,7 +3,8 @@
 ## 상태
 
 - 문서 목적: multi-tenant runtime으로 확장할 때의 책임 경계와 단계적 설계 기준
-- 현재 기준: `feature/runtime-scheduler-network-otel` runtime service contract
+- 현재 기준: mainline runtime scheduler/network/observability foundation +
+  Goosetown MCP tool surface
 - 구현 범위: MCP adapter boundary, scheduler service foundation, daemon
   control-plane/observability foundation.
   `internal/anvilmcp`는 tenant ID validation, quota decision, scheduler decision,
@@ -12,9 +13,11 @@
   audit JSONL append/read/retention helper를 제공한다. daemon API는 optional
   `tenant_id`와 `egress_policy`를 VM/snapshot/restore contract에 보존하고 tenant
   API, runtime audit API, `/health`, `/metrics`, `/metrics/vms`, `deny_all` 및
-  profile allowlist/DNS egress rule을 제공한다.
+  profile allowlist/DNS egress rule을 제공한다. Goosetown flock spawn도
+  `tenant_id`와 `egress_policy`를 VM 생성 경로에 전달하고 flock metadata에 보존한다.
 - 비구현 범위: scheduler service의 production deployment automation, cross-host
-  snapshot replication, L7 egress proxy, billing, UI.
+  snapshot replication, scheduler-aware cross-host flock placement, L7 egress proxy,
+  billing, UI.
 
 이 문서는 anvil이 IronClaw와 ephemera runtime을 multi-tenant 실행 기반으로
 확장할 때 필요한 경계를 정리한다. 현재 ephemera daemon의 단일 호스트 VM
@@ -47,6 +50,8 @@ daemon 계약 확장을 필요로 한다.
   tenant/audit 설정
 - daemon VM/snapshot/restore request/response metadata의 `tenant_id`와
   `egress_policy`
+- daemon Goosetown `POST /flocks` request/response와 live flock metadata의
+  `tenant_id`, `egress_policy`
 - daemon `/tenants`, `/audit/runtime`, `/health`, `/metrics`, `/metrics/vms`
 
 `deny_all`은 host `iptables FORWARD` reject rule로 강제한다. `profile`은 profile별
@@ -113,6 +118,12 @@ tenant별 전역 quota의 원천이 되어서는 안 된다.
 deterministic decision과 JSON persistence를 제공한다. `Schedule`은 quota를 host
 selection보다 먼저 평가해 quota 초과 요청이 daemon host 선택이나 runtime mutation으로
 내려가지 않게 한다. daemon `/tenants` API는 tenant quota 조회/수정을 제공한다.
+
+현재 Goosetown flock 생성은 단일 daemon host에서 여러 VM을 순차 생성한다.
+`tenant_id`와 `egress_policy`는 각 member VM과 flock metadata에 보존되지만,
+flock 단위 cross-host placement와 tenant별 multi-VM quota reservation은 아직
+scheduler가 소유하지 않는다. 운영자는 flock spawn을 single-host runtime capacity
+안에서 다뤄야 한다.
 
 ## Scheduler 책임
 
@@ -219,6 +230,7 @@ restore 경로의 direct token exposure는 제거됐다. 새로운 audit record,
 - 완전한 multi-tenant runtime 즉시 구현
 - scheduler service production deployment automation
 - cross-host snapshot replication
+- scheduler-aware cross-host flock placement
 - L7 egress proxy 또는 full HTTP CONNECT/SNI gateway
 - billing
 - UI
