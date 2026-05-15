@@ -12,17 +12,29 @@ import (
 )
 
 // testAgent stands in for the in-VM goose-agent's /health endpoint. Toggle
-// failNow to make subsequent requests return 500.
+// failNow (1=fail, 0=ok) to switch behavior. A plain int32 + atomic.Load/Store
+// is used instead of atomic.Bool/atomic.Int32 so the file remains compatible
+// with go 1.18 (the module's declared minimum); the atomic.* types were
+// added in 1.19.
 type testAgent struct {
 	server  *httptest.Server
-	failNow atomic.Bool
+	failNow int32
 	port    int
+}
+
+// setFail toggles the mock /health response. true → 500, false → 200.
+func (ta *testAgent) setFail(v bool) {
+	if v {
+		atomic.StoreInt32(&ta.failNow, 1)
+	} else {
+		atomic.StoreInt32(&ta.failNow, 0)
+	}
 }
 
 func newTestAgent(t *testing.T) *testAgent {
 	ta := &testAgent{}
 	ta.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if ta.failNow.Load() {
+		if atomic.LoadInt32(&ta.failNow) != 0 {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
@@ -63,7 +75,7 @@ func TestWatchdog_MarksDeadAfterThreshold(t *testing.T) {
 	wd := NewWatchdog(fm, locator, lister, agent.port)
 	wd.interval = 50 * time.Millisecond
 	wd.dyingThreshold = 3
-	agent.failNow.Store(true)
+	agent.setFail(true)
 	wd.Start()
 	defer wd.Stop()
 
@@ -144,9 +156,9 @@ func TestWatchdog_TransientFailureDoesNotMark(t *testing.T) {
 	defer wd.Stop()
 
 	// One failure, then recovery — fail count should reset on the next success.
-	agent.failNow.Store(true)
+	agent.setFail(true)
 	time.Sleep(80 * time.Millisecond)
-	agent.failNow.Store(false)
+	agent.setFail(false)
 	time.Sleep(300 * time.Millisecond)
 
 	snap := flock.Snapshot()
