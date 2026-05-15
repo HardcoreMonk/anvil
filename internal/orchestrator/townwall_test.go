@@ -83,6 +83,50 @@ func TestTownWall_ConcurrentPost(t *testing.T) {
 	}
 }
 
+func TestTownWall_SeqMonotonic(t *testing.T) {
+	tmp := t.TempDir()
+	tw, err := NewTownWall("flock-seq", filepath.Join(tmp, "TOWN_WALL.log"))
+	if err != nil {
+		t.Fatalf("NewTownWall: %v", err)
+	}
+	m1, _ := tw.Post("a", "first")
+	m2, _ := tw.Post("a", "second")
+	m3, _ := tw.Post("b", "third")
+	if m1.Seq != 1 || m2.Seq != 2 || m3.Seq != 3 {
+		t.Errorf("expected seq 1,2,3; got %d,%d,%d", m1.Seq, m2.Seq, m3.Seq)
+	}
+	hist, _ := tw.History()
+	if len(hist) != 3 {
+		t.Fatalf("expected 3 history entries, got %d", len(hist))
+	}
+	for i, m := range hist {
+		if m.Seq != uint64(i+1) {
+			t.Errorf("history[%d].Seq = %d, want %d", i, m.Seq, i+1)
+		}
+	}
+}
+
+func TestTownWall_SeqResumesAcrossReopen(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "TOWN_WALL.log")
+
+	tw1, err := NewTownWall("flock-resume", path)
+	if err != nil {
+		t.Fatalf("NewTownWall #1: %v", err)
+	}
+	tw1.Post("a", "msg1")
+	tw1.Post("a", "msg2")
+
+	tw2, err := NewTownWall("flock-resume", path)
+	if err != nil {
+		t.Fatalf("NewTownWall #2: %v", err)
+	}
+	m3, _ := tw2.Post("a", "msg3")
+	if m3.Seq != 3 {
+		t.Errorf("expected seq 3 after reopen, got %d", m3.Seq)
+	}
+}
+
 func TestParseLine(t *testing.T) {
 	cases := []struct {
 		in    string
