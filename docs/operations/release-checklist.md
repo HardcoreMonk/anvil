@@ -17,7 +17,7 @@ Release 본문에서 두 이름을 섞어 쓰지 않는다.
 |---|---|---|---|
 | ephemera runtime | `v0.2.0` | Firecracker MicroVM runtime source snapshot | `cmd/goose-daemon`, `cmd/goose-agent`, `cmd/micro-init`, `internal/storage`, `internal/network`, `internal/vm` |
 | anvil integration | `anvil-v0.1.0` | IronClaw 통합 MCP adapter와 운영 계약 | `cmd/anvil-mcp`, `internal/anvilmcp`, workspace copy-in/out, snapshot MCP tools, daemon env alias, IronClaw E2E 검증 |
-| anvil runtime foundation | 다음 `anvil-v*` tag | scheduler, network policy, observability, Goosetown MCP foundation | `cmd/anvil-scheduler`, `internal/anvilmcp`, daemon tenant/audit/metrics API, profile egress, optional trace export, Goosetown flock/Town Wall MCP tools |
+| anvil runtime foundation | `anvil-v0.2.0` | scheduler, network policy, observability, Goosetown MCP foundation | `cmd/anvil-scheduler`, `internal/anvilmcp`, daemon tenant/audit/metrics API, profile egress, optional trace export, Goosetown flock/Town Wall MCP tools |
 
 ## 게시 전 확인 명령
 
@@ -46,10 +46,10 @@ tag를 덮어쓰지 않는다. upstream sync 절차는
 ### GitHub Release 상태 확인
 
 ```bash
-gh release view anvil-v0.1.0 --json tagName,targetCommitish,publishedAt,url,isDraft,isPrerelease
+gh release view anvil-v0.2.0 --json tagName,targetCommitish,publishedAt,url,isDraft,isPrerelease
 ```
 
-`anvil-v0.1.0` GitHub Release가 이미 존재하면 release body를 갱신하는 작업도
+게시된 GitHub Release의 body를 갱신하는 작업도
 외부 상태를 바꾸는 작업이다. 따라서 `gh release edit`을 실행하기 전에 tag name,
 target commit, release body source를 먼저 보여 주고 사용자의 명시적 승인을
 받아야 한다.
@@ -63,15 +63,19 @@ bash -n e2e_test.sh
 bash -n scripts/anvil-mcp-e2e.sh
 ```
 
-`anvil-v0.1.0` Release 본문 초안은 이미 게시된 첫 통합 release의 historical body다.
-현재 mainline의 scheduler, profile egress, `/metrics/vms`, optional trace export,
-ephemera `v0.3.1` Goosetown hardening, Goosetown MCP tool surface는
-[RELEASE_NOTES.md](../../RELEASE_NOTES.md)의 `Unreleased` section과 아래
-`anvil-v0.2.0` draft를 기준으로 다음 release body에 반영한다. KVM host가 준비된
-release candidate에서는 58단계 `sudo bash e2e_test.sh`와
-`scripts/anvil-mcp-e2e.sh flock`을 함께 확인한다.
+`anvil-v0.1.0` Release 본문은 이미 게시된 첫 통합 release의 historical body다.
+`anvil-v0.2.0` Release는 scheduler, profile egress, `/metrics/vms`, optional
+trace export, ephemera `v0.3.1` Goosetown hardening, Goosetown MCP tool surface를
+포함하는 두 번째 integration release로 게시됐다. KVM host가 준비된 release
+candidate에서는 58단계 `sudo bash e2e_test.sh`와 `scripts/anvil-mcp-e2e.sh flock`을
+함께 확인한다.
 
-## `anvil-v0.2.0` GitHub Release 본문 초안
+## `anvil-v0.2.0` GitHub Release 게시 기록과 본문
+
+- Tag: `anvil-v0.2.0`
+- Target commit: `5b8298fab17b455a9e4e4325618d2743d9486a6c`
+- Published: 2026-05-15 17:53:21 KST
+- URL: <https://github.com/HardcoreMonk/anvil/releases/tag/anvil-v0.2.0>
 
 ```markdown
 # anvil-v0.2.0 - Runtime scheduler, Goosetown MCP, and observability foundation
@@ -145,10 +149,9 @@ Goosetown hardening, Goosetown MCP tool surface를 추가한다.
 - daemon 실행 상태에서 `scripts/anvil-mcp-e2e.sh flock`
 ```
 
-## `anvil-v0.1.0` GitHub Release 본문 초안
+## `anvil-v0.1.0` GitHub Release historical 본문
 
-아래 본문은 `anvil-v0.1.0` GitHub Release를 게시할 때 사용하는 초안이다.
-게시 전 target commit이 `RELEASE_NOTES.md`와 이 체크리스트를 포함하는지 확인한다.
+아래 본문은 `anvil-v0.1.0` GitHub Release 게시 당시 사용한 historical body다.
 
 ```markdown
 # anvil-v0.1.0 - IronClaw integration over ephemera runtime v0.2.0
@@ -228,9 +231,9 @@ adapter로 그 기능을 IronClaw에 노출한다.
 - tag name
 - target commit
 - release body source: `docs/operations/release-checklist.md` 안의 해당
-  `anvil-v*` GitHub Release 본문 초안 fenced section
+  `anvil-v*` GitHub Release 본문 fenced section
 
 `gh release --notes-file`에는 전체 체크리스트 파일을 넘기지 않는다. 게시 전 fenced
-draft만 별도의 검토된 notes file로 추출한 뒤 그 파일을 사용한다.
+본문만 별도의 검토된 notes file로 추출한 뒤 그 파일을 사용한다.
 
 승인 없이 tag를 만들거나, tag를 push하거나, GitHub Release를 게시하지 않는다.

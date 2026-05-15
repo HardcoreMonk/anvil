@@ -1,7 +1,20 @@
-# Unreleased — runtime scheduler, network policy, observability
+# Unreleased — 다음 운영 확장 후보
 
-현재 mainline은 anvil `anvil-v0.1.0` 통합 표면 위에 multi-host runtime
-foundation, Goosetown operational hardening, 운영 관측성 계약을 추가한다.
+아직 `anvil-v0.2.0` 이후 확정된 release 변경은 없다. 다음 후보는 scheduler
+service production deployment automation, cross-host snapshot replication,
+scheduler-aware cross-host flock placement, L7 egress proxy/SNI hardening,
+snapshot storage quota dashboard다.
+
+# anvil v0.2.0 — Runtime scheduler, Goosetown MCP, observability foundation
+
+- Tag: `anvil-v0.2.0`
+- GitHub Release:
+  <https://github.com/HardcoreMonk/anvil/releases/tag/anvil-v0.2.0>
+- Published: 2026-05-15 17:53:21 KST
+- Target commit: `5b8298fab17b455a9e4e4325618d2743d9486a6c`
+
+`anvil-v0.2.0`은 `anvil-v0.1.0` 통합 표면 위에 multi-host runtime foundation,
+Goosetown operational hardening, 운영 관측성 계약을 추가한다.
 
 ## 추가됨
 
@@ -217,8 +230,9 @@ endpoint는 backward compatible하게 유지된다.
 # anvil v0.1.0 — IronClaw 통합 E2E 완료
 
 `anvil`은 IronClaw와 ephemera를 결합하는 새 프로젝트다. 이 저장소의 공개
-릴리즈 `v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.3.1`은 ephemera runtime 릴리즈이며, anvil 통합
-릴리즈는 `anvil-v0.1.0` 태그로 분리한다.
+릴리즈 `v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.3.1`은 ephemera runtime 릴리즈이며,
+anvil 통합 릴리즈는 `anvil-v0.1.0`, `anvil-v0.2.0`처럼 별도 tag prefix로
+분리한다.
 
 ## 추가됨
 
@@ -249,7 +263,7 @@ endpoint는 backward compatible하게 유지된다.
   MCP 연결, 실제 IronClaw agent E2E 검증 기록.
 - `docs/operations/release-checklist.md`: ephemera runtime 릴리즈와 anvil
   integration 릴리즈를 구분하는 게시 전 확인 절차와 `anvil-v0.1.0` GitHub
-  Release 본문 초안.
+  Release historical 본문.
 - [docs/operations/security-policy.md](docs/operations/security-policy.md): 운영 공개
   노출, token, local secret, `agent_token` 불변 조건, snapshot metadata scrub 정책을
   구체화한 보안 정책.

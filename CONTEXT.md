@@ -31,7 +31,8 @@ ephemera는 계속 버전업되는 runtime engine upstream이며, anvil은 그 r
 IronClaw 실행 계층으로 통합하는 downstream product fork다. 이 저장소의 Go 모듈
 경로와 기존 API/환경 변수에는 `ephemera` 또는 `goose` 이름이 남아 있다. anvil
 통합 릴리즈는 ephemera runtime tag와 충돌하지 않도록 `anvil-v0.1.0`처럼 별도
-prefix를 사용한다. 문서에서는 anvil과 ephemera를 같은 이름으로 취급하지 않는다.
+prefix를 사용한다. 현재 최신 anvil 공개 integration tag는 `anvil-v0.2.0`이다.
+문서에서는 anvil과 ephemera를 같은 이름으로 취급하지 않는다.
 
 ## 진실 기준 문서 순서
 
@@ -127,6 +128,10 @@ daemon으로 보내는 outbound Bearer token이다.
 최근 후속 완료 상태:
 
 - `anvil-v0.1.0` 공개 tag와 GitHub Release page는 게시된 상태다.
+- `anvil-v0.2.0` 공개 tag와 GitHub Release page는 2026-05-15 17:53:21 KST에
+  게시된 상태다. Release URL은
+  `https://github.com/HardcoreMonk/anvil/releases/tag/anvil-v0.2.0`이고, tag
+  target은 `5b8298fab17b455a9e4e4325618d2743d9486a6c`다.
 - MCP v2 workspace copy-in/out과 persistent session store는 구현된 상태다.
 - snapshot GC는 `max_total_bytes`와 `snapshots/gc-audit.jsonl` audit record를
   지원한다.
