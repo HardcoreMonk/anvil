@@ -32,8 +32,9 @@ func TestSanitizeRecordingStripsTerminalNoise(t *testing.T) {
 }
 
 func TestSanitizeRecordingRedactsSecrets(t *testing.T) {
+	fakeGoogleKey := "AI" + "za" + strings.Repeat("A", 35)
 	input := strings.Join([]string{
-		`GOOGLE_API_KEY: "AIzaSyADAimcwTU-OEE_qiIOw5QdB5SuO2ZRFvQ"`,
+		`GOOGLE_API_KEY: "` + fakeGoogleKey + `"`,
 		`Authorization: Bearer abc.def.ghi`,
 		`"agent_token":"secret-token-value"`,
 	}, "\n")
@@ -41,7 +42,7 @@ func TestSanitizeRecordingRedactsSecrets(t *testing.T) {
 	got := strings.Join(sanitizeRecording(input), "\n")
 
 	for _, forbidden := range []string{
-		"AIzaSyADAimcwTU-OEE_qiIOw5QdB5SuO2ZRFvQ",
+		fakeGoogleKey,
 		"abc.def.ghi",
 		"secret-token-value",
 	} {

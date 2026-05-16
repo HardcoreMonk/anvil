@@ -426,6 +426,10 @@ configs/
     system.md
 
 docs/
+  PUBLIC_RELEASE_BOUNDARY.md
+                       anvil 공개 포함/조건부 포함/제외 표면
+  ADR_INDEX.md         ADR 현재 적용 상태와 upstream ephemera 채택 상태
+  adr/                 공개 경계, token/auth, runtime lifecycle 장기 결정
   architecture/        ephemera 런타임, 서비스 로직, anvil MCP 아키텍처
   analysis/            ephemera 버전 비교와 소스 분석
   lifecycle/runs/      계산된 lifecycle 상태 snapshot
@@ -448,6 +452,12 @@ scripts/gtwall         VM 내부 Town Wall post helper
 
 - [AGENTS.md](AGENTS.md):
   Codex 작업 규약, 검증 명령, 불변 조건.
+
+- [docs/PUBLIC_RELEASE_BOUNDARY.md](docs/PUBLIC_RELEASE_BOUNDARY.md):
+  anvil 공개 포함/조건부 포함/제외 표면, upstream ephemera 변경 채택 분류.
+
+- [docs/ADR_INDEX.md](docs/ADR_INDEX.md):
+  anvil 장기 설계 결정의 현재 적용 상태와 ADR 작성 기준.
 
 - [RELEASE_NOTES.md](RELEASE_NOTES.md):
   `anvil-v0.2.0` runtime scheduler/network/observability release와 ephemera

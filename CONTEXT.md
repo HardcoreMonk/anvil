@@ -37,11 +37,13 @@ prefix를 사용한다. 현재 최신 anvil 공개 integration tag는 `anvil-v0.
 ## 진실 기준 문서 순서
 
 1. `CONTEXT.md`: anvil/ephemera/IronClaw 경계, 변경 불가 계약
-2. `README.md`: anvil 결합 프로젝트 개요와 현재 구현 사용법
-3. `RELEASE_NOTES.md`: ephemera 릴리즈와 anvil 통합 작업 변화
-4. `docs/architecture/*.md`: ephemera runtime, service logic, anvil MCP 설계
-5. `docs/analysis/*.md`: ephemera 0.1.0/0.2.0 분석과 보조 설명
-6. 업로드된 과거 문서와 초안: 참고 자료
+2. `docs/PUBLIC_RELEASE_BOUNDARY.md`: anvil 공개 포함/조건부 포함/제외 표면
+3. `docs/ADR_INDEX.md`: 장기 설계 결정과 upstream ephemera 채택 상태
+4. `README.md`: anvil 결합 프로젝트 개요와 현재 구현 사용법
+5. `RELEASE_NOTES.md`: ephemera 릴리즈와 anvil 통합 작업 변화
+6. `docs/architecture/*.md`: ephemera runtime, service logic, anvil MCP 설계
+7. `docs/analysis/*.md`: ephemera 0.1.0/0.2.0 분석과 보조 설명
+8. 업로드된 과거 문서와 초안: 참고 자료
 
 ## 도메인 용어집
 
@@ -60,6 +62,8 @@ prefix를 사용한다. 현재 최신 anvil 공개 integration tag는 `anvil-v0.
 | COW restore | snapshot rootfs를 read-only base로 두고 per-VM sparse exception store에 쓰기를 기록하는 restore 방식 | `internal/storage` |
 | IronClaw MCP adapter | IronClaw가 ephemera daemon API를 anvil tool로 호출하게 해 주는 stdio bridge | `cmd/anvil-mcp` |
 | anvil scheduler service | host inventory, quota, placement, snapshot locality를 바탕으로 runtime host 선택을 반환하는 얇은 HTTP service | `cmd/anvil-scheduler`, `internal/anvilmcp` |
+| 공개 릴리즈 경계 | anvil이 공개적으로 책임지는 기능 표면과 제외 표면 | `docs/PUBLIC_RELEASE_BOUNDARY.md` |
+| ADR | 공개 경계, token/auth, MCP tool 계약, runtime lifecycle 같은 장기 결정을 남기는 기록 | `docs/adr/*.md` |
 
 ## 경계 규칙
 
@@ -73,6 +77,12 @@ prefix를 사용한다. 현재 최신 anvil 공개 integration tag는 `anvil-v0.
   취급한다. 이것을 anvil 제품명으로 덮어쓰지 않는다.
 - 공개 운영 URL은 reverse proxy/TLS 계층에서 결정한다. 현재 로컬 검증
   환경에서는 사용자가 지정한 `192.168.3.73` 주소를 기준으로 한다.
+- 공개 기능을 추가하거나 upstream ephemera 변경을 병합할 때는
+  `docs/PUBLIC_RELEASE_BOUNDARY.md`의 포함/조건부 포함/제외 표면을 확인한다.
+- upstream ephemera 변경이 anvil 정책과 충돌하면 그대로 채택하지 않고
+  `adopted`, `adapted`, `excluded`, `deferred`, `historical` 중 하나로 분류한다.
+- token/auth, MCP output, VM lifecycle, snapshot/restore, cleanup 의미를 바꾸는
+  결정은 `docs/ADR_INDEX.md`와 `docs/adr/*.md`에 남긴다.
 
 ## Fork와 upstream 정책
 

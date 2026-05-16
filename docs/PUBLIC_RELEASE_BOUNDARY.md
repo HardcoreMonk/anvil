@@ -1,0 +1,109 @@
+# anvil 공개 릴리즈 경계
+
+> **대상:** anvil downstream repository
+> **현행화 기준:** 2026-05-16
+> **목적:** anvil이 공개적으로 책임지는 기능 표면과, upstream ephemera에서 가져오더라도 anvil 정책상 수정하거나 제외해야 하는 표면을 구분한다.
+
+---
+
+## 1. 읽는 규칙
+
+이 문서는 anvil의 공개 릴리즈 경계를 판단하는 기준이다. 문서가 충돌하면
+`CONTEXT.md`가 우선하고, 이 문서는 README보다 먼저 공개 표면을 판단한다.
+
+- `CONTEXT.md`: 프로젝트 경계, 변경 불가 계약, 진실 기준
+- `docs/PUBLIC_RELEASE_BOUNDARY.md`: 공개 릴리즈 포함/제외 표면
+- `docs/ADR_INDEX.md`: 장기 설계 결정의 현재 적용 상태
+- `README.md`: 사용자 진입점과 현재 사용법
+- `RELEASE_NOTES.md`: 릴리즈별 변경 기록
+
+`ephemera` upstream 릴리즈 문서는 기반 runtime 분석으로 유지한다. ephemera
+릴리즈 분석 문서의 제목이나 태그 이름을 anvil로 바꾸지 않는다.
+
+---
+
+## 2. 공개 포함 표면
+
+현재 anvil 공개 표면은 다음 범위를 책임진다.
+
+| 영역 | 공개 표면 | 구현/문서 위치 |
+|---|---|---|
+| MCP adapter | IronClaw가 호출하는 `anvil_*` stdio MCP tool | `cmd/anvil-mcp`, `internal/anvilmcp`, `docs/architecture/mcp-architecture.md` |
+| VM lifecycle | VM 생성, task 실행, health, stop, delete | ephemera daemon API + anvil MCP wrapper |
+| Snapshot lifecycle | full/diff snapshot 생성, 목록, restore, 삭제 | `internal/storage`, `anvil_create_snapshot` 계열 MCP tool |
+| Runtime boundary | Firecracker MicroVM, TAP/IP, rootfs, guest agent proxy | `cmd/goose-daemon`, `internal/vm`, `internal/network`, `internal/storage` |
+| Token policy | daemon token과 guest `agent_token` 분리, MCP output token redaction | `CONTEXT.md`, `README.md`, MCP adapter |
+| IronClaw integration | IronClaw 전용 실행 layer 계약 | `CONTEXT.md`, `README.md` |
+| 문서 계약 | 한국어 운영 문서, 실제 API/env/file 이름 보존 | `AGENTS.md`, `CONTEXT.md` |
+
+공개 표면에 들어간 기능은 README, RELEASE_NOTES, 관련 architecture 문서 중
+영향을 받는 문서와 함께 갱신해야 한다.
+
+---
+
+## 3. 조건부 포함 표면
+
+다음 표면은 runtime에는 존재할 수 있지만, anvil 공개 표면으로 노출할 때 별도
+검토가 필요하다.
+
+| 영역 | 조건 |
+|---|---|
+| upstream ephemera 새 API | token 노출, lifecycle 의미, cleanup 계약이 anvil 정책과 충돌하지 않아야 한다. |
+| Goosetown/flock 기능 | IronClaw MCP tool surface로 승격할 때 `agent_token` 노출 없이 Town Wall/API 경유 방식으로 노출해야 한다. |
+| multi-host/scheduler/quota | runtime 안정성, 보안 경계, 운영 문서, full KVM E2E 기준이 먼저 정리되어야 한다. |
+| audit/metrics/job store | public API 계약과 retention/보안 정책이 함께 정의되어야 한다. |
+| replay/player 산출물 | 검증 근거와 운영 URL을 문서화한 경우에만 공개 문서 표면으로 취급한다. |
+
+조건부 표면을 공개 표면으로 올릴 때는 ADR을 추가하거나 기존 ADR 적용 상태를
+갱신한다.
+
+---
+
+## 4. 공개 제외 표면
+
+다음은 현재 anvil 공개 릴리즈 범위가 아니다.
+
+- OpenClaw compatibility layer, shared gateway, shared runtime contract
+- IronClaw가 ephemera low-level HTTP API를 직접 다루는 결합 구조
+- `POST /vms` 응답 외부의 `agent_token` 노출
+- upstream ephemera의 flock `agent_tokens` 응답을 anvil public API로 그대로 노출
+- 실제 구현 계약 없이 `EPHEMERA_*`, `goose-*` API/env/path를 anvil 이름으로
+  일괄 rename하는 변경
+- purecvisor의 libvirt/QEMU, LXC, ZFS zvol clone, multi-node HA, live migration,
+  cluster evacuation, OVN multi-node automation
+- 공개 검증 없이 runtime 산출물, local secret, profile별 secret을 릴리즈 표면에
+  포함하는 변경
+
+제외 표면은 코드에 존재하거나 upstream에 존재해도 anvil 공개 기능으로 설명하지
+않는다.
+
+---
+
+## 5. upstream ephemera 변경 채택 분류
+
+upstream ephemera 변경을 병합할 때는 다음 상태 중 하나로 분류한다.
+
+| 상태 | 의미 | 예시 |
+|---|---|---|
+| `adopted` | anvil 정책과 충돌하지 않아 그대로 채택 | watchdog, metadata persistence, stale artifact rebuild |
+| `adapted` | runtime 가치는 채택하되 public/API 보안 표면은 수정 | restore 응답 token redaction, env alias 병행 |
+| `excluded` | anvil 공개 경계와 충돌해 제외 | flock `agent_tokens` public response |
+| `deferred` | 가치가 있으나 현재 release scope 밖 | multi-host scheduler, persistent audit store, quota |
+| `historical` | 과거 분석 근거로만 유지 | ephemera 0.1.0/0.2.0 분석 문서 |
+
+`adapted`, `excluded`, `deferred` 판단은 README나 RELEASE_NOTES만으로 처리하지
+말고 ADR 또는 ADR_INDEX에 남긴다.
+
+---
+
+## 6. 릴리즈 전 경계 확인
+
+공개 릴리즈 또는 push 전에는 변경 성격에 맞게 다음을 확인한다.
+
+- 공개 기능이 늘었으면 이 문서의 포함/조건부/제외 표면을 갱신한다.
+- 장기 설계 결정이면 `docs/ADR_INDEX.md`와 `docs/adr/*.md`를 갱신한다.
+- upstream ephemera 변경을 병합했으면 채택 상태를 명시한다.
+- `agent_token` 노출 경로가 `POST /vms` 응답 외부로 늘지 않았는지 확인한다.
+- runtime lifecycle 변경이면 full KVM E2E 또는 그에 준하는 실환경 검증 근거를
+  남긴다.
+- 로컬 secret, runtime artifact, snapshot, profile secret은 커밋하지 않는다.

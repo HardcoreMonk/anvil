@@ -6,6 +6,7 @@
 /anvil-daemon
 /anvil-mcp
 /anvil-scheduler
+/e2e-replay-server
 /ephemera-daemon
 /goose-daemon
 /cmd/goose-daemon/goose-daemon
@@ -30,6 +31,7 @@ vmlinux*
 /tmp/*
 
 # 4. Runtime-generated directories
+/internal-recordings/
 /snapshots/
 /tmp/
 
