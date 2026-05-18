@@ -140,9 +140,10 @@ DELETE /vms/{id}
 | **Per-client API auth** | Named Bearer tokens per client (`alice:tok1,bob:tok2`); timing-safe comparison; per-request audit log |
 | **SIGHUP token hot reload** | API token list can be updated without restarting the daemon or interrupting running VMs |
 | **VM health watchdog** (v0.3.1) | Polls every flock-member `/health` every 5 s; 3 consecutive failures → agent `status=dead` + auto Town Wall notice. See [Resilience](#resilience). |
-| **Flock metadata persistence** (v0.3.1) | `flocks/<id>/metadata.json` written atomically on spawn; daemon startup re-registers every flock and reopens its Town Wall log. Read-mostly recovery (live VM auto-restart deferred to v0.4.0). |
+| **Flock metadata persistence** (v0.3.1) | `flocks/<id>/metadata.json` written atomically on spawn; daemon startup re-registers every flock and reopens its Town Wall log. |
 | **Monotonic Town Wall seq** (v0.3.1) | Every `Message` carries `seq` (uint64, 1-based per flock); subscribers can detect dropped messages and recover from `/wall/history`. |
 | **Fatal-on-bind daemon startup** (v0.3.1) | Daemon `log.Fatalf` if the API listener fails to bind (e.g. port already in use), so a stale process never silently masks a fresh one. |
+| **Live VM cold-restart** (v0.3.2) | `vms/<vm_id>/state.json` written on every spawn; daemon startup cleans orphan Firecracker processes, re-reserves the original TAP/IP/MAC, and boots each VM from its existing rootfs clone. Same `vm_id`, same agent token, same `agent_url` across the restart. Memory state is not preserved. See [Resilience](#resilience). |
 
 ---
 
@@ -157,6 +158,7 @@ cmd/
     config.go         Env-var configuration + AgentProfile / LookupProfile
                       (role → vCPU, memory, profile directory mapping)
     orchestrator_api.go  /flocks endpoints, SSE Town Wall streaming
+    recovery.go       RecoverVMs (cold-restart) + flock cross-link
   goose-agent/        In-VM HTTP agent (baked into golden image)
     main.go           /tasks, /health, /stop, /townwall/post  (Bearer token auth);
                       prepends role system prompt to /tasks bodies
@@ -167,16 +169,21 @@ cmd/
 internal/
   vm/machine.go       Firecracker SDK wrapper — StartMachine, RestoreMachine
                       (VcpuCount / MemSizeMib are per-call; zero falls back to 2 / 2048)
-  network/manager.go  IP pool, TAP device lifecycle, AllocateForRestore, bridge, NAT
+  network/manager.go  IP pool, TAP device lifecycle, AllocateForRestore,
+                      ReclaimAllocation (cold-restart reuse), bridge, NAT
   storage/
     provisioner.go    Golden image bootstrap, disk clone, config/token/flock injection,
                       CloneDiskCOW (dm-snapshot-backed spawn), artifact download + SHA256
     snapshot.go       Snapshot metadata (read/write), disk copy helpers,
                       SetupDMSnapshot/TeardownDMSnapshot (COW restore via dm-snapshot),
                       MergeMemoryDiff (SEEK_DATA/SEEK_HOLE sparse merge)
+    vm_state.go       Per-VM state.json — Save/Load/Delete/List (cold-restart input)
+    orphan.go         KillStaleFirecracker + RemoveStaleVMArtifacts (cold-restart cleanup)
   orchestrator/
     townwall.go       Per-flock append-only log + subscriber fan-out
     flock.go          Flock + FlockManager (lock-safe JSON via MarshalJSON)
+    persistence.go    FlockMetadata Save/Load/Delete/List
+    watchdog.go       Per-VM health probing + dead marking
     handoff.go        Structured JSON handoff between agents
 
 configs/
@@ -199,7 +206,7 @@ snapshots/            Stored snapshot directories (auto-created, gitignored)
     rootfs.ext4       Disk copy (always full, ~700 MB)
     metadata.json     Restore params (IP, TAP, MAC, token, type, base_snapshot_id)
 
-e2e_test.sh           End-to-end integration test (58 steps; requires /dev/kvm + root)
+e2e_test.sh           End-to-end integration test (58 numbered steps incl. resilience sub-steps; requires /dev/kvm + root)
 
 scripts/
   build_image.sh      Builds golden image (Debian Bookworm + Goose + goose-agent + micro-init + gtwall)
@@ -208,6 +215,11 @@ scripts/
 flocks/               Per-flock workspace (auto-created at first flock spawn, gitignored)
   <flock-id>/
     TOWN_WALL.log     Append-only log of agent messages
+    metadata.json     Flock recovery state (atomic tmp+rename; schema_version: 1)
+
+vms/                  Per-VM cold-restart state (auto-created on first spawn, gitignored)
+  <vm-id>/
+    state.json        Network identity, agent token, disk path, profile, flock link
 
 artifacts/            Auto-populated at runtime (gitignored)
   golden-image.ext4   Golden VM disk image
@@ -299,7 +311,7 @@ go test ./...           # standard
 go test -race ./...     # mandatory before merging concurrency-sensitive changes
 ```
 
-Covers: API token parsing, LLM profile path resolution, agent auth middleware, token generation, Town Wall append/history/seq monotonicity, flock metadata persistence round-trip and disk recovery, watchdog dead-marking under failure thresholds, artifact staleness check.
+Covers: API token parsing, LLM profile path resolution, agent auth middleware, token generation, Town Wall append/history/seq monotonicity, flock metadata persistence round-trip and disk recovery, watchdog dead-marking under failure thresholds, artifact staleness check, per-VM state.json round-trip/sort/idempotent-delete/empty-workdir.
 
 ### End-to-end test (`e2e_test.sh`)
 
@@ -343,10 +355,12 @@ sudo bash e2e_test.sh
 | 57 | **Flock teardown** — `DELETE /flocks/{id}` returns 200; all 5 VMs and the flock registry entry are gone |
 | 57a | Create a separate resilience flock (3 agents) |
 | 57b | **SSE seq monotonicity** — successive `POST /flocks/{id}/post` responses carry strictly increasing `seq` |
-| 57c | **Persistence** — `flocks/<id>/metadata.json` exists with correct `flock_id` and `schema_version: 1` |
-| 57d | **Recovery** — kill daemon (and Firecrackers); restart with `EPHEMERA_API_ADDR=0.0.0.0:3000`; flock reappears in `GET /flocks`; Town Wall history preserved with seq continuity |
-| 57e | `DELETE` on a recovered flock removes its `metadata.json` |
-| 57f | Daemon log shows the `Watchdog started` line for each daemon invocation |
+| 57c | **Flock persistence** — `flocks/<id>/metadata.json` exists with correct `flock_id` and `schema_version: 1` |
+| 57d | **Recovery setup** — verify `vms/<vm_id>/state.json` for each agent; kill daemon (and Firecrackers); restart with `EPHEMERA_API_ADDR=0.0.0.0:3000`; flock metadata reloaded; Town Wall history preserved with seq continuity |
+| 57e | **Cold-restart VM IDs preserved** — every pre-restart `vm_id` reappears in `GET /vms` with same identity |
+| 57f | **Recovered VM `/health` responds** — proxy `GET /vms/{id}/health` returns 200 for each cold-restarted member |
+| 57g | `DELETE` on a recovered flock removes its `metadata.json` |
+| 57h | Daemon log shows the `Watchdog started` line for each daemon invocation |
 | 58 | Daemon graceful shutdown |
 
 **Example output (passing, flock steps 51–58):**
@@ -399,16 +413,28 @@ sudo bash e2e_test.sh
   ✓ schema_version == 1 ✓
 
 ━━━ 57d. Daemon restart recovers flock from disk ━━━
+  ✓ VM state.json persisted for all flock members ✓
   ✓ Daemon back up after restart
   ✓ Flock flock-... recovered after daemon restart ✓
   ✓ Town Wall history preserved: 3 entries ✓
   ✓ Recovered history seq 3 ≥ pre-restart seq 3 ✓
 
-━━━ 57e. DELETE recovered flock removes metadata.json ━━━
+━━━ 57e. Cold-restart preserves VM IDs ━━━
+  ✓ VM IDs unchanged across daemon restart ✓
+  ✓ VM vm-... is live in /vms after cold-restart ✓
+  ✓ VM vm-... is live in /vms after cold-restart ✓
+  ✓ VM vm-... is live in /vms after cold-restart ✓
+
+━━━ 57f. Recovered VM /health responds ━━━
+  ✓ VM vm-... /health → 200 ✓
+  ✓ VM vm-... /health → 200 ✓
+  ✓ VM vm-... /health → 200 ✓
+
+━━━ 57g. DELETE recovered flock removes metadata.json ━━━
   ✓ DELETE recovered flock (HTTP 200)
   ✓ metadata.json removed after DELETE ✓
 
-━━━ 57f. Watchdog start log line present ━━━
+━━━ 57h. Watchdog start log line present ━━━
   ✓ Watchdog start log line present in 2 daemon run(s) ✓
 
 ━━━ 58. Shut down daemon ━━━
@@ -1098,7 +1124,38 @@ curl -X POST https://api.example.com/vms \
 
 ## Resilience
 
-v0.3.1 hardens Goosetown for long-running flock workloads with three additive features. All preserve v0.3.0 wire compatibility (`seq` is a new JSON field; the watchdog is purely server-side; persistence touches only `flocks/<id>/metadata.json`).
+v0.3.1 hardened Goosetown for long-running flock workloads (health watchdog, flock metadata persistence, monotonic `seq`). v0.3.2 extends this with **live VM cold-restart**: any VM that was running when the daemon stops is automatically brought back up on the next daemon start, with the same IP, TAP, MAC, agent token, and `vm_id`. All features preserve v0.3.0 wire compatibility (`seq` is a new JSON field; watchdog is server-side only; persistence touches only `flocks/<id>/metadata.json` and `vms/<vm_id>/state.json`).
+
+### Live VM cold-restart (v0.3.2)
+
+Every successful spawn writes `vms/<vm_id>/state.json` (atomic tmp + rename) capturing the network identity, disk path, agent token, profile, and flock association. On daemon startup, after flock metadata is rescanned, each persisted VM is automatically brought back up:
+
+1. **Orphan cleanup** — any leftover Firecracker process bound to the persisted API socket is sent SIGTERM, then SIGKILL after a 1.5 s grace. Stale socket / log FIFO / vsock UDS files are removed. (After a graceful shutdown this is a no-op because the previous daemon already stopped them; after a SIGKILL / crash it does the actual cleanup.)
+2. **Network re-reservation** — the original TAP device is recreated with the same name and MAC, and the original IP is re-marked as in-use in the pool.
+3. **Cold boot** — Firecracker is restarted against the same rootfs clone; `goose-agent` is waited for on `/health` up to 60 s.
+4. **Flock association** — if the VM belonged to a flock, the agent's status is flipped back to `"ready"`. If recovery fails, the agent is marked `"dead"` and a `<orchestrator>` notice is posted to the Town Wall.
+
+The daemon-side shutdown path is designed to feed cold-restart:
+
+- **Graceful shutdown (SIGTERM/SIGINT)** — `ControlPlane.DestroyAll` stops every Firecracker process via `StopVMM`, releases TAP/IP/vsock/socket, and **preserves each VM's rootfs ext4 and `state.json`**. The next daemon start cold-restarts them.
+- **Explicit `DELETE /vms/{id}`** — routes through `destroyVM`, which does a full cleanup (deletes `state.json`, removes the rootfs ext4, releases all resources). The VM is gone and is not cold-restarted.
+- **SIGKILL / crash** — defers don't run. `state.json` + rootfs survive on disk; on the next start, cold-restart picks them up exactly as for graceful shutdown.
+- **COW-restored and snapshot-restored VMs** — torn down fully during `DestroyAll` (dm-snapshot devices / bind mounts would leak kernel resources otherwise); their `state.json` is removed so the next start does not attempt to recover them.
+
+What this preserves:
+
+| Preserved | Lost |
+|-----------|------|
+| `vm_id`, `guest_ip`, `tap_device`, `mac_addr` | In-flight `/tasks` work (memory is not snapshotted) |
+| `agent_token`, `agent_url` | Goose conversation context (in-VM, in-memory) |
+| Disk contents (the rootfs clone is reused, not recreated) | `runningVM.dmSnapshot` info (COW-mode VMs are not auto-recovered) |
+| Flock membership, Town Wall history | Watchdog `status=dead` markings (status reverts to `ready` until the next probe) |
+
+Callers that need at-most-once semantics across daemon restarts should idempotency-key their `/tasks` calls or poll for completion before retrying.
+
+**Out of scope for v0.3.2**:
+- VMs spawned with `EPHEMERA_DISK_MODE=cow` skip recovery (logged on startup); they require dm-snapshot orphan cleanup that is deferred to a later release.
+- Snapshot-restored VMs (`POST /snapshots/{id}/restore`) are not auto-recovered — restore from the snapshot again after the daemon comes back.
 
 ### Health watchdog
 
@@ -1114,7 +1171,7 @@ Subscribers on the SSE stream see this in real time. The dead agent is **not** a
 
 `POST /flocks` writes `flocks/<flock-id>/metadata.json` atomically (tmp + rename) before returning the response. On daemon startup the file is rescanned and every flock is re-registered in memory. The Town Wall log is reopened in append mode so full message history is preserved across restarts; `seq` numbering continues monotonically.
 
-> **Recovery scope (v0.3.1)**: only the *flock metadata* is restored. The Firecracker processes themselves are gone after a daemon restart, so calls that need a live VM (`/tasks`, `/stop`) will fail. Recovered flocks are useful for: querying audit history (`/wall/history`), enumerating previously dispatched work, and cleanly `DELETE`-ing the leftover registration. Live VM auto-restart is on the v0.4.0 roadmap.
+> **Recovery scope (v0.3.2)**: flock metadata is restored here; the live VMs are brought back via the cold-restart path described above. After daemon restart, recovered flocks are fully interactive (`/tasks`, `/stop`, `/post`, `/wall`, `DELETE` all work), with the caveat that in-VM memory state is lost — agents resume from a fresh boot, not from where they left off.
 
 ### Monotonic message sequence numbers
 
@@ -1150,9 +1207,11 @@ done
 | **Single-host** | All VMs run on one physical host. Multi-host clustering is not supported. |
 | **Same-snapshot concurrent restores not supported** | The guest IP is reconfigured via vsock after restore, so different-snapshot concurrent restores each get a fresh IP. However, two VMs from the *same* snapshot would still collide on the Firecracker vsock UDS path (which is fixed in `state.bin`), so same-snapshot concurrent restores are not supported. |
 | **Cross-machine restore** | Supported manually: copy the `snapshots/<id>/` directory to the target host at the same absolute path, then call `POST /snapshots/{id}/restore`. Automated transfer is not built in. |
-| **Recovered flocks are read-mostly** (v0.3.1) | After daemon restart, flock metadata is restored but the underlying Firecracker processes are gone. `/tasks` and `/stop` against a recovered agent's VM will fail; `/post`, `/wall`, `/wall/history`, and `DELETE` continue to work. Live VM auto-restart is on the v0.4.0 roadmap. |
-| **Watchdog state not persisted** (v0.3.1) | A `status=dead` marking set by the watchdog lives only in memory. After a daemon restart, the recovered flock's agents go back to their spawn-time status (typically `ready`) until the watchdog probes them again. Status-update persistence is on the v0.4.0 roadmap. |
-| **In-VM control-plane auth requires env var** (v0.3.1) | When the control plane runs with `EPHEMERA_API_TOKENS` set, the in-VM `/townwall/post` forwarder needs `EPHEMERA_CONTROL_PLANE_TOKEN` set inside the VM to authenticate against the control plane. Automatic per-VM control-plane token injection is on the v0.4.0 roadmap. |
+| **Cold-restart loses in-VM memory** (v0.3.2) | Live VM auto-restart re-boots each VM from its rootfs clone; the guest kernel and `goose-agent` start fresh. Any `/tasks` request in flight at the moment of daemon shutdown is dropped. Callers should idempotency-key tasks or re-poll for completion across a restart. |
+| **COW-mode VMs are not auto-recovered** (v0.3.2) | VMs spawned with `EPHEMERA_DISK_MODE=cow` are skipped during cold-restart (logged on startup). dm-snapshot orphan cleanup is deferred. Workaround: re-spawn the agent if you depend on it. |
+| **Snapshot-restored VMs are not auto-recovered** (v0.3.2) | Only spawn-path VMs are cold-restarted. After a daemon restart, call `POST /snapshots/{id}/restore` again to bring back a snapshot-derived VM. |
+| **Watchdog state not persisted** | A `status=dead` marking set by the watchdog lives only in memory. After a daemon restart (or cold-restart of the watched VM), agents revert to `ready` until the watchdog probes them again. Status-update persistence is on the roadmap. |
+| **In-VM control-plane auth requires env var** | When the control plane runs with `EPHEMERA_API_TOKENS` set, the in-VM `/townwall/post` forwarder needs `EPHEMERA_CONTROL_PLANE_TOKEN` set inside the VM to authenticate against the control plane. Automatic per-VM control-plane token injection is on the roadmap. |
 
 ---
 

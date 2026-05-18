@@ -116,6 +116,51 @@ func (m *Manager) Allocate() (tapDevice string, guestIP string, macAddr string, 
 	return tapDevice, guestIP, macAddr, nil
 }
 
+// ReclaimAllocation re-reserves the exact original IP, TAP name, and MAC for a
+// VM being recovered after a daemon restart. Unlike AllocateForRestore (which
+// picks any free IP because the guest is reconfigured via vsock post-snapshot),
+// cold-restart needs to reuse the prior IP so callers and the agent_url stay
+// stable across the restart.
+//
+// Returns an error if the requested IP or TAP ID is no longer free (which
+// indicates a stale state.json — the recovery loop should drop that entry).
+func (m *Manager) ReclaimAllocation(tapDeviceName, guestIP, macAddr string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, known := m.ipInUse[guestIP]; !known {
+		return fmt.Errorf("IP %q is not in this manager's subnet", guestIP)
+	}
+	if m.ipInUse[guestIP] {
+		return fmt.Errorf("IP %q is already in use", guestIP)
+	}
+
+	var tapID int
+	if _, err := fmt.Sscanf(tapDeviceName, "tap%d", &tapID); err != nil {
+		return fmt.Errorf("invalid tap device name %q: %w", tapDeviceName, err)
+	}
+
+	// Reserve the IP and align the tap-ID bookkeeping so future Allocate calls
+	// won't collide with this reclaimed device.
+	m.ipInUse[guestIP] = true
+	for i, id := range m.freeTapIDs {
+		if id == tapID {
+			m.freeTapIDs = append(m.freeTapIDs[:i], m.freeTapIDs[i+1:]...)
+			break
+		}
+	}
+	if tapID >= m.nextTapID {
+		m.nextTapID = tapID + 1
+	}
+
+	log.Printf("Reclaiming TAP device %s with IP %s and MAC %s (recovery)...", tapDeviceName, guestIP, macAddr)
+	if err := m.createTapDeviceWithMAC(tapDeviceName, macAddr); err != nil {
+		m.ipInUse[guestIP] = false
+		return fmt.Errorf("failed to recreate TAP device for recovery: %w", err)
+	}
+	return nil
+}
+
 // AllocateForRestore recreates a TAP device with the exact original name and MAC (required by
 // Firecracker's snapshot state.bin) and allocates any available IP from the pool.
 // The guest IP is reconfigured post-restore via vsock, so any free IP works.

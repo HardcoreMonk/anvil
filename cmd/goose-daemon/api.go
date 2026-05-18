@@ -185,10 +185,9 @@ func NewControlPlane(
 		}
 	}
 
-	// Recover flocks persisted from previous daemon runs. Recovered flocks are
-	// read-mostly: their VMID references no longer correspond to live VMs, so
-	// /flocks/{id}/post and /flocks/{id}/wall continue to work, but /tasks
-	// against any member VM will fail until v0.4.0 adds VM auto-restart.
+	// Recover flocks persisted from previous daemon runs. Town Wall + agent
+	// metadata are restored here; the actual VM cold-restart happens in
+	// RecoverVMs below, which also flips per-agent status to ready on success.
 	if recovered, failed, err := cp.flockMgr.LoadFromDisk(); err != nil {
 		log.Printf("Warning: failed to scan flock metadata: %v", err)
 	} else {
@@ -197,6 +196,21 @@ func NewControlPlane(
 		}
 		if len(failed) > 0 {
 			log.Printf("Warning: %d flock(s) had metadata but could not be fully restored: %v", len(failed), failed)
+		}
+	}
+
+	// Cold-restart any VMs that were running when the previous daemon stopped.
+	// Memory is not preserved; the same rootfs clone is booted with the same
+	// network identity (TAP/IP/MAC) and agent token, so external callers and
+	// flock associations stay stable across the restart.
+	if recovered, failed, err := cp.RecoverVMs(); err != nil {
+		log.Printf("Warning: failed to scan VM state for recovery: %v", err)
+	} else {
+		if recovered > 0 {
+			log.Printf("Recovered %d VM(s) via cold-restart", recovered)
+		}
+		if len(failed) > 0 {
+			log.Printf("Warning: %d VM(s) had state but could not be cold-restarted: %v", len(failed), failed)
 		}
 	}
 
@@ -588,6 +602,36 @@ func (cp *ControlPlane) spawnVMInternal(opts spawnVMOptions) (*VMInfo, string, e
 	}
 	cp.mu.Unlock()
 
+	// Persist VM state for cold-restart recovery after daemon restart.
+	// COW-mode VMs are marked but excluded from automatic recovery in v0.3.2;
+	// the recovery path checks DiskMode and skips them with a warning.
+	diskMode := storage.DiskModePlain
+	if dmInfo != nil {
+		diskMode = storage.DiskModeCOW
+	}
+	if err := storage.SaveVMState(cp.workDir, storage.VMState{
+		VMID:       vmID,
+		GuestIP:    guestIP,
+		TapDevice:  tapDevice,
+		MacAddr:    macAddr,
+		VsockPath:  vsockPath,
+		SocketPath: socketPath,
+		AgentToken: agentToken,
+		DiskPath:   diskPath,
+		DiskMode:   diskMode,
+		Profile:    opts.Profile,
+		VcpuCount:  opts.VcpuCount,
+		MemSizeMib: opts.MemSizeMib,
+		FlockID:    opts.FlockID,
+		AgentID:    opts.AgentID,
+		AgentURL:   info.AgentURL,
+		CreatedAt:  time.Now().UTC(),
+	}); err != nil {
+		// State persistence failure must not abort the spawn — the VM is
+		// already live. Log and continue; recovery just won't include it.
+		log.Printf("Warning: failed to persist VM state for [%s]: %v", vmID, err)
+	}
+
 	log.Printf("VM [%s] booting at %s — waiting for goose-agent...", vmID, info.AgentURL)
 	if err := waitForAgent(guestIP, 60*time.Second); err != nil {
 		cp.destroyVM(vmID)
@@ -688,6 +732,11 @@ func (cp *ControlPlane) destroyVM(vmID string) {
 	if !ok {
 		return
 	}
+	// Drop the persisted state first so a crash between StopVMM and resource
+	// release doesn't resurrect the VM on next boot with stale identity.
+	if err := storage.DeleteVMState(cp.workDir, vmID); err != nil {
+		log.Printf("Warning: failed to delete VM state for [%s]: %v", vmID, err)
+	}
 	// StopVMM sends SIGTERM and waits for Firecracker to exit.
 	v.machine.StopVMM()
 	os.Remove(v.socketPath)
@@ -711,16 +760,44 @@ func (cp *ControlPlane) destroyVM(vmID string) {
 	log.Printf("VM [%s] destroyed.", vmID)
 }
 
-// DestroyAll stops all running VMs. Called on daemon shutdown.
+// DestroyAll is called on graceful daemon shutdown. It stops every running
+// Firecracker process but preserves each VM's state.json and rootfs clone so
+// the next daemon start can cold-restart them with the same identity.
+// Explicit DELETE /vms/{id} (which routes through destroyVM) still does a full
+// cleanup — only the daemon-lifecycle path takes the preserving branch.
+//
+// COW-restored and snapshot-restored VMs are torn down fully here because
+// v0.3.2 does not recover them: leaving their dm-snapshot devices or bind
+// mounts behind would leak kernel resources without any benefit.
 func (cp *ControlPlane) DestroyAll() {
 	cp.mu.RLock()
-	ids := make([]string, 0, len(cp.vms))
-	for id := range cp.vms {
-		ids = append(ids, id)
+	snapshot := make([]*runningVM, 0, len(cp.vms))
+	for _, v := range cp.vms {
+		snapshot = append(snapshot, v)
 	}
 	cp.mu.RUnlock()
-	for _, id := range ids {
-		cp.destroyVM(id)
+	for _, v := range snapshot {
+		v.machine.StopVMM()
+		os.Remove(v.socketPath)
+		os.Remove(fmt.Sprintf("/tmp/fc-%s-log.fifo", v.VMID))
+		if v.vsockPath != "" {
+			os.Remove(v.vsockPath)
+		}
+		if v.dmSnapshot != nil {
+			// COW VMs are not auto-recovered in v0.3.2; release the dm-snapshot
+			// device and exception store now. Also drop the state.json so the
+			// next start does not log a confusing "skipping COW VM" line for
+			// what is really an intentional teardown.
+			storage.TeardownDMSnapshot(v.dmSnapshot)
+			storage.DeleteVMState(cp.workDir, v.VMID)
+		} else if v.bindMountTarget != "" {
+			storage.TeardownBindMount(v.bindMountTarget, v.diskPath)
+			storage.DeleteVMState(cp.workDir, v.VMID)
+		}
+		// Plain rootfs ext4 + state.json are intentionally preserved here;
+		// RecoverVMs will pick them up on the next daemon start.
+		cp.netManager.Release(v.tapDevice, v.GuestIP)
+		log.Printf("VM [%s] paused for cold-restart (graceful shutdown).", v.VMID)
 	}
 }
 

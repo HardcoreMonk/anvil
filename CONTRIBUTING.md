@@ -86,6 +86,10 @@ These are the parts that have surprised contributors before. Read the existing c
 
 **`EPHEMERA_API_ADDR` for flocks** — The default `127.0.0.1:3000` is loopback-only. Inside a flock VM, `gtwall` and the agent's `/townwall/post` forwarder target `http://10.0.1.1:3000` (the bridge gateway). For flocks to work end-to-end, start the daemon with `EPHEMERA_API_ADDR=0.0.0.0:3000` (or any address that includes the bridge IP).
 
+**Cold-restart state (v0.3.2)** — `vms/<vm_id>/state.json` is the source of truth for cold-restart. When you add fields to `runningVM`, decide whether they need to survive a daemon restart; if yes, persist them via `storage.VMState` and reconstruct them in `RecoverVMs` (`cmd/goose-daemon/recovery.go`). Don't rely on Firecracker `*Machine` invariants in recovery — the SDK does not re-attach to a running process, so recovery boots a fresh Firecracker with the same socket/TAP/IP/MAC. `EPHEMERA_DISK_MODE=cow` VMs are deliberately skipped (dm-snapshot orphan cleanup is unsolved); if you change the disk mode default, also update the recovery skip logic and the README limitations table.
+
+**Graceful shutdown vs. `destroyVM` (v0.3.2)** — these are two distinct teardown paths and they intentionally behave differently. `destroyVM` is the explicit-DELETE path: it removes `state.json`, the rootfs ext4, and all transient files (full cleanup). `DestroyAll` is the deferred-on-SIGTERM path in `main`: it stops Firecracker and releases network resources but **preserves `state.json` + rootfs** so the next daemon start cold-restarts the VM. If you add cleanup code, decide which of these two paths it belongs to. A common mistake (caught in the v0.3.2 cycle) is to put cleanup inside `destroyVM` and call it from `DestroyAll` for the "shared" case — that drops the persisted state and silently breaks cold-restart.
+
 ## PR expectations
 
 - **One logical change per PR.** Mixed PRs are slow to review and risky to revert.

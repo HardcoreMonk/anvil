@@ -20,6 +20,7 @@ rm -f /tmp/goose-workspaces/*.ext4 2>/dev/null || true
 rm -f /tmp/goose-workspaces/*.cow  2>/dev/null || true
 rm -rf snapshots/snap-* 2>/dev/null || true
 rm -rf flocks/flock-* 2>/dev/null || true
+rm -rf vms/vm-* 2>/dev/null || true
 
 # Kill any stale ephemera-daemon left over from a prior interrupted run —
 # it would still be holding port 3000, causing this run's daemon to fail to
@@ -889,13 +890,22 @@ jq -e '.schema_version == 1' "$META_PATH" >/dev/null \
     && ok "schema_version == 1 ✓" \
     || fail "schema_version not 1"
 
-# ── 57d. Daemon restart preserves flock metadata ─────────────────
+# ── 57d. Daemon restart recovers flock + cold-restarts VMs ───────
 step "57d. Daemon restart recovers flock from disk"
+# Capture VM IDs and verify per-VM state.json was persisted, so we can later
+# confirm cold-restart preserved the same identities (steps 57g/57h).
+PRE_VM_IDS=$(curl -s "$API/flocks/$RESI_FLOCK_ID" | jq -r '.agents | to_entries | .[].value.vm_id' | sort -u)
+for VM in $PRE_VM_IDS; do
+    [ -f "$(pwd)/vms/$VM/state.json" ] \
+        || fail "vms/$VM/state.json missing (cold-restart will fail)"
+done
+ok "VM state.json persisted for all flock members ✓"
+
 kill "$DAEMON_PID" 2>/dev/null
 wait "$DAEMON_PID" 2>/dev/null || true
-# Recovered VMs are no longer in cp.vms; the live Firecracker processes
-# from this flock must be cleaned up explicitly so the next daemon start
-# does not collide with stale TAP/IP allocations.
+# pkill kept for now as a safety net: cold-restart's orphan cleanup (via
+# KillStaleFirecracker) should handle leftover Firecracker processes, but
+# pkill ensures the test is deterministic even if pgrep is unavailable.
 pkill -f "firecracker --api-sock" 2>/dev/null || true
 sleep 2
 
@@ -927,19 +937,51 @@ RECOVERED_SEQ=$(curl -s "$API/flocks/$RESI_FLOCK_ID/wall/history" | jq '.[-1].se
     && ok "Recovered history seq $RECOVERED_SEQ ≥ pre-restart seq $SECOND_SEQ ✓" \
     || fail "Recovered seq $RECOVERED_SEQ regressed below $SECOND_SEQ"
 
-# ── 57e. Delete recovered flock cleans metadata.json ─────────────
-step "57e. DELETE recovered flock removes metadata.json"
+# ── 57e. Cold-restart preserves VM identities ────────────────────
+# pkill kills the Firecracker processes from the previous daemon; if cold-restart
+# works, the new daemon must re-spawn them with the same vm_id / IP / TAP / token.
+step "57e. Cold-restart preserves VM IDs"
+POST_VM_IDS=$(curl -s "$API/flocks/$RESI_FLOCK_ID" | jq -r '.agents | to_entries | .[].value.vm_id' | sort -u)
+if [ "$PRE_VM_IDS" = "$POST_VM_IDS" ]; then
+    ok "VM IDs unchanged across daemon restart ✓"
+else
+    fail "VM IDs changed: [$PRE_VM_IDS] → [$POST_VM_IDS]"
+fi
+
+# Each pre-restart VM must show up in /vms (cp.vms repopulated by RecoverVMs).
+LIVE_VMS=$(curl -s "$API/vms" | jq -r '.[].vm_id' | sort -u)
+for VM in $PRE_VM_IDS; do
+    if echo "$LIVE_VMS" | grep -qx "$VM"; then
+        ok "VM $VM is live in /vms after cold-restart ✓"
+    else
+        fail "VM $VM missing from /vms after cold-restart"
+    fi
+done
+
+# ── 57f. Recovered VM /health responds ───────────────────────────
+step "57f. Recovered VM /health responds"
+# Allow a few extra seconds for goose-agent in each recovered VM to bind :8080.
+sleep 3
+for VM in $PRE_VM_IDS; do
+    HEALTH=$(curl -s -o /dev/null -w "%{http_code}" "$API/vms/$VM/health")
+    [ "$HEALTH" = "200" ] \
+        && ok "VM $VM /health → 200 ✓" \
+        || fail "VM $VM /health → $HEALTH (expected 200)"
+done
+
+# ── 57g. Delete recovered flock cleans metadata.json ─────────────
+step "57g. DELETE recovered flock removes metadata.json"
 check_http "$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/flocks/$RESI_FLOCK_ID")" \
     "200" "DELETE recovered flock"
 [ ! -f "$META_PATH" ] \
     && ok "metadata.json removed after DELETE ✓" \
     || fail "metadata.json still present after DELETE"
 
-# ── 57f. Watchdog start log line ─────────────────────────────────
+# ── 57h. Watchdog start log line ─────────────────────────────────
 # Watchdog timing-based VM-kill scenarios are flaky in shell; the
 # unit tests cover behavior. Here we only confirm the watchdog was
 # started by both daemon invocations.
-step "57f. Watchdog start log line present"
+step "57h. Watchdog start log line present"
 WD_COUNT=$(grep -c "Watchdog started" "$LOG" 2>/dev/null || echo 0)
 [ "$WD_COUNT" -ge "2" ] \
     && ok "Watchdog start log line present in $WD_COUNT daemon run(s) ✓" \
