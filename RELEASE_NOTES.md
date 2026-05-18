@@ -1,3 +1,66 @@
+# v0.3.2 — Live VM Cold-Restart
+
+**Ephemera** v0.3.2 closes the biggest operational gap left by v0.3.1: when the daemon stops and restarts, the VMs that were running come back up automatically with the same identity. Flock metadata recovery (v0.3.1) is no longer read-mostly — every recovered flock's member VMs are cold-restarted from their existing rootfs clones, with the same `vm_id`, IP, TAP device, MAC, agent token, and `agent_url` preserved. Memory state is not snapshotted; in-flight `/tasks` work is lost, but the system surface, network identity, and audit history are all stable across the restart. v0.3.x API responses remain fully backward compatible.
+
+---
+
+## What's New
+
+### Live VM cold-restart
+
+- Every successful `POST /vms` (and every flock member) writes `vms/<vm_id>/state.json` atomically (tmp + rename) with the VM's network identity, agent token, disk path, profile, and flock association
+- On daemon startup, after flock metadata is rescanned, `ControlPlane.RecoverVMs` iterates the persisted state:
+  1. **Orphan cleanup** — any leftover Firecracker process bound to the persisted API socket is sent SIGTERM, then SIGKILL after a 1.5 s grace; stale socket / log FIFO / vsock UDS files are removed (`internal/storage/orphan.go`)
+  2. **Network re-reservation** — the original TAP name and MAC are recreated, the original IP is re-marked in-use in the pool (`network.Manager.ReclaimAllocation`); if the IP is no longer free, the entry is dropped and the agent is marked `dead`
+  3. **Cold boot** — `vm.StartMachine` is called against the same rootfs clone with the persisted vCPU / memory sizing; `goose-agent` is waited for on `/health` up to 60 s
+  4. **Flock association** — for flock VMs, the agent status is flipped back to `ready` on success or `dead` (with an `<orchestrator>` Town Wall notice) on failure
+- `cp.vms` is repopulated, so `/tasks`, `/health`, `/stop`, and proxy endpoints all work against recovered VMs immediately after the daemon comes back up
+- `destroyVM` deletes the per-VM state file before tearing down the Firecracker process, so a crash mid-teardown does not resurrect a VM that the operator was already removing
+
+### Graceful shutdown feeds cold-restart
+
+`ControlPlane.DestroyAll` (deferred from `main` when the daemon receives SIGTERM/SIGINT) was rewritten to support cold-restart. Previously it called `destroyVM` per VM, which removed `state.json` and the rootfs ext4 — so the next start had nothing to recover. v0.3.2 splits the two paths:
+
+- **Graceful daemon shutdown** stops every Firecracker process via `StopVMM`, removes per-VM transient files (API socket, log FIFO, vsock UDS), and releases TAP/IP back to the pool — but **preserves `state.json` and the rootfs ext4**. Cold-restart picks them up on the next start.
+- **Explicit `DELETE /vms/{id}`** still routes through `destroyVM` and does a full cleanup (state.json removed, rootfs removed); the VM is gone permanently.
+- **SIGKILL / crash** leaves everything on disk as-is; cold-restart's orphan cleanup handles any leftover Firecracker process and then proceeds identically to the graceful path.
+- **COW-restored and snapshot-restored VMs** are torn down fully in `DestroyAll` (their `state.json` is also removed) because v0.3.2 does not recover them; leaving the dm-snapshot device or bind mount would leak kernel resources.
+
+### What is preserved vs. lost
+
+| Preserved | Lost |
+|-----------|------|
+| `vm_id`, `guest_ip`, `tap_device`, `mac_addr` | In-flight `/tasks` work (memory is not snapshotted) |
+| `agent_token`, `agent_url`, `profile` | Goose conversation context (in-VM, in-memory) |
+| Disk contents (rootfs clone is reused, not recreated) | Watchdog `status=dead` markings (revert to `ready` until next probe) |
+| Flock membership, Town Wall history, `seq` numbering | COW-mode VMs and snapshot-restored VMs (out of scope for v0.3.2) |
+
+### Out of scope for v0.3.2
+
+- **COW-mode VMs** (`EPHEMERA_DISK_MODE=cow`) are skipped during recovery (logged on startup). dm-snapshot orphan cleanup is deferred to a later release; workaround is to re-spawn the agent.
+- **Snapshot-restored VMs** (`POST /snapshots/{id}/restore`) are not auto-recovered — restore from the snapshot again after the daemon comes back.
+
+### New / changed files
+
+- `internal/storage/vm_state.go` — `VMState` struct, `SaveVMState` / `LoadVMState` / `DeleteVMState` / `ListVMState` (atomic tmp+rename; `schema_version: 1`)
+- `internal/storage/orphan.go` — `KillStaleFirecracker(socketPath)` + `RemoveStaleVMArtifacts`
+- `internal/network/manager.go` — `ReclaimAllocation(tapName, guestIP, macAddr)`: re-reserve the exact original allocation (vs. `AllocateForRestore` which picks any free IP for vsock-reconfig snapshot restore)
+- `cmd/goose-daemon/recovery.go` — `ControlPlane.RecoverVMs()` and `markFlockAgentDead`
+- `cmd/goose-daemon/api.go` — `spawnVMInternal` writes state at the end of every spawn; `destroyVM` deletes state at the start of teardown; `NewControlPlane` calls `RecoverVMs` after `flockMgr.LoadFromDisk`; **`DestroyAll` rewritten** to stop Firecracker without dropping state.json or rootfs ext4 (see "Graceful shutdown feeds cold-restart")
+- New e2e sub-steps `57e` (cold-restart preserves VM IDs) and `57f` (recovered VM `/health` responds); existing 57e/57f renumbered to 57g/57h. Pre-flight cleans `vms/vm-*` alongside `flocks/flock-*` and `snapshots/snap-*`.
+- `vms/` and `flocks/` added to `.gitignore` (both were undocumented gaps)
+
+---
+
+## Upgrade Notes
+
+- **Fully backward compatible** with v0.3.x clients — `state.json` is new on-disk surface only; no API response shape changes
+- **First boot after upgrade**: existing VMs spawned by a v0.3.x daemon do *not* have `state.json` on disk, so they will not be cold-restarted. The new behavior takes effect for VMs spawned by v0.3.2 or later
+- **Callers that rely on at-most-once `/tasks` semantics** should idempotency-key their task IDs or re-poll for completion across a daemon restart — memory is not preserved, so any in-flight task is lost
+- **`EPHEMERA_DISK_MODE=cow` users**: keep using COW for spawn-time disk savings, but a daemon restart will not recover those VMs in v0.3.2. Plain disk mode (default) is fully covered.
+
+---
+
 # v0.3.1 — Goosetown Operational Hardening
 
 **Ephemera** v0.3.1 hardens the Goosetown layer introduced in v0.3.0 for long-running workloads. Three operational risks present in v0.3.0 are addressed: VM death goes from silent to actively surfaced, flock state survives daemon restarts, and Town Wall subscribers can now detect message gaps. The release also folds in Phase 5 verification follow-up that completes the in-VM `gtwall` chain validation, plus a `CONTRIBUTING.md`. All v0.3.0 API responses remain backward compatible — only additive fields and one new internal behavior surface (watchdog).
@@ -21,7 +84,7 @@
 - Daemon startup scans `flocks/*/metadata.json` and re-registers every flock in memory; the Town Wall log is reopened in append mode so full history (and `seq` numbering) continues across restarts
 - Recovered flocks are read-mostly: their VM IDs no longer correspond to live Firecracker processes (those died with the previous daemon), so `/tasks` against them will fail; `/post`, `/wall`, `/wall/history`, and `DELETE` continue to work
 - Schema versioned (`schema_version: 1`) for future migrations
-- Live VM auto-restart is deferred to v0.4.0
+- Live VM auto-restart is deferred to v0.3.2
 
 ### Monotonic SSE sequence numbers
 
@@ -59,7 +122,7 @@ These items extend the v0.3.0 work to cover what the original e2e couldn't:
 - **Fully backward compatible** with v0.3.0 clients — `seq`, `agent_tokens`, and the new `metadata.json` are all additive; existing endpoints unchanged
 - **No image rebuild required** unless the daemon detects stale in-VM binaries — the new staleness check handles that automatically on the next start
 - **First boot after upgrade**: existing `flocks/<id>/TOWN_WALL.log` files are preserved; flocks created before v0.3.1 (which have no `metadata.json`) are *not* recovered automatically. Going forward, every flock is recoverable
-- **Production with `EPHEMERA_API_TOKENS` set**: the in-VM `/townwall/post` forwarder still relies on `EPHEMERA_CONTROL_PLANE_TOKEN` being set inside the VM; auto-injection is on the v0.4.0 roadmap
+- **Production with `EPHEMERA_API_TOKENS` set**: the in-VM `/townwall/post` forwarder still relies on `EPHEMERA_CONTROL_PLANE_TOKEN` being set inside the VM; auto-injection is on the v0.3.2 roadmap
 
 ---
 
