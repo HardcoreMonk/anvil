@@ -182,7 +182,7 @@ func (fm *FlockManager) Delete(flockID string) (*Flock, bool) {
 // Recovered flocks are read-mostly: their VMID references no longer correspond
 // to live Firecracker processes (those died with the previous daemon), so
 // DELETE on a recovered flock relies on destroyVM's missing-vm guard. Live VM
-// re-registration is deferred to v0.4.0.
+// re-registration is deferred to v0.3.2.
 func (fm *FlockManager) LoadFromDisk() (recovered int, failed []string, err error) {
 	metas, err := ListFlockMetadata(fm.workDir)
 	if err != nil {
