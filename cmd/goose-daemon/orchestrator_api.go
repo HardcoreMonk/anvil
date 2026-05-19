@@ -365,15 +365,16 @@ func (cp *ControlPlane) restartAgent(w http.ResponseWriter, flockID, agentID str
 	}
 	profile := LookupProfile(role)
 	info, _, err := cp.spawnVMInternal(spawnVMOptions{
-		Profile:      role,
-		ConfigPath:   configPath,
-		SecretsPath:  secretsPath,
-		SystemPrompt: cp.loadProfileSystemPrompt(profile.ProfileDir),
-		FlockID:      flockID,
-		AgentID:      agentID,
-		AgentToken:   oldToken,
-		VcpuCount:    profile.VcpuCount,
-		MemSizeMib:   profile.MemSizeMib,
+		Profile:           role,
+		ConfigPath:        configPath,
+		SecretsPath:       secretsPath,
+		SystemPrompt:      cp.loadProfileSystemPrompt(profile.ProfileDir),
+		FlockID:           flockID,
+		AgentID:           agentID,
+		AgentToken:        oldToken,
+		ControlPlaneToken: cp.controlPlaneTokenForVM(),
+		VcpuCount:         profile.VcpuCount,
+		MemSizeMib:        profile.MemSizeMib,
 	})
 	if err != nil {
 		// Agent slot no longer has a backing VM — mark dead so callers see it
@@ -396,7 +397,9 @@ func (cp *ControlPlane) restartAgent(w http.ResponseWriter, flockID, agentID str
 
 // spawnVMForFlock spawns one VM as a flock member. role is mapped through
 // LookupProfile to determine VM sizing, the goose config directory, and the
-// system prompt that will be injected at boot.
+// system prompt that will be injected at boot. The control plane token is
+// auto-injected (apiClients[0]) so the in-VM /townwall/post forwarder
+// authenticates against an auth-on control plane without manual setup.
 func (cp *ControlPlane) spawnVMForFlock(flockID, agentID, role string) (*VMInfo, string, error) {
 	configPath, secretsPath, err := cp.profileConfigPaths(role)
 	if err != nil {
@@ -404,14 +407,15 @@ func (cp *ControlPlane) spawnVMForFlock(flockID, agentID, role string) (*VMInfo,
 	}
 	agentProfile := LookupProfile(role)
 	return cp.spawnVMInternal(spawnVMOptions{
-		Profile:      role,
-		ConfigPath:   configPath,
-		SecretsPath:  secretsPath,
-		SystemPrompt: cp.loadProfileSystemPrompt(agentProfile.ProfileDir),
-		FlockID:      flockID,
-		AgentID:      agentID,
-		VcpuCount:    agentProfile.VcpuCount,
-		MemSizeMib:   agentProfile.MemSizeMib,
+		Profile:           role,
+		ConfigPath:        configPath,
+		SecretsPath:       secretsPath,
+		SystemPrompt:      cp.loadProfileSystemPrompt(agentProfile.ProfileDir),
+		FlockID:           flockID,
+		AgentID:           agentID,
+		ControlPlaneToken: cp.controlPlaneTokenForVM(),
+		VcpuCount:         agentProfile.VcpuCount,
+		MemSizeMib:        agentProfile.MemSizeMib,
 	})
 }
 

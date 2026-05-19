@@ -204,70 +204,98 @@ type VMPrepareOptions struct {
 	FlockID      string
 	AgentID      string
 	SystemPrompt string // optional role system prompt written to /root/.goose-system-prompt
+
+	// ControlPlaneToken, when non-empty, is written to /root/.ephemera-cp-token
+	// (mode 0600) and used by the in-VM /townwall/post forwarder as the bearer
+	// when calling back into the control plane. Auto-derived from the host's
+	// apiClients[0] by the daemon; empty when control plane auth is disabled.
+	ControlPlaneToken string
 }
 
-// PrepareVM injects all VM-specific files in a single mount/unmount cycle:
-//   - /root/.config/goose/config.yaml       (provider, model, extensions)
-//   - /root/.config/goose/secrets.yaml      (API keys; requires GOOSE_DISABLE_KEYRING=true)
-//   - /root/task.txt                         (task prompt; optional)
-//   - /root/.ephemera-agent-token            (Bearer token for goose-agent auth; optional)
+// PrepareVM injects all VM-specific files in a single mount/unmount cycle.
+// The file-writing logic lives in injectVMFiles so it can be unit-tested
+// against a plain temp directory without mounting a loop device.
 func (p *Provisioner) PrepareVM(vmID string, opts VMPrepareOptions) error {
 	return p.mountVMDisk(vmID, func(mntDir string) error {
-		gooseConfigDir := filepath.Join(mntDir, "root", ".config", "goose")
-		if err := os.MkdirAll(gooseConfigDir, 0755); err != nil {
-			return fmt.Errorf("failed to create goose config dir: %w", err)
+		if err := injectVMFiles(mntDir, opts); err != nil {
+			return err
 		}
-
-		for _, pair := range []struct{ src, dst string }{
-			{opts.HostConfigPath, "config.yaml"},
-			{opts.HostSecretsPath, "secrets.yaml"},
-		} {
-			if err := copyFile(pair.src, filepath.Join(gooseConfigDir, pair.dst)); err != nil {
-				return fmt.Errorf("failed to inject %s: %w", pair.dst, err)
-			}
-		}
-
-		// task is optional: empty means persistent mode (goose-agent handles requests).
-		if opts.Task != "" {
-			taskPath := filepath.Join(mntDir, "root", "task.txt")
-			if err := os.WriteFile(taskPath, []byte(opts.Task), 0644); err != nil {
-				return fmt.Errorf("failed to write task.txt: %w", err)
-			}
-		}
-
-		// AgentToken is written with mode 0600 so only root can read it inside the VM.
-		if opts.AgentToken != "" {
-			tokenPath := filepath.Join(mntDir, "root", ".ephemera-agent-token")
-			if err := os.WriteFile(tokenPath, []byte(opts.AgentToken), 0600); err != nil {
-				return fmt.Errorf("failed to write agent token: %w", err)
-			}
-		}
-
-		// Flock context: tells the in-VM agent which flock and agent identity it has.
-		// Mode 0600 because AGENT_ID is enough to address the agent on the wall.
-		if opts.FlockID != "" {
-			flockMeta := fmt.Sprintf("FLOCK_ID=%s\nAGENT_ID=%s\n", opts.FlockID, opts.AgentID)
-			flockPath := filepath.Join(mntDir, "root", ".ephemera-flock")
-			if err := os.WriteFile(flockPath, []byte(flockMeta), 0600); err != nil {
-				return fmt.Errorf("failed to write flock meta: %w", err)
-			}
-		}
-
-		// System prompt: prepended to every /tasks request by goose-agent.
-		if opts.SystemPrompt != "" {
-			spPath := filepath.Join(mntDir, "root", ".goose-system-prompt")
-			if err := os.WriteFile(spPath, []byte(opts.SystemPrompt), 0644); err != nil {
-				return fmt.Errorf("failed to write system prompt: %w", err)
-			}
-		}
-
 		if err := injectHostTimezone(mntDir); err != nil {
 			log.Printf("Warning: failed to inject timezone: %v", err)
 		}
-
 		log.Printf("Config, secrets, and timezone injected into MicroVM [%s]", vmID)
 		return nil
 	})
+}
+
+// injectVMFiles writes every per-VM file into the mounted rootfs at mntDir.
+// Files written (all under /root inside the guest):
+//   - /root/.config/goose/config.yaml       (provider, model, extensions)
+//   - /root/.config/goose/secrets.yaml      (API keys; requires GOOSE_DISABLE_KEYRING=true)
+//   - /root/task.txt                         (task prompt; optional)
+//   - /root/.ephemera-agent-token            (Bearer for goose-agent; mode 0600; optional)
+//   - /root/.ephemera-flock                  (FLOCK_ID + AGENT_ID; mode 0600; optional)
+//   - /root/.goose-system-prompt             (role system prompt; optional)
+//   - /root/.ephemera-cp-token               (bearer for in-VM /townwall/post forward; mode 0600; optional)
+func injectVMFiles(mntDir string, opts VMPrepareOptions) error {
+	gooseConfigDir := filepath.Join(mntDir, "root", ".config", "goose")
+	if err := os.MkdirAll(gooseConfigDir, 0755); err != nil {
+		return fmt.Errorf("failed to create goose config dir: %w", err)
+	}
+
+	for _, pair := range []struct{ src, dst string }{
+		{opts.HostConfigPath, "config.yaml"},
+		{opts.HostSecretsPath, "secrets.yaml"},
+	} {
+		if err := copyFile(pair.src, filepath.Join(gooseConfigDir, pair.dst)); err != nil {
+			return fmt.Errorf("failed to inject %s: %w", pair.dst, err)
+		}
+	}
+
+	// task is optional: empty means persistent mode (goose-agent handles requests).
+	if opts.Task != "" {
+		taskPath := filepath.Join(mntDir, "root", "task.txt")
+		if err := os.WriteFile(taskPath, []byte(opts.Task), 0644); err != nil {
+			return fmt.Errorf("failed to write task.txt: %w", err)
+		}
+	}
+
+	// AgentToken is written with mode 0600 so only root can read it inside the VM.
+	if opts.AgentToken != "" {
+		tokenPath := filepath.Join(mntDir, "root", ".ephemera-agent-token")
+		if err := os.WriteFile(tokenPath, []byte(opts.AgentToken), 0600); err != nil {
+			return fmt.Errorf("failed to write agent token: %w", err)
+		}
+	}
+
+	// Flock context: tells the in-VM agent which flock and agent identity it has.
+	// Mode 0600 because AGENT_ID is enough to address the agent on the wall.
+	if opts.FlockID != "" {
+		flockMeta := fmt.Sprintf("FLOCK_ID=%s\nAGENT_ID=%s\n", opts.FlockID, opts.AgentID)
+		flockPath := filepath.Join(mntDir, "root", ".ephemera-flock")
+		if err := os.WriteFile(flockPath, []byte(flockMeta), 0600); err != nil {
+			return fmt.Errorf("failed to write flock meta: %w", err)
+		}
+	}
+
+	// System prompt: prepended to every /tasks request by goose-agent.
+	if opts.SystemPrompt != "" {
+		spPath := filepath.Join(mntDir, "root", ".goose-system-prompt")
+		if err := os.WriteFile(spPath, []byte(opts.SystemPrompt), 0644); err != nil {
+			return fmt.Errorf("failed to write system prompt: %w", err)
+		}
+	}
+
+	// CP token: read by the in-VM /townwall/post forwarder when calling back
+	// to the control plane. 0600 because anyone with this token could post as
+	// a different agent over a forged forward request.
+	if opts.ControlPlaneToken != "" {
+		cpTokenPath := filepath.Join(mntDir, "root", ".ephemera-cp-token")
+		if err := os.WriteFile(cpTokenPath, []byte(opts.ControlPlaneToken), 0600); err != nil {
+			return fmt.Errorf("failed to write CP token: %w", err)
+		}
+	}
+	return nil
 }
 
 // injectHostTimezone configures the VM disk to use the host's timezone.

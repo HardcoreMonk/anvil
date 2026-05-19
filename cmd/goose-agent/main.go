@@ -52,6 +52,7 @@ const (
 	agentTokenPath   = "/root/.ephemera-agent-token"
 	flockMetaPath    = "/root/.ephemera-flock"
 	systemPromptPath = "/root/.goose-system-prompt"
+	cpTokenPath      = "/root/.ephemera-cp-token"
 	// defaultControlPlaneAddr is the gateway IP the host uses inside the VM's
 	// /24 network. Overridable via EPHEMERA_CONTROL_PLANE for testing.
 	defaultControlPlaneAddr = "http://10.0.1.1:3000"
@@ -91,6 +92,18 @@ func loadFlockMeta() (flockID, agentID string) {
 		}
 	}
 	return
+}
+
+// loadCPToken returns the bearer the in-VM /townwall/post forwarder uses
+// when calling back into the control plane. Prefers the host-injected file
+// (matches apiClients[0]); falls back to EPHEMERA_CONTROL_PLANE_TOKEN for
+// older golden images that predate v0.3.3. Returns "" when neither is set
+// (auth disabled mode).
+func loadCPToken() string {
+	if b, err := os.ReadFile(cpTokenPath); err == nil {
+		return strings.TrimSpace(string(b))
+	}
+	return os.Getenv("EPHEMERA_CONTROL_PLANE_TOKEN")
 }
 
 // loadSystemPrompt returns the role's system prompt or "" when absent.
@@ -325,7 +338,7 @@ func handleTownWallPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if cpTok := os.Getenv("EPHEMERA_CONTROL_PLANE_TOKEN"); cpTok != "" {
+	if cpTok := loadCPToken(); cpTok != "" {
 		req.Header.Set("Authorization", "Bearer "+cpTok)
 	}
 	resp, err := http.DefaultClient.Do(req)
