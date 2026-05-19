@@ -223,6 +223,54 @@ func TestWatchdog_PersistsDeadStatus(t *testing.T) {
 	}
 }
 
+// TestWatchdog_ForgetVM_ClearsState ensures ForgetVM drops both the fail
+// counter and the deadMarked bit so a recycled vmID does not inherit the
+// previous instance's state. Without this, a per-agent restart that reuses
+// the (typically distinct) vmID would still skip the dead notice if the
+// same vmID later collided.
+func TestWatchdog_ForgetVM_ClearsState(t *testing.T) {
+	tmp := t.TempDir()
+	fm := NewFlockManager(tmp)
+	flock, _ := fm.Create("flock-forget", "test", filepath.Join(tmp, "flock-forget", "TOWN_WALL.log"))
+	flock.AddAgent(&AgentInfo{AgentID: "w", Role: "worker", VMID: "vm-1", Status: AgentStatusReady})
+
+	agent := newTestAgent(t)
+	locator := func(string) (string, string, bool) { return "flock-forget", "w", true }
+	lister := func() []VMRef { return []VMRef{{VMID: "vm-1", GuestIP: "127.0.0.1"}} }
+
+	wd := NewWatchdog(fm, locator, lister, agent.port)
+	wd.interval = 30 * time.Millisecond
+	wd.dyingThreshold = 3
+	agent.setFail(true)
+	wd.Start()
+	defer wd.Stop()
+
+	// Wait for dead marking.
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		if flock.Snapshot()[0].Status == AgentStatusDead {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if flock.Snapshot()[0].Status != AgentStatusDead {
+		t.Fatal("setup: expected agent to be marked dead")
+	}
+
+	wd.ForgetVM("vm-1")
+
+	wd.mu.Lock()
+	_, hasFail := wd.failCount["vm-1"]
+	_, hasDead := wd.deadMarked["vm-1"]
+	wd.mu.Unlock()
+	if hasFail {
+		t.Error("ForgetVM should delete failCount entry")
+	}
+	if hasDead {
+		t.Error("ForgetVM should delete deadMarked entry")
+	}
+}
+
 func TestWatchdog_StopReleasesGoroutine(t *testing.T) {
 	tmp := t.TempDir()
 	fm := NewFlockManager(tmp)

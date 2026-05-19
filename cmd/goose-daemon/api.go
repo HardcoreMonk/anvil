@@ -280,6 +280,7 @@ func (cp *ControlPlane) Start() error {
 	log.Printf("  GET    /flocks/{flock_id}/wall           — SSE stream of Town Wall")
 	log.Printf("  GET    /flocks/{flock_id}/wall/history   — full Town Wall log")
 	log.Printf("  POST   /flocks/{flock_id}/post           — post message to Town Wall")
+	log.Printf("  POST   /flocks/{flock_id}/agents/{id}/restart — restart one agent in place")
 	if publicURL != "" {
 		log.Printf("  agent_url base: %s (EPHEMERA_PUBLIC_URL)", publicURL)
 	}
@@ -493,8 +494,12 @@ type spawnVMOptions struct {
 	SystemPrompt string // optional role system prompt injected into the VM
 	FlockID      string // optional: when set, agent is part of a flock
 	AgentID      string // optional: per-flock agent ID (e.g. "researcher-1")
-	VcpuCount    int64  // 0 → default 2
-	MemSizeMib   int64  // 0 → default 2048
+	// AgentToken, when set, is reused as the in-VM bearer instead of being
+	// freshly generated. Used by per-agent restart so callers that already
+	// cached a token keep working across the restart.
+	AgentToken string
+	VcpuCount  int64 // 0 → default 2
+	MemSizeMib int64 // 0 → default 2048
 }
 
 // spawnVMInternal performs the actual VM lifecycle: allocate networking, clone
@@ -502,9 +507,13 @@ type spawnVMOptions struct {
 // On any error it cleans up every resource it allocated and returns.
 // Used by both the public POST /vms handler and the orchestrator's flock spawner.
 func (cp *ControlPlane) spawnVMInternal(opts spawnVMOptions) (*VMInfo, string, error) {
-	agentToken, err := generateAgentToken()
-	if err != nil {
-		return nil, "", fmt.Errorf("token generation: %w", err)
+	agentToken := opts.AgentToken
+	if agentToken == "" {
+		t, err := generateAgentToken()
+		if err != nil {
+			return nil, "", fmt.Errorf("token generation: %w", err)
+		}
+		agentToken = t
 	}
 	vmID := fmt.Sprintf("vm-%d", time.Now().UnixNano())
 

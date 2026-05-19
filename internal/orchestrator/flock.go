@@ -57,6 +57,21 @@ func (f *Flock) UpdateAgentStatus(agentID, status string) {
 	}
 }
 
+// UpdateAgentVM swaps the VM identity of an existing agent (vm_id / agent_url)
+// and resets status to ready. Used by per-agent restart so a single failed
+// agent can be replaced without recreating the whole flock; the AgentID and
+// Role stay unchanged so callers can keep addressing the same agent slot.
+// No-op when the agent ID is unknown.
+func (f *Flock) UpdateAgentVM(agentID, newVMID, newAgentURL string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if a, ok := f.Agents[agentID]; ok {
+		a.VMID = newVMID
+		a.AgentURL = newAgentURL
+		a.Status = AgentStatusReady
+	}
+}
+
 // Persist atomically writes the flock's current metadata to disk. Holds
 // writeMu so concurrent callers (createFlock, watchdog, recovery) cannot
 // race the tmp+rename inside SaveFlockMetadata. All flock metadata writers
