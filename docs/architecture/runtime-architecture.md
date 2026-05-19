@@ -6,6 +6,9 @@
 - anvil 관점: ephemera runtime은 IronClaw 결합 프로젝트의 기반 실행 계층
 - upstream: `https://github.com/steve-seungeui/ephemera`. anvil fork network를
   유지하며 ephemera runtime version을 merge로 반영한다.
+- upstream `v0.3.2`/`v0.3.3`은 확인된 sync 후보지만 아직 이 문서의 현재 runtime
+  구조로 반영하지 않는다. 변경 근거는
+  `docs/analysis/08-v0.3.2-v0.3.3-upstream-change-review.md`를 기준으로 한다.
 - 저장소/모듈 이름: `ephemera`
 - 런타임 소유 파일:
   - `cmd/goose-daemon/`

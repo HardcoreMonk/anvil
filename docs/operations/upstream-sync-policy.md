@@ -31,7 +31,7 @@ ephemera upstream 반영은 `main`에서 직접 하지 않는다. 항상 전용 
 
 ```bash
 git fetch upstream main
-git checkout -b sync/ephemera-v0.3.1 origin/main
+git checkout -b sync/ephemera-v0.3.3 origin/main
 git merge --no-ff upstream/main
 ```
 
@@ -78,6 +78,22 @@ upstream sync PR은 다음 형태를 권장한다.
 
 sync PR은 upstream merge commit과 anvil adaptation commit을 분리한다. 이렇게 해야
 upstream 변경 자체와 anvil에서 해결한 conflict/적응 작업을 review에서 구분할 수 있다.
+
+## 현재 확인된 upstream 후보
+
+2026-05-19 기준으로 upstream ephemera에는 anvil `anvil-v0.2.0` baseline 이후 다음
+tag가 추가로 존재한다.
+
+| tag | peeled commit | 요약 | anvil 현재 상태 |
+|---|---|---|---|
+| `v0.3.2` | `f5e0de694a5584acb1a20436a0b3ae912d862792` | live VM cold-restart, `vms/<vm_id>/state.json`, orphan cleanup, network re-reservation | 미병합, sync 검토 필요 |
+| `v0.3.3` | `3c24e6086e8b16380c94cf16d4d19dec960c9675` | watchdog dead-status persistence, per-agent restart, in-VM CP token auto-injection, real-LLM e2e | 미병합, sync 검토 필요 |
+
+세부 변경 근거와 anvil 채택 검토 포인트는
+[`docs/analysis/08-v0.3.2-v0.3.3-upstream-change-review.md`](../analysis/08-v0.3.2-v0.3.3-upstream-change-review.md)를
+기준으로 한다. 특히 `agent_token` persistence, `/root/.ephemera-cp-token` 주입,
+`POST /flocks/{flock_id}/agents/{agent_id}/restart` 공개 여부는 sync branch에서
+`adopted`/`adapted`/`deferred`로 명시해야 한다.
 
 ## Tag와 release 규칙
 

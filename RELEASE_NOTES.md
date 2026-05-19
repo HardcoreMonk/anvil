@@ -1,9 +1,18 @@
 # Unreleased — 다음 운영 확장 후보
 
-아직 `anvil-v0.2.0` 이후 확정된 release 변경은 없다. 다음 후보는 scheduler
-service production deployment automation, cross-host snapshot replication,
-scheduler-aware cross-host flock placement, L7 egress proxy/SNI hardening,
-snapshot storage quota dashboard다.
+아직 `anvil-v0.2.0` 이후 확정된 runtime/product release 변경은 없다. 다음 후보는
+upstream ephemera `v0.3.2`/`v0.3.3` sync 검토, scheduler service production
+deployment automation, cross-host snapshot replication, scheduler-aware cross-host
+flock placement, L7 egress proxy/SNI hardening, snapshot storage quota dashboard다.
+
+## 문서화됨
+
+- upstream ephemera `v0.3.2`와 `v0.3.3`의 tag, commit, diff 근거와 anvil 채택
+  검토 포인트를
+  `docs/analysis/08-v0.3.2-v0.3.3-upstream-change-review.md`에 추가했다.
+- `PUBLIC_RELEASE_BOUNDARY.md`, `ADR_INDEX.md`, `upstream-sync-policy.md`,
+  `release-checklist.md`에 두 upstream tag가 아직 anvil `main`에 병합되지 않은
+  `deferred` 후보임을 반영했다.
 
 # anvil v0.2.0 — Runtime scheduler, Goosetown MCP, observability foundation
 

@@ -47,9 +47,11 @@ daemon 이름, HTTP API, 일부 환경 변수에는 `ephemera` 또는 `goose` �
 있다. README에서는 `anvil`을 IronClaw 통합 프로젝트로, `ephemera`를 분리된 기반
 runtime으로 구분한다.
 
-버전별 ephemera 소스 snapshot은 Git tag로 공개된다. 현재 ephemera runtime 공개
-tag 기준은 `v0.3.1`이고, IronClaw 통합 프로젝트 anvil의 최신 공개 tag는
-`anvil-v0.2.0`이다. 첫 공개 tag는 `anvil-v0.1.0`이다.
+버전별 ephemera 소스 snapshot은 Git tag로 공개된다. 현재 anvil `main`의 runtime
+baseline은 upstream ephemera `v0.3.1` 병합분이고, IronClaw 통합 프로젝트 anvil의
+최신 공개 tag는 `anvil-v0.2.0`이다. upstream ephemera에는 `v0.3.2`, `v0.3.3`
+tag가 추가로 존재하지만, 아직 anvil `main`에 병합된 현재 기능으로 설명하지 않는다.
+첫 공개 tag는 `anvil-v0.1.0`이다.
 
 <p align="center">
   <img src="docs/assets/ironclaw-e2e.gif" alt="IronClaw anvil E2E terminal replay" width="900">
@@ -106,7 +108,7 @@ upstream sync는 별도 branch에서 수행한다.
 ```bash
 git fetch upstream main
 git ls-remote --tags upstream
-git checkout -b sync/ephemera-v0.3.1 origin/main
+git checkout -b sync/ephemera-v0.3.3 origin/main
 git merge --no-ff upstream/main
 ```
 
@@ -490,7 +492,11 @@ scripts/gtwall         VM 내부 Town Wall post helper
   API, optional trace export, 향후 지표 후보.
 
 - [docs/analysis/README.md](docs/analysis/README.md):
-  ephemera 0.1.0/0.2.0 분석 문서 index.
+  ephemera 0.1.0/0.2.0 분석 문서와 upstream 0.3.x 변경 검토 문서 index.
+
+- [ephemera v0.3.2/v0.3.3 upstream 변경 검토](docs/analysis/08-v0.3.2-v0.3.3-upstream-change-review.md):
+  upstream `v0.3.2` live VM cold-restart와 `v0.3.3` operational polish 변경의
+  태그/commit/diff 근거, anvil 채택 검토 포인트.
 
 - [anvil redesign handoff](docs/operations/2026-05-11-anvil-redesign-handoff.md):
   재설계 release/operate handoff 근거.

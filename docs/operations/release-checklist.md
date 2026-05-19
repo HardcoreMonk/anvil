@@ -70,6 +70,25 @@ trace export, ephemera `v0.3.1` Goosetown hardening, Goosetown MCP tool surface�
 candidate에서는 58단계 `sudo bash e2e_test.sh`와 `scripts/anvil-mcp-e2e.sh flock`을
 함께 확인한다.
 
+### 다음 upstream runtime 후보
+
+2026-05-19 기준 upstream ephemera `v0.3.2`, `v0.3.3`은 확인됐지만 anvil `main`에는
+아직 병합되지 않았다. 새 anvil release 후보가 이 runtime tag를 포함한다면 release
+본문에는 다음을 분리해서 적는다.
+
+- upstream `v0.3.2`: live VM cold-restart, `vms/<vm_id>/state.json`, orphan cleanup,
+  기존 TAP/IP/MAC 재예약, graceful daemon shutdown 시 rootfs/state 보존.
+- upstream `v0.3.3`: watchdog dead-status persistence, single-agent restart
+  endpoint, flock VM 내부 `/root/.ephemera-cp-token` auto-injection, real-LLM Town
+  Wall round-trip e2e.
+- anvil adaptation: `agent_token`과 control-plane token이 MCP output, audit, metrics,
+  trace, replay fixture, release artifact에 노출되지 않도록 수정 또는 검증한 내용.
+
+v0.3.3 기반으로 sync한 경우 upstream E2E는 60단계까지 확장된다. provider key가
+있는 환경에서는 real-LLM smoke가 실행될 수 있으므로 `GOOGLE_API_KEY`,
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY` 값이 문서와 fixture에 남지 않았는지 별도로
+확인한다.
+
 ## `anvil-v0.2.0` GitHub Release 게시 기록과 본문
 
 - Tag: `anvil-v0.2.0`

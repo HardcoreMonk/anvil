@@ -81,6 +81,9 @@ gitignored 상태로 유지한다.
   snapshot GC audit에는 `agent_token`이 없어야 한다.
 - upstream ephemera `v0.3.1`의 `POST /flocks` `agent_tokens` 응답 추가는 anvil에서
   채택하지 않는다.
+- upstream ephemera `v0.3.2`/`v0.3.3`을 sync할 때는 `vms/<vm_id>/state.json`의
+  `agent_token` 보존과 `/root/.ephemera-cp-token` 주입이 문서, log, replay fixture,
+  MCP output, audit/metrics/trace로 노출되지 않는지 별도 확인한다.
 - Town Wall message body는 `flocks/<flock_id>/TOWN_WALL.log`와 history 응답에
   남으므로 secret 전달 채널로 쓰지 않는다.
 

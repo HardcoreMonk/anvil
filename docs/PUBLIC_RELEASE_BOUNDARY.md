@@ -1,7 +1,7 @@
 # anvil 공개 릴리즈 경계
 
 > **대상:** anvil downstream repository
-> **현행화 기준:** 2026-05-16
+> **현행화 기준:** 2026-05-19
 > **목적:** anvil이 공개적으로 책임지는 기능 표면과, upstream ephemera에서 가져오더라도 anvil 정책상 수정하거나 제외해야 하는 표면을 구분한다.
 
 ---
@@ -53,6 +53,7 @@
 | multi-host/scheduler/quota | runtime 안정성, 보안 경계, 운영 문서, full KVM E2E 기준이 먼저 정리되어야 한다. |
 | audit/metrics/job store | public API 계약과 retention/보안 정책이 함께 정의되어야 한다. |
 | replay/player 산출물 | 검증 근거와 운영 URL을 문서화한 경우에만 공개 문서 표면으로 취급한다. |
+| upstream `v0.3.2`/`v0.3.3` runtime 변경 | cold-restart, per-agent restart, in-VM CP token 주입은 token/auth/lifecycle 의미가 바뀌므로 sync branch에서 채택 상태를 명시해야 한다. |
 
 조건부 표면을 공개 표면으로 올릴 때는 ADR을 추가하거나 기존 ADR 적용 상태를
 갱신한다.
@@ -93,6 +94,16 @@ upstream ephemera 변경을 병합할 때는 다음 상태 중 하나로 분류�
 
 `adapted`, `excluded`, `deferred` 판단은 README나 RELEASE_NOTES만으로 처리하지
 말고 ADR 또는 ADR_INDEX에 남긴다.
+
+현재 확인된 upstream 후보:
+
+| upstream tag | 주요 변경 | 현재 anvil 분류 |
+|---|---|---|
+| `v0.3.2` | live VM cold-restart, `vms/<vm_id>/state.json`, same-identity recovery | `deferred` |
+| `v0.3.3` | watchdog dead persistence, per-agent restart, in-VM CP token auto-injection, real-LLM e2e | `deferred` |
+
+두 tag는 아직 anvil `main`에 병합되지 않았다. 채택 전 근거 문서는
+`docs/analysis/08-v0.3.2-v0.3.3-upstream-change-review.md`다.
 
 ---
 

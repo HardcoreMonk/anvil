@@ -31,7 +31,9 @@ ephemera는 계속 버전업되는 runtime engine upstream이며, anvil은 그 r
 IronClaw 실행 계층으로 통합하는 downstream product fork다. 이 저장소의 Go 모듈
 경로와 기존 API/환경 변수에는 `ephemera` 또는 `goose` 이름이 남아 있다. anvil
 통합 릴리즈는 ephemera runtime tag와 충돌하지 않도록 `anvil-v0.1.0`처럼 별도
-prefix를 사용한다. 현재 최신 anvil 공개 integration tag는 `anvil-v0.2.0`이다.
+prefix를 사용한다. 현재 최신 anvil 공개 integration tag는 `anvil-v0.2.0`이고,
+현재 anvil runtime baseline은 upstream ephemera `v0.3.1` 병합분이다. upstream에는
+`v0.3.2`, `v0.3.3` tag가 추가로 존재하지만 아직 anvil `main`에는 병합되지 않았다.
 문서에서는 anvil과 ephemera를 같은 이름으로 취급하지 않는다.
 
 ## 진실 기준 문서 순서
@@ -52,7 +54,7 @@ prefix를 사용한다. 현재 최신 anvil 공개 integration tag는 `anvil-v0.
 | anvil | IronClaw와 ephemera를 결합하는 새 프로젝트 이름 | project-wide |
 | IronClaw | MCP client/orchestration 계층. anvil VM 실행 기능을 사용하는 상위 시스템 | 외부/상위 통합 |
 | OpenClaw | anvil의 통합 대상이 아님. anvil 문서와 구현은 OpenClaw 운영 계약을 제공하지 않음 | 제외 범위 |
-| ephemera | Firecracker MicroVM 기반 격리 실행 runtime. `0.1.0`, `0.2.0` 릴리즈 기준 구현 | `cmd/goose-daemon`, `internal/*` |
+| ephemera | Firecracker MicroVM 기반 격리 실행 runtime. 현재 anvil baseline은 upstream `v0.3.1` 병합분이고, `v0.3.2`/`v0.3.3`은 upstream sync 후보 | `cmd/goose-daemon`, `internal/*` |
 | ephemera control plane | VM 생성, 삭제, snapshot, restore, proxy를 담당하는 호스트 daemon | `cmd/goose-daemon` |
 | MicroVM | Firecracker + KVM으로 실행되는 ephemera 격리 실행 환경 | `internal/vm` |
 | goose-agent | VM 안에서 prompt 실행, health, stop API를 제공하는 HTTP agent | `cmd/goose-agent` |
@@ -174,9 +176,17 @@ daemon으로 보내는 outbound Bearer token이다.
   맞춰 채택하지 않는다.
 - `scripts/anvil-mcp-e2e.sh flock`과 전체 KVM `sudo bash e2e_test.sh` 58단계가
   Goosetown MCP surface와 daemon flock lifecycle 검증 경로에 포함된다.
+- upstream ephemera `v0.3.2`는 live VM cold-restart를 추가하고, `v0.3.3`은
+  watchdog dead-status persistence, per-agent restart endpoint, in-VM control-plane
+  token auto-injection, real-LLM Town Wall round-trip e2e를 추가한다. 두 tag는
+  upstream에서 확인됐지만 아직 anvil `main`에 병합되지 않았으며, 세부 근거와
+  채택 검토 포인트는
+  `docs/analysis/08-v0.3.2-v0.3.3-upstream-change-review.md`에 기록한다.
 
 남은 후속 후보:
 
+- upstream ephemera `v0.3.2`/`v0.3.3` sync branch 작성과 anvil 보안/운영 정책에
+  맞춘 `adopted`/`adapted`/`deferred` 분류
 - scheduler service의 실제 운영 배포와 host inventory polling daemonization
 - snapshot locality의 cross-host snapshot replication
 - scheduler-aware cross-host flock placement
