@@ -31,8 +31,10 @@ func metadataPath(workDir, flockID string) string {
 
 // SaveFlockMetadata writes meta atomically (tmp + rename) so a partial write
 // can never produce a half-formed file. Not safe for concurrent writes to the
-// same flock; v0.3.1's call sites (createFlock once, deleteFlock once) never
-// overlap, but a future per-status-update writer needs its own serialization.
+// same flock — callers MUST go through Flock.Persist (v0.3.3+), which holds
+// the per-flock writeMu around tmp+rename. This function is kept as the raw
+// persistence primitive used by Flock.Persist and by code paths that have no
+// live Flock instance (e.g. tests).
 func SaveFlockMetadata(workDir string, meta FlockMetadata) error {
 	if meta.SchemaVersion == 0 {
 		meta.SchemaVersion = currentSchemaVersion

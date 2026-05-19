@@ -27,7 +27,12 @@ type AgentInfo struct {
 
 // Flock is a named group of agents sharing one Town Wall.
 type Flock struct {
-	mu        sync.RWMutex
+	mu sync.RWMutex
+	// writeMu serializes metadata.json writes against any concurrent Persist
+	// caller (createFlock, watchdog.onFailure, recovery.markFlockAgentDead,
+	// per-agent restart). Held only for the duration of ToMetadata + tmp+rename
+	// inside Persist; never overlaps with the per-agent f.mu critical sections.
+	writeMu   sync.Mutex
 	ID        string                `json:"flock_id"`
 	Task      string                `json:"task"`
 	Agents    map[string]*AgentInfo `json:"agents"`
@@ -50,6 +55,17 @@ func (f *Flock) UpdateAgentStatus(agentID, status string) {
 	if a, ok := f.Agents[agentID]; ok {
 		a.Status = status
 	}
+}
+
+// Persist atomically writes the flock's current metadata to disk. Holds
+// writeMu so concurrent callers (createFlock, watchdog, recovery) cannot
+// race the tmp+rename inside SaveFlockMetadata. All flock metadata writers
+// MUST go through this helper rather than calling SaveFlockMetadata
+// directly, otherwise the serialization invariant is lost.
+func (f *Flock) Persist(workDir string) error {
+	f.writeMu.Lock()
+	defer f.writeMu.Unlock()
+	return SaveFlockMetadata(workDir, f.ToMetadata())
 }
 
 // Snapshot returns a defensive copy of the agent map for safe iteration

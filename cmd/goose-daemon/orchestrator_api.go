@@ -163,8 +163,9 @@ func (cp *ControlPlane) createFlock(w http.ResponseWriter, r *http.Request) {
 	// Persist before responding so a daemon crash between here and the next
 	// request still leaves a recoverable record. Persistence failure is
 	// logged but does not invalidate the spawn — the in-memory flock works
-	// for the duration of this daemon process.
-	if err := orchestrator.SaveFlockMetadata(cp.workDir, flock.ToMetadata()); err != nil {
+	// for the duration of this daemon process. Uses Flock.Persist so the
+	// writeMu serializes against any concurrent watchdog/recovery write.
+	if err := flock.Persist(cp.workDir); err != nil {
 		log.Printf("Flock [%s]: failed to persist metadata: %v (still usable in memory)", flockID, err)
 	}
 

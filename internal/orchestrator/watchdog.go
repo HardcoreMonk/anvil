@@ -172,6 +172,12 @@ func (wd *Watchdog) onFailure(v VMRef) {
 		return
 	}
 	flock.UpdateAgentStatus(agentID, AgentStatusDead)
+	if err := flock.Persist(wd.flockMgr.WorkDir()); err != nil {
+		// The in-memory mark already took effect; a missed disk write means
+		// the dead state will be lost on the next daemon restart, which the
+		// next probe will re-detect. Logged for operator visibility.
+		log.Printf("Watchdog: failed to persist dead status for %s: %v", agentID, err)
+	}
 	if _, err := flock.TownWall.Post(
 		"orchestrator",
 		fmt.Sprintf("%s unresponsive after %d health probes - marked dead",
