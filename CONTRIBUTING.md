@@ -90,6 +90,12 @@ These are the parts that have surprised contributors before. Read the existing c
 
 **Graceful shutdown vs. `destroyVM` (v0.3.2)** — these are two distinct teardown paths and they intentionally behave differently. `destroyVM` is the explicit-DELETE path: it removes `state.json`, the rootfs ext4, and all transient files (full cleanup). `DestroyAll` is the deferred-on-SIGTERM path in `main`: it stops Firecracker and releases network resources but **preserves `state.json` + rootfs** so the next daemon start cold-restarts the VM. If you add cleanup code, decide which of these two paths it belongs to. A common mistake (caught in the v0.3.2 cycle) is to put cleanup inside `destroyVM` and call it from `DestroyAll` for the "shared" case — that drops the persisted state and silently breaks cold-restart.
 
+**Flock metadata writes (v0.3.3)** — Always go through `Flock.Persist(workDir)` rather than calling `orchestrator.SaveFlockMetadata` directly. The helper holds a per-flock `writeMu` around the tmp+rename, which is the only thing keeping concurrent writers (createFlock, watchdog `onFailure`, recovery `markFlockAgentDead`, per-agent restart) from tearing each other's writes. The raw `SaveFlockMetadata` is kept as the persistence primitive used by `Flock.Persist` itself and by tests that have no live Flock; calling it from a daemon path silently dodges the serialization invariant.
+
+**Per-agent restart token semantics (v0.3.3)** — `restartAgent` deliberately reuses the existing `agent_token` so caller-side caches keep working across a restart. The mechanism is `spawnVMOptions.AgentToken`: empty triggers fresh generation (the standalone spawn path), non-empty reuses verbatim (the restart path). Changing this contract is a breaking change — every caller that previously cached the token would start hitting 401s after restarts.
+
+**In-VM control-plane token (v0.3.3)** — The host injects `apiClients[0].Token` into each flock VM at `/root/.ephemera-cp-token` (mode 0600) via `spawnVMOptions.ControlPlaneToken`. Standalone `POST /vms` deliberately does NOT inject (non-flock VMs have no `/townwall/post` use case), so a confusing empty file does not litter every disk. SIGHUP-driven token rotation is not propagated to already-running VMs; if you change that behavior, also update the Known Limitations table and add an e2e step.
+
 ## PR expectations
 
 - **One logical change per PR.** Mixed PRs are slow to review and risky to revert.
