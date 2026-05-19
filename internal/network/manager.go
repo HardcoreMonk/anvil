@@ -18,6 +18,7 @@ type Manager struct {
 	nextTapID  int
 	freeTapIDs []int // recycled tap IDs — prefer these over nextTapID
 	bridgeName string
+	runCommand func(name string, args ...string) error
 }
 
 func NewManager(subnet string, gatewayIP string) *Manager {
@@ -42,6 +43,9 @@ func NewManager(subnet string, gatewayIP string) *Manager {
 		nextTapID:  1,
 		freeTapIDs: nil,
 		bridgeName: "goose-br0",
+		runCommand: func(name string, args ...string) error {
+			return exec.Command(name, args...).Run()
+		},
 	}
 
 	if err := m.setupBridge(); err != nil {
@@ -52,9 +56,9 @@ func NewManager(subnet string, gatewayIP string) *Manager {
 }
 
 func (m *Manager) setupBridge() error {
-	exec.Command("ip", "link", "add", "name", m.bridgeName, "type", "bridge").Run()
-	exec.Command("ip", "addr", "add", m.gatewayIP+"/24", "dev", m.bridgeName).Run()
-	if err := exec.Command("ip", "link", "set", "dev", m.bridgeName, "up").Run(); err != nil {
+	m.command("ip", "link", "add", "name", m.bridgeName, "type", "bridge")
+	m.command("ip", "addr", "add", m.gatewayIP+"/24", "dev", m.bridgeName)
+	if err := m.command("ip", "link", "set", "dev", m.bridgeName, "up"); err != nil {
 		return err
 	}
 
@@ -69,11 +73,33 @@ func (m *Manager) setupBridge() error {
 	masqArgs := []string{
 		"POSTROUTING", "-s", m.subnet + "0/24", "!", "-d", m.subnet + "0/24", "-j", "MASQUERADE",
 	}
-	if exec.Command("iptables", append([]string{"-t", "nat", "-C"}, masqArgs...)...).Run() != nil {
-		exec.Command("iptables", append([]string{"-t", "nat", "-A"}, masqArgs...)...).Run()
+	if m.command("iptables", append([]string{"-t", "nat", "-C"}, masqArgs...)...) != nil {
+		if err := m.command("iptables", append([]string{"-t", "nat", "-A"}, masqArgs...)...); err != nil {
+			log.Printf("Warning: failed to add NAT masquerade rule: %v", err)
+		}
+	}
+
+	forwardRules := [][]string{
+		{"FORWARD", "-i", m.bridgeName, "-s", m.subnet + "0/24", "-j", "ACCEPT"},
+		{"FORWARD", "-o", m.bridgeName, "-d", m.subnet + "0/24", "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"},
+	}
+	for _, rule := range forwardRules {
+		if m.command("iptables", append([]string{"-C"}, rule...)...) == nil {
+			continue
+		}
+		if err := m.command("iptables", append([]string{"-I"}, rule...)...); err != nil {
+			log.Printf("Warning: failed to add forwarding rule %v: %v", rule, err)
+		}
 	}
 
 	return nil
+}
+
+func (m *Manager) command(name string, args ...string) error {
+	if m.runCommand != nil {
+		return m.runCommand(name, args...)
+	}
+	return exec.Command(name, args...).Run()
 }
 
 func (m *Manager) Allocate() (tapDevice string, guestIP string, macAddr string, err error) {
