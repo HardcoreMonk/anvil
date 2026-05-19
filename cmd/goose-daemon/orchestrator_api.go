@@ -86,6 +86,14 @@ func (cp *ControlPlane) handleFlockItem(w http.ResponseWriter, r *http.Request) 
 		cp.townWallHistory(w, flockID)
 	case sub == "post" && r.Method == http.MethodPost:
 		cp.postToTownWall(w, r, flockID)
+	case strings.HasPrefix(sub, "agents/") && r.Method == http.MethodPost:
+		rest := strings.TrimPrefix(sub, "agents/")
+		agentID, action, _ := strings.Cut(rest, "/")
+		if action == "restart" && agentID != "" {
+			cp.restartAgent(w, flockID, agentID)
+			return
+		}
+		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("unsupported agent action"))
 	default:
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 	}
@@ -163,8 +171,9 @@ func (cp *ControlPlane) createFlock(w http.ResponseWriter, r *http.Request) {
 	// Persist before responding so a daemon crash between here and the next
 	// request still leaves a recoverable record. Persistence failure is
 	// logged but does not invalidate the spawn — the in-memory flock works
-	// for the duration of this daemon process.
-	if err := orchestrator.SaveFlockMetadata(cp.workDir, flock.ToMetadata()); err != nil {
+	// for the duration of this daemon process. Uses Flock.Persist so the
+	// writeMu serializes against any concurrent watchdog/recovery write.
+	if err := flock.Persist(cp.workDir); err != nil {
 		log.Printf("Flock [%s]: failed to persist metadata: %v (still usable in memory)", flockID, err)
 	}
 
@@ -313,9 +322,84 @@ func (cp *ControlPlane) streamTownWall(w http.ResponseWriter, r *http.Request, f
 	}
 }
 
+// restartAgent tears down a single flock member's VM and respawns it with
+// the same agent_id, role, and agent_token so callers that cached the token
+// keep working across the restart. The new VM gets a fresh vm_id / guest_ip
+// / agent_url. Status flips to ready on success; on spawn failure the agent
+// is marked dead so external callers see the truth.
+func (cp *ControlPlane) restartAgent(w http.ResponseWriter, flockID, agentID string) {
+	f, ok := cp.flockMgr.Get(flockID)
+	if !ok {
+		writeJSONError(w, http.StatusNotFound, fmt.Errorf("flock not found"))
+		return
+	}
+
+	var oldVMID, role string
+	for _, a := range f.Snapshot() {
+		if a.AgentID == agentID {
+			oldVMID = a.VMID
+			role = a.Role
+			break
+		}
+	}
+	if oldVMID == "" {
+		writeJSONError(w, http.StatusNotFound, fmt.Errorf("agent not found"))
+		return
+	}
+
+	// Token must be read before destroyVM removes the runningVM entry.
+	cp.mu.RLock()
+	var oldToken string
+	if v, ok := cp.vms[oldVMID]; ok {
+		oldToken = v.agentToken
+	}
+	cp.mu.RUnlock()
+
+	cp.destroyVM(oldVMID)
+	cp.watchdog.ForgetVM(oldVMID)
+
+	configPath, secretsPath, err := cp.profileConfigPaths(role)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err)
+		return
+	}
+	profile := LookupProfile(role)
+	info, _, err := cp.spawnVMInternal(spawnVMOptions{
+		Profile:           role,
+		ConfigPath:        configPath,
+		SecretsPath:       secretsPath,
+		SystemPrompt:      cp.loadProfileSystemPrompt(profile.ProfileDir),
+		FlockID:           flockID,
+		AgentID:           agentID,
+		AgentToken:        oldToken,
+		ControlPlaneToken: cp.controlPlaneTokenForVM(),
+		VcpuCount:         profile.VcpuCount,
+		MemSizeMib:        profile.MemSizeMib,
+	})
+	if err != nil {
+		// Agent slot no longer has a backing VM — mark dead so callers see it
+		// and let them decide whether to retry or DELETE the flock entirely.
+		f.UpdateAgentStatus(agentID, orchestrator.AgentStatusDead)
+		if perr := f.Persist(cp.workDir); perr != nil {
+			log.Printf("restartAgent: persist dead status failed for %s: %v", agentID, perr)
+		}
+		writeJSONError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	f.UpdateAgentVM(agentID, info.VMID, info.AgentURL)
+	if err := f.Persist(cp.workDir); err != nil {
+		log.Printf("restartAgent: persist failed for flock %s: %v", flockID, err)
+	}
+	log.Printf("Flock [%s]: agent %s restarted (vm %s → %s)", flockID, agentID, oldVMID, info.VMID)
+	writeJSON(w, http.StatusOK, info)
+}
+
 // spawnVMForFlock spawns one VM as a flock member. role is mapped through
 // LookupProfile to determine VM sizing, the goose config directory, and the
-// system prompt that will be injected at boot.
+// system prompt that will be injected at boot. The control plane token is
+// auto-injected (apiClients[0]) so the in-VM /townwall/post forwarder
+// authenticates against an auth-on control plane without manual setup.
 func (cp *ControlPlane) spawnVMForFlock(flockID, agentID, role string) (*VMInfo, string, error) {
 	configPath, secretsPath, err := cp.profileConfigPaths(role)
 	if err != nil {
@@ -323,14 +407,15 @@ func (cp *ControlPlane) spawnVMForFlock(flockID, agentID, role string) (*VMInfo,
 	}
 	agentProfile := LookupProfile(role)
 	return cp.spawnVMInternal(spawnVMOptions{
-		Profile:      role,
-		ConfigPath:   configPath,
-		SecretsPath:  secretsPath,
-		SystemPrompt: cp.loadProfileSystemPrompt(agentProfile.ProfileDir),
-		FlockID:      flockID,
-		AgentID:      agentID,
-		VcpuCount:    agentProfile.VcpuCount,
-		MemSizeMib:   agentProfile.MemSizeMib,
+		Profile:           role,
+		ConfigPath:        configPath,
+		SecretsPath:       secretsPath,
+		SystemPrompt:      cp.loadProfileSystemPrompt(agentProfile.ProfileDir),
+		FlockID:           flockID,
+		AgentID:           agentID,
+		ControlPlaneToken: cp.controlPlaneTokenForVM(),
+		VcpuCount:         agentProfile.VcpuCount,
+		MemSizeMib:        agentProfile.MemSizeMib,
 	})
 }
 

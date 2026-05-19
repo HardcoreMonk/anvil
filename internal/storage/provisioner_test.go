@@ -155,6 +155,73 @@ func TestPathsNewerThan(t *testing.T) {
 	}
 }
 
+// TestInjectVMFiles_ControlPlaneToken verifies the v0.3.3 CP token injection:
+// the file lands at /root/.ephemera-cp-token (relative to mntDir), with the
+// exact content the caller asked for, at mode 0600. Mount-free so it runs
+// in any environment (no root, no loop device required).
+func TestInjectVMFiles_ControlPlaneToken(t *testing.T) {
+	mnt := t.TempDir()
+	srcCfg := filepath.Join(mnt, "cfg.yaml")
+	srcSec := filepath.Join(mnt, "sec.yaml")
+	if err := os.WriteFile(srcCfg, []byte("dummy"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(srcSec, []byte("dummy"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := injectVMFiles(mnt, VMPrepareOptions{
+		HostConfigPath:    srcCfg,
+		HostSecretsPath:   srcSec,
+		ControlPlaneToken: "e2e-cp-token-1234",
+	}); err != nil {
+		t.Fatalf("injectVMFiles: %v", err)
+	}
+
+	cpTokenPath := filepath.Join(mnt, "root", ".ephemera-cp-token")
+	got, err := os.ReadFile(cpTokenPath)
+	if err != nil {
+		t.Fatalf("read CP token: %v", err)
+	}
+	if string(got) != "e2e-cp-token-1234" {
+		t.Errorf("CP token content mismatch: got %q", string(got))
+	}
+	info, err := os.Stat(cpTokenPath)
+	if err != nil {
+		t.Fatalf("stat CP token: %v", err)
+	}
+	if mode := info.Mode().Perm(); mode != 0600 {
+		t.Errorf("CP token mode = %o, want 0600", mode)
+	}
+}
+
+// TestInjectVMFiles_EmptyControlPlaneToken_SkipsFile keeps the backward-
+// compatible behavior: when ControlPlaneToken is empty no file is created,
+// so auth-disabled daemons don't leave a confusing empty file behind.
+func TestInjectVMFiles_EmptyControlPlaneToken_SkipsFile(t *testing.T) {
+	mnt := t.TempDir()
+	srcCfg := filepath.Join(mnt, "cfg.yaml")
+	srcSec := filepath.Join(mnt, "sec.yaml")
+	if err := os.WriteFile(srcCfg, []byte("dummy"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(srcSec, []byte("dummy"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := injectVMFiles(mnt, VMPrepareOptions{
+		HostConfigPath:  srcCfg,
+		HostSecretsPath: srcSec,
+		// ControlPlaneToken left empty.
+	}); err != nil {
+		t.Fatalf("injectVMFiles: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(mnt, "root", ".ephemera-cp-token")); !os.IsNotExist(err) {
+		t.Errorf("expected no CP token file, stat err = %v", err)
+	}
+}
+
 func TestPrepareVM_NoTokenFileWhenTokenEmpty(t *testing.T) {
 	tmp := t.TempDir()
 	ws := filepath.Join(tmp, "ws")

@@ -22,6 +22,14 @@ rm -rf snapshots/snap-* 2>/dev/null || true
 rm -rf flocks/flock-* 2>/dev/null || true
 rm -rf vms/vm-* 2>/dev/null || true
 
+# Restore any profile files left mangled by an interrupted v0.3.3 LLM smoke run.
+# trap-based restore in step 59a covers normal exits; this catches SIGKILL gaps.
+[ -f /tmp/researcher-secrets.bak ] && \
+    mv /tmp/researcher-secrets.bak configs/profiles/researcher/goose-secrets.yaml
+[ -f /tmp/researcher-goose.bak ] && \
+    mv /tmp/researcher-goose.bak configs/profiles/researcher/goose.yaml
+rm -f /tmp/t59c.json 2>/dev/null || true
+
 # Kill any stale ephemera-daemon left over from a prior interrupted run —
 # it would still be holding port 3000, causing this run's daemon to fail to
 # bind while the test sees the OLD daemon answering /vms (and thus reports
@@ -987,12 +995,245 @@ WD_COUNT=$(grep -c "Watchdog started" "$LOG" 2>/dev/null || echo 0)
     && ok "Watchdog start log line present in $WD_COUNT daemon run(s) ✓" \
     || fail "Expected ≥2 'Watchdog started' log lines, got $WD_COUNT"
 
+# ════════════════════════════════════════════════════════════════
+# v0.3.3 — Operational polish scenarios (57i, 57j, 58b, 59*)
+# ════════════════════════════════════════════════════════════════
+
+# ── 57i. Watchdog persists dead status to metadata.json (v0.3.3) ─
+# Phase 1 contract: when the watchdog flips status to dead, the new
+# state lands on disk *before* anything else can race it. We verify the
+# Flock.Persist hook fired by reading metadata.json directly.
+#
+# Note we deliberately do NOT bounce the daemon here: cold-restart of a
+# healthy guest legitimately re-flips status to ready (recovery.go does
+# this on a successful waitForAgent and persists ready). The unit test
+# TestWatchdog_PersistsDeadStatus covers the LoadFromDisk roundtrip in
+# isolation. Truly-stuck-dead-across-restart requires a failed cold-
+# restart, which has its own dedicated path (markFlockAgentDead).
+step "57i. Watchdog persists dead status to metadata.json"
+WD_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/flocks" \
+    -H "Content-Type: application/json" \
+    -d '{"task":"watchdog persist","roles":["worker"]}')
+check_http "$(echo "$WD_RESP" | tail -1)" "201" "POST /flocks (watchdog persist)"
+WD_BODY=$(echo "$WD_RESP" | head -1)
+WD_FLOCK_ID=$(echo "$WD_BODY" | jq -r '.flock_id')
+WD_VM_ID=$(echo "$WD_BODY" | jq -r '.agents[] | select(.agent_id=="worker-1") | .vm_id')
+WD_TOKEN=$(echo "$WD_BODY" | jq -r '.agent_tokens["worker-1"]')
+
+# /stop tells goose-agent to gracefully exit (auth required).
+curl -s -o /dev/null -X POST "$API/vms/$WD_VM_ID/stop" \
+    -H "Authorization: Bearer $WD_TOKEN" || true
+DEAD_OK=false
+for i in $(seq 1 30); do
+    STATUS=$(curl -s "$API/flocks/$WD_FLOCK_ID" | jq -r '.agents["worker-1"].status')
+    if [ "$STATUS" = "dead" ]; then DEAD_OK=true; break; fi
+    sleep 1
+done
+$DEAD_OK && ok "Watchdog marked worker-1 dead in ≤30s ✓" \
+         || fail "Watchdog did not mark agent dead within 30s (last status: $STATUS)"
+
+META_DEAD=$(jq -r '.agents["worker-1"].status' \
+    "$(pwd)/flocks/$WD_FLOCK_ID/metadata.json")
+[ "$META_DEAD" = "dead" ] \
+    && ok "metadata.json on disk shows status=dead (Persist hook fired) ✓" \
+    || fail "metadata.json status=$META_DEAD, expected dead"
+
+curl -s -o /dev/null -X DELETE "$API/flocks/$WD_FLOCK_ID"
+sleep 2
+
+# ── 57j. Per-agent restart preserves identity + token (v0.3.3) ───
+# Phase 2. POST /flocks/{id}/agents/{agent_id}/restart must swap vm_id
+# while preserving agent_id, role, and the original agent_token (D1).
+step "57j. Per-agent restart preserves identity and reuses agent_token"
+RJ_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/flocks" \
+    -H "Content-Type: application/json" \
+    -d '{"task":"restart test","roles":["reviewer"]}')
+check_http "$(echo "$RJ_RESP" | tail -1)" "201" "POST /flocks (restart test)"
+RJ_BODY=$(echo "$RJ_RESP" | head -1)
+RJ_FLOCK_ID=$(echo "$RJ_BODY" | jq -r '.flock_id')
+# POST /flocks returns .agents as an ARRAY (FlockCreateResponse.Agents);
+# GET /flocks/{id} returns it as a MAP (Flock.MarshalJSON). Use the array
+# form here.
+RJ_OLD_VM=$(echo "$RJ_BODY" | jq -r '.agents[] | select(.agent_id=="reviewer-1") | .vm_id')
+RJ_TOKEN=$(echo "$RJ_BODY" | jq -r '.agent_tokens["reviewer-1"]')
+
+NEW_RESP=$(curl -s -w "\n%{http_code}" -X POST \
+    "$API/flocks/$RJ_FLOCK_ID/agents/reviewer-1/restart")
+check_http "$(echo "$NEW_RESP" | tail -1)" "200" "POST .../agents/reviewer-1/restart"
+NEW_VM=$(echo "$NEW_RESP" | head -1 | jq -r '.vm_id')
+[ -n "$NEW_VM" ] && [ "$NEW_VM" != "$RJ_OLD_VM" ] \
+    && ok "VM ID swapped: $RJ_OLD_VM → $NEW_VM ✓" \
+    || fail "VM ID did not change: $RJ_OLD_VM → $NEW_VM"
+
+STATUS=$(curl -s "$API/flocks/$RJ_FLOCK_ID" | jq -r '.agents["reviewer-1"].status')
+[ "$STATUS" = "ready" ] && ok "Restarted agent status reset to ready ✓" \
+                        || fail "Expected status=ready, got: $STATUS"
+
+ROLE_AFTER=$(curl -s "$API/flocks/$RJ_FLOCK_ID" | jq -r '.agents["reviewer-1"].role')
+[ "$ROLE_AFTER" = "reviewer" ] && ok "Role preserved across restart ✓" \
+                                || fail "Role changed: $ROLE_AFTER"
+
+sleep 2
+HE_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$API/vms/$NEW_VM/health")
+[ "$HE_CODE" = "200" ] && ok "New VM /health → 200 ✓" \
+                       || fail "New VM /health → $HE_CODE (expected 200)"
+
+# Token preservation check: the in-VM goose-agent on the new VM must
+# accept the OLD token. If restartAgent regenerated the token this 200
+# becomes 401.
+NEW_GUEST_IP=$(curl -s "$API/vms" | jq -r ".[] | select(.vm_id==\"$NEW_VM\") | .guest_ip")
+TW_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+    -X POST "http://${NEW_GUEST_IP}:8080/townwall/post" \
+    -H "Authorization: Bearer $RJ_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"body":"restart-token-still-valid"}')
+[ "$TW_CODE" = "200" ] \
+    && ok "Old agent_token still valid on the new VM (token preserved) ✓" \
+    || fail "Old token rejected by new VM (got $TW_CODE) — restart changed the token"
+curl -s -o /dev/null -X DELETE "$API/flocks/$RJ_FLOCK_ID"
+sleep 2
+
 # ── 58. Shut down daemon ──────────────────────────────────────────
 step "58. Shut down daemon"
 kill "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null || true
+ok "Daemon stopped"
+
+# ════════════════════════════════════════════════════════════════
+# v0.3.3 — Auth-on scenarios (Phase 3 + Phase 4 LLM smoke)
+# Both share the same auth-on daemon to avoid an extra restart cycle.
+# ════════════════════════════════════════════════════════════════
+
+# ── 58b. Auth-on daemon: in-VM CP token auto-injected (v0.3.3) ───
+# Phase 3. With EPHEMERA_API_TOKENS set, the in-VM /townwall/post
+# forwarder must authenticate to the control plane using a token
+# auto-injected by the host at /root/.ephemera-cp-token (= apiClients[0]).
+# A 200 here proves the injection chain works end-to-end; a 401 would
+# mean the in-VM forwarder hit the CP without (or with the wrong) token.
+step "58b. Auth-on daemon spawned for v0.3.3 CP-token scenarios"
+EPHEMERA_API_TOKENS="e2etest:e2e-cp-token-deadbeef" \
+    EPHEMERA_API_ADDR=0.0.0.0:3000 \
+    ./ephemera-daemon >>"$LOG" 2>&1 &
+DAEMON_PID=$!
+AUTH_HDR="Authorization: Bearer e2e-cp-token-deadbeef"
+AUTH_OK=false
+for i in $(seq 1 60); do
+    if [ "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH_HDR" "$API/vms")" = "200" ]; then
+        AUTH_OK=true; break
+    fi
+    sleep 1
+done
+$AUTH_OK && ok "Auth-on daemon ready" || { fail "Auth-on daemon did not respond"; exit 1; }
+
+step "58b.i. In-VM /townwall/post auto-authenticates under auth-on CP"
+AU_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/flocks" \
+    -H "$AUTH_HDR" -H "Content-Type: application/json" \
+    -d '{"task":"auth test","roles":["worker"]}')
+check_http "$(echo "$AU_RESP" | tail -1)" "201" "POST /flocks (auth-on)"
+AU_BODY=$(echo "$AU_RESP" | head -1)
+AU_FLOCK_ID=$(echo "$AU_BODY" | jq -r '.flock_id')
+AU_VM_ID=$(echo "$AU_BODY" | jq -r '.agents[] | select(.agent_id=="worker-1") | .vm_id')
+AU_TOKEN=$(echo "$AU_BODY" | jq -r '.agent_tokens["worker-1"]')
+AU_GUEST_IP=$(curl -s -H "$AUTH_HDR" "$API/vms" | \
+    jq -r ".[] | select(.vm_id==\"$AU_VM_ID\") | .guest_ip")
+
+TW_AUTH_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+    -X POST "http://${AU_GUEST_IP}:8080/townwall/post" \
+    -H "Authorization: Bearer $AU_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"body":"auth-on roundtrip OK"}')
+[ "$TW_AUTH_CODE" = "200" ] \
+    && ok "In-VM /townwall/post → CP succeeded with auto-injected CP token ✓" \
+    || fail "In-VM /townwall/post failed under auth-on CP: got $TW_AUTH_CODE"
+
+HIST_OK=$(curl -s -H "$AUTH_HDR" "$API/flocks/$AU_FLOCK_ID/wall/history" | \
+    jq '[.[] | select(.body|contains("auth-on roundtrip OK"))] | length')
+[ "$HIST_OK" -ge "1" ] && ok "Town Wall received auth-on forward ✓" \
+                       || fail "Town Wall did not receive the auth-on forward"
+
+curl -s -o /dev/null -H "$AUTH_HDR" -X DELETE "$API/flocks/$AU_FLOCK_ID"
+sleep 2
+
+# ── 59. Real-LLM /tasks round-trip (v0.3.3 Phase 4) ──────────────
+# Skipped when no provider API key is in env. When run, exercises the
+# full chain: /tasks → Goose CLI → system prompt → gtwall → CP Town Wall.
+LLM_KEY=""; LLM_PROVIDER=""; LLM_SECRET_KEY=""
+if [ -n "${GOOGLE_API_KEY:-}" ]; then
+    LLM_KEY="$GOOGLE_API_KEY"; LLM_PROVIDER="google"; LLM_SECRET_KEY="GOOGLE_API_KEY"
+elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    LLM_KEY="$ANTHROPIC_API_KEY"; LLM_PROVIDER="anthropic"; LLM_SECRET_KEY="ANTHROPIC_API_KEY"
+elif [ -n "${OPENAI_API_KEY:-}" ]; then
+    LLM_KEY="$OPENAI_API_KEY"; LLM_PROVIDER="openai"; LLM_SECRET_KEY="OPENAI_API_KEY"
+fi
+
+if [ -z "$LLM_KEY" ]; then
+    step "59. Real-LLM /tasks smoke test"
+    ok "Skipped — set GOOGLE_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY to run"
+else
+    # ── 59a. Inject real key into researcher profile (with restore trap) ──
+    step "59a. Inject $LLM_SECRET_KEY into researcher profile"
+    cp configs/profiles/researcher/goose-secrets.yaml /tmp/researcher-secrets.bak
+    cp configs/profiles/researcher/goose.yaml /tmp/researcher-goose.bak
+    trap '[ -f /tmp/researcher-secrets.bak ] && mv /tmp/researcher-secrets.bak configs/profiles/researcher/goose-secrets.yaml; [ -f /tmp/researcher-goose.bak ] && mv /tmp/researcher-goose.bak configs/profiles/researcher/goose.yaml' EXIT
+    # Uncomment + overwrite the line matching LLM_SECRET_KEY.
+    sed -i "s|^# *${LLM_SECRET_KEY}:.*|${LLM_SECRET_KEY}: \"${LLM_KEY}\"|" \
+        configs/profiles/researcher/goose-secrets.yaml
+    sed -i "s|^${LLM_SECRET_KEY}:.*|${LLM_SECRET_KEY}: \"${LLM_KEY}\"|" \
+        configs/profiles/researcher/goose-secrets.yaml
+    # Switch GOOSE_PROVIDER to match the key we have.
+    sed -i "s|^GOOSE_PROVIDER:.*|GOOSE_PROVIDER: ${LLM_PROVIDER}|" \
+        configs/profiles/researcher/goose.yaml
+    ok "Researcher profile updated for provider=$LLM_PROVIDER"
+
+    # ── 59b. Spawn 1-agent researcher flock under auth-on daemon ──────
+    step "59b. Spawn researcher-only flock"
+    LLM_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/flocks" \
+        -H "$AUTH_HDR" -H "Content-Type: application/json" \
+        -d '{"task":"smoke","roles":["researcher"]}')
+    check_http "$(echo "$LLM_RESP" | tail -1)" "201" "POST /flocks (LLM smoke)"
+    LLM_BODY=$(echo "$LLM_RESP" | head -1)
+    LLM_FLOCK_ID=$(echo "$LLM_BODY" | jq -r '.flock_id')
+    RES_VM_ID=$(echo "$LLM_BODY" | jq -r '.agents[] | select(.agent_id=="researcher-1") | .vm_id')
+    RES_TOKEN=$(echo "$LLM_BODY" | jq -r '.agent_tokens["researcher-1"]')
+    ok "Spawned researcher flock $LLM_FLOCK_ID"
+
+    # ── 59c. Send a deterministic /tasks prompt ──────────────────────
+    step "59c. POST /tasks with explicit gtwall instruction"
+    TASK_BODY=$(jq -n '{prompt:"Use the gtwall command exactly once to post the literal text: ROUNDTRIP_OK. Do not post anything else. Then respond with the JSON {\"done\":true}."}')
+    curl -s -m 180 -X POST "$API/vms/$RES_VM_ID/tasks" \
+        -H "$AUTH_HDR" \
+        -H "Authorization: Bearer $RES_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$TASK_BODY" > /tmp/t59c.json || true
+    ok "/tasks invocation returned (see /tmp/t59c.json)"
+
+    # ── 59d. Verify Town Wall received the ROUNDTRIP_OK posting ───────
+    step "59d. Town Wall received researcher's gtwall post"
+    FOUND=false
+    for i in $(seq 1 30); do
+        HIT=$(curl -s -H "$AUTH_HDR" "$API/flocks/$LLM_FLOCK_ID/wall/history" | \
+            jq --arg id "researcher-1" \
+            '[.[] | select(.agent_id==$id and (.body|contains("ROUNDTRIP_OK")))] | length')
+        if [ "$HIT" -ge 1 ]; then FOUND=true; break; fi
+        sleep 1
+    done
+    $FOUND && ok "Researcher posted ROUNDTRIP_OK to Town Wall via gtwall ✓" \
+           || fail "Town Wall did not receive ROUNDTRIP_OK within 30s (see /tmp/t59c.json)"
+
+    # ── 59e. Cleanup ─────────────────────────────────────────────────
+    step "59e. DELETE LLM flock + restore profile files"
+    curl -s -o /dev/null -H "$AUTH_HDR" -X DELETE "$API/flocks/$LLM_FLOCK_ID"
+    mv /tmp/researcher-secrets.bak configs/profiles/researcher/goose-secrets.yaml
+    mv /tmp/researcher-goose.bak configs/profiles/researcher/goose.yaml
+    trap - EXIT
+    ok "LLM smoke cleanup complete"
+fi
+
+# ── 60. Shut down auth-on daemon ──────────────────────────────────
+step "60. Shut down auth-on daemon"
+kill "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null || true
 
 trap - EXIT
-ok "Daemon stopped"
+ok "Auth-on daemon stopped"
 
 # ── Result ───────────────────────────────────────────────────────
 echo

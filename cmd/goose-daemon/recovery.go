@@ -111,6 +111,11 @@ func (cp *ControlPlane) RecoverVMs() (recovered int, failed []string, err error)
 		if s.FlockID != "" && s.AgentID != "" {
 			if f, ok := cp.flockMgr.Get(s.FlockID); ok {
 				f.UpdateAgentStatus(s.AgentID, orchestrator.AgentStatusReady)
+				// Persist so a future LoadFromDisk reads ready rather than
+				// the dead state left by the previous daemon's watchdog.
+				if err := f.Persist(cp.workDir); err != nil {
+					log.Printf("Recovery: failed to persist ready status for %s: %v", s.AgentID, err)
+				}
 			}
 		}
 
@@ -132,6 +137,9 @@ func (cp *ControlPlane) markFlockAgentDead(flockID, agentID string) {
 		return
 	}
 	f.UpdateAgentStatus(agentID, orchestrator.AgentStatusDead)
+	if err := f.Persist(cp.workDir); err != nil {
+		log.Printf("Recovery: failed to persist dead status for %s: %v", agentID, err)
+	}
 	if f.TownWall != nil {
 		f.TownWall.Post("<orchestrator>", fmt.Sprintf("agent %s could not be recovered after daemon restart (marked dead)", agentID))
 	}

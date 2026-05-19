@@ -1,3 +1,72 @@
+# v0.3.3 — Operational Polish
+
+**Ephemera** v0.3.3 closes the four rough edges left by the v0.3.1 / v0.3.2 hardening pass without changing any wire formats. Watchdog-detected `dead` markings now survive daemon restart and cold-restart; a single failed agent can be replaced in place without recreating the whole flock; the in-VM `/townwall/post` forwarder authenticates against an auth-on control plane without any per-VM operator setup; and the end-to-end test gained a real-LLM round-trip scenario so the `gtwall` chain stops being a code-only contract. The release is a strict superset of v0.3.2 — every existing API response, env var, and on-disk file remains valid.
+
+---
+
+## What's New
+
+### Watchdog dead-status persistence
+
+- `Flock.Persist(workDir)` is the new single entry point for flock-metadata writes (`internal/orchestrator/flock.go`). Holds a per-flock `writeMu` around `ToMetadata` + `SaveFlockMetadata`'s tmp+rename, so concurrent writers (createFlock, watchdog, recovery, per-agent restart) cannot tear each other's writes
+- `Watchdog.onFailure` (`internal/orchestrator/watchdog.go`) now calls `Persist` immediately after flipping `Status` to `"dead"` — the change lands on disk before the next probe cycle
+- `cmd/goose-daemon/recovery.go` persists both transitions: `markFlockAgentDead` writes the dead state when a VM can't be cold-restarted, and the success path persists `Status=ready` so a future `LoadFromDisk` does not resurrect a previously-dead agent
+- `cmd/goose-daemon/orchestrator_api.go`'s `createFlock` swapped its raw `SaveFlockMetadata` call for `flock.Persist(cp.workDir)`; the raw API now carries a comment forbidding direct daemon-side calls
+
+### Per-agent restart endpoint
+
+- `POST /flocks/{flock_id}/agents/{agent_id}/restart` (handled by `restartAgent` in `orchestrator_api.go`) tears down one flock member's VM and respawns it with the same `agent_id`, role, and `agent_token` — callers that cached the token keep working without re-auth
+- `spawnVMOptions.AgentToken` is the new optional field that drives token reuse: empty means generate fresh (standalone spawn path), non-empty means reuse verbatim (restart path)
+- `Flock.UpdateAgentVM(agentID, newVMID, newAgentURL)` swaps the VM identity in place and resets `Status` to `ready`
+- `Watchdog.ForgetVM(vmID)` clears cached `failCount` / `deadMarked` for a destroyed vmID so a recycled ID does not inherit stale state
+- On spawn failure the agent is left `Status=dead` and persisted, so external callers see the truth without polling
+
+### Auto-injected control-plane token
+
+- `ControlPlane.controlPlaneTokenForVM()` returns `apiClients[0].Token` under `clientsMu` (so SIGHUP-driven `ReloadClients` is safe). Empty when auth is disabled — in that mode in-VM forwarders call CP unauthenticated, preserving the v0.3.2 dev/test flow
+- `spawnVMForFlock` and `restartAgent` thread the token through `spawnVMOptions.ControlPlaneToken` → `VMPrepareOptions.ControlPlaneToken` → `injectVMFiles`, which writes it to `/root/.ephemera-cp-token` (mode 0600). Standalone `POST /vms` deliberately does NOT inject (no `/townwall/post` use case)
+- `cmd/goose-agent/main.go` gains `loadCPToken()` — prefers the new file, falls back to the legacy `EPHEMERA_CONTROL_PLANE_TOKEN` env var so older golden images keep working
+
+### Real-LLM Town Wall round-trip e2e
+
+- `e2e_test.sh` step 59 spawns a researcher under the auth-on daemon, sends `/tasks` with an explicit `gtwall` instruction, and verifies `ROUNDTRIP_OK` reaches Town Wall via the system-prompt → Goose CLI → `gtwall` → in-VM forwarder → CP chain
+- Skip-by-default: when none of `GOOGLE_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` is in the environment the step reports `ok "Skipped"` so CI without LLM credentials stays green
+- Secret handling: profile files are backed up to `/tmp/researcher-{secrets,goose}.bak` before sed-injection and restored via `trap EXIT`; pre-flight cleanup also restores them in case a previous run was SIGKILLed mid-step
+
+### Refactor for testability
+
+- `internal/storage/provisioner.go`'s file-writing logic moved into `injectVMFiles(mntDir, opts)`, decoupling it from the loop-mount lifecycle. New mount-free unit tests cover the v0.3.3 `ControlPlaneToken` injection without needing root or `/dev/kvm`
+
+---
+
+## Upgrade Notes
+
+- **Wire compatibility**: unchanged. All existing API responses, env vars, and on-disk files remain valid.
+- **New on-disk file inside each flock VM**: `/root/.ephemera-cp-token` (mode 0600). Only present when `EPHEMERA_API_TOKENS` is set on the host.
+- **`flocks/<id>/metadata.json` is written more often** (every dead transition + every per-agent restart). Atomic tmp+rename keeps the file always parseable; expect a handful of additional writes per long-running flock, not a steady-state burden.
+- **CP token rotation is still a manual operation**: `apiClients[0]` is captured at spawn time. After SIGHUP-driven token rotation, run `POST /flocks/{id}/agents/{agent_id}/restart` (or DELETE + recreate the flock) on affected VMs. See README Known Limitations.
+
+---
+
+## Changed / new files
+
+- `internal/orchestrator/flock.go` — `Flock.writeMu`, `Flock.Persist`, `Flock.UpdateAgentVM`
+- `internal/orchestrator/watchdog.go` — `Watchdog.onFailure` persists; new `Watchdog.ForgetVM`
+- `internal/orchestrator/persistence.go` — concurrency note updated; `SaveFlockMetadata` documented as raw primitive (callers go through `Flock.Persist`)
+- `internal/orchestrator/persistence_test.go` — `TestFlock_Persist_StatusRoundTrip`, `TestFlock_Persist_ConcurrentSafe`
+- `internal/orchestrator/watchdog_test.go` — `TestWatchdog_PersistsDeadStatus`, `TestWatchdog_ForgetVM_ClearsState`
+- `internal/orchestrator/flock_test.go` — `TestFlock_UpdateAgentVM`
+- `cmd/goose-daemon/recovery.go` — both status transitions persisted
+- `cmd/goose-daemon/orchestrator_api.go` — `restartAgent`, `agents/{id}/restart` route, `controlPlaneTokenForVM` plumbed into `spawnVMForFlock`
+- `cmd/goose-daemon/api.go` — `controlPlaneTokenForVM`, `spawnVMOptions.AgentToken` + `.ControlPlaneToken`, route log entry for restart
+- `internal/storage/provisioner.go` — `VMPrepareOptions.ControlPlaneToken`, `injectVMFiles` refactor, `/root/.ephemera-cp-token` (mode 0600)
+- `internal/storage/provisioner_test.go` — `TestInjectVMFiles_ControlPlaneToken`, `TestInjectVMFiles_EmptyControlPlaneToken_SkipsFile`
+- `cmd/goose-agent/main.go` — `cpTokenPath` constant, `loadCPToken`, `/townwall/post` reads via `loadCPToken`
+- `e2e_test.sh` — steps 57i, 57j, 58b, 58b.i, 59a–59e, 60 (+ pre-flight LLM-secret restore)
+- `README.md`, `CONTRIBUTING.md`, `RELEASE_NOTES.md`
+
+---
+
 # v0.3.2 — Live VM Cold-Restart
 
 **Ephemera** v0.3.2 closes the biggest operational gap left by v0.3.1: when the daemon stops and restarts, the VMs that were running come back up automatically with the same identity. Flock metadata recovery (v0.3.1) is no longer read-mostly — every recovered flock's member VMs are cold-restarted from their existing rootfs clones, with the same `vm_id`, IP, TAP device, MAC, agent token, and `agent_url` preserved. Memory state is not snapshotted; in-flight `/tasks` work is lost, but the system surface, network identity, and audit history are all stable across the restart. v0.3.x API responses remain fully backward compatible.

@@ -172,6 +172,12 @@ func (wd *Watchdog) onFailure(v VMRef) {
 		return
 	}
 	flock.UpdateAgentStatus(agentID, AgentStatusDead)
+	if err := flock.Persist(wd.flockMgr.WorkDir()); err != nil {
+		// The in-memory mark already took effect; a missed disk write means
+		// the dead state will be lost on the next daemon restart, which the
+		// next probe will re-detect. Logged for operator visibility.
+		log.Printf("Watchdog: failed to persist dead status for %s: %v", agentID, err)
+	}
 	if _, err := flock.TownWall.Post(
 		"orchestrator",
 		fmt.Sprintf("%s unresponsive after %d health probes - marked dead",
@@ -183,4 +189,15 @@ func (wd *Watchdog) onFailure(v VMRef) {
 	wd.mu.Lock()
 	wd.deadMarked[v.VMID] = true
 	wd.mu.Unlock()
+}
+
+// ForgetVM clears any cached failure state for vmID. Call after a VM is
+// destroyed (per-agent restart, DELETE) so a recycled vmID — or a future
+// probe of a long-dead one — does not inherit the previous run's
+// deadMarked bit. Safe to call concurrently with the polling loop.
+func (wd *Watchdog) ForgetVM(vmID string) {
+	wd.mu.Lock()
+	defer wd.mu.Unlock()
+	delete(wd.failCount, vmID)
+	delete(wd.deadMarked, vmID)
 }

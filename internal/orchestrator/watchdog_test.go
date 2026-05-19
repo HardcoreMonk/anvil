@@ -167,6 +167,110 @@ func TestWatchdog_TransientFailureDoesNotMark(t *testing.T) {
 	}
 }
 
+// TestWatchdog_PersistsDeadStatus verifies that crossing the dyingThreshold
+// not only flips the in-memory status but also writes metadata.json so the
+// dead state survives a daemon restart.
+func TestWatchdog_PersistsDeadStatus(t *testing.T) {
+	tmp := t.TempDir()
+	fm := NewFlockManager(tmp)
+	flock, err := fm.Create("flock-wd-persist", "test", filepath.Join(tmp, "flock-wd-persist", "TOWN_WALL.log"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	flock.AddAgent(&AgentInfo{
+		AgentID: "worker-1", Role: "worker", VMID: "vm-1", Status: AgentStatusReady,
+	})
+	// Seed metadata.json so LoadFromDisk can later pick it up.
+	if err := flock.Persist(tmp); err != nil {
+		t.Fatalf("seed Persist: %v", err)
+	}
+
+	agent := newTestAgent(t)
+	locator := func(vmID string) (string, string, bool) {
+		if vmID == "vm-1" {
+			return "flock-wd-persist", "worker-1", true
+		}
+		return "", "", false
+	}
+	lister := func() []VMRef { return []VMRef{{VMID: "vm-1", GuestIP: "127.0.0.1"}} }
+
+	wd := NewWatchdog(fm, locator, lister, agent.port)
+	wd.interval = 50 * time.Millisecond
+	wd.dyingThreshold = 3
+	agent.setFail(true)
+	wd.Start()
+	defer wd.Stop()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if flock.Snapshot()[0].Status == AgentStatusDead {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Cross-check that the on-disk metadata was updated, not just the in-memory copy.
+	fm2 := NewFlockManager(tmp)
+	if _, _, err := fm2.LoadFromDisk(); err != nil {
+		t.Fatalf("LoadFromDisk: %v", err)
+	}
+	reloaded, ok := fm2.Get("flock-wd-persist")
+	if !ok {
+		t.Fatal("flock-wd-persist missing after LoadFromDisk")
+	}
+	if got := reloaded.Snapshot()[0].Status; got != AgentStatusDead {
+		t.Errorf("expected on-disk status=dead after watchdog mark, got %q", got)
+	}
+}
+
+// TestWatchdog_ForgetVM_ClearsState ensures ForgetVM drops both the fail
+// counter and the deadMarked bit so a recycled vmID does not inherit the
+// previous instance's state. Without this, a per-agent restart that reuses
+// the (typically distinct) vmID would still skip the dead notice if the
+// same vmID later collided.
+func TestWatchdog_ForgetVM_ClearsState(t *testing.T) {
+	tmp := t.TempDir()
+	fm := NewFlockManager(tmp)
+	flock, _ := fm.Create("flock-forget", "test", filepath.Join(tmp, "flock-forget", "TOWN_WALL.log"))
+	flock.AddAgent(&AgentInfo{AgentID: "w", Role: "worker", VMID: "vm-1", Status: AgentStatusReady})
+
+	agent := newTestAgent(t)
+	locator := func(string) (string, string, bool) { return "flock-forget", "w", true }
+	lister := func() []VMRef { return []VMRef{{VMID: "vm-1", GuestIP: "127.0.0.1"}} }
+
+	wd := NewWatchdog(fm, locator, lister, agent.port)
+	wd.interval = 30 * time.Millisecond
+	wd.dyingThreshold = 3
+	agent.setFail(true)
+	wd.Start()
+	defer wd.Stop()
+
+	// Wait for dead marking.
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		if flock.Snapshot()[0].Status == AgentStatusDead {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if flock.Snapshot()[0].Status != AgentStatusDead {
+		t.Fatal("setup: expected agent to be marked dead")
+	}
+
+	wd.ForgetVM("vm-1")
+
+	wd.mu.Lock()
+	_, hasFail := wd.failCount["vm-1"]
+	_, hasDead := wd.deadMarked["vm-1"]
+	wd.mu.Unlock()
+	if hasFail {
+		t.Error("ForgetVM should delete failCount entry")
+	}
+	if hasDead {
+		t.Error("ForgetVM should delete deadMarked entry")
+	}
+}
+
 func TestWatchdog_StopReleasesGoroutine(t *testing.T) {
 	tmp := t.TempDir()
 	fm := NewFlockManager(tmp)

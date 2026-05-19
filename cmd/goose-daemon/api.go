@@ -233,6 +233,21 @@ func (cp *ControlPlane) getClients() []APIClient {
 	return cp.clients
 }
 
+// controlPlaneTokenForVM returns the bearer the in-VM /townwall/post forwarder
+// uses when calling back into the control plane. Returns the first API client's
+// token (apiClients[0].Token) when auth is enabled, or "" when auth is disabled
+// — in the latter case the in-VM forwarder calls CP unauthenticated.
+//
+// Read under clientsMu so SIGHUP-driven ReloadClients is safe.
+func (cp *ControlPlane) controlPlaneTokenForVM() string {
+	cp.clientsMu.RLock()
+	defer cp.clientsMu.RUnlock()
+	if len(cp.clients) == 0 {
+		return ""
+	}
+	return cp.clients[0].Token
+}
+
 // ReloadClients re-reads API tokens from the environment and hot-swaps the client list.
 // Called on SIGHUP. Running VMs are not affected.
 func (cp *ControlPlane) ReloadClients() {
@@ -280,6 +295,7 @@ func (cp *ControlPlane) Start() error {
 	log.Printf("  GET    /flocks/{flock_id}/wall           — SSE stream of Town Wall")
 	log.Printf("  GET    /flocks/{flock_id}/wall/history   — full Town Wall log")
 	log.Printf("  POST   /flocks/{flock_id}/post           — post message to Town Wall")
+	log.Printf("  POST   /flocks/{flock_id}/agents/{id}/restart — restart one agent in place")
 	if publicURL != "" {
 		log.Printf("  agent_url base: %s (EPHEMERA_PUBLIC_URL)", publicURL)
 	}
@@ -493,8 +509,17 @@ type spawnVMOptions struct {
 	SystemPrompt string // optional role system prompt injected into the VM
 	FlockID      string // optional: when set, agent is part of a flock
 	AgentID      string // optional: per-flock agent ID (e.g. "researcher-1")
-	VcpuCount    int64  // 0 → default 2
-	MemSizeMib   int64  // 0 → default 2048
+	// AgentToken, when set, is reused as the in-VM bearer instead of being
+	// freshly generated. Used by per-agent restart so callers that already
+	// cached a token keep working across the restart.
+	AgentToken string
+	// ControlPlaneToken, when set, is injected into the VM at /root/.ephemera-cp-token
+	// so the in-VM /townwall/post forwarder can authenticate when calling
+	// back into the control plane. Auto-populated by spawnVMForFlock from
+	// the daemon's apiClients[0]; standalone spawnVM leaves this empty.
+	ControlPlaneToken string
+	VcpuCount         int64 // 0 → default 2
+	MemSizeMib        int64 // 0 → default 2048
 }
 
 // spawnVMInternal performs the actual VM lifecycle: allocate networking, clone
@@ -502,9 +527,13 @@ type spawnVMOptions struct {
 // On any error it cleans up every resource it allocated and returns.
 // Used by both the public POST /vms handler and the orchestrator's flock spawner.
 func (cp *ControlPlane) spawnVMInternal(opts spawnVMOptions) (*VMInfo, string, error) {
-	agentToken, err := generateAgentToken()
-	if err != nil {
-		return nil, "", fmt.Errorf("token generation: %w", err)
+	agentToken := opts.AgentToken
+	if agentToken == "" {
+		t, err := generateAgentToken()
+		if err != nil {
+			return nil, "", fmt.Errorf("token generation: %w", err)
+		}
+		agentToken = t
 	}
 	vmID := fmt.Sprintf("vm-%d", time.Now().UnixNano())
 
@@ -536,12 +565,13 @@ func (cp *ControlPlane) spawnVMInternal(opts spawnVMOptions) (*VMInfo, string, e
 	}
 
 	if err := cp.provisioner.PrepareVM(vmID, storage.VMPrepareOptions{
-		HostConfigPath:  opts.ConfigPath,
-		HostSecretsPath: opts.SecretsPath,
-		AgentToken:      agentToken,
-		FlockID:         opts.FlockID,
-		AgentID:         opts.AgentID,
-		SystemPrompt:    opts.SystemPrompt,
+		HostConfigPath:    opts.ConfigPath,
+		HostSecretsPath:   opts.SecretsPath,
+		AgentToken:        agentToken,
+		FlockID:           opts.FlockID,
+		AgentID:           opts.AgentID,
+		SystemPrompt:      opts.SystemPrompt,
+		ControlPlaneToken: opts.ControlPlaneToken,
 	}); err != nil {
 		if dmInfo != nil {
 			storage.TeardownDMSnapshot(dmInfo)

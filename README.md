@@ -144,6 +144,9 @@ DELETE /vms/{id}
 | **Monotonic Town Wall seq** (v0.3.1) | Every `Message` carries `seq` (uint64, 1-based per flock); subscribers can detect dropped messages and recover from `/wall/history`. |
 | **Fatal-on-bind daemon startup** (v0.3.1) | Daemon `log.Fatalf` if the API listener fails to bind (e.g. port already in use), so a stale process never silently masks a fresh one. |
 | **Live VM cold-restart** (v0.3.2) | `vms/<vm_id>/state.json` written on every spawn; daemon startup cleans orphan Firecracker processes, re-reserves the original TAP/IP/MAC, and boots each VM from its existing rootfs clone. Same `vm_id`, same agent token, same `agent_url` across the restart. Memory state is not preserved. See [Resilience](#resilience). |
+| **Watchdog dead-status persistence** (v0.3.3) | When the watchdog marks an agent `dead`, the new status is written to `flocks/<id>/metadata.json` (via `Flock.Persist`, serialized by a per-flock `writeMu`). Daemon restart and cold-restart both preserve the marking, so a once-dead agent stays dead until explicitly restarted. |
+| **Per-agent restart** (v0.3.3) | `POST /flocks/{id}/agents/{agent_id}/restart` tears down one flock member's VM and respawns it with the same `agent_id`, role, and `agent_token` (callers' cached tokens keep working). The new VM gets a fresh `vm_id` / `guest_ip`; the agent's status resets to `ready`. |
+| **Auto-injected control-plane token** (v0.3.3) | When `EPHEMERA_API_TOKENS` is set, the host writes `apiClients[0].Token` into each flock VM at `/root/.ephemera-cp-token` (mode 0600); the in-VM `/townwall/post` forwarder reads it automatically. No more manual `EPHEMERA_CONTROL_PLANE_TOKEN` env inside every VM. |
 
 ---
 
@@ -154,11 +157,15 @@ cmd/
   goose-daemon/       Control plane daemon (main binary)
     main.go           Startup, artifact bootstrap, ControlPlane init
     api.go            HTTP API: VM + snapshot CRUD, auth middleware,
-                      spawnVMInternal (shared by /vms and /flocks paths)
+                      spawnVMInternal (shared by /vms and /flocks paths;
+                      AgentToken / ControlPlaneToken plumb-through),
+                      controlPlaneTokenForVM (apiClients[0] → in-VM bearer)
     config.go         Env-var configuration + AgentProfile / LookupProfile
                       (role → vCPU, memory, profile directory mapping)
-    orchestrator_api.go  /flocks endpoints, SSE Town Wall streaming
-    recovery.go       RecoverVMs (cold-restart) + flock cross-link
+    orchestrator_api.go  /flocks endpoints, SSE Town Wall streaming,
+                      restartAgent (per-agent restart endpoint)
+    recovery.go       RecoverVMs (cold-restart) + flock cross-link;
+                      markFlockAgentDead persists dead status
   goose-agent/        In-VM HTTP agent (baked into golden image)
     main.go           /tasks, /health, /stop, /townwall/post  (Bearer token auth);
                       prepends role system prompt to /tasks bodies
@@ -172,7 +179,8 @@ internal/
   network/manager.go  IP pool, TAP device lifecycle, AllocateForRestore,
                       ReclaimAllocation (cold-restart reuse), bridge, NAT
   storage/
-    provisioner.go    Golden image bootstrap, disk clone, config/token/flock injection,
+    provisioner.go    Golden image bootstrap, disk clone, config/token/flock injection
+                      (incl. /root/.ephemera-cp-token via injectVMFiles),
                       CloneDiskCOW (dm-snapshot-backed spawn), artifact download + SHA256
     snapshot.go       Snapshot metadata (read/write), disk copy helpers,
                       SetupDMSnapshot/TeardownDMSnapshot (COW restore via dm-snapshot),
@@ -181,9 +189,13 @@ internal/
     orphan.go         KillStaleFirecracker + RemoveStaleVMArtifacts (cold-restart cleanup)
   orchestrator/
     townwall.go       Per-flock append-only log + subscriber fan-out
-    flock.go          Flock + FlockManager (lock-safe JSON via MarshalJSON)
-    persistence.go    FlockMetadata Save/Load/Delete/List
-    watchdog.go       Per-VM health probing + dead marking
+    flock.go          Flock + FlockManager (lock-safe JSON via MarshalJSON);
+                      Persist (writeMu-serialized metadata write),
+                      UpdateAgentVM (per-agent restart swap)
+    persistence.go    FlockMetadata Save/Load/Delete/List (raw API;
+                      always go through Flock.Persist for live flocks)
+    watchdog.go       Per-VM health probing + dead marking;
+                      onFailure persists status, ForgetVM clears restart caches
     handoff.go        Structured JSON handoff between agents
 
 configs/
@@ -206,7 +218,7 @@ snapshots/            Stored snapshot directories (auto-created, gitignored)
     rootfs.ext4       Disk copy (always full, ~700 MB)
     metadata.json     Restore params (IP, TAP, MAC, token, type, base_snapshot_id)
 
-e2e_test.sh           End-to-end integration test (58 numbered steps incl. resilience sub-steps; requires /dev/kvm + root)
+e2e_test.sh           End-to-end integration test (60 numbered steps incl. resilience + v0.3.3 sub-steps; requires /dev/kvm + root)
 
 scripts/
   build_image.sh      Builds golden image (Debian Bookworm + Goose + goose-agent + micro-init + gtwall)
@@ -361,9 +373,14 @@ sudo bash e2e_test.sh
 | 57f | **Recovered VM `/health` responds** — proxy `GET /vms/{id}/health` returns 200 for each cold-restarted member |
 | 57g | `DELETE` on a recovered flock removes its `metadata.json` |
 | 57h | Daemon log shows the `Watchdog started` line for each daemon invocation |
+| 57i | **Watchdog persists dead status to disk** (v0.3.3) — kill an in-VM agent, watchdog marks `dead`, `flocks/{id}/metadata.json` on disk reflects `dead` before the next probe (Persist hook fired). Daemon restart is intentionally not part of this step because cold-restart of a healthy guest legitimately re-flips to `ready`. |
+| 57j | **Per-agent restart preserves identity + token** (v0.3.3) — `POST /flocks/{id}/agents/{agent_id}/restart` swaps `vm_id`, keeps role/token; new VM's `/townwall/post` accepts the OLD token |
 | 58 | Daemon graceful shutdown |
+| 58b | **Auth-on CP token auto-injection** (v0.3.3) — restart daemon with `EPHEMERA_API_TOKENS` set; flock VM's `/townwall/post` forward to CP returns 200 without any in-VM env setup |
+| 59 | **Real-LLM round-trip** (v0.3.3) — when `GOOGLE_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` is in env, spawn researcher, send `/tasks`, verify `ROUNDTRIP_OK` reaches Town Wall via `gtwall`. Skipped (ok) when no key. |
+| 60 | Auth-on daemon shutdown |
 
-**Example output (passing, flock steps 51–58):**
+**Example output (passing, flock steps 51–60):**
 
 ```
 ━━━ 51. Prep role profile yaml files ━━━
@@ -435,10 +452,38 @@ sudo bash e2e_test.sh
   ✓ metadata.json removed after DELETE ✓
 
 ━━━ 57h. Watchdog start log line present ━━━
-  ✓ Watchdog start log line present in 2 daemon run(s) ✓
+  ✓ Watchdog start log line present in 3 daemon run(s) ✓
+
+━━━ 57i. Watchdog persists dead status to metadata.json ━━━
+  ✓ POST /flocks (watchdog persist) (HTTP 201)
+  ✓ Watchdog marked worker-1 dead in ≤30s ✓
+  ✓ metadata.json on disk shows status=dead (Persist hook fired) ✓
+
+━━━ 57j. Per-agent restart preserves identity and reuses agent_token ━━━
+  ✓ POST /flocks (restart test) (HTTP 201)
+  ✓ POST .../agents/reviewer-1/restart (HTTP 200)
+  ✓ VM ID swapped: vm-1779176432527292612 → vm-1779176434494332773 ✓
+  ✓ Restarted agent status reset to ready ✓
+  ✓ Role preserved across restart ✓
+  ✓ New VM /health → 200 ✓
+  ✓ Old agent_token still valid on the new VM (token preserved) ✓
 
 ━━━ 58. Shut down daemon ━━━
   ✓ Daemon stopped
+
+━━━ 58b. Auth-on daemon spawned for v0.3.3 CP-token scenarios ━━━
+  ✓ Auth-on daemon ready
+
+━━━ 58b.i. In-VM /townwall/post auto-authenticates under auth-on CP ━━━
+  ✓ POST /flocks (auth-on) (HTTP 201)
+  ✓ In-VM /townwall/post → CP succeeded with auto-injected CP token ✓
+  ✓ Town Wall received auth-on forward ✓
+
+━━━ 59. Real-LLM /tasks smoke test ━━━
+  ✓ Skipped — set GOOGLE_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY to run
+
+━━━ 60. Shut down auth-on daemon ━━━
+  ✓ Auth-on daemon stopped
 
 ══════════════════════════════════
   All test steps passed ✓
@@ -455,7 +500,7 @@ All settings are read from environment variables at startup.
 |----------|---------|-------------|
 | `EPHEMERA_API_ADDR` | `127.0.0.1:3000` | Control plane bind address. Set to `0.0.0.0:3000` when behind a reverse proxy, or when using flocks: the in-VM `gtwall` / `/townwall/post` forwarder targets `http://10.0.1.1:3000` (the bridge gateway), which is unreachable with the loopback-only default. |
 | `EPHEMERA_API_PORT` | `3000` | Port only (used when `EPHEMERA_API_ADDR` is not set). |
-| `EPHEMERA_API_TOKENS` | *(unset)* | Per-client Bearer tokens: `alice:token1,bob:token2`. Preferred. |
+| `EPHEMERA_API_TOKENS` | *(unset)* | Per-client Bearer tokens: `alice:token1,bob:token2`. Preferred. The first token (`apiClients[0]`) is also auto-injected into every flock VM at `/root/.ephemera-cp-token` so the in-VM `/townwall/post` forwarder can call back to the control plane without manual setup (v0.3.3). |
 | `EPHEMERA_API_TOKEN` | *(unset)* | Single Bearer token (backward-compatible fallback). |
 | `EPHEMERA_AGENT_PORT` | `8080` | Port goose-agent listens on inside each VM. |
 | `EPHEMERA_PUBLIC_URL` | *(unset)* | Externally-reachable base URL of the control plane (no trailing slash). When set, `agent_url` in VM responses uses the proxy path `{EPHEMERA_PUBLIC_URL}/vms/{vm_id}` instead of the VM's private IP. Example: `https://api.example.com`. |
@@ -750,6 +795,16 @@ curl -X DELETE http://localhost:3000/flocks/$FLOCK_ID \
 ```
 
 Destroys every member VM in parallel and removes the flock from the registry. The Town Wall log on disk (`flocks/<id>/TOWN_WALL.log`) is left in place as an audit artifact.
+
+#### Restart a single agent (v0.3.3)
+
+```bash
+curl -X POST http://localhost:3000/flocks/$FLOCK_ID/agents/reviewer-1/restart \
+  -H "Authorization: Bearer $TOKEN"
+# {"vm_id":"vm-...","guest_ip":"10.0.1.7","agent_url":"http://10.0.1.7:8080","profile":"reviewer"}
+```
+
+Tears down the named agent's VM and respawns it with the same `agent_id`, role, and `agent_token` (callers that cached the token keep working). The new VM has a fresh `vm_id` / `guest_ip` / `agent_url`; the agent status resets to `ready`. On spawn failure the agent is left `Status=dead` and persisted, so callers see the truth without needing to poll.
 
 ---
 
@@ -1149,13 +1204,50 @@ What this preserves:
 | `vm_id`, `guest_ip`, `tap_device`, `mac_addr` | In-flight `/tasks` work (memory is not snapshotted) |
 | `agent_token`, `agent_url` | Goose conversation context (in-VM, in-memory) |
 | Disk contents (the rootfs clone is reused, not recreated) | `runningVM.dmSnapshot` info (COW-mode VMs are not auto-recovered) |
-| Flock membership, Town Wall history | Watchdog `status=dead` markings (status reverts to `ready` until the next probe) |
+| Flock membership, Town Wall history | (none) |
+| Watchdog `status=dead` markings (v0.3.3 — persisted to `metadata.json`) | |
 
 Callers that need at-most-once semantics across daemon restarts should idempotency-key their `/tasks` calls or poll for completion before retrying.
 
 **Out of scope for v0.3.2**:
 - VMs spawned with `EPHEMERA_DISK_MODE=cow` skip recovery (logged on startup); they require dm-snapshot orphan cleanup that is deferred to a later release.
 - Snapshot-restored VMs (`POST /snapshots/{id}/restore`) are not auto-recovered — restore from the snapshot again after the daemon comes back.
+
+### Watchdog dead-status persistence (v0.3.3)
+
+The watchdog's `dead` marking is now durable. `Watchdog.onFailure` calls `Flock.Persist(workDir)` immediately after flipping `AgentInfo.Status` to `"dead"`, so the change lands in `flocks/<id>/metadata.json` before the next probe cycle. `Flock.Persist` holds a per-flock `writeMu` around `ToMetadata` + `SaveFlockMetadata`'s `tmp + rename`, so concurrent writers (`createFlock`, `watchdog.onFailure`, `recovery.markFlockAgentDead`, the new per-agent restart) never tear each other's writes.
+
+Recovery's status transitions are persisted on the same path: successful cold-restart flips status back to `ready` and persists, while a VM that cannot be cold-restarted is marked `dead` (with an `<orchestrator>` Town Wall notice) and persisted. The net effect is that the on-disk metadata always reflects the freshest known liveness, and a daemon restart can never silently revive an agent that was already dead.
+
+> **Operational note**: a recovered `dead` agent stays dead — even if the watchdog later sees the VM respond, the dead marking is intentionally not auto-cleared. Use `POST /flocks/{id}/agents/{agent_id}/restart` (below) to replace the VM and reset the status to `ready`.
+
+### Per-agent restart (v0.3.3)
+
+`POST /flocks/{flock_id}/agents/{agent_id}/restart` is the surgical alternative to recreating a whole flock when one member dies. The handler:
+
+1. Looks up the agent in the flock (404 if either is missing).
+2. Captures the existing `agent_token` from `cp.vms` before teardown.
+3. Tears down the dead VM via `destroyVM` and calls `Watchdog.ForgetVM(oldVMID)` to drop cached failure state.
+4. Calls `spawnVMInternal` with the same role/profile/flockID/agentID **plus the captured `AgentToken`**; an empty token would trigger fresh generation, but here we reuse so callers' cached tokens keep working.
+5. Calls `Flock.UpdateAgentVM(agentID, newVMID, newAgentURL)`, which swaps the VM identity in place and resets `Status` to `ready`.
+6. Persists the updated metadata.
+
+On spawn failure the agent is left in `Status=dead` (and persisted) so external callers see the truth — they can retry restart or `DELETE` the flock entirely.
+
+```bash
+curl -X POST "$API/flocks/$FLOCK_ID/agents/reviewer-1/restart"
+# {"vm_id":"vm-1715...","guest_ip":"10.0.1.7","agent_url":"http://10.0.1.7:8080","profile":"reviewer"}
+```
+
+### Auto-injected control-plane token (v0.3.3)
+
+When the control plane runs with `EPHEMERA_API_TOKENS` set, the in-VM `/townwall/post` forwarder needs a Bearer to authenticate against `/flocks/{id}/post`. v0.3.3 plumbs that token automatically:
+
+- `ControlPlane.controlPlaneTokenForVM()` returns `apiClients[0].Token` under `clientsMu` (so SIGHUP-driven `ReloadClients` stays safe). Empty when auth is disabled.
+- `spawnVMForFlock` (and `restartAgent`) pass the token through `spawnVMOptions.ControlPlaneToken` → `VMPrepareOptions.ControlPlaneToken` → `injectVMFiles`, which writes it to `/root/.ephemera-cp-token` at mode 0600. Standalone `POST /vms` does NOT inject it because non-flock VMs do not use `/townwall/post`.
+- `goose-agent`'s `loadCPToken` prefers the file and falls back to the legacy `EPHEMERA_CONTROL_PLANE_TOKEN` env var for older golden images.
+
+This removes the per-VM operator burden documented in earlier releases. **Caveat**: a VM is initialized with whatever the host's `apiClients[0]` was at spawn time; rotating tokens via SIGHUP does not retroactively re-inject (see Known Limitations).
 
 ### Health watchdog
 
@@ -1210,8 +1302,7 @@ done
 | **Cold-restart loses in-VM memory** (v0.3.2) | Live VM auto-restart re-boots each VM from its rootfs clone; the guest kernel and `goose-agent` start fresh. Any `/tasks` request in flight at the moment of daemon shutdown is dropped. Callers should idempotency-key tasks or re-poll for completion across a restart. |
 | **COW-mode VMs are not auto-recovered** (v0.3.2) | VMs spawned with `EPHEMERA_DISK_MODE=cow` are skipped during cold-restart (logged on startup). dm-snapshot orphan cleanup is deferred. Workaround: re-spawn the agent if you depend on it. |
 | **Snapshot-restored VMs are not auto-recovered** (v0.3.2) | Only spawn-path VMs are cold-restarted. After a daemon restart, call `POST /snapshots/{id}/restore` again to bring back a snapshot-derived VM. |
-| **Watchdog state not persisted** | A `status=dead` marking set by the watchdog lives only in memory. After a daemon restart (or cold-restart of the watched VM), agents revert to `ready` until the watchdog probes them again. Status-update persistence is on the roadmap. |
-| **In-VM control-plane auth requires env var** | When the control plane runs with `EPHEMERA_API_TOKENS` set, the in-VM `/townwall/post` forwarder needs `EPHEMERA_CONTROL_PLANE_TOKEN` set inside the VM to authenticate against the control plane. Automatic per-VM control-plane token injection is on the roadmap. |
+| **CP token rotation requires VM restart** (v0.3.3) | Each VM is provisioned with the host's `apiClients[0]` at spawn time and the value lives on disk at `/root/.ephemera-cp-token`. SIGHUP-driven `EPHEMERA_API_TOKENS` changes do not retroactively re-inject. Workaround: `POST /flocks/{id}/agents/{agent_id}/restart` (or DELETE + re-create the flock) to pick up the new token. Roadmap: per-VM token re-injection on SIGHUP. |
 
 ---
 
