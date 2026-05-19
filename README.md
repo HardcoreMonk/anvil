@@ -380,7 +380,7 @@ sudo bash e2e_test.sh
 | 59 | **Real-LLM round-trip** (v0.3.3) — when `GOOGLE_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` is in env, spawn researcher, send `/tasks`, verify `ROUNDTRIP_OK` reaches Town Wall via `gtwall`. Skipped (ok) when no key. |
 | 60 | Auth-on daemon shutdown |
 
-**Example output (passing, flock steps 51–58):**
+**Example output (passing, flock steps 51–60):**
 
 ```
 ━━━ 51. Prep role profile yaml files ━━━
@@ -452,10 +452,38 @@ sudo bash e2e_test.sh
   ✓ metadata.json removed after DELETE ✓
 
 ━━━ 57h. Watchdog start log line present ━━━
-  ✓ Watchdog start log line present in 2 daemon run(s) ✓
+  ✓ Watchdog start log line present in 3 daemon run(s) ✓
+
+━━━ 57i. Watchdog persists dead status to metadata.json ━━━
+  ✓ POST /flocks (watchdog persist) (HTTP 201)
+  ✓ Watchdog marked worker-1 dead in ≤30s ✓
+  ✓ metadata.json on disk shows status=dead (Persist hook fired) ✓
+
+━━━ 57j. Per-agent restart preserves identity and reuses agent_token ━━━
+  ✓ POST /flocks (restart test) (HTTP 201)
+  ✓ POST .../agents/reviewer-1/restart (HTTP 200)
+  ✓ VM ID swapped: vm-1779176432527292612 → vm-1779176434494332773 ✓
+  ✓ Restarted agent status reset to ready ✓
+  ✓ Role preserved across restart ✓
+  ✓ New VM /health → 200 ✓
+  ✓ Old agent_token still valid on the new VM (token preserved) ✓
 
 ━━━ 58. Shut down daemon ━━━
   ✓ Daemon stopped
+
+━━━ 58b. Auth-on daemon spawned for v0.3.3 CP-token scenarios ━━━
+  ✓ Auth-on daemon ready
+
+━━━ 58b.i. In-VM /townwall/post auto-authenticates under auth-on CP ━━━
+  ✓ POST /flocks (auth-on) (HTTP 201)
+  ✓ In-VM /townwall/post → CP succeeded with auto-injected CP token ✓
+  ✓ Town Wall received auth-on forward ✓
+
+━━━ 59. Real-LLM /tasks smoke test ━━━
+  ✓ Skipped — set GOOGLE_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY to run
+
+━━━ 60. Shut down auth-on daemon ━━━
+  ✓ Auth-on daemon stopped
 
 ══════════════════════════════════
   All test steps passed ✓
