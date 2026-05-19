@@ -373,7 +373,7 @@ sudo bash e2e_test.sh
 | 57f | **Recovered VM `/health` responds** — proxy `GET /vms/{id}/health` returns 200 for each cold-restarted member |
 | 57g | `DELETE` on a recovered flock removes its `metadata.json` |
 | 57h | Daemon log shows the `Watchdog started` line for each daemon invocation |
-| 57i | **Watchdog dead status survives daemon restart** (v0.3.3) — kill an in-VM agent, watchdog marks `dead`, bounce daemon; status remains `dead` after restart (`metadata.json` checked directly) |
+| 57i | **Watchdog persists dead status to disk** (v0.3.3) — kill an in-VM agent, watchdog marks `dead`, `flocks/{id}/metadata.json` on disk reflects `dead` before the next probe (Persist hook fired). Daemon restart is intentionally not part of this step because cold-restart of a healthy guest legitimately re-flips to `ready`. |
 | 57j | **Per-agent restart preserves identity + token** (v0.3.3) — `POST /flocks/{id}/agents/{agent_id}/restart` swaps `vm_id`, keeps role/token; new VM's `/townwall/post` accepts the OLD token |
 | 58 | Daemon graceful shutdown |
 | 58b | **Auth-on CP token auto-injection** (v0.3.3) — restart daemon with `EPHEMERA_API_TOKENS` set; flock VM's `/townwall/post` forward to CP returns 200 without any in-VM env setup |

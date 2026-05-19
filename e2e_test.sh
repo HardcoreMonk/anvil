@@ -999,20 +999,26 @@ WD_COUNT=$(grep -c "Watchdog started" "$LOG" 2>/dev/null || echo 0)
 # v0.3.3 — Operational polish scenarios (57i, 57j, 58b, 59*)
 # ════════════════════════════════════════════════════════════════
 
-# ── 57i. Watchdog dead status persists across daemon restart ─────
-# v0.3.3 Phase 1. Kill one agent's in-VM goose-agent so the watchdog
-# (interval=5s, threshold=3 fails ≈ 15-20s) marks it dead, then bounce
-# the daemon and verify the status survives — proves Flock.Persist
-# wrote metadata.json on the dead transition and LoadFromDisk restored it.
-step "57i. Watchdog dead status survives daemon restart"
+# ── 57i. Watchdog persists dead status to metadata.json (v0.3.3) ─
+# Phase 1 contract: when the watchdog flips status to dead, the new
+# state lands on disk *before* anything else can race it. We verify the
+# Flock.Persist hook fired by reading metadata.json directly.
+#
+# Note we deliberately do NOT bounce the daemon here: cold-restart of a
+# healthy guest legitimately re-flips status to ready (recovery.go does
+# this on a successful waitForAgent and persists ready). The unit test
+# TestWatchdog_PersistsDeadStatus covers the LoadFromDisk roundtrip in
+# isolation. Truly-stuck-dead-across-restart requires a failed cold-
+# restart, which has its own dedicated path (markFlockAgentDead).
+step "57i. Watchdog persists dead status to metadata.json"
 WD_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/flocks" \
     -H "Content-Type: application/json" \
     -d '{"task":"watchdog persist","roles":["worker"]}')
 check_http "$(echo "$WD_RESP" | tail -1)" "201" "POST /flocks (watchdog persist)"
 WD_BODY=$(echo "$WD_RESP" | head -1)
 WD_FLOCK_ID=$(echo "$WD_BODY" | jq -r '.flock_id')
-WD_VM_ID=$(echo "$WD_BODY" | jq -r '.agents | to_entries | .[].value.vm_id')
-WD_TOKEN=$(echo "$WD_BODY" | jq -r '.agent_tokens | to_entries | .[0].value')
+WD_VM_ID=$(echo "$WD_BODY" | jq -r '.agents[] | select(.agent_id=="worker-1") | .vm_id')
+WD_TOKEN=$(echo "$WD_BODY" | jq -r '.agent_tokens["worker-1"]')
 
 # /stop tells goose-agent to gracefully exit (auth required).
 curl -s -o /dev/null -X POST "$API/vms/$WD_VM_ID/stop" \
@@ -1026,33 +1032,12 @@ done
 $DEAD_OK && ok "Watchdog marked worker-1 dead in ≤30s ✓" \
          || fail "Watchdog did not mark agent dead within 30s (last status: $STATUS)"
 
-# Confirm metadata.json captured the dead transition before we restart.
 META_DEAD=$(jq -r '.agents["worker-1"].status' \
     "$(pwd)/flocks/$WD_FLOCK_ID/metadata.json")
 [ "$META_DEAD" = "dead" ] \
-    && ok "metadata.json on disk shows status=dead before restart ✓" \
+    && ok "metadata.json on disk shows status=dead (Persist hook fired) ✓" \
     || fail "metadata.json status=$META_DEAD, expected dead"
 
-# Restart daemon and check the dead status survived.
-kill "$DAEMON_PID" 2>/dev/null
-wait "$DAEMON_PID" 2>/dev/null || true
-pkill -f "firecracker --api-sock" 2>/dev/null || true
-sleep 2
-EPHEMERA_API_ADDR=0.0.0.0:3000 ./ephemera-daemon >>"$LOG" 2>&1 &
-DAEMON_PID=$!
-for i in $(seq 1 60); do
-    if curl -s -o /dev/null "$API/vms" 2>/dev/null; then break; fi
-    sleep 1
-done
-
-# Cold-restart re-flips to ready on success (Phase 1 also persists that);
-# the killed agent's VM has no live goose-agent so recovery should drop it
-# and mark it dead. Either way the agent is dead — what matters is that
-# the dead state isn't silently reset to ready.
-POST_STATUS=$(curl -s "$API/flocks/$WD_FLOCK_ID" | jq -r '.agents["worker-1"].status')
-[ "$POST_STATUS" = "dead" ] \
-    && ok "Dead status survived daemon restart (status=$POST_STATUS) ✓" \
-    || fail "Expected status=dead after restart, got: $POST_STATUS"
 curl -s -o /dev/null -X DELETE "$API/flocks/$WD_FLOCK_ID"
 sleep 2
 
@@ -1066,7 +1051,10 @@ RJ_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/flocks" \
 check_http "$(echo "$RJ_RESP" | tail -1)" "201" "POST /flocks (restart test)"
 RJ_BODY=$(echo "$RJ_RESP" | head -1)
 RJ_FLOCK_ID=$(echo "$RJ_BODY" | jq -r '.flock_id')
-RJ_OLD_VM=$(echo "$RJ_BODY" | jq -r '.agents["reviewer-1"].vm_id')
+# POST /flocks returns .agents as an ARRAY (FlockCreateResponse.Agents);
+# GET /flocks/{id} returns it as a MAP (Flock.MarshalJSON). Use the array
+# form here.
+RJ_OLD_VM=$(echo "$RJ_BODY" | jq -r '.agents[] | select(.agent_id=="reviewer-1") | .vm_id')
 RJ_TOKEN=$(echo "$RJ_BODY" | jq -r '.agent_tokens["reviewer-1"]')
 
 NEW_RESP=$(curl -s -w "\n%{http_code}" -X POST \
@@ -1143,7 +1131,7 @@ AU_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/flocks" \
 check_http "$(echo "$AU_RESP" | tail -1)" "201" "POST /flocks (auth-on)"
 AU_BODY=$(echo "$AU_RESP" | head -1)
 AU_FLOCK_ID=$(echo "$AU_BODY" | jq -r '.flock_id')
-AU_VM_ID=$(echo "$AU_BODY" | jq -r '.agents["worker-1"].vm_id')
+AU_VM_ID=$(echo "$AU_BODY" | jq -r '.agents[] | select(.agent_id=="worker-1") | .vm_id')
 AU_TOKEN=$(echo "$AU_BODY" | jq -r '.agent_tokens["worker-1"]')
 AU_GUEST_IP=$(curl -s -H "$AUTH_HDR" "$API/vms" | \
     jq -r ".[] | select(.vm_id==\"$AU_VM_ID\") | .guest_ip")
@@ -1204,7 +1192,7 @@ else
     check_http "$(echo "$LLM_RESP" | tail -1)" "201" "POST /flocks (LLM smoke)"
     LLM_BODY=$(echo "$LLM_RESP" | head -1)
     LLM_FLOCK_ID=$(echo "$LLM_BODY" | jq -r '.flock_id')
-    RES_VM_ID=$(echo "$LLM_BODY" | jq -r '.agents["researcher-1"].vm_id')
+    RES_VM_ID=$(echo "$LLM_BODY" | jq -r '.agents[] | select(.agent_id=="researcher-1") | .vm_id')
     RES_TOKEN=$(echo "$LLM_BODY" | jq -r '.agent_tokens["researcher-1"]')
     ok "Spawned researcher flock $LLM_FLOCK_ID"
 
