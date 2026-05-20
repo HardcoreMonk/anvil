@@ -29,6 +29,8 @@ rm -rf vms/vm-* 2>/dev/null || true
 [ -f /tmp/researcher-goose.bak ] && \
     mv /tmp/researcher-goose.bak configs/profiles/researcher/goose.yaml
 rm -f /tmp/t59c.json 2>/dev/null || true
+# v0.3.4 step 58c writes a tokens file; survive SIGKILLed prior runs.
+rm -f /tmp/ephemera-tokens.txt 2>/dev/null || true
 
 # Kill any stale ephemera-daemon left over from a prior interrupted run —
 # it would still be holding port 3000, causing this run's daemon to fail to
@@ -1228,12 +1230,105 @@ else
     ok "LLM smoke cleanup complete"
 fi
 
-# ── 60. Shut down auth-on daemon ──────────────────────────────────
-step "60. Shut down auth-on daemon"
+# ── 58c. CP token rotation via TOKENS_FILE + SIGHUP (v0.3.4 #1) ───
+# Swap the auth-on daemon for one backed by EPHEMERA_API_TOKENS_FILE,
+# spawn a flock, then rotate the file and SIGHUP. The same in-VM
+# agent_token must still authenticate at /townwall/post afterwards —
+# that only works if the vsock fan-out atomically rewrote the in-VM
+# /root/.ephemera-cp-token to the rotated value. Without v0.3.4 #1
+# the post-rotation post would 401 because cp.clients[0] swapped but
+# the in-VM file kept the v1 token.
+step "58c. Kill auth-on daemon to prep for rotation test"
+kill "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null || true
+sleep 1
+ok "Auth-on daemon stopped"
+
+step "58c.i. Spawn TOKENS_FILE-backed daemon (token=v1)"
+echo "e2etest:e2e-cp-token-v1" > /tmp/ephemera-tokens.txt
+EPHEMERA_API_TOKENS_FILE=/tmp/ephemera-tokens.txt \
+    EPHEMERA_API_ADDR=0.0.0.0:3000 \
+    ./ephemera-daemon >>"$LOG" 2>&1 &
+DAEMON_PID=$!
+ROT_HDR_V1="Authorization: Bearer e2e-cp-token-v1"
+ROT_OK=false
+for i in $(seq 1 60); do
+    if [ "$(curl -s -o /dev/null -w '%{http_code}' -H "$ROT_HDR_V1" "$API/vms")" = "200" ]; then
+        ROT_OK=true; break
+    fi
+    sleep 1
+done
+$ROT_OK && ok "File-source daemon ready" || { fail "File-source daemon did not respond"; exit 1; }
+
+step "58c.ii. Spawn flock and verify v1 in-VM CP forward"
+ROT_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/flocks" \
+    -H "$ROT_HDR_V1" -H "Content-Type: application/json" \
+    -d '{"task":"rotation","roles":["worker"]}')
+check_http "$(echo "$ROT_RESP" | tail -1)" "201" "POST /flocks (rotation)"
+ROT_BODY=$(echo "$ROT_RESP" | head -1)
+ROT_FLOCK_ID=$(echo "$ROT_BODY" | jq -r '.flock_id')
+ROT_VM_ID=$(echo "$ROT_BODY" | jq -r '.agents[] | select(.agent_id=="worker-1") | .vm_id')
+ROT_TOKEN=$(echo "$ROT_BODY" | jq -r '.agent_tokens["worker-1"]')
+ROT_GUEST_IP=$(curl -s -H "$ROT_HDR_V1" "$API/vms" | \
+    jq -r ".[] | select(.vm_id==\"$ROT_VM_ID\") | .guest_ip")
+
+PRE_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+    -X POST "http://${ROT_GUEST_IP}:8080/townwall/post" \
+    -H "Authorization: Bearer $ROT_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"body":"pre-rotation"}')
+[ "$PRE_CODE" = "200" ] \
+    && ok "Pre-rotation /townwall/post via v1 CP token: 200 ✓" \
+    || fail "Pre-rotation /townwall/post failed: $PRE_CODE"
+
+step "58c.iii. Edit tokens file + SIGHUP daemon"
+echo "e2etest:e2e-cp-token-v2" > /tmp/ephemera-tokens.txt
+kill -HUP "$DAEMON_PID"
+sleep 3   # vsock fan-out budget is ~1s/VM × 1 VM + reload log flush
+
+if grep -q "SIGHUP: CP token propagated" "$LOG"; then
+    ok "SIGHUP propagation log line present"
+else
+    fail "SIGHUP propagation log line missing from $LOG"
+fi
+
+step "58c.iv. Post-rotation /townwall/post must still succeed (v2 reached VM)"
+POST_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+    -X POST "http://${ROT_GUEST_IP}:8080/townwall/post" \
+    -H "Authorization: Bearer $ROT_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"body":"post-rotation"}')
+[ "$POST_CODE" = "200" ] \
+    && ok "Post-rotation /townwall/post via v2 CP token: 200 ✓" \
+    || fail "Post-rotation /townwall/post failed ($POST_CODE) — vsock fan-out broken"
+
+step "58c.v. v1 operator bearer must now be rejected"
+OLDOP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+    -H "$ROT_HDR_V1" "$API/vms")
+[ "$OLDOP_CODE" = "401" ] \
+    && ok "v1 operator bearer correctly rejected (401) ✓" \
+    || fail "v1 operator bearer still works ($OLDOP_CODE) — SIGHUP did not swap cp.clients"
+
+step "58c.vi. Town Wall received both pre- and post-rotation posts"
+TW_HITS=$(curl -s -H "Authorization: Bearer e2e-cp-token-v2" \
+    "$API/flocks/$ROT_FLOCK_ID/wall/history" | \
+    jq '[.[] | select(.body=="pre-rotation" or .body=="post-rotation")] | length')
+[ "$TW_HITS" -ge "2" ] \
+    && ok "Town Wall recorded both posts ✓" \
+    || fail "Town Wall missing posts (got $TW_HITS, want 2)"
+
+step "58c.vii. Cleanup rotation test"
+curl -s -o /dev/null -H "Authorization: Bearer e2e-cp-token-v2" \
+    -X DELETE "$API/flocks/$ROT_FLOCK_ID"
+rm -f /tmp/ephemera-tokens.txt
+sleep 2
+ok "Rotation flock deleted, tokens file removed"
+
+# ── 60. Shut down rotation daemon ────────────────────────────────
+step "60. Shut down rotation daemon"
 kill "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null || true
 
 trap - EXIT
-ok "Auth-on daemon stopped"
+ok "Rotation daemon stopped"
 
 # ── Result ───────────────────────────────────────────────────────
 echo
