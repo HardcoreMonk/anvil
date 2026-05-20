@@ -216,6 +216,12 @@ func NewControlPlane(
 	}
 
 	cp.watchdog = orchestrator.NewWatchdog(cp.flockMgr, cp.locateFlockAgent, cp.listVMRefs, agentPort)
+	cp.watchdog.Configure(
+		time.Duration(watchdogIntervalSec)*time.Second,
+		time.Duration(watchdogTimeoutSec)*time.Second,
+		watchdogThreshold,
+		watchdogAutoHeal,
+	)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/vms", cp.handleVMs)
@@ -346,7 +352,8 @@ func (cp *ControlPlane) Start() error {
 		log.Printf("  agent_url base: %s (EPHEMERA_PUBLIC_URL)", publicURL)
 	}
 	cp.watchdog.Start()
-	log.Printf("Watchdog started (interval=5s, threshold=3 fails)")
+	log.Printf("Watchdog started (interval=%ds, timeout=%ds, threshold=%d, auto_heal=%v)",
+		watchdogIntervalSec, watchdogTimeoutSec, watchdogThreshold, watchdogAutoHeal)
 	return cp.srv.ListenAndServe()
 }
 

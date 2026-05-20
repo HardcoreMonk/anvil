@@ -25,6 +25,13 @@ var (
 	// Must match GOOSE_AGENT_PORT if overridden on the VM side.
 	agentPort = envInt("EPHEMERA_AGENT_PORT", defaultAgentPort)
 
+	// Watchdog tunables (v0.3.4). Defaults match the original hard-coded values
+	// so existing deployments observe no change unless the env var is set.
+	watchdogIntervalSec = envInt("EPHEMERA_WATCHDOG_INTERVAL_SEC", 5)
+	watchdogTimeoutSec  = envInt("EPHEMERA_WATCHDOG_TIMEOUT_SEC", 1)
+	watchdogThreshold   = envInt("EPHEMERA_WATCHDOG_THRESHOLD", 3)
+	watchdogAutoHeal    = envBool("EPHEMERA_WATCHDOG_AUTO_HEAL", false)
+
 	// apiAddr is the address the control plane API binds to.
 	// Default 127.0.0.1:3000 makes the API reachable only on localhost,
 	// requiring a reverse proxy for external access.
@@ -115,6 +122,23 @@ func envInt(key string, defaultVal int) int {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			return n
 		}
+	}
+	return defaultVal
+}
+
+// envBool returns true when the env var is set to a recognized truthy
+// value, false for a recognized falsy value, and defaultVal otherwise.
+// Recognized: "1"/"true"/"yes"/"on" and "0"/"false"/"no"/"off",
+// case-insensitive. Unknown values fall back to defaultVal silently.
+func envBool(key string, defaultVal bool) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	switch v {
+	case "":
+		return defaultVal
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
 	}
 	return defaultVal
 }
