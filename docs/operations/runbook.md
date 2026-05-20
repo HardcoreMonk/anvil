@@ -158,6 +158,33 @@ go build -o anvil-scheduler ./cmd/anvil-scheduler
 sudo bash e2e_test.sh
 ```
 
+### VM workload E2E
+
+VM 내부 서비스 설치, 기동, host-to-VM 접근, 기초 성능 artifact를 확인할 때는
+workload E2E를 실행한다. 이 검증은 root/KVM/network 조건이 필요하며, VM 내부에서
+`apt-get`을 사용하므로 outbound와 DNS 경로도 함께 검증한다.
+
+```bash
+go build -o anvil-daemon ./cmd/goose-daemon/
+sudo -n bash scripts/vm-workload-e2e.sh
+```
+
+이미 daemon을 직접 띄운 상태에서 재사용하려면 다음처럼 실행한다.
+
+```bash
+ANVIL_WORKLOAD_REUSE_DAEMON=1 \
+ANVIL_WORKLOAD_API=http://127.0.0.1:3000 \
+bash scripts/vm-workload-e2e.sh
+```
+
+재사용하는 daemon이 인증을 요구하면 `ANVIL_WORKLOAD_API_TOKEN=$TOKEN`을 함께
+전달한다.
+
+결과 artifact는 기본적으로 `/tmp/anvil-workload-e2e-<timestamp>/` 아래에 남는다.
+핵심 파일은 `summary.json`, `task-output.json`, `nginx.log`, `go-http.log`,
+`bench.txt`, `host-bench.txt`이다. 이 파일에는 provider token, API key,
+control-plane token, agent token을 남기지 않는다.
+
 daemon이 이미 실행 중이면 MCP adapter smoke도 별도로 확인할 수 있다.
 
 ```bash
