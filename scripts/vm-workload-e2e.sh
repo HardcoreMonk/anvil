@@ -17,7 +17,7 @@ Environment:
 USAGE
 }
 
-if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+if [[ $# -eq 1 && ( "${1:-}" == "-h" || "${1:-}" == "--help" ) ]]; then
   usage
   exit 0
 fi
@@ -60,8 +60,8 @@ require_cmd() {
 
 write_summary() {
   if ! command -v jq >/dev/null 2>&1; then
-    printf '{"pass":false,"failure_reasons":["preflight_failed: missing jq"],"artifact_dir":"%s","api":"%s","vm_id":"%s","guest_ip":"%s"}\n' \
-      "$ARTIFACT_DIR" "$API" "$VM_ID" "$VM_IP" >"$ARTIFACT_DIR/summary.json"
+    printf '{"pass":false,"failure_reasons":["preflight_failed: missing jq"],"artifact_dir":"%s","api":"%s","vm_id":"%s","guest_ip":"%s","nginx_http_status":"%s","go_http_status":"%s","host_benchmark_tool":"%s","finished_at":"%s"}\n' \
+      "$ARTIFACT_DIR" "$API" "$VM_ID" "$VM_IP" "$NGINX_STATUS" "$GO_STATUS" "$HOST_BENCH_TOOL" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$ARTIFACT_DIR/summary.json"
     return
   fi
 
