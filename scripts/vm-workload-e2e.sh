@@ -14,6 +14,7 @@ Environment:
   ANVIL_WORKLOAD_REUSE_DAEMON=1
   ANVIL_WORKLOAD_ARTIFACT_DIR=/tmp/anvil-workload-e2e-custom
   ANVIL_WORKLOAD_TASK_TIMEOUT=900
+  ANVIL_WORKLOAD_API_TOKEN=optional bearer token for existing daemon auth
 USAGE
 }
 
@@ -27,9 +28,14 @@ if [[ $# -gt 0 ]]; then
 fi
 
 API="${ANVIL_WORKLOAD_API:-http://127.0.0.1:3000}"
+API_TOKEN="${ANVIL_WORKLOAD_API_TOKEN:-}"
 REUSE_DAEMON="${ANVIL_WORKLOAD_REUSE_DAEMON:-0}"
 TASK_TIMEOUT="${ANVIL_WORKLOAD_TASK_TIMEOUT:-900}"
 ARTIFACT_DIR="${ANVIL_WORKLOAD_ARTIFACT_DIR:-/tmp/anvil-workload-e2e-$(date +%Y%m%d-%H%M%S)}"
+CURL_AUTH_ARGS=()
+if [ -n "$API_TOKEN" ]; then
+  CURL_AUTH_ARGS=(-H "Authorization: Bearer $API_TOKEN")
+fi
 PASS=true
 FAIL_REASONS=()
 VM_ID=""
@@ -59,12 +65,6 @@ require_cmd() {
 }
 
 write_summary() {
-  if ! command -v jq >/dev/null 2>&1; then
-    printf '{"pass":false,"failure_reasons":["preflight_failed: missing jq"],"artifact_dir":"%s","api":"%s","vm_id":"%s","guest_ip":"%s","nginx_http_status":"%s","go_http_status":"%s","host_benchmark_tool":"%s","finished_at":"%s"}\n' \
-      "$ARTIFACT_DIR" "$API" "$VM_ID" "$VM_IP" "$NGINX_STATUS" "$GO_STATUS" "$HOST_BENCH_TOOL" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$ARTIFACT_DIR/summary.json"
-    return
-  fi
-
   local reasons_json
   if [ "${#FAIL_REASONS[@]}" -eq 0 ]; then
     reasons_json='[]'
@@ -98,10 +98,13 @@ write_summary() {
 }
 
 cleanup() {
+  local status=$?
+  trap - EXIT
+
   step "Cleanup"
   if [ -n "$VM_ID" ]; then
     local delete_code
-    delete_code="$(curl -sS -o "$ARTIFACT_DIR/delete-vm.json" -w "%{http_code}" -X DELETE "$API/vms/$VM_ID" || true)"
+    delete_code="$(curl -sS "${CURL_AUTH_ARGS[@]}" -o "$ARTIFACT_DIR/delete-vm.json" -w "%{http_code}" -X DELETE "$API/vms/$VM_ID" || true)"
     if [ "$delete_code" = "200" ]; then
       ok "Deleted VM $VM_ID"
     else
@@ -117,14 +120,17 @@ cleanup() {
 
   write_summary
   printf '  Artifact directory: %s\n' "$ARTIFACT_DIR"
+  if [ "$PASS" != "true" ] || [ "$status" -ne 0 ]; then
+    exit 1
+  fi
+  exit 0
 }
-trap cleanup EXIT
 
 upload_workspace_file() {
   local src="$1"
   local dst="$2"
   local code
-  code="$(curl -sS -o "$ARTIFACT_DIR/upload-$(basename "$dst").json" -w "%{http_code}" \
+  code="$(curl -sS "${CURL_AUTH_ARGS[@]}" -o "$ARTIFACT_DIR/upload-$(basename "$dst").json" -w "%{http_code}" \
     -X PUT "$API/vms/$VM_ID/workspace?path=$dst&overwrite=true" \
     --data-binary @"$src" || true)"
   if [ "$code" = "200" ]; then
@@ -138,7 +144,7 @@ fetch_workspace_file() {
   local src="$1"
   local dst="$2"
   local code
-  code="$(curl -sS -o "$ARTIFACT_DIR/$dst" -w "%{http_code}" \
+  code="$(curl -sS "${CURL_AUTH_ARGS[@]}" -o "$ARTIFACT_DIR/$dst" -w "%{http_code}" \
     "$API/vms/$VM_ID/workspace?path=$src" || true)"
   if [ "$code" = "200" ]; then
     ok "Fetched $src"
@@ -194,23 +200,32 @@ host_benchmark() {
     printf 'tool=curl-loop\n'
     start_ns="$(date +%s%N)"
     ok_count=0
+    failed_count=0
     for _ in $(seq 1 50); do
-      if curl -fsS "$url" >/dev/null; then
+      if curl -fsS --connect-timeout 5 --max-time 10 "$url" >/dev/null; then
         ok_count=$((ok_count + 1))
+      else
+        failed_count=$((failed_count + 1))
       fi
     done
     end_ns="$(date +%s%N)"
     duration_ms=$(((end_ns - start_ns) / 1000000))
     printf 'requests=50\n'
     printf 'ok=%s\n' "$ok_count"
+    printf 'failed=%s\n' "$failed_count"
     printf 'duration_ms=%s\n' "$duration_ms"
   } >"$out"
-  ok "Host benchmark completed with curl-loop"
+  if [ "$ok_count" = "50" ] && [ "$failed_count" = "0" ]; then
+    ok "Host benchmark completed with curl-loop"
+  else
+    fail "benchmark_failed: curl-loop ok=$ok_count failed=$failed_count"
+  fi
 }
 
 step "Preflight"
 require_cmd curl || exit 1
 require_cmd jq || exit 1
+trap cleanup EXIT
 
 if [ "$REUSE_DAEMON" != "1" ]; then
   if [ "${EUID:-$(id -u)}" -ne 0 ]; then
@@ -239,7 +254,7 @@ else
 fi
 
 for attempt in $(seq 1 120); do
-  if curl -sS -o /dev/null "$API/vms" 2>/dev/null; then
+  if curl -sS "${CURL_AUTH_ARGS[@]}" -o /dev/null "$API/vms" 2>/dev/null; then
     ok "Control plane API ready"
     break
   fi
@@ -255,7 +270,7 @@ for attempt in $(seq 1 120); do
 done
 
 step "Create workload VM"
-vm_resp="$(curl -sS -w "\n%{http_code}" -X POST "$API/vms" -H "Content-Type: application/json" || true)"
+vm_resp="$(curl -sS "${CURL_AUTH_ARGS[@]}" -w "\n%{http_code}" -X POST "$API/vms" -H "Content-Type: application/json" || true)"
 vm_code="$(printf '%s\n' "$vm_resp" | tail -1)"
 vm_body="$(printf '%s\n' "$vm_resp" | sed '$d')"
 if [ "$vm_code" != "201" ]; then
@@ -288,7 +303,7 @@ After the commands complete, print the marker lines from the scripts and the fin
 PROMPT
 )"
 task_payload="$(jq -n --arg prompt "$task_prompt" '{prompt: $prompt}')"
-task_code="$(curl -sS --max-time "$TASK_TIMEOUT" -o "$ARTIFACT_DIR/task-output.json" -w "%{http_code}" \
+task_code="$(curl -sS "${CURL_AUTH_ARGS[@]}" --max-time "$TASK_TIMEOUT" -o "$ARTIFACT_DIR/task-output.json" -w "%{http_code}" \
   -X POST "$API/vms/$VM_ID/tasks" \
   -H "Content-Type: application/json" \
   -d "$task_payload" || true)"
