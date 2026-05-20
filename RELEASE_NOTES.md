@@ -1,3 +1,59 @@
+# v0.3.4 — Operational Convenience
+
+**Ephemera** v0.3.4 closes the last three operator-touch corners after v0.3.3: rotating the control-plane bearer no longer requires per-VM restarts, the watchdog cadence is overridable from the environment, and an opt-in self-heal returns recovered agents to `ready` for operators who prefer liveness over the sticky-dead default. The release is additive — defaults preserve every v0.3.3 behavior, no wire format changed, and every existing env var keeps working.
+
+---
+
+## What's New
+
+### CP token hot rotation via vsock
+
+- New `EPHEMERA_API_TOKENS_FILE` env (in `cmd/goose-daemon/config.go`) names a file path that `loadAPIClients` reads on every call. Operators edit the file, send `SIGHUP`, and the daemon picks up the new contents. Env-only deployments still work as before — file precedence is `EPHEMERA_API_TOKENS_FILE` → `EPHEMERA_API_TOKENS` → `EPHEMERA_API_TOKEN`. `parseAPIClients` is factored out of the legacy parse loop and accepts both comma- and newline-separated entries.
+- `ReloadClients` (`cmd/goose-daemon/api.go`) now fans the new `apiClients[0].Token` out to every running VM that has a vsock UDS path. Snapshot taken under `cp.mu.RLock()`, dispatch in parallel goroutines, per-VM 1 s budget (3 × 300 ms), per-VM failure logged but never propagated. A final log line summarizes ok/total counts.
+- `internal/vm/machine.go` extracts a generic `vsockSendCommand` from the existing `vsockSendChangeIP`; `ReconfigureGuestIP` becomes a thin wrapper with its original 20 × 200 ms retry budget preserved. New sibling `SetGuestCPToken` uses the tighter 3 × 300 ms budget appropriate for already-running VMs.
+- `cmd/goose-agent/main.go`'s `handleVsockConn` now dispatches on the leading verb. The new `SET_CP_TOKEN <token>` command writes `/root/.ephemera-cp-token` via tmp-and-rename (mode 0600), so a concurrent `loadCPToken` reader never observes a partial write. `/townwall/post` continues to call `loadCPToken` per request, so the next forwarder call sees the rotated bearer without any caching change.
+
+### Env-tunable watchdog timings
+
+- `cmd/goose-daemon/config.go` exposes three new ints: `EPHEMERA_WATCHDOG_INTERVAL_SEC` (default 5), `EPHEMERA_WATCHDOG_TIMEOUT_SEC` (default 1), `EPHEMERA_WATCHDOG_THRESHOLD` (default 3). All three reuse the existing `envInt` helper.
+- `Watchdog.Configure(interval, httpTimeout, threshold, autoHeal)` (`internal/orchestrator/watchdog.go`) is the new public entry point. The struct fields remain unexported so external callers cannot bypass the `interval >= httpTimeout` clamp logic; in-package tests continue to set fields directly.
+- The startup log line now reflects the resolved values: `Watchdog started (interval=5s, timeout=1s, threshold=3, auto_heal=false)`.
+
+### Opt-in watchdog self-heal
+
+- New `envBool` helper (case-insensitive, accepts `1/true/yes/on` and `0/false/no/off`) backs `EPHEMERA_WATCHDOG_AUTO_HEAL` (default `false`).
+- When `autoHeal=true`, `Watchdog.onSuccess` clears the `deadMarked` bit on the first successful probe of a previously-dead VM, flips the agent's status back to `ready`, persists the change via `Flock.Persist`, and posts an `<orchestrator> <id> recovered - auto-healed to ready` notice to the flock's Town Wall.
+- Default (`false`) preserves the v0.3.1+ sticky-dead contract — `TestWatchdog_MarksDeadAfterThreshold` and `TestWatchdog_PersistsDeadStatus` are unchanged and still pass.
+
+### Tests
+
+- `TestWatchdog_Configure_AppliesTunables` and `TestWatchdog_AutoHeal_ResetsDeadMark` in `internal/orchestrator/watchdog_test.go` cover the new behaviors. The auto-heal test asserts the Town Wall recovery notice, the in-memory `Status=ready`, and the on-disk metadata round-trip.
+- `e2e_test.sh` step 58c (sub-steps 58c.i–58c.vii) exercises the full rotation flow against a real Firecracker VM: spawn TOKENS_FILE daemon with v1 → spawn flock → SIGHUP after editing file to v2 → assert post-rotation `/townwall/post` 200, v1 operator bearer 401, both posts in Town Wall, and the `SIGHUP: CP token propagated` log line. Pre-flight cleanup also removes a leftover `/tmp/ephemera-tokens.txt`. Step 60 is renamed to the rotation-daemon shutdown.
+
+---
+
+## Upgrade Notes
+
+- **Wire compatibility**: unchanged. All existing API responses, env vars, and on-disk files remain valid.
+- **No default behavior change**: every new env var is default-preserving (`5s / 1s / 3` watchdog timings unchanged; `auto_heal=false` matches sticky-dead). Existing deployments observe no behavior difference until they opt in.
+- **CP token hot rotation requires two prerequisites**: (1) the daemon must source tokens from `EPHEMERA_API_TOKENS_FILE`, since env vars are fixed at exec time and SIGHUP cannot change them; (2) the VMs must run a v0.3.4+ `goose-agent` (the `SET_CP_TOKEN` vsock handler did not exist before). Mixed-version fleets keep working — older VMs log a propagation failure and operators can fall back to `POST /flocks/{id}/agents/{agent_id}/restart` for those.
+- **New vsock command**: `SET_CP_TOKEN <token>` joins `CHANGE_IP <cidr_ip> <gateway>` on the existing AF_VSOCK port 1234 channel. No new port, no new transport.
+
+---
+
+## Changed / new files
+
+- `cmd/goose-daemon/config.go` — `EPHEMERA_API_TOKENS_FILE` source, `parseAPIClients` helper, four watchdog env vars, `envBool` helper
+- `cmd/goose-daemon/api.go` — `ReloadClients` token fan-out (`propagateCPTokenToVMs`), `Configure` call after `NewWatchdog`, startup log line carries resolved tunable values
+- `cmd/goose-agent/main.go` — `handleVsockConn` dispatch on verb (`CHANGE_IP` / `SET_CP_TOKEN`), `writeCPTokenAtomic`
+- `internal/vm/machine.go` — `vsockSendCommand` / `vsockSendOnce` extracted from `vsockSendChangeIP`; `ReconfigureGuestIP` becomes a thin wrapper; new `SetGuestCPToken`
+- `internal/orchestrator/watchdog.go` — `Watchdog.autoHeal`, `Watchdog.Configure`, opt-in `onSuccess` heal path
+- `internal/orchestrator/watchdog_test.go` — `TestWatchdog_Configure_AppliesTunables`, `TestWatchdog_AutoHeal_ResetsDeadMark`
+- `e2e_test.sh` — step 58c (sub-steps i–vii) for the rotation flow; step 60 renamed; pre-flight removes `/tmp/ephemera-tokens.txt`
+- `README.md`, `CONTRIBUTING.md`, `RELEASE_NOTES.md`
+
+---
+
 # v0.3.3 — Operational Polish
 
 **Ephemera** v0.3.3 closes the four rough edges left by the v0.3.1 / v0.3.2 hardening pass without changing any wire formats. Watchdog-detected `dead` markings now survive daemon restart and cold-restart; a single failed agent can be replaced in place without recreating the whole flock; the in-VM `/townwall/post` forwarder authenticates against an auth-on control plane without any per-VM operator setup; and the end-to-end test gained a real-LLM round-trip scenario so the `gtwall` chain stops being a code-only contract. The release is a strict superset of v0.3.2 — every existing API response, env var, and on-disk file remains valid.

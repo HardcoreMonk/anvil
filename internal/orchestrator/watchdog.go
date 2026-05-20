@@ -26,13 +26,15 @@ type VMRef struct {
 // Watchdog polls every registered VM's in-guest /health endpoint on a fixed
 // interval. After dyingThreshold consecutive failures the agent is marked
 // dead in the flock registry and a notice is posted to that flock's Town
-// Wall. A revived VM is not auto-marked back to ready — operators decide
-// when to clear the dead state (typically by deleting and respawning).
+// Wall. By default a revived VM is NOT auto-marked back to ready — operators
+// decide when to clear the dead state. Setting autoHeal=true via Configure
+// flips this to opt-in self-healing.
 type Watchdog struct {
 	interval       time.Duration
 	httpTimeout    time.Duration
 	dyingThreshold int
 	agentPort      int
+	autoHeal       bool
 
 	flockMgr *FlockManager
 	locator  AgentLocator
@@ -48,9 +50,9 @@ type Watchdog struct {
 }
 
 // NewWatchdog wires the watchdog with all dependencies it needs from the
-// control plane. Tunables (interval, httpTimeout, dyingThreshold) can be
-// overridden on the returned struct before Start is called — useful for tests
-// that need a faster cadence.
+// control plane. Default tunables are 5s interval / 1s timeout / 3 fails.
+// Use Configure (from external packages) or set the unexported fields
+// directly in in-package tests to override before Start is called.
 func NewWatchdog(fm *FlockManager, locator AgentLocator, lister VMLister, agentPort int) *Watchdog {
 	return &Watchdog{
 		interval:       5 * time.Second,
@@ -66,6 +68,34 @@ func NewWatchdog(fm *FlockManager, locator AgentLocator, lister VMLister, agentP
 		stopCh:         make(chan struct{}),
 		doneCh:         make(chan struct{}),
 	}
+}
+
+// Configure overrides watchdog tunables. Must be called BEFORE Start.
+// Zero or negative interval/httpTimeout/threshold values are ignored
+// (defaults preserved). When interval < httpTimeout, interval is clamped up
+// to httpTimeout and a warning is logged — otherwise a probe could outlast
+// its own tick window.
+//
+// autoHeal=true enables opt-in self-healing: a VM previously marked dead
+// that starts responding will be returned to AgentStatusReady, the new
+// status persisted, and a recovery notice posted to the flock's Town Wall.
+// Default (false) preserves the sticky-dead policy.
+func (wd *Watchdog) Configure(interval, httpTimeout time.Duration, threshold int, autoHeal bool) {
+	if interval > 0 {
+		wd.interval = interval
+	}
+	if httpTimeout > 0 {
+		wd.httpTimeout = httpTimeout
+		wd.client.Timeout = httpTimeout
+	}
+	if threshold > 0 {
+		wd.dyingThreshold = threshold
+	}
+	if wd.interval < wd.httpTimeout {
+		log.Printf("Watchdog: interval %s < httpTimeout %s; clamping interval up", wd.interval, wd.httpTimeout)
+		wd.interval = wd.httpTimeout
+	}
+	wd.autoHeal = autoHeal
 }
 
 // Start launches the polling goroutine. Safe to call exactly once per
@@ -138,13 +168,41 @@ func (wd *Watchdog) checkOne(v VMRef) {
 	wd.onFailure(v)
 }
 
-// onSuccess clears any accumulated fail count. deadMarked is preserved on
-// purpose — a flapping VM that revived briefly should not be auto-cleared.
+// onSuccess clears any accumulated fail count. By default, deadMarked is
+// preserved — a flapping VM that revived briefly should not be auto-cleared.
+// With Configure(..., autoHeal=true), a previously-dead VM that responds
+// successfully is returned to AgentStatusReady, the change persisted, and
+// a recovery notice posted to the flock's Town Wall.
 func (wd *Watchdog) onSuccess(vmID string) {
 	wd.mu.Lock()
-	defer wd.mu.Unlock()
 	if wd.failCount[vmID] > 0 {
 		delete(wd.failCount, vmID)
+	}
+	wasDead := wd.deadMarked[vmID]
+	if !wd.autoHeal || !wasDead {
+		wd.mu.Unlock()
+		return
+	}
+	delete(wd.deadMarked, vmID)
+	wd.mu.Unlock()
+
+	flockID, agentID, ok := wd.locator(vmID)
+	if !ok {
+		return
+	}
+	flock, ok := wd.flockMgr.Get(flockID)
+	if !ok {
+		return
+	}
+	flock.UpdateAgentStatus(agentID, AgentStatusReady)
+	if err := flock.Persist(wd.flockMgr.WorkDir()); err != nil {
+		log.Printf("Watchdog: failed to persist auto-heal for %s: %v", agentID, err)
+	}
+	if _, err := flock.TownWall.Post(
+		"orchestrator",
+		fmt.Sprintf("%s recovered - auto-healed to ready", agentID),
+	); err != nil {
+		log.Printf("Watchdog: failed to post auto-heal notice for %s: %v", agentID, err)
 	}
 }
 

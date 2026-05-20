@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	firecracker "github.com/firecracker-microvm/firecracker-go-sdk"
@@ -215,6 +216,12 @@ func NewControlPlane(
 	}
 
 	cp.watchdog = orchestrator.NewWatchdog(cp.flockMgr, cp.locateFlockAgent, cp.listVMRefs, agentPort)
+	cp.watchdog.Configure(
+		time.Duration(watchdogIntervalSec)*time.Second,
+		time.Duration(watchdogTimeoutSec)*time.Second,
+		watchdogThreshold,
+		watchdogAutoHeal,
+	)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/vms", cp.handleVMs)
@@ -248,8 +255,10 @@ func (cp *ControlPlane) controlPlaneTokenForVM() string {
 	return cp.clients[0].Token
 }
 
-// ReloadClients re-reads API tokens from the environment and hot-swaps the client list.
-// Called on SIGHUP. Running VMs are not affected.
+// ReloadClients re-reads API tokens from the environment (or EPHEMERA_API_TOKENS_FILE)
+// and hot-swaps the client list. Called on SIGHUP. Also propagates the new apiClients[0]
+// token to every running flock VM via vsock so the in-VM /townwall/post forwarder keeps
+// authenticating after rotation.
 func (cp *ControlPlane) ReloadClients() {
 	newClients := loadAPIClients()
 	cp.clientsMu.Lock()
@@ -258,13 +267,56 @@ func (cp *ControlPlane) ReloadClients() {
 
 	if len(newClients) == 0 {
 		log.Println("SIGHUP: token reload complete — auth disabled (no tokens configured)")
+	} else {
+		names := make([]string, len(newClients))
+		for i, c := range newClients {
+			names[i] = c.Name
+		}
+		log.Printf("SIGHUP: token reload complete — %d client(s): %s", len(newClients), strings.Join(names, ", "))
+	}
+
+	cp.propagateCPTokenToVMs(newClients)
+}
+
+// propagateCPTokenToVMs fans out the new apiClients[0] token to every running VM that
+// has a vsock UDS path. Best-effort: per-VM failure is logged, not propagated. Older
+// (pre-v0.3.4) guests lack the SET_CP_TOKEN handler and will fail here; operators can
+// fall back to POST /flocks/{id}/agents/{agent_id}/restart for those.
+func (cp *ControlPlane) propagateCPTokenToVMs(clients []APIClient) {
+	newToken := ""
+	if len(clients) > 0 {
+		newToken = clients[0].Token
+	}
+
+	cp.mu.RLock()
+	type target struct{ vmID, vsock string }
+	targets := make([]target, 0, len(cp.vms))
+	for id, v := range cp.vms {
+		if v.vsockPath != "" {
+			targets = append(targets, target{id, v.vsockPath})
+		}
+	}
+	cp.mu.RUnlock()
+
+	if len(targets) == 0 {
 		return
 	}
-	names := make([]string, len(newClients))
-	for i, c := range newClients {
-		names[i] = c.Name
+
+	var wg sync.WaitGroup
+	var okCount int32
+	for _, t := range targets {
+		wg.Add(1)
+		go func(t target) {
+			defer wg.Done()
+			if err := vm.SetGuestCPToken(t.vsock, newToken); err != nil {
+				log.Printf("SIGHUP: CP token propagation to %s failed: %v", t.vmID, err)
+				return
+			}
+			atomic.AddInt32(&okCount, 1)
+		}(t)
 	}
-	log.Printf("SIGHUP: token reload complete — %d client(s): %s", len(newClients), strings.Join(names, ", "))
+	wg.Wait()
+	log.Printf("SIGHUP: CP token propagated to %d/%d VM(s)", atomic.LoadInt32(&okCount), len(targets))
 }
 
 func (cp *ControlPlane) Start() error {
@@ -300,7 +352,8 @@ func (cp *ControlPlane) Start() error {
 		log.Printf("  agent_url base: %s (EPHEMERA_PUBLIC_URL)", publicURL)
 	}
 	cp.watchdog.Start()
-	log.Printf("Watchdog started (interval=5s, threshold=3 fails)")
+	log.Printf("Watchdog started (interval=%ds, timeout=%ds, threshold=%d, auto_heal=%v)",
+		watchdogIntervalSec, watchdogTimeoutSec, watchdogThreshold, watchdogAutoHeal)
 	return cp.srv.ListenAndServe()
 }
 

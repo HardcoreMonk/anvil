@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -24,6 +25,13 @@ var (
 	// Must match GOOSE_AGENT_PORT if overridden on the VM side.
 	agentPort = envInt("EPHEMERA_AGENT_PORT", defaultAgentPort)
 
+	// Watchdog tunables (v0.3.4). Defaults match the original hard-coded values
+	// so existing deployments observe no change unless the env var is set.
+	watchdogIntervalSec = envInt("EPHEMERA_WATCHDOG_INTERVAL_SEC", 5)
+	watchdogTimeoutSec  = envInt("EPHEMERA_WATCHDOG_TIMEOUT_SEC", 1)
+	watchdogThreshold   = envInt("EPHEMERA_WATCHDOG_THRESHOLD", 3)
+	watchdogAutoHeal    = envBool("EPHEMERA_WATCHDOG_AUTO_HEAL", false)
+
 	// apiAddr is the address the control plane API binds to.
 	// Default 127.0.0.1:3000 makes the API reachable only on localhost,
 	// requiring a reverse proxy for external access.
@@ -38,41 +46,66 @@ var (
 	publicURL = strings.TrimRight(os.Getenv("EPHEMERA_PUBLIC_URL"), "/")
 
 	// apiClients is the set of authorized callers loaded once at startup.
-	// Populated from EPHEMERA_API_TOKENS (multi-client) or EPHEMERA_API_TOKEN
-	// (single-client fallback). Empty = authentication disabled.
+	// Populated from EPHEMERA_API_TOKENS_FILE (preferred), EPHEMERA_API_TOKENS
+	// (multi-client env), or EPHEMERA_API_TOKEN (single-client fallback).
+	// Empty = authentication disabled.
 	apiClients = loadAPIClients()
 )
 
-// loadAPIClients parses caller tokens from environment variables.
+// loadAPIClients parses caller tokens. Precedence: file > multi-env > single-env > nil.
 //
-// Multi-client (preferred):
+// File source (v0.3.4, preferred for rotation):
+//
+//	EPHEMERA_API_TOKENS_FILE=/etc/ephemera/tokens
+//
+// Multi-client env:
 //
 //	EPHEMERA_API_TOKENS=alice:token1,bob:token2
 //
-// Single-client (backward-compatible fallback):
+// Single-client fallback:
 //
 //	EPHEMERA_API_TOKEN=token
+//
+// The file source is re-read on every call (including SIGHUP via ReloadClients),
+// which is what enables hot rotation. Env vars are captured at exec and cannot
+// change without a daemon restart.
 func loadAPIClients() []APIClient {
-	if raw := os.Getenv("EPHEMERA_API_TOKENS"); raw != "" {
-		var clients []APIClient
-		for _, entry := range strings.Split(raw, ",") {
-			entry = strings.TrimSpace(entry)
-			idx := strings.Index(entry, ":")
-			if idx <= 0 {
-				continue
-			}
-			clients = append(clients, APIClient{
-				Name:  entry[:idx],
-				Token: entry[idx+1:],
-			})
+	if path := os.Getenv("EPHEMERA_API_TOKENS_FILE"); path != "" {
+		raw, err := os.ReadFile(path)
+		if err == nil {
+			return parseAPIClients(string(raw))
 		}
-		return clients
+		log.Printf("EPHEMERA_API_TOKENS_FILE %q unreadable: %v - falling back to env", path, err)
 	}
-	// Fall back to the legacy single-token variable.
+	if raw := os.Getenv("EPHEMERA_API_TOKENS"); raw != "" {
+		return parseAPIClients(raw)
+	}
 	if t := os.Getenv("EPHEMERA_API_TOKEN"); t != "" {
 		return []APIClient{{Name: "default", Token: t}}
 	}
 	return nil
+}
+
+// parseAPIClients parses a raw token list. Entries are name:token pairs
+// separated by commas or newlines (operators write one-per-line in files;
+// env stays CSV). Whitespace is trimmed; entries without a ':' or with an
+// empty name are skipped silently.
+func parseAPIClients(raw string) []APIClient {
+	var clients []APIClient
+	for _, entry := range strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == '\n'
+	}) {
+		entry = strings.TrimSpace(entry)
+		idx := strings.Index(entry, ":")
+		if idx <= 0 {
+			continue
+		}
+		clients = append(clients, APIClient{
+			Name:  entry[:idx],
+			Token: entry[idx+1:],
+		})
+	}
+	return clients
 }
 
 // resolveAPIAddr builds the listen address.
@@ -89,6 +122,23 @@ func envInt(key string, defaultVal int) int {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			return n
 		}
+	}
+	return defaultVal
+}
+
+// envBool returns true when the env var is set to a recognized truthy
+// value, false for a recognized falsy value, and defaultVal otherwise.
+// Recognized: "1"/"true"/"yes"/"on" and "0"/"false"/"no"/"off",
+// case-insensitive. Unknown values fall back to defaultVal silently.
+func envBool(key string, defaultVal bool) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	switch v {
+	case "":
+		return defaultVal
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
 	}
 	return defaultVal
 }
