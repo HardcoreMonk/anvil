@@ -204,7 +204,10 @@ func startVsockListener() {
 }
 
 // handleVsockConn processes a single vsock connection from the host.
-// Protocol: "CHANGE_IP <cidr_ip> <gateway>\n" → "OK\n" or "ERROR: ...\n"
+// Protocol: newline-delimited "<COMMAND> [args...]\n" → "OK\n" or "ERROR: ...\n".
+// Supported commands:
+//   - CHANGE_IP <cidr_ip> <gateway>     — reconfigure eth0 after snapshot restore
+//   - SET_CP_TOKEN <token>              — atomically rewrite /root/.ephemera-cp-token (v0.3.4)
 func handleVsockConn(fd int) {
 	defer unix.Close(fd)
 	f := os.NewFile(uintptr(fd), "vsock-conn")
@@ -216,19 +219,57 @@ func handleVsockConn(fd int) {
 		return
 	}
 	parts := strings.Fields(strings.TrimSpace(line))
-	if len(parts) != 3 || parts[0] != "CHANGE_IP" {
-		fmt.Fprintf(f, "ERROR: expected CHANGE_IP <cidr_ip> <gateway>\n")
+	if len(parts) == 0 {
+		fmt.Fprintf(f, "ERROR: empty command\n")
 		return
 	}
-	cidrIP, gateway := parts[1], parts[2]
 
-	if err := applyIPConfig(cidrIP, gateway); err != nil {
-		fmt.Fprintf(f, "ERROR: %v\n", err)
-		log.Printf("vsock CHANGE_IP failed: %v", err)
-		return
+	switch parts[0] {
+	case "CHANGE_IP":
+		if len(parts) != 3 {
+			fmt.Fprintf(f, "ERROR: expected CHANGE_IP <cidr_ip> <gateway>\n")
+			return
+		}
+		cidrIP, gateway := parts[1], parts[2]
+		if err := applyIPConfig(cidrIP, gateway); err != nil {
+			fmt.Fprintf(f, "ERROR: %v\n", err)
+			log.Printf("vsock CHANGE_IP failed: %v", err)
+			return
+		}
+		fmt.Fprintf(f, "OK\n")
+		log.Printf("IP reconfigured: eth0 → %s via %s", cidrIP, gateway)
+
+	case "SET_CP_TOKEN":
+		if len(parts) != 2 {
+			fmt.Fprintf(f, "ERROR: expected SET_CP_TOKEN <token>\n")
+			return
+		}
+		if err := writeCPTokenAtomic(parts[1]); err != nil {
+			fmt.Fprintf(f, "ERROR: %v\n", err)
+			log.Printf("vsock SET_CP_TOKEN failed: %v", err)
+			return
+		}
+		fmt.Fprintf(f, "OK\n")
+		log.Printf("CP token updated via vsock")
+
+	default:
+		fmt.Fprintf(f, "ERROR: unknown command %q\n", parts[0])
 	}
-	fmt.Fprintf(f, "OK\n")
-	log.Printf("IP reconfigured: eth0 → %s via %s", cidrIP, gateway)
+}
+
+// writeCPTokenAtomic rewrites /root/.ephemera-cp-token with the supplied bearer.
+// Uses tmp-and-rename so a reader (the per-request loadCPToken in handleTownWallPost)
+// never observes a partial write. Mode is 0600 to match the original injectVMFiles write.
+func writeCPTokenAtomic(token string) error {
+	tmp := cpTokenPath + ".tmp"
+	if err := os.WriteFile(tmp, []byte(token), 0600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, cpTokenPath); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // applyIPConfig reconfigures eth0 with a new IP/mask and default gateway.

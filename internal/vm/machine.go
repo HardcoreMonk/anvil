@@ -281,21 +281,38 @@ func vsockDevices(udsPath string) []firecracker.VsockDevice {
 // Used after snapshot restore to assign a fresh IP without rebooting the guest.
 // Retries for up to 4 seconds to allow the vsock proxy to become ready.
 func ReconfigureGuestIP(vsockUDSPath, newCIDRIP, gateway string) error {
+	cmd := fmt.Sprintf("CHANGE_IP %s %s", newCIDRIP, gateway)
+	return vsockSendCommand(vsockUDSPath, cmd, 20, 200*time.Millisecond)
+}
+
+// SetGuestCPToken instructs the guest to atomically rewrite its
+// /root/.ephemera-cp-token file to the supplied token. Called from the
+// SIGHUP reload path, where the VM is already known running, so the retry
+// budget is tighter than ReconfigureGuestIP (~1s total vs ~4s).
+func SetGuestCPToken(vsockUDSPath, token string) error {
+	return vsockSendCommand(vsockUDSPath, "SET_CP_TOKEN "+token, 3, 300*time.Millisecond)
+}
+
+// vsockSendCommand performs the Firecracker vsock handshake, sends a single
+// newline-terminated command, and waits for an "OK" / "ERROR" reply.
+// Retries up to attempts times spaced by perAttempt; the first attempt is
+// immediate.
+func vsockSendCommand(vsockUDSPath, command string, attempts int, perAttempt time.Duration) error {
 	var lastErr error
-	for attempt := 0; attempt < 20; attempt++ {
-		if attempt > 0 {
-			time.Sleep(200 * time.Millisecond)
+	for i := 0; i < attempts; i++ {
+		if i > 0 {
+			time.Sleep(perAttempt)
 		}
-		if err := vsockSendChangeIP(vsockUDSPath, newCIDRIP, gateway); err != nil {
+		if err := vsockSendOnce(vsockUDSPath, command); err != nil {
 			lastErr = err
 			continue
 		}
 		return nil
 	}
-	return fmt.Errorf("vsock IP reconfigure failed after 20 attempts: %w", lastErr)
+	return fmt.Errorf("vsock command failed after %d attempts: %w", attempts, lastErr)
 }
 
-func vsockSendChangeIP(vsockUDSPath, newCIDRIP, gateway string) error {
+func vsockSendOnce(vsockUDSPath, command string) error {
 	conn, err := net.DialTimeout("unix", vsockUDSPath, 1*time.Second)
 	if err != nil {
 		return err
@@ -315,14 +332,13 @@ func vsockSendChangeIP(vsockUDSPath, newCIDRIP, gateway string) error {
 		return fmt.Errorf("vsock NACK: %s", strings.TrimSpace(resp))
 	}
 
-	// Send reconfiguration command and wait for confirmation.
-	fmt.Fprintf(conn, "CHANGE_IP %s %s\n", newCIDRIP, gateway)
+	fmt.Fprintf(conn, "%s\n", command)
 	reply, err := r.ReadString('\n')
 	if err != nil {
-		return fmt.Errorf("read reconfig reply: %w", err)
+		return fmt.Errorf("read reply: %w", err)
 	}
 	if !strings.HasPrefix(reply, "OK") {
-		return fmt.Errorf("reconfig failed: %s", strings.TrimSpace(reply))
+		return fmt.Errorf("guest rejected command: %s", strings.TrimSpace(reply))
 	}
 	return nil
 }
