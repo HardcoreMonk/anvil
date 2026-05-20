@@ -10,6 +10,11 @@ server_bin="/workspace/workloads/go-http-server"
 server_src="/workspace/workloads/go-http-server.go"
 requests="${ANVIL_WORKLOAD_REQUESTS:-50}"
 
+if [[ ! "$requests" =~ ^[1-9][0-9]*$ ]]; then
+  echo "[go-http] ANVIL_WORKLOAD_REQUESTS must be a positive integer" >&2
+  exit 33
+fi
+
 mkdir -p "$result_dir"
 exec > >(tee "$log_file") 2>&1
 
