@@ -485,8 +485,35 @@ sudo bash e2e_test.sh
 ━━━ 59. Real-LLM /tasks smoke test ━━━
   ✓ Skipped — set GOOGLE_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY to run
 
-━━━ 60. Shut down auth-on daemon ━━━
+━━━ 58c. Kill auth-on daemon to prep for rotation test ━━━
   ✓ Auth-on daemon stopped
+
+━━━ 58c.i. Spawn TOKENS_FILE-backed daemon (token=v1) ━━━
+  ✓ File-source daemon ready
+
+━━━ 58c.ii. Spawn flock and verify v1 in-VM CP forward ━━━
+  ✓ POST /flocks (rotation) (HTTP 201)
+  ✓ Pre-rotation /townwall/post via v1 CP token: 200 ✓
+
+━━━ 58c.iii. Edit tokens file + SIGHUP daemon ━━━
+  vsock UDS state before SIGHUP:
+    srwxr-xr-x 1 root root 0 May 20 15:51 /tmp/firecracker-vsock-vm-1779259880788616345.sock
+  ✓ vsock fan-out: 1/1 VMs OK
+
+━━━ 58c.iv. Post-rotation /townwall/post must still succeed (v2 reached VM) ━━━
+  ✓ Post-rotation /townwall/post via v2 CP token: 200 ✓
+
+━━━ 58c.v. v1 operator bearer must now be rejected ━━━
+  ✓ v1 operator bearer correctly rejected (401) ✓
+
+━━━ 58c.vi. Town Wall received both pre- and post-rotation posts ━━━
+  ✓ Town Wall recorded both posts ✓
+
+━━━ 58c.vii. Cleanup rotation test ━━━
+  ✓ Rotation flock deleted, tokens file removed
+
+━━━ 60. Shut down rotation daemon ━━━
+  ✓ Rotation daemon stopped
 
 ══════════════════════════════════
   All test steps passed ✓
@@ -1274,12 +1301,14 @@ When you want to rotate the control-plane bearer without restarting either the d
 
 In-VM side, `goose-agent`'s vsock listener now dispatches both `CHANGE_IP` (used since v0.2.0 for snapshot-restore IP plumbing) and the new `SET_CP_TOKEN <token>` command, which atomically rewrites `/root/.ephemera-cp-token` (tmp + rename, mode 0600). The `/townwall/post` handler re-reads the file on every request, so the next forwarder call sees the new bearer.
 
-The fan-out is **best-effort**: each VM gets ~1 s (3 attempts × 300 ms) and any per-VM failure is logged but never propagated. The SIGHUP path therefore completes in bounded time regardless of unresponsive VMs. A final log line summarizes results:
+The fan-out is **best-effort**: each VM gets ~4 s (20 attempts × 200 ms, matching the existing `ReconfigureGuestIP` budget) and any per-VM failure is logged but never propagated. The SIGHUP path therefore completes in bounded time regardless of unresponsive VMs. A final log line summarizes results:
 
 ```
 SIGHUP: token reload complete — 1 client(s): alice
 SIGHUP: CP token propagated to 3/3 VM(s)
 ```
+
+**SDK signal forwarding** — `firecracker-go-sdk` v1.0.0 defaults to forwarding `SIGINT/SIGQUIT/SIGTERM/SIGHUP/SIGABRT` from the daemon to every Firecracker child (see `internal/vm/machine.go`'s `setupSignals` reference). Because the daemon itself uses `SIGHUP` for the rotation flow described here, we explicitly set `firecracker.Config.ForwardSignals` to a list that **excludes SIGHUP** — otherwise the daemon's own reload signal would kill every running Firecracker and the vsock fan-out would immediately get `connection refused`. The shutdown signals stay forwarded so `Ctrl-C` / `systemctl stop` still propagate cleanly.
 
 **Caveat**: only VMs spawned by a v0.3.4 (or newer) daemon implement the `SET_CP_TOKEN` handler. VMs whose `goose-agent` was baked from an older golden image will log a per-VM "unknown command" failure during fan-out; for those, the v0.3.3 fallback (`POST /flocks/{id}/agents/{agent_id}/restart`) is still the rotation path.
 

@@ -9,8 +9,8 @@
 ### CP token hot rotation via vsock
 
 - New `EPHEMERA_API_TOKENS_FILE` env (in `cmd/goose-daemon/config.go`) names a file path that `loadAPIClients` reads on every call. Operators edit the file, send `SIGHUP`, and the daemon picks up the new contents. Env-only deployments still work as before — file precedence is `EPHEMERA_API_TOKENS_FILE` → `EPHEMERA_API_TOKENS` → `EPHEMERA_API_TOKEN`. `parseAPIClients` is factored out of the legacy parse loop and accepts both comma- and newline-separated entries.
-- `ReloadClients` (`cmd/goose-daemon/api.go`) now fans the new `apiClients[0].Token` out to every running VM that has a vsock UDS path. Snapshot taken under `cp.mu.RLock()`, dispatch in parallel goroutines, per-VM 1 s budget (3 × 300 ms), per-VM failure logged but never propagated. A final log line summarizes ok/total counts.
-- `internal/vm/machine.go` extracts a generic `vsockSendCommand` from the existing `vsockSendChangeIP`; `ReconfigureGuestIP` becomes a thin wrapper with its original 20 × 200 ms retry budget preserved. New sibling `SetGuestCPToken` uses the tighter 3 × 300 ms budget appropriate for already-running VMs.
+- `ReloadClients` (`cmd/goose-daemon/api.go`) now fans the new `apiClients[0].Token` out to every running VM that has a vsock UDS path. Snapshot taken under `cp.mu.RLock()`, dispatch in parallel goroutines, per-VM 4 s budget (20 × 200 ms — see hot-fix below for why this matches `ReconfigureGuestIP`), per-VM failure logged but never propagated. A final log line summarizes ok/total counts.
+- `internal/vm/machine.go` extracts a generic `vsockSendCommand` from the existing `vsockSendChangeIP`; `ReconfigureGuestIP` becomes a thin wrapper with its original 20 × 200 ms retry budget preserved. New sibling `SetGuestCPToken` uses the same 20 × 200 ms budget. `vsockSendOnce` also stat-preflights the UDS path so a dead Firecracker surfaces as "vsock UDS missing" rather than the misleading "connection refused".
 - `cmd/goose-agent/main.go`'s `handleVsockConn` now dispatches on the leading verb. The new `SET_CP_TOKEN <token>` command writes `/root/.ephemera-cp-token` via tmp-and-rename (mode 0600), so a concurrent `loadCPToken` reader never observes a partial write. `/townwall/post` continues to call `loadCPToken` per request, so the next forwarder call sees the rotated bearer without any caching change.
 
 ### Env-tunable watchdog timings
@@ -28,7 +28,17 @@
 ### Tests
 
 - `TestWatchdog_Configure_AppliesTunables` and `TestWatchdog_AutoHeal_ResetsDeadMark` in `internal/orchestrator/watchdog_test.go` cover the new behaviors. The auto-heal test asserts the Town Wall recovery notice, the in-memory `Status=ready`, and the on-disk metadata round-trip.
-- `e2e_test.sh` step 58c (sub-steps 58c.i–58c.vii) exercises the full rotation flow against a real Firecracker VM: spawn TOKENS_FILE daemon with v1 → spawn flock → SIGHUP after editing file to v2 → assert post-rotation `/townwall/post` 200, v1 operator bearer 401, both posts in Town Wall, and the `SIGHUP: CP token propagated` log line. Pre-flight cleanup also removes a leftover `/tmp/ephemera-tokens.txt`. Step 60 is renamed to the rotation-daemon shutdown.
+- `e2e_test.sh` step 58c (sub-steps 58c.i–58c.vii) exercises the full rotation flow against a real Firecracker VM: spawn TOKENS_FILE daemon with v1 → spawn flock → SIGHUP after editing file to v2 → assert post-rotation `/townwall/post` 200, v1 operator bearer 401, both posts in Town Wall, and the `SIGHUP: CP token propagated` log line. Pre-flight cleanup also removes a leftover `/tmp/ephemera-tokens.txt`. Step 60 is renamed to the rotation-daemon shutdown. 58c.iii also `ls -la`s the vsock UDS before SIGHUP so operators reading a future failure can tell whether the file exists, and 58c.iii's assertion parses the `propagated to N/M` count line rather than just substring-grepping for the prefix (a silent "0/1" used to pass).
+
+### Hot-fix: SDK signal forwarding (post-release)
+
+The initial v0.3.4 cycle merged with a critical bug that the e2e gate did not catch on the first run: `firecracker-go-sdk` v1.0.0's default `ForwardSignals` list **includes `SIGHUP`**, and the SDK installs a goroutine that forwards every received signal to its Firecracker child via `cmd.Process.Signal(sig)`. The daemon uses `SIGHUP` for its own token reload, so sending `kill -HUP <daemon_pid>` triggered the SDK's forwarder, killed every running Firecracker (exit status 156), and the vsock fan-out then failed with `connection refused` on a UDS whose listener had just died. The bug existed latently since v0.2.0 (SDK upgrade), but v0.3.4 was the first release whose post-SIGHUP code actually depended on Firecracker still being alive.
+
+Fix in `internal/vm/machine.go`: define a package-level `forwardSignals = []os.Signal{os.Interrupt, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGABRT}` (SIGHUP deliberately omitted) and set `firecracker.Config.ForwardSignals: forwardSignals` in both `StartMachine` and `RestoreMachine`. Shutdown signals are still forwarded so `Ctrl-C` / `systemctl stop` propagate cleanly; only the daemon's own reload signal is intercepted before reaching Firecracker.
+
+Two safety nets also landed alongside: `SetGuestCPToken`'s retry budget moved from 3 × 300 ms to 20 × 200 ms to match `ReconfigureGuestIP`, and `vsockSendOnce` now `os.Stat()`s the UDS path before dialing so a dead Firecracker is reported as `vsock UDS missing at <path>` instead of the more ambiguous `connection refused`.
+
+**Operational impact for prior versions**: if you ran `kill -HUP` against any v0.2.0–v0.3.3 daemon (e.g. for the documented "token hot reload"), every Firecracker was silently killed at that moment. The v0.3.3 effect was undetectable because no post-SIGHUP code touched the children; nonetheless any VMs in flight became unreachable. Upgrading to the hot-fixed v0.3.4 is the recommended remediation.
 
 ---
 
@@ -46,7 +56,7 @@
 - `cmd/goose-daemon/config.go` — `EPHEMERA_API_TOKENS_FILE` source, `parseAPIClients` helper, four watchdog env vars, `envBool` helper
 - `cmd/goose-daemon/api.go` — `ReloadClients` token fan-out (`propagateCPTokenToVMs`), `Configure` call after `NewWatchdog`, startup log line carries resolved tunable values
 - `cmd/goose-agent/main.go` — `handleVsockConn` dispatch on verb (`CHANGE_IP` / `SET_CP_TOKEN`), `writeCPTokenAtomic`
-- `internal/vm/machine.go` — `vsockSendCommand` / `vsockSendOnce` extracted from `vsockSendChangeIP`; `ReconfigureGuestIP` becomes a thin wrapper; new `SetGuestCPToken`
+- `internal/vm/machine.go` — `vsockSendCommand` / `vsockSendOnce` (with `os.Stat` preflight) extracted from `vsockSendChangeIP`; `ReconfigureGuestIP` becomes a thin wrapper; new `SetGuestCPToken` (20 × 200 ms retry); new `forwardSignals` package var explicitly omitting `SIGHUP`; both `StartMachine` and `RestoreMachine` set `firecracker.Config.ForwardSignals`
 - `internal/orchestrator/watchdog.go` — `Watchdog.autoHeal`, `Watchdog.Configure`, opt-in `onSuccess` heal path
 - `internal/orchestrator/watchdog_test.go` — `TestWatchdog_Configure_AppliesTunables`, `TestWatchdog_AutoHeal_ResetsDeadMark`
 - `e2e_test.sh` — step 58c (sub-steps i–vii) for the rotation flow; step 60 renamed; pre-flight removes `/tmp/ephemera-tokens.txt`

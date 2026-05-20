@@ -100,6 +100,8 @@ These are the parts that have surprised contributors before. Read the existing c
 
 **Watchdog tunables + auto-heal (v0.3.4)** — `Watchdog.Configure` is the only public entry to override `interval` / `httpTimeout` / `dyingThreshold` / `autoHeal`; the underlying fields stay unexported so external callers cannot bypass the `interval >= httpTimeout` clamp. In-package tests still set fields directly — that's fine and intentional. `EPHEMERA_WATCHDOG_AUTO_HEAL` MUST default to off; `TestWatchdog_MarksDeadAfterThreshold` is the sticky-dead contract and changes that flip a once-dead agent back to ready without the opt-in flag are a regression by definition.
 
+**Firecracker SDK signal forwarding (v0.3.4 hot-fix)** — `firecracker-go-sdk` v1.0.0's `firecracker.Config.ForwardSignals` defaults to `[SIGINT, SIGQUIT, SIGTERM, SIGHUP, SIGABRT]` and installs a goroutine (`setupSignals` in the SDK) that forwards each received signal to the Firecracker child via `cmd.Process.Signal(sig)`. The daemon uses `SIGHUP` for token hot reload, so the default would kill every running Firecracker the moment a reload signal arrives. `internal/vm/machine.go` defines a package-level `forwardSignals` slice that **deliberately omits `SIGHUP`** and passes it to both `StartMachine` and `RestoreMachine`'s `firecracker.Config`. If you add new SDK call sites (a third spawn path, a re-attach path, etc.), set `ForwardSignals: forwardSignals` there too — leaving it nil silently re-enables the bug. If we ever stop using `SIGHUP` for hot reload, the explicit list can shrink, but never grow back to include `SIGHUP` while reload semantics are tied to it.
+
 ## PR expectations
 
 - **One logical change per PR.** Mixed PRs are slow to review and risky to revert.

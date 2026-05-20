@@ -7,12 +7,26 @@ import (
 	"net"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/firecracker-microvm/firecracker-go-sdk"
 	models "github.com/firecracker-microvm/firecracker-go-sdk/client/models"
 	"github.com/sirupsen/logrus"
 )
+
+// forwardSignals is the explicit signal list the firecracker-go-sdk forwards
+// to each Firecracker child process. SIGHUP is DELIBERATELY omitted: the
+// daemon uses SIGHUP for its own token-reload + vsock fan-out flow, and
+// Firecracker has no SIGHUP handler — forwarding it would kill every running
+// VM mid-rotation. Leaving ForwardSignals at the SDK default would silently
+// re-introduce the bug.
+var forwardSignals = []os.Signal{
+	os.Interrupt,
+	syscall.SIGQUIT,
+	syscall.SIGTERM,
+	syscall.SIGABRT,
+}
 
 // vsockReconfigPort is the well-known port the goose-agent vsock listener binds to inside the VM.
 const vsockReconfigPort = 1234
@@ -111,9 +125,10 @@ func StartMachine(ctx context.Context, cfg VMConfig) (*firecracker.Machine, erro
 			MemSizeMib:      firecracker.Int64(mem),
 			TrackDirtyPages: true, // required for diff snapshot creation
 		},
-		LogFifo:      logFifoPath,
-		LogLevel:     "Warning",
-		VsockDevices: vsockDevices(cfg.VsockUDSPath),
+		LogFifo:        logFifoPath,
+		LogLevel:       "Warning",
+		VsockDevices:   vsockDevices(cfg.VsockUDSPath),
+		ForwardSignals: forwardSignals,
 	}
 
 	// Capture Firecracker process logs at Warn level.
@@ -203,9 +218,10 @@ func RestoreMachine(ctx context.Context, cfg VMConfig, memFilePath, snapshotPath
 			MemSizeMib:      firecracker.Int64(mem),
 			TrackDirtyPages: true, // required for diff snapshot creation
 		},
-		LogFifo:      logFifoPath,
-		LogLevel:     "Warning",
-		VsockDevices: vsockDevices(cfg.VsockUDSPath),
+		LogFifo:        logFifoPath,
+		LogLevel:       "Warning",
+		VsockDevices:   vsockDevices(cfg.VsockUDSPath),
+		ForwardSignals: forwardSignals,
 	}
 
 	logger := logrus.New()
@@ -287,10 +303,13 @@ func ReconfigureGuestIP(vsockUDSPath, newCIDRIP, gateway string) error {
 
 // SetGuestCPToken instructs the guest to atomically rewrite its
 // /root/.ephemera-cp-token file to the supplied token. Called from the
-// SIGHUP reload path, where the VM is already known running, so the retry
-// budget is tighter than ReconfigureGuestIP (~1s total vs ~4s).
+// SIGHUP reload path. Uses the same retry budget as ReconfigureGuestIP
+// (~4 s, 20×200ms) — Firecracker's host-side vsock UDS multiplexer can
+// take longer than expected to be ready for host-initiated connections,
+// especially on spawn-path (non-restored) VMs where this is the first
+// host→guest vsock attempt in the VM's lifetime.
 func SetGuestCPToken(vsockUDSPath, token string) error {
-	return vsockSendCommand(vsockUDSPath, "SET_CP_TOKEN "+token, 3, 300*time.Millisecond)
+	return vsockSendCommand(vsockUDSPath, "SET_CP_TOKEN "+token, 20, 200*time.Millisecond)
 }
 
 // vsockSendCommand performs the Firecracker vsock handshake, sends a single
@@ -313,6 +332,12 @@ func vsockSendCommand(vsockUDSPath, command string, attempts int, perAttempt tim
 }
 
 func vsockSendOnce(vsockUDSPath, command string) error {
+	// Stat preflight: an ECONNREFUSED on a missing file is misleading; surface
+	// "file not present" explicitly so operators can distinguish a dead
+	// Firecracker (file gone) from one that exists but is not yet listening.
+	if _, err := os.Stat(vsockUDSPath); err != nil {
+		return fmt.Errorf("vsock UDS missing at %s: %w", vsockUDSPath, err)
+	}
 	conn, err := net.DialTimeout("unix", vsockUDSPath, 1*time.Second)
 	if err != nil {
 		return err

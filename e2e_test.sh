@@ -1282,36 +1282,59 @@ PRE_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
 
 step "58c.iii. Edit tokens file + SIGHUP daemon"
 echo "e2etest:e2e-cp-token-v2" > /tmp/ephemera-tokens.txt
+# Show vsock UDS state before SIGHUP — helps diagnose whether Firecracker
+# actually created a listenable multiplexer for this spawn-path VM.
+echo "  vsock UDS state before SIGHUP:"
+ls -la "/tmp/firecracker-vsock-${ROT_VM_ID}.sock" 2>&1 | sed 's/^/    /'
 kill -HUP "$DAEMON_PID"
-sleep 3   # vsock fan-out budget is ~1s/VM × 1 VM + reload log flush
+sleep 8   # vsock fan-out budget is now 4 s/VM × 1 VM; sleep generously for log flush
 
-if grep -q "SIGHUP: CP token propagated" "$LOG"; then
-    ok "SIGHUP propagation log line present"
+# Match the count form ("propagated to N/M VM(s)") and verify N == M >= 1.
+# Plain substring grep would pass even on "0/1" — i.e. silent fan-out failure.
+PROP_LINE=$(grep -E 'SIGHUP: CP token propagated to [0-9]+/[0-9]+' "$LOG" | tail -1 || true)
+if [ -z "$PROP_LINE" ]; then
+    fail "Propagation line missing from $LOG"
+    echo "    Last 20 daemon log lines:"; tail -20 "$LOG" | sed 's/^/      /'
 else
-    fail "SIGHUP propagation log line missing from $LOG"
+    PROP_OK=$(echo "$PROP_LINE" | sed -E 's|.*propagated to ([0-9]+)/[0-9]+.*|\1|')
+    PROP_TOTAL=$(echo "$PROP_LINE" | sed -E 's|.*propagated to [0-9]+/([0-9]+).*|\1|')
+    if [ "$PROP_OK" = "$PROP_TOTAL" ] && [ "$PROP_TOTAL" -ge "1" ]; then
+        ok "vsock fan-out: $PROP_OK/$PROP_TOTAL VMs OK"
+    else
+        fail "vsock fan-out incomplete: $PROP_OK/$PROP_TOTAL (line: $PROP_LINE)"
+        echo "    Per-VM failure lines:"
+        grep -E 'CP token propagation to .* failed' "$LOG" | tail -5 | sed 's/^/      /'
+        echo "    Last 30 daemon log lines:"; tail -30 "$LOG" | sed 's/^/      /'
+    fi
 fi
 
+# `|| echo "000"` survives a curl process error (connection refused, timeout)
+# so set -e does not kill the script before we print a real ✗ message.
 step "58c.iv. Post-rotation /townwall/post must still succeed (v2 reached VM)"
-POST_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+POST_CODE=$(curl -s -o /dev/null -m 5 -w "%{http_code}" \
     -X POST "http://${ROT_GUEST_IP}:8080/townwall/post" \
     -H "Authorization: Bearer $ROT_TOKEN" \
     -H "Content-Type: application/json" \
-    -d '{"body":"post-rotation"}')
-[ "$POST_CODE" = "200" ] \
-    && ok "Post-rotation /townwall/post via v2 CP token: 200 ✓" \
-    || fail "Post-rotation /townwall/post failed ($POST_CODE) — vsock fan-out broken"
+    -d '{"body":"post-rotation"}' || echo "000")
+if [ "$POST_CODE" = "200" ]; then
+    ok "Post-rotation /townwall/post via v2 CP token: 200 ✓"
+else
+    fail "Post-rotation /townwall/post failed (HTTP $POST_CODE) — vsock fan-out broken or VM unreachable"
+    echo "    Recent daemon log lines (forwarder / SIGHUP / vsock context):"
+    grep -E 'townwall|forward|401|SIGHUP|propagat|SET_CP|vsock' "$LOG" | tail -20 | sed 's/^/      /'
+fi
 
 step "58c.v. v1 operator bearer must now be rejected"
-OLDOP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-    -H "$ROT_HDR_V1" "$API/vms")
+OLDOP_CODE=$(curl -s -o /dev/null -m 5 -w "%{http_code}" \
+    -H "$ROT_HDR_V1" "$API/vms" || echo "000")
 [ "$OLDOP_CODE" = "401" ] \
     && ok "v1 operator bearer correctly rejected (401) ✓" \
     || fail "v1 operator bearer still works ($OLDOP_CODE) — SIGHUP did not swap cp.clients"
 
 step "58c.vi. Town Wall received both pre- and post-rotation posts"
-TW_HITS=$(curl -s -H "Authorization: Bearer e2e-cp-token-v2" \
-    "$API/flocks/$ROT_FLOCK_ID/wall/history" | \
-    jq '[.[] | select(.body=="pre-rotation" or .body=="post-rotation")] | length')
+TW_HITS=$(curl -s -m 5 -H "Authorization: Bearer e2e-cp-token-v2" \
+    "$API/flocks/$ROT_FLOCK_ID/wall/history" 2>/dev/null | \
+    jq '[.[] | select(.body=="pre-rotation" or .body=="post-rotation")] | length' 2>/dev/null || echo "0")
 [ "$TW_HITS" -ge "2" ] \
     && ok "Town Wall recorded both posts ✓" \
     || fail "Town Wall missing posts (got $TW_HITS, want 2)"
