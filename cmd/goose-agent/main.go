@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -171,6 +172,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/tasks", agentAuthMiddleware(token, handleTask))
 	mux.HandleFunc("/workspace", agentAuthMiddleware(token, workspaceHandler(workspaceRoot)))
+	mux.HandleFunc("/workloads/run", agentAuthMiddleware(token, workloadRunHandler(workspaceRoot)))
 	mux.HandleFunc("/stop", agentAuthMiddleware(token, handleStop))
 	mux.HandleFunc("/townwall/post", agentAuthMiddleware(token, handleTownWallPost))
 	mux.HandleFunc("/health", handleHealth) // always unauthenticated
@@ -273,6 +275,33 @@ type WorkspaceWriteResult struct {
 type ErrorResponse struct {
 	Error string `json:"error"`
 }
+
+type truncatingBuffer struct {
+	limit     int
+	buf       bytes.Buffer
+	truncated bool
+}
+
+func (b *truncatingBuffer) Write(p []byte) (int, error) {
+	if b.limit <= 0 {
+		b.truncated = true
+		return len(p), nil
+	}
+	remaining := b.limit - b.buf.Len()
+	if remaining <= 0 {
+		b.truncated = true
+		return len(p), nil
+	}
+	if len(p) > remaining {
+		b.buf.Write(p[:remaining])
+		b.truncated = true
+		return len(p), nil
+	}
+	b.buf.Write(p)
+	return len(p), nil
+}
+
+func (b *truncatingBuffer) String() string { return b.buf.String() }
 
 func writeJSONError(w http.ResponseWriter, status int, message string) {
 	w.Header().Set("Content-Type", "application/json")
@@ -493,6 +522,94 @@ func handleTask(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(res)
+}
+
+func workloadRunHandler(root string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSONError(w, http.StatusMethodNotAllowed, "POST required")
+			return
+		}
+
+		var req WorkloadRunRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+		fullPath, cleanScript, status, err := workloadScriptPath(root, req.Script)
+		if err != nil {
+			writeJSONError(w, status, err.Error())
+			return
+		}
+		timeout, err := workloadTimeoutSeconds(req.TimeoutSeconds)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		mu.Lock()
+		if busy {
+			mu.Unlock()
+			writeJSONError(w, http.StatusServiceUnavailable, "agent busy")
+			return
+		}
+		busy = true
+		mu.Unlock()
+		defer func() {
+			mu.Lock()
+			busy = false
+			mu.Unlock()
+		}()
+
+		result := runWorkloadScript(r.Context(), root, cleanScript, fullPath, timeout)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(result)
+	}
+}
+
+func runWorkloadScript(parent context.Context, root, cleanScript, fullPath string, timeout time.Duration) WorkloadRunResult {
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+
+	stdout := &truncatingBuffer{limit: maxWorkloadOutputBytes}
+	stderr := &truncatingBuffer{limit: maxWorkloadOutputBytes}
+	cmd := exec.CommandContext(ctx, "bash", fullPath)
+	cmd.Dir = root
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	cmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+
+	err := cmd.Run()
+	result := WorkloadRunResult{
+		Script:          cleanScript,
+		Stdout:          stdout.String(),
+		Stderr:          stderr.String(),
+		DurationMs:      time.Since(start).Milliseconds(),
+		StdoutTruncated: stdout.truncated,
+		StderrTruncated: stderr.truncated,
+	}
+	if err == nil {
+		return result
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		result.ExitCode = -1
+		result.TimedOut = true
+		if result.Stderr == "" {
+			result.Stderr = fmt.Sprintf("workload timed out after %ds", int(timeout/time.Second))
+		}
+		return result
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		result.ExitCode = exitErr.ExitCode()
+		return result
+	}
+	result.ExitCode = -1
+	if result.Stderr == "" {
+		result.Stderr = err.Error()
+	}
+	return result
 }
 
 // TownWallPostBody is the JSON body accepted by /townwall/post inside the VM.

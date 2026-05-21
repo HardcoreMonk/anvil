@@ -371,6 +371,131 @@ func TestWorkloadTimeoutSeconds(t *testing.T) {
 	}
 }
 
+func TestHandleWorkloadRunSuccess(t *testing.T) {
+	root := t.TempDir()
+	writeWorkloadScript(t, root, "workloads/success.sh", "#!/usr/bin/env bash\necho stdout-ok\necho stderr-ok >&2\n")
+	handler := workloadRunHandler(root)
+
+	body := strings.NewReader(`{"script":"workloads/success.sh","timeout_seconds":5}`)
+	req := httptest.NewRequest(http.MethodPost, "/workloads/run", body)
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q; want 200", rr.Code, rr.Body.String())
+	}
+	var result WorkloadRunResult
+	if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("exit_code = %d, want 0", result.ExitCode)
+	}
+	if !strings.Contains(result.Stdout, "stdout-ok") {
+		t.Fatalf("stdout = %q, want stdout-ok", result.Stdout)
+	}
+	if !strings.Contains(result.Stderr, "stderr-ok") {
+		t.Fatalf("stderr = %q, want stderr-ok", result.Stderr)
+	}
+	if result.Script != "workloads/success.sh" {
+		t.Fatalf("script = %q, want workloads/success.sh", result.Script)
+	}
+}
+
+func TestHandleWorkloadRunNonzeroExitReturnsResult(t *testing.T) {
+	root := t.TempDir()
+	writeWorkloadScript(t, root, "workloads/fail.sh", "#!/usr/bin/env bash\necho failed >&2\nexit 7\n")
+	handler := workloadRunHandler(root)
+
+	req := httptest.NewRequest(http.MethodPost, "/workloads/run", strings.NewReader(`{"script":"workloads/fail.sh","timeout_seconds":5}`))
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q; want 200", rr.Code, rr.Body.String())
+	}
+	var result WorkloadRunResult
+	if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if result.ExitCode != 7 {
+		t.Fatalf("exit_code = %d, want 7", result.ExitCode)
+	}
+	if !strings.Contains(result.Stderr, "failed") {
+		t.Fatalf("stderr = %q, want failed", result.Stderr)
+	}
+}
+
+func TestHandleWorkloadRunTimeout(t *testing.T) {
+	root := t.TempDir()
+	writeWorkloadScript(t, root, "workloads/sleep.sh", "#!/usr/bin/env bash\nsleep 2\n")
+	handler := workloadRunHandler(root)
+
+	req := httptest.NewRequest(http.MethodPost, "/workloads/run", strings.NewReader(`{"script":"workloads/sleep.sh","timeout_seconds":1}`))
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q; want 200", rr.Code, rr.Body.String())
+	}
+	var result WorkloadRunResult
+	if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if !result.TimedOut {
+		t.Fatalf("timed_out = false, want true")
+	}
+	if result.ExitCode != -1 {
+		t.Fatalf("exit_code = %d, want -1", result.ExitCode)
+	}
+}
+
+func TestHandleWorkloadRunRejectsInvalidPath(t *testing.T) {
+	handler := workloadRunHandler(t.TempDir())
+	req := httptest.NewRequest(http.MethodPost, "/workloads/run", strings.NewReader(`{"script":"../secret.sh"}`))
+	rr := httptest.NewRecorder()
+
+	handler(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %q; want 400", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandleWorkloadRunBusy(t *testing.T) {
+	root := t.TempDir()
+	writeWorkloadScript(t, root, "workloads/success.sh", "#!/usr/bin/env bash\necho ok\n")
+	handler := workloadRunHandler(root)
+
+	mu.Lock()
+	busy = true
+	mu.Unlock()
+	defer func() {
+		mu.Lock()
+		busy = false
+		mu.Unlock()
+	}()
+
+	req := httptest.NewRequest(http.MethodPost, "/workloads/run", strings.NewReader(`{"script":"workloads/success.sh"}`))
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rr.Code)
+	}
+}
+
+func writeWorkloadScript(t *testing.T, root, relPath, content string) {
+	t.Helper()
+	fullPath := filepath.Join(root, filepath.FromSlash(relPath))
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+		t.Fatalf("mkdir script parent: %v", err)
+	}
+	if err := os.WriteFile(fullPath, []byte(content), 0755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+}
+
 func assertJSONError(t *testing.T, rr *httptest.ResponseRecorder, want string) {
 	t.Helper()
 	if got := rr.Header().Get("Content-Type"); got != "application/json" {
