@@ -153,6 +153,17 @@ fetch_workspace_file() {
   fi
 }
 
+build_go_http_server() {
+  local output="$ARTIFACT_DIR/go-http-server"
+  require_cmd go || exit 1
+  if env CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$output" ./scripts/workloads/go-http-server.go; then
+    ok "Built workload asset go-http-server"
+  else
+    fail "workspace_upload_failed: could not build go-http-server"
+    exit 1
+  fi
+}
+
 run_workload() {
   local label="$1"
   local script="$2"
@@ -325,9 +336,13 @@ if [ -z "$VM_ID" ] || [ "$VM_ID" = "null" ] || [ -z "$VM_IP" ] || [ "$VM_IP" = "
 fi
 ok "Created VM $VM_ID at $VM_IP"
 
+step "Build workload assets"
+build_go_http_server
+
 step "Upload workload files"
 upload_workspace_file scripts/workloads/nginx-smoke.sh workloads/nginx-smoke.sh
 upload_workspace_file scripts/workloads/go-http-server.go workloads/go-http-server.go
+upload_workspace_file "$ARTIFACT_DIR/go-http-server" workloads/go-http-server
 upload_workspace_file scripts/workloads/go-http-bench.sh workloads/go-http-bench.sh
 
 # Current workload artifacts: nginx-run.json and go-http-run.json.

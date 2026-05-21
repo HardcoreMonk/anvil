@@ -46,13 +46,19 @@ if ! command -v curl >/dev/null 2>&1; then
   apt-get install -y --no-install-recommends curl ca-certificates
 fi
 
-if ! command -v go >/dev/null 2>&1; then
+if [ -f "$server_bin" ]; then
+  chmod +x "$server_bin"
+  echo "[go-http] using prebuilt server binary $server_bin"
+elif ! command -v go >/dev/null 2>&1; then
   apt-get update
   apt-get install -y --no-install-recommends golang-go
-fi
 
-go version
-go build -o "$server_bin" "$server_src"
+  go version
+  go build -o "$server_bin" "$server_src"
+else
+  go version
+  go build -o "$server_bin" "$server_src"
+fi
 
 if pgrep -f "$server_bin" >/dev/null 2>&1; then
   pkill -f "$server_bin" || true

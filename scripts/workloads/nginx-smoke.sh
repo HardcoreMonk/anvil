@@ -40,8 +40,12 @@ if command -v service >/dev/null 2>&1; then
   service nginx restart || true
 fi
 
-if ! pgrep -x nginx >/dev/null 2>&1; then
-  nginx
+if command -v pgrep >/dev/null 2>&1; then
+  if ! pgrep -x nginx >/dev/null 2>&1; then
+    nginx || true
+  fi
+else
+  nginx || true
 fi
 
 for attempt in $(seq 1 30); do
