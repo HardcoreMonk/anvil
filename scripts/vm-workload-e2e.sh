@@ -153,6 +153,46 @@ fetch_workspace_file() {
   fi
 }
 
+run_workload() {
+  local label="$1"
+  local script="$2"
+  local marker="$3"
+  local output="$ARTIFACT_DIR/${label}-run.json"
+  local payload
+  local code
+  local exit_code
+  local timed_out
+  local stdout
+
+  payload="$(jq -n --arg script "$script" --argjson timeout "$TASK_TIMEOUT" '{script: $script, timeout_seconds: $timeout}')"
+  code="$(curl -sS "${CURL_AUTH_ARGS[@]}" --max-time "$((TASK_TIMEOUT + 30))" -o "$output" -w "%{http_code}" \
+    -X POST "$API/vms/$VM_ID/workloads/run" \
+    -H "Content-Type: application/json" \
+    -d "$payload" || true)"
+  if [ "$code" != "200" ]; then
+    fail "task_failed: workload $script returned HTTP $code"
+    return
+  fi
+
+  exit_code="$(jq -r '.exit_code // "missing"' "$output" 2>/dev/null || true)"
+  timed_out="$(jq -r '.timed_out // false' "$output" 2>/dev/null || true)"
+  stdout="$(jq -r '.stdout // ""' "$output" 2>/dev/null || true)"
+
+  if [ "$timed_out" = "true" ]; then
+    fail "task_failed: workload $script timed out"
+    return
+  fi
+  if [ "$exit_code" != "0" ]; then
+    fail "task_failed: workload $script exit_code=$exit_code"
+    return
+  fi
+  if printf '%s' "$stdout" | grep -q "$marker"; then
+    ok "Workload $script output contains $marker"
+  else
+    fail "task_failed: workload $script missing marker $marker"
+  fi
+}
+
 host_probe() {
   local label="$1"
   local url="$2"
@@ -290,35 +330,15 @@ upload_workspace_file scripts/workloads/nginx-smoke.sh workloads/nginx-smoke.sh
 upload_workspace_file scripts/workloads/go-http-server.go workloads/go-http-server.go
 upload_workspace_file scripts/workloads/go-http-bench.sh workloads/go-http-bench.sh
 
-step "Run VM workload task"
-task_prompt="$(cat <<'PROMPT'
-Run the uploaded workload scripts exactly as shell commands inside this VM.
-
-Commands:
-chmod +x /workspace/workloads/nginx-smoke.sh /workspace/workloads/go-http-bench.sh
-bash /workspace/workloads/nginx-smoke.sh
-bash /workspace/workloads/go-http-bench.sh
-
-After the commands complete, print the marker lines from the scripts and the final 20 lines of each workload log. Do not print any secret, token, or config file content.
-PROMPT
-)"
-task_payload="$(jq -n --arg prompt "$task_prompt" '{prompt: $prompt}')"
-task_code="$(curl -sS "${CURL_AUTH_ARGS[@]}" --max-time "$TASK_TIMEOUT" -o "$ARTIFACT_DIR/task-output.json" -w "%{http_code}" \
-  -X POST "$API/vms/$VM_ID/tasks" \
-  -H "Content-Type: application/json" \
-  -d "$task_payload" || true)"
-if [ "$task_code" != "200" ]; then
-  fail "task_failed: workload task returned HTTP $task_code"
+# Current workload artifacts: nginx-run.json and go-http-run.json.
+step "Run VM workloads"
+run_workload nginx workloads/nginx-smoke.sh ANVIL_WORKLOAD_NGINX_READY
+run_workload go-http workloads/go-http-bench.sh ANVIL_WORKLOAD_GO_HTTP_READY
+if jq -r '.stdout // ""' "$ARTIFACT_DIR/go-http-run.json" 2>/dev/null | grep -q ANVIL_WORKLOAD_BENCH_DONE; then
+  ok "Workload workloads/go-http-bench.sh output contains ANVIL_WORKLOAD_BENCH_DONE"
+else
+  fail "task_failed: workload workloads/go-http-bench.sh missing marker ANVIL_WORKLOAD_BENCH_DONE"
 fi
-
-task_output="$(jq -r '.output // ""' "$ARTIFACT_DIR/task-output.json" 2>/dev/null || true)"
-for marker in ANVIL_WORKLOAD_NGINX_READY ANVIL_WORKLOAD_GO_HTTP_READY ANVIL_WORKLOAD_BENCH_DONE; do
-  if printf '%s' "$task_output" | grep -q "$marker"; then
-    ok "Task output contains $marker"
-  else
-    fail "task_failed: missing marker $marker"
-  fi
-done
 
 step "Fetch VM workload logs"
 fetch_workspace_file workloads/results/nginx.log nginx.log
