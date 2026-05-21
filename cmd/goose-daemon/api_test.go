@@ -1480,11 +1480,12 @@ func TestHandleVMProxiesWorkloadRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("split host port: %v", err)
 	}
-	oldAgentPort := agentPort
-	agentPort, err = strconv.Atoi(port)
+	parsedPort, err := strconv.Atoi(port)
 	if err != nil {
 		t.Fatalf("parse port: %v", err)
 	}
+	oldAgentPort := agentPort
+	agentPort = parsedPort
 	defer func() { agentPort = oldAgentPort }()
 
 	cp := newTestCP(t)
