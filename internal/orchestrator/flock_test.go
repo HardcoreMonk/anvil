@@ -75,6 +75,44 @@ func TestFlock_AddAgentAndStatus(t *testing.T) {
 	}
 }
 
+// TestFlock_UpdateAgentVM verifies that swapping VM identity preserves the
+// agent_id and role while replacing vm_id / agent_url and resetting status
+// to ready — the exact contract per-agent restart relies on.
+func TestFlock_UpdateAgentVM(t *testing.T) {
+	tmp := t.TempDir()
+	fm := NewFlockManager(tmp)
+	f, _ := fm.Create("flock-restart", "task", filepath.Join(tmp, "wall.log"))
+	f.AddAgent(&AgentInfo{
+		AgentID:  "reviewer-1",
+		Role:     "reviewer",
+		VMID:     "vm-old",
+		AgentURL: "http://10.0.1.5:8080",
+		Status:   AgentStatusDead,
+	})
+
+	f.UpdateAgentVM("reviewer-1", "vm-new", "http://10.0.1.6:8080")
+
+	snap := f.Snapshot()
+	if snap[0].VMID != "vm-new" {
+		t.Errorf("VMID not swapped: %q", snap[0].VMID)
+	}
+	if snap[0].AgentURL != "http://10.0.1.6:8080" {
+		t.Errorf("AgentURL not swapped: %q", snap[0].AgentURL)
+	}
+	if snap[0].Status != AgentStatusReady {
+		t.Errorf("status should reset to ready, got %q", snap[0].Status)
+	}
+	if snap[0].Role != "reviewer" || snap[0].AgentID != "reviewer-1" {
+		t.Errorf("role/agent_id changed unexpectedly: %+v", snap[0])
+	}
+
+	// Unknown agent ID must be a no-op (parity with UpdateAgentStatus).
+	f.UpdateAgentVM("nobody", "vm-x", "http://x")
+	if len(f.Snapshot()) != 1 {
+		t.Error("UpdateAgentVM should not create new agents")
+	}
+}
+
 func TestFlock_MarshalJSON(t *testing.T) {
 	tmp := t.TempDir()
 	fm := NewFlockManager(tmp)

@@ -2,7 +2,7 @@ package network
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"sort"
@@ -49,7 +49,7 @@ func NewManager(subnet string, gatewayIP string) *Manager {
 	}
 
 	if err := m.setupBridge(); err != nil {
-		log.Printf("Warning: Bridge setup note (might already exist): %v", err)
+		slog.Warn("bridge setup note (might already exist)", "err", err)
 	}
 
 	return m
@@ -64,7 +64,7 @@ func (m *Manager) setupBridge() error {
 
 	// Enable IP forwarding so VM packets can reach the internet via the host.
 	if err := os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1"), 0644); err != nil {
-		log.Printf("Warning: failed to enable ip_forward: %v", err)
+		slog.Warn("enable ip_forward failed", "err", err)
 	}
 
 	// NAT masquerade: rewrite source IP of VM packets leaving the internal subnet
@@ -75,7 +75,7 @@ func (m *Manager) setupBridge() error {
 	}
 	if m.command("iptables", append([]string{"-t", "nat", "-C"}, masqArgs...)...) != nil {
 		if err := m.command("iptables", append([]string{"-t", "nat", "-A"}, masqArgs...)...); err != nil {
-			log.Printf("Warning: failed to add NAT masquerade rule: %v", err)
+			slog.Warn("failed to add NAT masquerade rule", "err", err)
 		}
 	}
 
@@ -88,7 +88,7 @@ func (m *Manager) setupBridge() error {
 			continue
 		}
 		if err := m.command("iptables", append([]string{"-I"}, rule...)...); err != nil {
-			log.Printf("Warning: failed to add forwarding rule %v: %v", rule, err)
+			slog.Warn("failed to add forwarding rule", "rule", rule, "err", err)
 		}
 	}
 
@@ -132,7 +132,7 @@ func (m *Manager) Allocate() (tapDevice string, guestIP string, macAddr string, 
 	tapDevice = fmt.Sprintf("tap%d", tapID)
 	macAddr = fmt.Sprintf("AA:FC:00:00:%02X:%02X", tapID/256, tapID%256)
 
-	log.Printf("Creating TAP device: %s for IP: %s...", tapDevice, guestIP)
+	slog.Info("creating tap device", "tap", tapDevice, "guest_ip", guestIP)
 	if err := m.createTapDevice(tapDevice); err != nil {
 		m.ipInUse[guestIP] = false
 		m.freeTapIDs = append([]int{tapID}, m.freeTapIDs...) // return ID to free-list
@@ -140,6 +140,51 @@ func (m *Manager) Allocate() (tapDevice string, guestIP string, macAddr string, 
 	}
 
 	return tapDevice, guestIP, macAddr, nil
+}
+
+// ReclaimAllocation re-reserves the exact original IP, TAP name, and MAC for a
+// VM being recovered after a daemon restart. Unlike AllocateForRestore (which
+// picks any free IP because the guest is reconfigured via vsock post-snapshot),
+// cold-restart needs to reuse the prior IP so callers and the agent_url stay
+// stable across the restart.
+//
+// Returns an error if the requested IP or TAP ID is no longer free (which
+// indicates a stale state.json — the recovery loop should drop that entry).
+func (m *Manager) ReclaimAllocation(tapDeviceName, guestIP, macAddr string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, known := m.ipInUse[guestIP]; !known {
+		return fmt.Errorf("IP %q is not in this manager's subnet", guestIP)
+	}
+	if m.ipInUse[guestIP] {
+		return fmt.Errorf("IP %q is already in use", guestIP)
+	}
+
+	var tapID int
+	if _, err := fmt.Sscanf(tapDeviceName, "tap%d", &tapID); err != nil {
+		return fmt.Errorf("invalid tap device name %q: %w", tapDeviceName, err)
+	}
+
+	// Reserve the IP and align the tap-ID bookkeeping so future Allocate calls
+	// won't collide with this reclaimed device.
+	m.ipInUse[guestIP] = true
+	for i, id := range m.freeTapIDs {
+		if id == tapID {
+			m.freeTapIDs = append(m.freeTapIDs[:i], m.freeTapIDs[i+1:]...)
+			break
+		}
+	}
+	if tapID >= m.nextTapID {
+		m.nextTapID = tapID + 1
+	}
+
+	slog.Warn("reclaiming tap device (recovery)", "tap", tapDeviceName, "guest_ip", guestIP, "mac", macAddr)
+	if err := m.createTapDeviceWithMAC(tapDeviceName, macAddr); err != nil {
+		m.ipInUse[guestIP] = false
+		return fmt.Errorf("failed to recreate TAP device for recovery: %w", err)
+	}
+	return nil
 }
 
 // AllocateForRestore recreates a TAP device with the exact original name and MAC (required by
@@ -177,7 +222,7 @@ func (m *Manager) AllocateForRestore(tapDeviceName, macAddr string) (tapDevice s
 		m.nextTapID = tapID + 1
 	}
 
-	log.Printf("Creating TAP device %s (restore) with IP %s and MAC %s...", tapDeviceName, guestIP, macAddr)
+	slog.Warn("creating tap device (restore)", "tap", tapDeviceName, "guest_ip", guestIP, "mac", macAddr)
 	if err := m.createTapDeviceWithMAC(tapDeviceName, macAddr); err != nil {
 		m.ipInUse[guestIP] = false
 		return "", "", fmt.Errorf("failed to create TAP device for restore: %w", err)
@@ -219,7 +264,7 @@ func (m *Manager) Release(tapDevice string, guestIP string) error {
 	defer m.mu.Unlock()
 
 	if err := m.deleteTapDevice(tapDevice); err != nil {
-		log.Printf("Warning: failed to delete TAP device %s: %v", tapDevice, err)
+		slog.Warn("delete tap device failed", "tap", tapDevice, "err", err)
 	}
 
 	// Return IP to the pool.

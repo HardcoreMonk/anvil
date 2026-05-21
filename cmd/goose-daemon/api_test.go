@@ -34,13 +34,17 @@ func newTestCP(t *testing.T) *ControlPlane {
 	defaultSec := filepath.Join(tmp, "goose-secrets.yaml")
 	os.WriteFile(defaultCfg, []byte("GOOSE_PROVIDER: default\n"), 0644)
 	os.WriteFile(defaultSec, []byte("DEFAULT_KEY: x\n"), 0644)
-	return &ControlPlane{
+	cp := &ControlPlane{
 		vms:              make(map[string]*runningVM),
 		snapshots:        make(map[string]storage.SnapshotMetadata),
 		workDir:          tmp,
 		gooseConfigPath:  defaultCfg,
 		gooseSecretsPath: defaultSec,
+		flockMgr:         orchestrator.NewFlockManager(tmp),
+		agentHTTPClient:  &http.Client{Timeout: time.Second},
 	}
+	cp.metrics = newDaemonMetrics(cp)
+	return cp
 }
 
 func TestCreateFlockRejectsInvalidTenantBeforeRegistration(t *testing.T) {

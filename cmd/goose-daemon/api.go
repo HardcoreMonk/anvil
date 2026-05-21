@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -17,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	firecracker "github.com/firecracker-microvm/firecracker-go-sdk"
@@ -30,6 +32,10 @@ import (
 	"ephemera/internal/vm"
 )
 
+type authFailureRecorder interface {
+	IncAuthFailure()
+}
+
 // authMiddleware enforces per-client Bearer token authentication on all requests.
 // getClients is called on every request so token changes (via SIGHUP reload) take
 // effect immediately without restarting the server or dropping running VMs.
@@ -40,7 +46,7 @@ import (
 // operands before returning, so response time does not vary with how many leading
 // characters match. All registered tokens are compared on every request (no
 // early-exit after the first match) to prevent leaking which client index was hit.
-func authMiddleware(getClients func() []APIClient, metrics *controlPlaneMetrics, next http.Handler) http.Handler {
+func authMiddleware(getClients func() []APIClient, metrics authFailureRecorder, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		clients := getClients()
 		if len(clients) == 0 {
@@ -67,7 +73,7 @@ func authMiddleware(getClients func() []APIClient, metrics *controlPlaneMetrics,
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
-		log.Printf("[%s] %s %s", matchedClient, r.Method, r.URL.Path)
+		slog.Info("api request", "client", matchedClient, "method", r.Method, "path", r.URL.Path)
 		next.ServeHTTP(w, r)
 	})
 }
@@ -108,6 +114,13 @@ type runningVM struct {
 	machine         *firecracker.Machine
 	tapDevice       string
 	socketPath      string
+	// v0.3.5 additions for /vms/{vm_id}/stats. memSizeMib mirrors VMState.MemSizeMib,
+	// spawnedAt mirrors VMState.CreatedAt, and fcPID caches the Firecracker child
+	// PID resolved via /proc/net/unix on first stats request. atomic stores so
+	// concurrent stats requests across goroutines remain race-free.
+	memSizeMib int64
+	spawnedAt  time.Time
+	fcPID      int32
 }
 
 type controlPlaneMetrics struct {
@@ -215,8 +228,11 @@ type ControlPlane struct {
 	tenantStore      *anvilmcp.QuotaStore
 	egress           egressEnforcer
 	runtimeAuditPath string
-	metrics          controlPlaneMetrics
-	traceExporter    *traceExporter
+	// metrics holds the Prometheus registry plus typed collectors used across
+	// the control plane. Wired in NewControlPlane after vms/snapshots/flockMgr
+	// are constructed because GaugeFunc closures observe those fields.
+	metrics       *daemonMetrics
+	traceExporter *traceExporter
 
 	snapshotLifecycleMu sync.Mutex
 
@@ -293,42 +309,83 @@ func NewControlPlane(
 			cp.snapshots[meta.SnapshotID] = meta
 		}
 		if len(existing) > 0 {
-			log.Printf("Loaded %d existing snapshot(s) from %s", len(existing), snapshotDir)
+			slog.Warn("loaded existing snapshots", "count", len(existing), "dir", snapshotDir)
 		}
 	}
 
-	// Recover flocks persisted from previous daemon runs. Recovered flocks are
-	// read-mostly: their VMID references no longer correspond to live VMs, so
-	// /flocks/{id}/post and /flocks/{id}/wall continue to work, but /tasks
-	// against any member VM will fail until v0.4.0 adds VM auto-restart.
+	// Recover flocks persisted from previous daemon runs. Town Wall + agent
+	// metadata are restored here; the actual VM cold-restart happens in
+	// RecoverVMs below, which also flips per-agent status to ready on success.
 	if recovered, failed, err := cp.flockMgr.LoadFromDisk(); err != nil {
-		log.Printf("Warning: failed to scan flock metadata: %v", err)
+		slog.Warn("scan flock metadata failed", "err", err)
 	} else {
 		if recovered > 0 {
-			log.Printf("Recovered %d flock(s) from %s", recovered, filepath.Join(workDir, "flocks"))
+			slog.Warn("recovered flocks", "count", recovered, "dir", filepath.Join(workDir, "flocks"))
 		}
 		if len(failed) > 0 {
-			log.Printf("Warning: %d flock(s) had metadata but could not be fully restored: %v", len(failed), failed)
+			slog.Warn("flocks not fully restored", "count", len(failed), "failed", failed)
 		}
 	}
 
-	cp.watchdog = orchestrator.NewWatchdog(cp.flockMgr, cp.locateFlockAgent, cp.listVMRefs, agentPort)
+	// Cold-restart any VMs that were running when the previous daemon stopped.
+	// Memory is not preserved; the same rootfs clone is booted with the same
+	// network identity (TAP/IP/MAC) and agent token, so external callers and
+	// flock associations stay stable across the restart.
+	if recovered, failed, err := cp.RecoverVMs(); err != nil {
+		slog.Warn("scan vm state for recovery failed", "err", err)
+	} else {
+		if recovered > 0 {
+			slog.Warn("recovered vms via cold-restart", "count", recovered)
+		}
+		if len(failed) > 0 {
+			slog.Warn("vms not cold-restarted", "count", len(failed), "failed", failed)
+		}
+	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", cp.handleHealth)
-	mux.HandleFunc("/metrics", cp.handleMetrics)
-	mux.HandleFunc("/metrics/vms", cp.handleVMMetrics)
-	mux.HandleFunc("/vms", cp.handleVMs)
-	mux.HandleFunc("/vms/", cp.handleVM)
-	mux.HandleFunc("/tenants", cp.handleTenants)
-	mux.HandleFunc("/tenants/", cp.handleTenantItem)
-	mux.HandleFunc("/audit/runtime", cp.handleRuntimeAudit)
-	mux.HandleFunc("/audit/runtime/prune", cp.handleRuntimeAuditPrune)
-	mux.HandleFunc("/snapshots", cp.handleSnapshots)
-	mux.HandleFunc("/snapshots/gc", cp.handleSnapshotGC)
-	mux.HandleFunc("/snapshots/", cp.handleSnapshotItem)
-	cp.registerOrchestratorRoutes(mux)
-	cp.srv = &http.Server{Addr: apiAddr, Handler: authMiddleware(cp.getClients, &cp.metrics, mux)}
+	// Register all Prometheus collectors. Done after vms/snapshots/flockMgr are
+	// allocated so GaugeFunc closures observe non-nil source fields.
+	cp.metrics = newDaemonMetrics(cp)
+
+	cp.watchdog = orchestrator.NewWatchdog(cp.flockMgr, cp.locateFlockAgent, cp.listVMRefs, agentPort)
+	cp.watchdog.Configure(
+		time.Duration(watchdogIntervalSec)*time.Second,
+		time.Duration(watchdogTimeoutSec)*time.Second,
+		watchdogThreshold,
+		watchdogAutoHeal,
+	)
+	// Wire watchdog metrics callbacks so orchestrator/ does not import metrics/.
+	cp.watchdog.OnDead = func(string, string, string) { cp.metrics.watchdogDead.Inc() }
+	cp.watchdog.OnHeal = func(string, string, string) { cp.metrics.watchdogHeal.Inc() }
+	cp.watchdog.OnProbeDuration = func(d time.Duration) {
+		cp.metrics.watchdogProbeDuration.Observe(d.Seconds())
+	}
+
+	// Two-mux pattern: /metrics is exempt from authMiddleware by default
+	// (standard Prometheus scrape model). When EPHEMERA_METRICS_REQUIRE_AUTH=true
+	// the /metrics handler is wrapped in authMiddleware just like everything else.
+	internalMux := http.NewServeMux()
+	internalMux.HandleFunc("/health", cp.handleHealth)
+	internalMux.HandleFunc("/metrics/vms", cp.handleVMMetrics)
+	internalMux.HandleFunc("/vms", cp.handleVMs)
+	internalMux.HandleFunc("/vms/", cp.handleVM)
+	internalMux.HandleFunc("/tenants", cp.handleTenants)
+	internalMux.HandleFunc("/tenants/", cp.handleTenantItem)
+	internalMux.HandleFunc("/audit/runtime", cp.handleRuntimeAudit)
+	internalMux.HandleFunc("/audit/runtime/prune", cp.handleRuntimeAuditPrune)
+	internalMux.HandleFunc("/snapshots", cp.handleSnapshots)
+	internalMux.HandleFunc("/snapshots/gc", cp.handleSnapshotGC)
+	internalMux.HandleFunc("/snapshots/", cp.handleSnapshotItem)
+	cp.registerOrchestratorRoutes(internalMux)
+
+	externalMux := http.NewServeMux()
+	if metricsRequireAuth {
+		externalMux.Handle("/metrics", authMiddleware(cp.getClients, cp.metrics, http.HandlerFunc(cp.handleMetrics)))
+	} else {
+		externalMux.HandleFunc("/metrics", cp.handleMetrics)
+	}
+	externalMux.Handle("/", authMiddleware(cp.getClients, cp.metrics, internalMux))
+
+	cp.srv = &http.Server{Addr: apiAddr, Handler: externalMux}
 	return cp
 }
 
@@ -339,8 +396,25 @@ func (cp *ControlPlane) getClients() []APIClient {
 	return cp.clients
 }
 
-// ReloadClients re-reads API tokens from the environment and hot-swaps the client list.
-// Called on SIGHUP. Running VMs are not affected.
+// controlPlaneTokenForVM returns the bearer the in-VM /townwall/post forwarder
+// uses when calling back into the control plane. Returns the first API client's
+// token (apiClients[0].Token) when auth is enabled, or "" when auth is disabled
+// — in the latter case the in-VM forwarder calls CP unauthenticated.
+//
+// Read under clientsMu so SIGHUP-driven ReloadClients is safe.
+func (cp *ControlPlane) controlPlaneTokenForVM() string {
+	cp.clientsMu.RLock()
+	defer cp.clientsMu.RUnlock()
+	if len(cp.clients) == 0 {
+		return ""
+	}
+	return cp.clients[0].Token
+}
+
+// ReloadClients re-reads API tokens from the environment (or EPHEMERA_API_TOKENS_FILE)
+// and hot-swaps the client list. Called on SIGHUP. Also propagates the new apiClients[0]
+// token to every running flock VM via vsock so the in-VM /townwall/post forwarder keeps
+// authenticating after rotation.
 func (cp *ControlPlane) ReloadClients() {
 	newClients := loadAPIClients()
 	cp.clientsMu.Lock()
@@ -348,14 +422,60 @@ func (cp *ControlPlane) ReloadClients() {
 	cp.clientsMu.Unlock()
 
 	if len(newClients) == 0 {
-		log.Println("SIGHUP: token reload complete — auth disabled (no tokens configured)")
+		slog.Warn("sighup: token reload complete (auth disabled)")
+	} else {
+		names := make([]string, len(newClients))
+		for i, c := range newClients {
+			names[i] = c.Name
+		}
+		slog.Warn("sighup: token reload complete", "client_count", len(newClients), "clients", strings.Join(names, ", "))
+	}
+
+	cp.propagateCPTokenToVMs(newClients)
+	cp.metrics.sighupReload.Inc()
+}
+
+// propagateCPTokenToVMs fans out the new apiClients[0] token to every running VM that
+// has a vsock UDS path. Best-effort: per-VM failure is logged, not propagated. Older
+// (pre-v0.3.4) guests lack the SET_CP_TOKEN handler and will fail here; operators can
+// fall back to POST /flocks/{id}/agents/{agent_id}/restart for those.
+func (cp *ControlPlane) propagateCPTokenToVMs(clients []APIClient) {
+	newToken := ""
+	if len(clients) > 0 {
+		newToken = clients[0].Token
+	}
+
+	cp.mu.RLock()
+	type target struct{ vmID, vsock string }
+	targets := make([]target, 0, len(cp.vms))
+	for id, v := range cp.vms {
+		if v.vsockPath != "" {
+			targets = append(targets, target{id, v.vsockPath})
+		}
+	}
+	cp.mu.RUnlock()
+
+	if len(targets) == 0 {
 		return
 	}
-	names := make([]string, len(newClients))
-	for i, c := range newClients {
-		names[i] = c.Name
+
+	var wg sync.WaitGroup
+	var okCount int32
+	for _, t := range targets {
+		wg.Add(1)
+		go func(t target) {
+			defer wg.Done()
+			if err := vm.SetGuestCPToken(t.vsock, newToken); err != nil {
+				slog.Warn("sighup: cp token propagation failed", "vm_id", t.vmID, "err", err)
+				cp.metrics.cpTokenPropagated.WithLabelValues("fail").Inc()
+				return
+			}
+			atomic.AddInt32(&okCount, 1)
+			cp.metrics.cpTokenPropagated.WithLabelValues("ok").Inc()
+		}(t)
 	}
-	log.Printf("SIGHUP: token reload complete — %d client(s): %s", len(newClients), strings.Join(names, ", "))
+	wg.Wait()
+	slog.Warn("sighup: cp token propagated", "ok", atomic.LoadInt32(&okCount), "total", len(targets))
 }
 
 func (cp *ControlPlane) Start() error {
@@ -368,38 +488,49 @@ func (cp *ControlPlane) Start() error {
 		}
 		auth = fmt.Sprintf("Bearer token (%d client(s): %s)", len(clients), strings.Join(names, ", "))
 	}
-	log.Printf("Control plane API on %s  (auth: %s)", apiAddr, auth)
-	log.Printf("  GET    /health                          — daemon health")
-	log.Printf("  GET    /metrics                         — daemon metrics")
-	log.Printf("  POST   /vms                              — spawn VM")
-	log.Printf("  GET    /vms                              — list VMs")
-	log.Printf("  GET    /tenants                          — list tenants")
-	log.Printf("  GET/PUT /tenants/{tenant_id}             — tenant quota state")
-	log.Printf("  GET    /audit/runtime                    — list runtime audit records")
-	log.Printf("  POST   /audit/runtime/prune              — prune runtime audit records")
-	log.Printf("  DELETE /vms/{vm_id}                      — stop VM")
-	log.Printf("  POST   /vms/{vm_id}/snapshot             — create snapshot")
-	log.Printf("  POST   /vms/{vm_id}/tasks                — proxy: run task on agent")
-	log.Printf("  POST   /vms/{vm_id}/workloads/run        — proxy: run workload script on agent")
-	log.Printf("  GET/PUT /vms/{vm_id}/workspace?path=...  — proxy: workspace file read/write")
-	log.Printf("  GET    /vms/{vm_id}/health               — proxy: agent health check")
-	log.Printf("  POST   /vms/{vm_id}/stop                 — proxy: stop agent")
-	log.Printf("  GET    /snapshots                        — list snapshots")
-	log.Printf("  POST   /snapshots/gc                     — plan/apply snapshot retention GC")
-	log.Printf("  POST   /snapshots/{snapshot_id}/restore  — restore VM from snapshot")
-	log.Printf("  DELETE /snapshots/{snapshot_id}          — delete snapshot")
-	log.Printf("  POST   /flocks                           — create multi-agent flock")
-	log.Printf("  GET    /flocks                           — list flocks")
-	log.Printf("  GET    /flocks/{flock_id}                — describe flock")
-	log.Printf("  DELETE /flocks/{flock_id}                — destroy flock")
-	log.Printf("  GET    /flocks/{flock_id}/wall           — SSE stream of Town Wall")
-	log.Printf("  GET    /flocks/{flock_id}/wall/history   — full Town Wall log")
-	log.Printf("  POST   /flocks/{flock_id}/post           — post message to Town Wall")
+	slog.Warn("control plane api ready", "addr", apiAddr, "auth", auth)
+	// Endpoints banner — emitted as a single block so JSON-mode log consumers
+	// don't get 19 records of UI noise during startup.
+	endpoints := "endpoints:\n" +
+		"  GET    /health                          — daemon health\n" +
+		"  GET    /metrics                         — Prometheus exposition (auth optional)\n" +
+		"  GET    /metrics/vms                     — legacy per-VM metadata metrics\n" +
+		"  POST   /vms                              — spawn VM\n" +
+		"  GET    /vms                              — list VMs (?stats=true for inline per-VM stats)\n" +
+		"  DELETE /vms/{vm_id}                      — stop VM\n" +
+		"  GET    /vms/{vm_id}/stats                — per-VM cpu/mem/net/uptime snapshot\n" +
+		"  POST   /vms/{vm_id}/snapshot             — create snapshot\n" +
+		"  POST   /vms/{vm_id}/tasks                — proxy: run task on agent\n" +
+		"  POST   /vms/{vm_id}/workloads/run        — proxy: run workload script on agent\n" +
+		"  GET/PUT /vms/{vm_id}/workspace?path=...  — proxy: workspace file read/write\n" +
+		"  GET    /vms/{vm_id}/health               — proxy: agent health check\n" +
+		"  POST   /vms/{vm_id}/stop                 — proxy: stop agent\n" +
+		"  GET    /tenants                          — list tenants\n" +
+		"  GET/PUT /tenants/{tenant_id}             — tenant quota state\n" +
+		"  GET    /audit/runtime                    — list runtime audit records\n" +
+		"  POST   /audit/runtime/prune              — prune runtime audit records\n" +
+		"  GET    /snapshots                        — list snapshots\n" +
+		"  POST   /snapshots/gc                     — plan/apply snapshot retention GC\n" +
+		"  POST   /snapshots/{snapshot_id}/restore  — restore VM from snapshot\n" +
+		"  DELETE /snapshots/{snapshot_id}          — delete snapshot\n" +
+		"  POST   /flocks                           — create multi-agent flock\n" +
+		"  GET    /flocks                           — list flocks\n" +
+		"  GET    /flocks/{flock_id}                — describe flock\n" +
+		"  DELETE /flocks/{flock_id}                — destroy flock\n" +
+		"  GET    /flocks/{flock_id}/wall           — SSE stream of Town Wall\n" +
+		"  GET    /flocks/{flock_id}/wall/history   — full Town Wall log\n" +
+		"  POST   /flocks/{flock_id}/post           — post message to Town Wall\n" +
+		"  POST   /flocks/{flock_id}/agents/{id}/restart — restart one agent in place"
+	slog.Warn(endpoints)
 	if publicURL != "" {
-		log.Printf("  agent_url base: %s (EPHEMERA_PUBLIC_URL)", publicURL)
+		slog.Warn("public agent_url base configured", "public_url", publicURL)
 	}
 	cp.watchdog.Start()
-	log.Printf("Watchdog started (interval=5s, threshold=3 fails)")
+	slog.Warn("watchdog started",
+		"interval_sec", watchdogIntervalSec,
+		"timeout_sec", watchdogTimeoutSec,
+		"threshold", watchdogThreshold,
+		"auto_heal", watchdogAutoHeal)
 	return cp.srv.ListenAndServe()
 }
 
@@ -473,6 +604,16 @@ func (cp *ControlPlane) handleVMs(w http.ResponseWriter, r *http.Request) {
 // handleVM routes /vms/{vm_id} and its sub-paths.
 func (cp *ControlPlane) handleVM(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/vms/")
+
+	if strings.HasSuffix(path, "/stats") {
+		vmID := strings.TrimSuffix(path, "/stats")
+		if vmID == "" {
+			http.Error(w, `{"error":"vm_id required"}`, http.StatusBadRequest)
+			return
+		}
+		cp.handleVMStats(w, r, vmID)
+		return
+	}
 
 	if strings.HasSuffix(path, "/snapshot") {
 		vmID := strings.TrimSuffix(path, "/snapshot")
@@ -691,8 +832,17 @@ type spawnVMOptions struct {
 	SystemPrompt string // optional role system prompt injected into the VM
 	FlockID      string // optional: when set, agent is part of a flock
 	AgentID      string // optional: per-flock agent ID (e.g. "researcher-1")
-	VcpuCount    int64  // 0 → default 2
-	MemSizeMib   int64  // 0 → default 2048
+	// AgentToken, when set, is reused as the in-VM bearer instead of being
+	// freshly generated. Used by per-agent restart so callers that already
+	// cached a token keep working across the restart.
+	AgentToken string
+	// ControlPlaneToken, when set, is injected into the VM at /root/.ephemera-cp-token
+	// so the in-VM /townwall/post forwarder can authenticate when calling
+	// back into the control plane. Auto-populated by spawnVMForFlock from
+	// the daemon's apiClients[0]; standalone spawnVM leaves this empty.
+	ControlPlaneToken string
+	VcpuCount         int64 // 0 → default 2
+	MemSizeMib        int64 // 0 → default 2048
 }
 
 // spawnVMInternal performs the actual VM lifecycle: allocate networking, clone
@@ -700,9 +850,19 @@ type spawnVMOptions struct {
 // On any error it cleans up every resource it allocated and returns.
 // Used by both the public POST /vms handler and the orchestrator's flock spawner.
 func (cp *ControlPlane) spawnVMInternal(opts spawnVMOptions) (*VMInfo, string, error) {
-	agentToken, err := generateAgentToken()
-	if err != nil {
-		return nil, "", fmt.Errorf("token generation: %w", err)
+	start := time.Now()
+	outcome := "fail"
+	defer func() {
+		cp.metrics.vmSpawnTotal.WithLabelValues(outcome).Inc()
+		cp.metrics.vmSpawnDuration.Observe(time.Since(start).Seconds())
+	}()
+	agentToken := opts.AgentToken
+	if agentToken == "" {
+		t, err := generateAgentToken()
+		if err != nil {
+			return nil, "", fmt.Errorf("token generation: %w", err)
+		}
+		agentToken = t
 	}
 	vmID := fmt.Sprintf("vm-%d", time.Now().UnixNano())
 
@@ -741,12 +901,13 @@ func (cp *ControlPlane) spawnVMInternal(opts spawnVMOptions) (*VMInfo, string, e
 	}
 
 	if err := cp.provisioner.PrepareVM(vmID, storage.VMPrepareOptions{
-		HostConfigPath:  opts.ConfigPath,
-		HostSecretsPath: opts.SecretsPath,
-		AgentToken:      agentToken,
-		FlockID:         opts.FlockID,
-		AgentID:         opts.AgentID,
-		SystemPrompt:    opts.SystemPrompt,
+		HostConfigPath:    opts.ConfigPath,
+		HostSecretsPath:   opts.SecretsPath,
+		AgentToken:        agentToken,
+		FlockID:           opts.FlockID,
+		AgentID:           opts.AgentID,
+		SystemPrompt:      opts.SystemPrompt,
+		ControlPlaneToken: opts.ControlPlaneToken,
 	}); err != nil {
 		if dmInfo != nil {
 			storage.TeardownDMSnapshot(dmInfo)
@@ -798,6 +959,11 @@ func (cp *ControlPlane) spawnVMInternal(opts spawnVMOptions) (*VMInfo, string, e
 
 	// runningVM.dmSnapshot drives the COW teardown branch in destroyVM; when
 	// nil, destroyVM falls back to deleting diskPath as a plain file.
+	memSize := opts.MemSizeMib
+	if memSize == 0 {
+		memSize = 2048 // matches vm.defaultMemSizeMib
+	}
+	spawnedAt := time.Now().UTC()
 	cp.mu.Lock()
 	cp.vms[vmID] = &runningVM{
 		VMInfo:     info,
@@ -809,20 +975,53 @@ func (cp *ControlPlane) spawnVMInternal(opts spawnVMOptions) (*VMInfo, string, e
 		machine:    machine,
 		tapDevice:  tapDevice,
 		socketPath: socketPath,
+		memSizeMib: memSize,
+		spawnedAt:  spawnedAt,
 	}
 	cp.mu.Unlock()
 
-	log.Printf("VM [%s] booting at %s — waiting for goose-agent...", vmID, info.AgentURL)
+	// Persist VM state for cold-restart recovery after daemon restart.
+	// COW-mode VMs are marked but excluded from automatic recovery in v0.3.2;
+	// the recovery path checks DiskMode and skips them with a warning.
+	diskMode := storage.DiskModePlain
+	if dmInfo != nil {
+		diskMode = storage.DiskModeCOW
+	}
+	if err := storage.SaveVMState(cp.workDir, storage.VMState{
+		VMID:       vmID,
+		GuestIP:    guestIP,
+		TapDevice:  tapDevice,
+		MacAddr:    macAddr,
+		VsockPath:  vsockPath,
+		SocketPath: socketPath,
+		AgentToken: agentToken,
+		DiskPath:   diskPath,
+		DiskMode:   diskMode,
+		Profile:    opts.Profile,
+		VcpuCount:  opts.VcpuCount,
+		MemSizeMib: opts.MemSizeMib,
+		FlockID:    opts.FlockID,
+		AgentID:    opts.AgentID,
+		AgentURL:   info.AgentURL,
+		CreatedAt:  spawnedAt,
+	}); err != nil {
+		// State persistence failure must not abort the spawn — the VM is
+		// already live. Log and continue; recovery just won't include it.
+		slog.Warn("persist vm state failed", "vm_id", vmID, "err", err)
+	}
+
+	slog.Warn("vm booting, waiting for agent", "vm_id", vmID, "agent_url", info.AgentURL)
 	if err := waitForAgent(guestIP, 60*time.Second); err != nil {
 		cp.destroyVM(vmID)
 		return nil, "", fmt.Errorf("goose-agent not ready: %w", err)
 	}
 	if opts.FlockID != "" {
-		log.Printf("VM [%s] ready — agent: %s  flock: %s/%s", vmID, info.AgentURL, opts.FlockID, opts.AgentID)
+		slog.Warn("vm ready", "vm_id", vmID, "agent_url", info.AgentURL, "flock_id", opts.FlockID, "agent_id", opts.AgentID)
 	} else {
-		log.Printf("VM [%s] ready — agent: %s  profile: %q", vmID, info.AgentURL, opts.Profile)
+		slog.Warn("vm ready", "vm_id", vmID, "agent_url", info.AgentURL, "profile", opts.Profile)
 	}
 	cp.metrics.IncVMCreate()
+	outcome = "ok"
 	return &info, agentToken, nil
 }
 
@@ -890,7 +1089,11 @@ func (cp *ControlPlane) spawnVM(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(VMSpawnResult{VMInfo: *info, AgentToken: agentToken})
 }
 
-func (cp *ControlPlane) listVMs(w http.ResponseWriter, _ *http.Request) {
+func (cp *ControlPlane) listVMs(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("stats") == "true" {
+		cp.listVMsWithStats(w, r)
+		return
+	}
 	cp.mu.RLock()
 	list := make([]VMInfo, 0, len(cp.vms))
 	for _, v := range cp.vms {
@@ -900,6 +1103,33 @@ func (cp *ControlPlane) listVMs(w http.ResponseWriter, _ *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(list)
+}
+
+// listVMsWithStats serves GET /vms?stats=true. Each list element is
+// VMInfoWithStats. Per-VM stats failures degrade to zero values (logged by
+// collectVMStats); the response never partial-errors.
+func (cp *ControlPlane) listVMsWithStats(w http.ResponseWriter, r *http.Request) {
+	cp.mu.RLock()
+	type ref struct {
+		id string
+		v  *runningVM
+	}
+	refs := make([]ref, 0, len(cp.vms))
+	for id, v := range cp.vms {
+		refs = append(refs, ref{id, v})
+	}
+	cp.mu.RUnlock()
+
+	out := make([]VMInfoWithStats, 0, len(refs))
+	for _, rf := range refs {
+		out = append(out, VMInfoWithStats{
+			VMInfo: rf.v.VMInfo,
+			Stats:  cp.collectVMStats(r.Context(), rf.id, rf.v),
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(out)
 }
 
 func (cp *ControlPlane) stopVM(w http.ResponseWriter, vmID string) {
@@ -928,6 +1158,11 @@ func (cp *ControlPlane) destroyVM(vmID string) {
 	if !ok {
 		return
 	}
+	// Drop the persisted state first so a crash between StopVMM and resource
+	// release doesn't resurrect the VM on next boot with stale identity.
+	if err := storage.DeleteVMState(cp.workDir, vmID); err != nil {
+		slog.Warn("delete vm state failed", "vm_id", vmID, "err", err)
+	}
 	// StopVMM sends SIGTERM and waits for Firecracker to exit.
 	v.machine.StopVMM()
 	os.Remove(v.socketPath)
@@ -948,24 +1183,53 @@ func (cp *ControlPlane) destroyVM(vmID string) {
 		storage.TeardownBindMount(v.bindMountTarget, v.diskPath)
 	} else if v.diskPath != "" {
 		if err := os.Remove(v.diskPath); err != nil && !os.IsNotExist(err) {
-			log.Printf("Warning: failed to delete disk %s for VM [%s]: %v", v.diskPath, vmID, err)
+			slog.Warn("delete disk failed", "vm_id", vmID, "disk_path", v.diskPath, "err", err)
 		}
 	}
 	cp.netManager.Release(v.tapDevice, v.GuestIP)
 	cp.metrics.IncVMDelete()
-	log.Printf("VM [%s] destroyed.", vmID)
+	slog.Warn("vm destroyed", "vm_id", vmID)
+	cp.metrics.vmDestroyTotal.WithLabelValues("ok").Inc()
 }
 
-// DestroyAll stops all running VMs. Called on daemon shutdown.
+// DestroyAll is called on graceful daemon shutdown. It stops every running
+// Firecracker process but preserves each VM's state.json and rootfs clone so
+// the next daemon start can cold-restart them with the same identity.
+// Explicit DELETE /vms/{id} (which routes through destroyVM) still does a full
+// cleanup — only the daemon-lifecycle path takes the preserving branch.
+//
+// COW-restored and snapshot-restored VMs are torn down fully here because
+// v0.3.2 does not recover them: leaving their dm-snapshot devices or bind
+// mounts behind would leak kernel resources without any benefit.
 func (cp *ControlPlane) DestroyAll() {
 	cp.mu.RLock()
-	ids := make([]string, 0, len(cp.vms))
-	for id := range cp.vms {
-		ids = append(ids, id)
+	snapshot := make([]*runningVM, 0, len(cp.vms))
+	for _, v := range cp.vms {
+		snapshot = append(snapshot, v)
 	}
 	cp.mu.RUnlock()
-	for _, id := range ids {
-		cp.destroyVM(id)
+	for _, v := range snapshot {
+		v.machine.StopVMM()
+		os.Remove(v.socketPath)
+		os.Remove(fmt.Sprintf("/tmp/fc-%s-log.fifo", v.VMID))
+		if v.vsockPath != "" {
+			os.Remove(v.vsockPath)
+		}
+		if v.dmSnapshot != nil {
+			// COW VMs are not auto-recovered in v0.3.2; release the dm-snapshot
+			// device and exception store now. Also drop the state.json so the
+			// next start does not log a confusing "skipping COW VM" line for
+			// what is really an intentional teardown.
+			storage.TeardownDMSnapshot(v.dmSnapshot)
+			storage.DeleteVMState(cp.workDir, v.VMID)
+		} else if v.bindMountTarget != "" {
+			storage.TeardownBindMount(v.bindMountTarget, v.diskPath)
+			storage.DeleteVMState(cp.workDir, v.VMID)
+		}
+		// Plain rootfs ext4 + state.json are intentionally preserved here;
+		// RecoverVMs will pick them up on the next daemon start.
+		cp.netManager.Release(v.tapDevice, v.GuestIP)
+		slog.Warn("vm paused for cold-restart", "vm_id", v.VMID)
 	}
 }
 
@@ -1443,34 +1707,6 @@ func (cp *ControlPlane) handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (cp *ControlPlane) handleMetrics(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "GET required", http.StatusMethodNotAllowed)
-		return
-	}
-	m := cp.metrics.snapshot()
-	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-	fmt.Fprintf(w, "anvil_vm_create_total %d\n", m.vmCreate)
-	fmt.Fprintf(w, "anvil_vm_restore_total %d\n", m.vmRestore)
-	fmt.Fprintf(w, "anvil_vm_delete_total %d\n", m.vmDelete)
-	fmt.Fprintf(w, "anvil_snapshot_create_total %d\n", m.snapshotCreate)
-	fmt.Fprintf(w, "anvil_snapshot_delete_total %d\n", m.snapshotDelete)
-	fmt.Fprintf(w, "anvil_snapshot_gc_total %d\n", m.snapshotGC)
-	fmt.Fprintf(w, "anvil_cleanup_failure_total %d\n", m.cleanupFailure)
-	fmt.Fprintf(w, "anvil_auth_failure_total %d\n", m.authFailure)
-	fmt.Fprintf(w, "anvil_lifecycle_queue_depth %d\n", m.queueDepth)
-	durationNames := make([]string, 0, len(m.durations))
-	for name := range m.durations {
-		durationNames = append(durationNames, name)
-	}
-	sort.Strings(durationNames)
-	for _, name := range durationNames {
-		metric := m.durations[name]
-		fmt.Fprintf(w, "anvil_%s_duration_seconds_count %d\n", name, metric.Count)
-		fmt.Fprintf(w, "anvil_%s_duration_seconds_sum %.6f\n", name, metric.Sum)
-	}
-}
-
 func (cp *ControlPlane) handleVMMetrics(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "GET required", http.StatusMethodNotAllowed)
@@ -1897,7 +2133,7 @@ func (cp *ControlPlane) createSnapshot(w http.ResponseWriter, r *http.Request, v
 	memPath := filepath.Join(snapDir, "memory.bin")
 	statPath := filepath.Join(snapDir, "state.bin")
 
-	log.Printf("Snapshot [%s] (%s): pausing VM [%s]...", snapID, snapType, vmID)
+	slog.Warn("snapshot: pausing vm", "snapshot_id", snapID, "type", snapType, "vm_id", vmID)
 	if err := v.machine.PauseVM(context.Background()); err != nil {
 		os.RemoveAll(snapDir)
 		http.Error(w, fmt.Sprintf(`{"error":"failed to pause VM: %v"}`, err), http.StatusInternalServerError)
@@ -1910,9 +2146,9 @@ func (cp *ControlPlane) createSnapshot(w http.ResponseWriter, r *http.Request, v
 		snapOpts = append(snapOpts, func(p *ops.CreateSnapshotParams) {
 			p.Body.SnapshotType = models.SnapshotCreateParamsSnapshotTypeDiff
 		})
-		log.Printf("Snapshot [%s]: creating Diff snapshot (base: %s)...", snapID, baseSnapID)
+		slog.Warn("snapshot: creating diff", "snapshot_id", snapID, "base_id", baseSnapID)
 	} else {
-		log.Printf("Snapshot [%s]: creating Full snapshot...", snapID)
+		slog.Warn("snapshot: creating full", "snapshot_id", snapID)
 	}
 
 	if err := v.machine.CreateSnapshot(context.Background(), memPath, statPath, snapOpts...); err != nil {
@@ -1925,7 +2161,7 @@ func (cp *ControlPlane) createSnapshot(w http.ResponseWriter, r *http.Request, v
 	// Copy disk while VM is still paused (ensures consistent state).
 	// Diff snapshots still copy the full rootfs — rootfs diff is a future optimization.
 	diskPath := filepath.Join("/tmp/goose-workspaces", vmID+".ext4")
-	log.Printf("Snapshot [%s]: copying disk...", snapID)
+	slog.Warn("snapshot: copying disk", "snapshot_id", snapID)
 	diskCopyPath, err := storage.CopyDiskToSnapshot(diskPath, snapDir)
 	if err != nil {
 		v.machine.ResumeVM(context.Background())
@@ -1935,12 +2171,12 @@ func (cp *ControlPlane) createSnapshot(w http.ResponseWriter, r *http.Request, v
 	}
 
 	if !req.StopAfter {
-		log.Printf("Snapshot [%s]: resuming VM [%s]...", snapID, vmID)
+		slog.Warn("snapshot: resuming vm", "snapshot_id", snapID, "vm_id", vmID)
 		if err := v.machine.ResumeVM(context.Background()); err != nil {
-			log.Printf("Warning: failed to resume VM [%s] after snapshot: %v", vmID, err)
+			slog.Warn("resume vm after snapshot failed", "vm_id", vmID, "err", err)
 		}
 	} else {
-		log.Printf("Snapshot [%s]: stop_after=true, destroying VM [%s]", snapID, vmID)
+		slog.Warn("snapshot: stop_after, destroying vm", "snapshot_id", snapID, "vm_id", vmID)
 		cp.destroyVM(vmID)
 	}
 
@@ -1967,15 +2203,16 @@ func (cp *ControlPlane) createSnapshot(w http.ResponseWriter, r *http.Request, v
 	}
 
 	if err := storage.SaveMetadata(snapDir, meta); err != nil {
-		log.Printf("Warning: failed to save snapshot metadata: %v", err)
+		slog.Warn("save snapshot metadata failed", "snapshot_id", snapID, "err", err)
 	}
 
 	cp.snapshotsMu.Lock()
 	cp.snapshots[snapID] = meta
 	cp.snapshotsMu.Unlock()
 
-	log.Printf("Snapshot [%s] (%s) created from VM [%s]", snapID, snapType, vmID)
 	cp.metrics.IncSnapshotCreate()
+	slog.Warn("snapshot created", "snapshot_id", snapID, "type", snapType, "vm_id", vmID)
+	cp.metrics.snapshotCreate.WithLabelValues(snapType).Inc()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(snapshotInfoFrom(meta))
@@ -2045,6 +2282,17 @@ func restoreTenantAndEgress(meta storage.SnapshotMetadata, req RestoreSnapshotRe
 
 func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID string, req RestoreSnapshotRequest) {
 	defer cp.observeLifecycle("vm_restore")()
+	start := time.Now()
+	outcome := "fail"
+	delegated := false
+	defer func() {
+		if delegated {
+			// Fallback handler (restoreLegacyBindMount) records its own outcome.
+			return
+		}
+		cp.metrics.snapshotRestore.WithLabelValues(outcome).Inc()
+		cp.metrics.snapshotRestoreDuration.Observe(time.Since(start).Seconds())
+	}()
 	// Prevent delete/GC from removing snapshot files while restore reads them.
 	cp.snapshotLifecycleMu.Lock()
 	defer cp.snapshotLifecycleMu.Unlock()
@@ -2082,7 +2330,7 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 	os.Remove(meta.VsockPath)
 
 	// Allocate any available IP — the guest will be reconfigured to this IP via vsock.
-	log.Printf("Restore [%s]: allocating network (TAP: %s, MAC: %s)...", snapID, meta.TapDevice, meta.MacAddr)
+	slog.Warn("restore: allocating network", "snapshot_id", snapID, "tap", meta.TapDevice, "mac", meta.MacAddr)
 	tapDevice, newGuestIP, err := cp.allocateNetworkForRestore(meta.TapDevice, meta.MacAddr)
 	if err != nil {
 		writeRestoreError(w, http.StatusConflict, "network_unavailable", snapID, fmt.Sprintf("network allocation failed: %v", err))
@@ -2092,11 +2340,11 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 	// Serialize dm-snapshot setup + Firecracker open so each restore sees its own COW device.
 	cp.restoreMu.Lock()
 
-	log.Printf("Restore [%s]: setting up dm-snapshot COW (base: %s, store: %s)...", snapID, meta.DiskCopyPath, exceptionStorePath)
+	slog.Warn("restore: setting up dm-snapshot cow", "snapshot_id", snapID, "base", meta.DiskCopyPath, "store", exceptionStorePath)
 	dmInfo, err := cp.setupRestoreDMSnapshot(meta.DiskCopyPath, exceptionStorePath, meta.DiskPath)
 	if err != nil {
 		cp.restoreMu.Unlock()
-		log.Printf("Restore [%s]: dm-snapshot failed (%v), falling back to bind mount", snapID, err)
+		slog.Warn("restore: dm-snapshot failed, falling back to bind mount", "snapshot_id", snapID, "err", err)
 		// Fallback: use the existing bind-mount approach if dm-snapshot is unavailable.
 		newDiskPath := filepath.Join(cp.provisioner.WorkspaceDir, newVMID+".ext4")
 		cp.restoreMu.Lock()
@@ -2108,6 +2356,7 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 		}
 		// Continue with bind-mount path (legacy runningVM fields).
 		cp.restoreMu.Unlock()
+		delegated = true
 		cp.restoreLegacyBindMount(w, snapID, meta, newVMID, newDiskPath, tapDevice, newGuestIP, socketPath, restoreTenantID, restoreEgressPolicy)
 		return
 	}
@@ -2129,7 +2378,7 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 		}
 		mergedMemPath = pickMergedMemPath(cp.workDir, newVMID)
 		os.MkdirAll(filepath.Dir(mergedMemPath), 0755)
-		log.Printf("Restore [%s]: merging base memory (%s) + diff (%s)...", snapID, base.MemFilePath, meta.MemFilePath)
+		slog.Warn("restore: merging base memory and diff", "snapshot_id", snapID, "base", base.MemFilePath, "diff", meta.MemFilePath)
 		if err := storage.MergeMemoryDiff(base.MemFilePath, meta.MemFilePath, mergedMemPath); err != nil {
 			cp.restoreMu.Unlock()
 			cp.teardownRestoreDMSnapshot(dmInfo)
@@ -2148,7 +2397,7 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 		return
 	}
 
-	log.Printf("Restore [%s]: starting VM [%s] from snapshot (%s)...", snapID, newVMID, meta.SnapshotType)
+	slog.Warn("restore: starting vm", "snapshot_id", snapID, "vm_id", newVMID, "type", meta.SnapshotType)
 	machine, err := cp.restoreSnapshotMachine(context.Background(), vm.VMConfig{
 		VMID:           newVMID,
 		SocketPath:     socketPath,
@@ -2175,9 +2424,9 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 	}
 
 	// Firecracker has restored vsock at meta.VsockPath. Reconfigure the guest's IP.
-	log.Printf("Restore [%s]: reconfiguring guest IP %s → %s via vsock %s...", snapID, meta.GuestIP, newGuestIP, meta.VsockPath)
+	slog.Warn("restore: reconfiguring guest ip", "snapshot_id", snapID, "old_ip", meta.GuestIP, "new_ip", newGuestIP, "vsock", meta.VsockPath)
 	if err := vm.ReconfigureGuestIP(meta.VsockPath, newGuestIP+"/24", "10.0.1.1"); err != nil {
-		log.Printf("Restore [%s]: vsock IP reconfigure failed: %v", snapID, err)
+		slog.Warn("restore: vsock ip reconfigure failed", "snapshot_id", snapID, "err", err)
 		machine.StopVMM()
 		cp.cleanupEgressPolicy(newVMID)
 		cp.teardownRestoreDMSnapshot(dmInfo)
@@ -2185,7 +2434,7 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 		writeRestoreError(w, http.StatusInternalServerError, "guest_reconfigure_failed", snapID, fmt.Sprintf("vsock IP reconfigure failed: %v", err))
 		return
 	}
-	log.Printf("Restore [%s]: guest IP reconfigured to %s (COW exception store: %s)", snapID, newGuestIP, exceptionStorePath)
+	slog.Warn("restore: guest ip reconfigured", "snapshot_id", snapID, "ip", newGuestIP, "cow_store", exceptionStorePath)
 
 	info := VMInfo{
 		VMID:         newVMID,
@@ -2207,18 +2456,21 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 		machine:    machine,
 		tapDevice:  tapDevice,
 		socketPath: socketPath,
+		memSizeMib: 2048, // restore default; meta does not carry per-snapshot sizing
+		spawnedAt:  time.Now().UTC(),
 	}
 	cp.mu.Unlock()
 
-	log.Printf("Restore [%s]: waiting for goose-agent at %s...", snapID, info.AgentURL)
+	slog.Warn("restore: waiting for agent", "snapshot_id", snapID, "agent_url", info.AgentURL)
 	if err := waitForAgent(newGuestIP, 30*time.Second); err != nil {
 		cp.destroyVM(newVMID)
 		writeRestoreError(w, http.StatusInternalServerError, "agent_not_ready", snapID, fmt.Sprintf("goose-agent not ready after restore: %v", err))
 		return
 	}
-	log.Printf("Restore [%s]: VM [%s] ready — agent: %s", snapID, newVMID, info.AgentURL)
+	slog.Warn("restore: vm ready", "snapshot_id", snapID, "vm_id", newVMID, "agent_url", info.AgentURL)
 
 	cp.metrics.IncVMRestore()
+	outcome = "ok"
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(VMRestoreResult{
@@ -2235,6 +2487,12 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 	newVMID, newDiskPath, tapDevice, newGuestIP, socketPath string,
 	restoreTenantID, restoreEgressPolicy string,
 ) {
+	start := time.Now()
+	outcome := "fail"
+	defer func() {
+		cp.metrics.snapshotRestore.WithLabelValues(outcome).Inc()
+		cp.metrics.snapshotRestoreDuration.Observe(time.Since(start).Seconds())
+	}()
 	// Diff memory merge if needed.
 	memFileToUse := meta.MemFilePath
 	var mergedMemPath string
@@ -2315,6 +2573,8 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 		machine:         machine,
 		tapDevice:       tapDevice,
 		socketPath:      socketPath,
+		memSizeMib:      2048,
+		spawnedAt:       time.Now().UTC(),
 	}
 	cp.mu.Unlock()
 
@@ -2325,6 +2585,7 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 	}
 
 	cp.metrics.IncVMRestore()
+	outcome = "ok"
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(VMRestoreResult{
@@ -2352,7 +2613,7 @@ func (cp *ControlPlane) deleteSnapshotByID(snapID string) (storage.SnapshotMetad
 
 	snapDir := storage.SnapshotDir(cp.workDir, snapID)
 	if err := storage.DeleteSnapshot(snapDir); err != nil {
-		log.Printf("Warning: failed to delete snapshot dir %s: %v", snapDir, err)
+		slog.Warn("delete snapshot dir failed", "snapshot_id", snapID, "dir", snapDir, "err", err)
 		return meta, http.StatusInternalServerError, fmt.Errorf("failed to delete snapshot %s", snapID)
 	}
 
@@ -2376,7 +2637,7 @@ func (cp *ControlPlane) deleteSnapshot(w http.ResponseWriter, snapID string) {
 		return
 	}
 
-	log.Printf("Snapshot [%s] (%s, from VM %s) deleted.", snapID, meta.SnapshotType, meta.SourceVMID)
+	slog.Warn("snapshot deleted", "snapshot_id", snapID, "type", meta.SnapshotType, "source_vm_id", meta.SourceVMID)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "deleted", "snapshot_id": snapID})
 }

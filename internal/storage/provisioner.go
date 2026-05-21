@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -67,10 +68,10 @@ func (p *Provisioner) EnsureGoldenImage() error {
 			filepath.Join(scriptDir, "gtwall"),
 		}
 		if !pathsNewerThan(stat.ModTime(), inputs...) {
-			log.Printf("Golden image at %s is up to date.", p.GoldenImagePath)
+			slog.Warn("golden image up to date", "path", p.GoldenImagePath)
 			return nil
 		}
-		log.Printf("Golden image at %s is stale (build inputs newer); rebuilding.", p.GoldenImagePath)
+		slog.Warn("golden image stale (build inputs newer), rebuilding", "path", p.GoldenImagePath)
 		if err := os.Remove(p.GoldenImagePath); err != nil {
 			return fmt.Errorf("remove stale golden image: %w", err)
 		}
@@ -78,8 +79,8 @@ func (p *Provisioner) EnsureGoldenImage() error {
 		return fmt.Errorf("error checking golden image: %w", err)
 	}
 
-	log.Printf("Golden image not found at %s. Starting automated build process...", p.GoldenImagePath)
-	log.Printf("This may take a few minutes. Please wait.")
+	slog.Warn("golden image not found, starting automated build", "path", p.GoldenImagePath)
+	slog.Warn("this may take a few minutes")
 
 	// Execute the build script
 	cmd := exec.Command("bash", p.BuildScriptPath)
@@ -97,7 +98,7 @@ func (p *Provisioner) EnsureGoldenImage() error {
 		return fmt.Errorf("build script completed, but golden image was not found at expected path")
 	}
 
-	log.Printf("Golden image successfully built and verified at %s.", p.GoldenImagePath)
+	slog.Warn("golden image built and verified", "path", p.GoldenImagePath)
 	return nil
 }
 
@@ -124,15 +125,14 @@ func (p *Provisioner) CloneDiskCOW(vmID string) (string, string, *DMSnapshotInfo
 		os.Remove(mountTarget)
 		return "", "", nil, err
 	}
-	log.Printf("Provisioned COW rootfs for MicroVM [%s] (base: %s, exception store: %s)",
-		vmID, p.GoldenImagePath, cowStore)
+	slog.Info("provisioned cow rootfs", "vm_id", vmID, "base", p.GoldenImagePath, "exception_store", cowStore)
 	return mountTarget, cowStore, info, nil
 }
 
 // CloneDisk creates an isolated copy of the golden image for a specific VM.
 func (p *Provisioner) CloneDisk(vmID string) (string, error) {
 	destPath := filepath.Join(p.WorkspaceDir, fmt.Sprintf("%s.ext4", vmID))
-	log.Printf("Cloning golden image to %s...", destPath)
+	slog.Info("cloning golden image", "dest", destPath)
 
 	srcFile, err := os.Open(p.GoldenImagePath)
 	if err != nil {
@@ -154,7 +154,7 @@ func (p *Provisioner) CloneDisk(vmID string) (string, error) {
 		return "", fmt.Errorf("failed to sync data to disk: %w", err)
 	}
 
-	log.Printf("Successfully provisioned isolated disk for MicroVM [%s]", vmID)
+	slog.Info("provisioned isolated disk", "vm_id", vmID)
 	return destPath, nil
 }
 
@@ -179,7 +179,7 @@ func (p *Provisioner) mountVMDisk(vmID string, fn func(mntDir string) error) err
 			// -l ensures the unmount succeeds even if a background goroutine
 			// still holds a file descriptor on the mounted filesystem.
 			if err := exec.Command("umount", "-l", mntDir).Run(); err != nil {
-				log.Printf("Warning: failed to unmount %s: %v", mntDir, err)
+				slog.Warn("unmount failed", "dir", mntDir, "err", err)
 			}
 		}
 		os.Remove(mntDir)
@@ -205,70 +205,98 @@ type VMPrepareOptions struct {
 	FlockID      string
 	AgentID      string
 	SystemPrompt string // optional role system prompt written to /root/.goose-system-prompt
+
+	// ControlPlaneToken, when non-empty, is written to /root/.ephemera-cp-token
+	// (mode 0600) and used by the in-VM /townwall/post forwarder as the bearer
+	// when calling back into the control plane. Auto-derived from the host's
+	// apiClients[0] by the daemon; empty when control plane auth is disabled.
+	ControlPlaneToken string
 }
 
-// PrepareVM injects all VM-specific files in a single mount/unmount cycle:
+// PrepareVM injects all VM-specific files in a single mount/unmount cycle.
+// The file-writing logic lives in injectVMFiles so it can be unit-tested
+// against a plain temp directory without mounting a loop device.
+func (p *Provisioner) PrepareVM(vmID string, opts VMPrepareOptions) error {
+	return p.mountVMDisk(vmID, func(mntDir string) error {
+		if err := injectVMFiles(mntDir, opts); err != nil {
+			return err
+		}
+		if err := injectHostTimezone(mntDir); err != nil {
+			slog.Warn("inject timezone failed", "err", err)
+		}
+		slog.Info("config, secrets, timezone injected", "vm_id", vmID)
+		return nil
+	})
+}
+
+// injectVMFiles writes every per-VM file into the mounted rootfs at mntDir.
+// Files written (all under /root inside the guest):
 //   - /root/.config/goose/config.yaml       (provider, model, extensions)
 //   - /root/.config/goose/secrets.yaml      (API keys; requires GOOSE_DISABLE_KEYRING=true)
 //   - /root/task.txt                         (task prompt; optional)
-//   - /root/.ephemera-agent-token            (Bearer token for goose-agent auth; optional)
-func (p *Provisioner) PrepareVM(vmID string, opts VMPrepareOptions) error {
-	return p.mountVMDisk(vmID, func(mntDir string) error {
-		gooseConfigDir := filepath.Join(mntDir, "root", ".config", "goose")
-		if err := os.MkdirAll(gooseConfigDir, 0755); err != nil {
-			return fmt.Errorf("failed to create goose config dir: %w", err)
-		}
+//   - /root/.ephemera-agent-token            (Bearer for goose-agent; mode 0600; optional)
+//   - /root/.ephemera-flock                  (FLOCK_ID + AGENT_ID; mode 0600; optional)
+//   - /root/.goose-system-prompt             (role system prompt; optional)
+//   - /root/.ephemera-cp-token               (bearer for in-VM /townwall/post forward; mode 0600; optional)
+func injectVMFiles(mntDir string, opts VMPrepareOptions) error {
+	gooseConfigDir := filepath.Join(mntDir, "root", ".config", "goose")
+	if err := os.MkdirAll(gooseConfigDir, 0755); err != nil {
+		return fmt.Errorf("failed to create goose config dir: %w", err)
+	}
 
-		for _, pair := range []struct{ src, dst string }{
-			{opts.HostConfigPath, "config.yaml"},
-			{opts.HostSecretsPath, "secrets.yaml"},
-		} {
-			if err := copyFile(pair.src, filepath.Join(gooseConfigDir, pair.dst)); err != nil {
-				return fmt.Errorf("failed to inject %s: %w", pair.dst, err)
-			}
+	for _, pair := range []struct{ src, dst string }{
+		{opts.HostConfigPath, "config.yaml"},
+		{opts.HostSecretsPath, "secrets.yaml"},
+	} {
+		if err := copyFile(pair.src, filepath.Join(gooseConfigDir, pair.dst)); err != nil {
+			return fmt.Errorf("failed to inject %s: %w", pair.dst, err)
 		}
+	}
 
-		// task is optional: empty means persistent mode (goose-agent handles requests).
-		if opts.Task != "" {
-			taskPath := filepath.Join(mntDir, "root", "task.txt")
-			if err := os.WriteFile(taskPath, []byte(opts.Task), 0644); err != nil {
-				return fmt.Errorf("failed to write task.txt: %w", err)
-			}
+	// task is optional: empty means persistent mode (goose-agent handles requests).
+	if opts.Task != "" {
+		taskPath := filepath.Join(mntDir, "root", "task.txt")
+		if err := os.WriteFile(taskPath, []byte(opts.Task), 0644); err != nil {
+			return fmt.Errorf("failed to write task.txt: %w", err)
 		}
+	}
 
-		// AgentToken is written with mode 0600 so only root can read it inside the VM.
-		if opts.AgentToken != "" {
-			tokenPath := filepath.Join(mntDir, "root", ".ephemera-agent-token")
-			if err := os.WriteFile(tokenPath, []byte(opts.AgentToken), 0600); err != nil {
-				return fmt.Errorf("failed to write agent token: %w", err)
-			}
+	// AgentToken is written with mode 0600 so only root can read it inside the VM.
+	if opts.AgentToken != "" {
+		tokenPath := filepath.Join(mntDir, "root", ".ephemera-agent-token")
+		if err := os.WriteFile(tokenPath, []byte(opts.AgentToken), 0600); err != nil {
+			return fmt.Errorf("failed to write agent token: %w", err)
 		}
+	}
 
-		// Flock context: tells the in-VM agent which flock and agent identity it has.
-		// Mode 0600 because AGENT_ID is enough to address the agent on the wall.
-		if opts.FlockID != "" {
-			flockMeta := fmt.Sprintf("FLOCK_ID=%s\nAGENT_ID=%s\n", opts.FlockID, opts.AgentID)
-			flockPath := filepath.Join(mntDir, "root", ".ephemera-flock")
-			if err := os.WriteFile(flockPath, []byte(flockMeta), 0600); err != nil {
-				return fmt.Errorf("failed to write flock meta: %w", err)
-			}
+	// Flock context: tells the in-VM agent which flock and agent identity it has.
+	// Mode 0600 because AGENT_ID is enough to address the agent on the wall.
+	if opts.FlockID != "" {
+		flockMeta := fmt.Sprintf("FLOCK_ID=%s\nAGENT_ID=%s\n", opts.FlockID, opts.AgentID)
+		flockPath := filepath.Join(mntDir, "root", ".ephemera-flock")
+		if err := os.WriteFile(flockPath, []byte(flockMeta), 0600); err != nil {
+			return fmt.Errorf("failed to write flock meta: %w", err)
 		}
+	}
 
-		// System prompt: prepended to every /tasks request by goose-agent.
-		if opts.SystemPrompt != "" {
-			spPath := filepath.Join(mntDir, "root", ".goose-system-prompt")
-			if err := os.WriteFile(spPath, []byte(opts.SystemPrompt), 0644); err != nil {
-				return fmt.Errorf("failed to write system prompt: %w", err)
-			}
+	// System prompt: prepended to every /tasks request by goose-agent.
+	if opts.SystemPrompt != "" {
+		spPath := filepath.Join(mntDir, "root", ".goose-system-prompt")
+		if err := os.WriteFile(spPath, []byte(opts.SystemPrompt), 0644); err != nil {
+			return fmt.Errorf("failed to write system prompt: %w", err)
 		}
+	}
 
-		if err := injectHostTimezone(mntDir); err != nil {
-			log.Printf("Warning: failed to inject timezone: %v", err)
+	// CP token: read by the in-VM /townwall/post forwarder when calling back
+	// to the control plane. 0600 because anyone with this token could post as
+	// a different agent over a forged forward request.
+	if opts.ControlPlaneToken != "" {
+		cpTokenPath := filepath.Join(mntDir, "root", ".ephemera-cp-token")
+		if err := os.WriteFile(cpTokenPath, []byte(opts.ControlPlaneToken), 0600); err != nil {
+			return fmt.Errorf("failed to write CP token: %w", err)
 		}
-
-		log.Printf("Config, secrets, and timezone injected into MicroVM [%s]", vmID)
-		return nil
-	})
+	}
+	return nil
 }
 
 // injectHostTimezone configures the VM disk to use the host's timezone.
@@ -306,7 +334,7 @@ func injectHostTimezone(mntDir string) error {
 		return fmt.Errorf("failed to write /etc/timezone: %w", err)
 	}
 
-	log.Printf("VM timezone set to %s.", tzName)
+	slog.Info("vm timezone set", "tz", tzName)
 	return nil
 }
 
@@ -369,15 +397,15 @@ func EnsureMicroInit(binaryPath, projectRoot string) error {
 	srcDir := filepath.Join(projectRoot, "cmd", "micro-init")
 	if stat, err := os.Stat(binaryPath); err == nil {
 		if !pathsNewerThan(stat.ModTime(), srcDir) {
-			log.Printf("micro-init up to date at %s.", binaryPath)
+			slog.Warn("micro-init up to date", "path", binaryPath)
 			return nil
 		}
-		log.Printf("micro-init at %s is stale (sources newer); rebuilding.", binaryPath)
+		slog.Warn("micro-init stale, rebuilding", "path", binaryPath)
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("stat micro-init: %w", err)
 	}
 
-	log.Printf("Building micro-init at %s ...", binaryPath)
+	slog.Warn("building micro-init", "path", binaryPath)
 
 	if err := os.MkdirAll(filepath.Dir(binaryPath), 0755); err != nil {
 		return fmt.Errorf("failed to create artifacts dir: %w", err)
@@ -394,7 +422,7 @@ func EnsureMicroInit(binaryPath, projectRoot string) error {
 		return fmt.Errorf("failed to build micro-init: %w", err)
 	}
 
-	log.Printf("micro-init built at %s.", binaryPath)
+	slog.Warn("micro-init built", "path", binaryPath)
 	return nil
 }
 
@@ -587,18 +615,18 @@ func EnsureGooseAgent(binaryPath, projectRoot string) error {
 		return fmt.Errorf("write goose-agent source stamp: %w", err)
 	}
 
-	log.Printf("goose-agent built at %s.", binaryPath)
+	slog.Warn("goose-agent built", "path", binaryPath)
 	return nil
 }
 
 // EnsureKernel downloads the Firecracker kernel binary to kernelPath if it does not exist.
 func EnsureKernel(kernelPath, downloadURL string) error {
 	if _, err := os.Stat(kernelPath); err == nil {
-		log.Printf("Kernel found at %s.", kernelPath)
+		slog.Warn("kernel found", "path", kernelPath)
 		return nil
 	}
 
-	log.Printf("Kernel not found at %s. Downloading from %s ...", kernelPath, downloadURL)
+	slog.Warn("kernel not found, downloading", "path", kernelPath, "url", downloadURL)
 
 	if err := os.MkdirAll(filepath.Dir(kernelPath), 0755); err != nil {
 		return fmt.Errorf("failed to create kernel directory: %w", err)
@@ -630,7 +658,7 @@ func EnsureKernel(kernelPath, downloadURL string) error {
 		return fmt.Errorf("failed to flush kernel file: %w", err)
 	}
 
-	log.Printf("Kernel successfully downloaded to %s.", kernelPath)
+	slog.Warn("kernel downloaded", "path", kernelPath)
 	return nil
 }
 
@@ -638,11 +666,11 @@ func EnsureKernel(kernelPath, downloadURL string) error {
 // and extracts the firecracker binary to destPath. A no-op if the binary already exists.
 func EnsureFirecracker(destPath, downloadURL, expectedSHA256 string) error {
 	if _, err := os.Stat(destPath); err == nil {
-		log.Printf("Firecracker found at %s.", destPath)
+		slog.Warn("firecracker found", "path", destPath)
 		return nil
 	}
 
-	log.Printf("Firecracker not found at %s. Downloading from %s ...", destPath, downloadURL)
+	slog.Warn("firecracker not found, downloading", "path", destPath, "url", downloadURL)
 
 	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
@@ -683,7 +711,7 @@ func EnsureFirecracker(destPath, downloadURL, expectedSHA256 string) error {
 		return fmt.Errorf("failed to extract Firecracker binary: %w", err)
 	}
 
-	log.Printf("Firecracker successfully installed at %s.", destPath)
+	slog.Warn("firecracker installed", "path", destPath)
 	return nil
 }
 
@@ -733,16 +761,16 @@ func extractFirecrackerBin(tgzPath, dest string) error {
 // CleanupDisk safely removes the disk image after the VM is destroyed.
 func (p *Provisioner) CleanupDisk(vmID string) error {
 	destPath := filepath.Join(p.WorkspaceDir, fmt.Sprintf("%s.ext4", vmID))
-	log.Printf("Cleaning up disk image: %s", destPath)
+	slog.Info("cleaning up disk image", "path", destPath)
 
 	if err := os.Remove(destPath); err != nil {
 		if os.IsNotExist(err) {
-			log.Printf("Disk image %s already deleted or does not exist.", destPath)
+			slog.Info("disk image already deleted or missing", "path", destPath)
 			return nil
 		}
 		return fmt.Errorf("failed to delete disk file: %w", err)
 	}
 
-	log.Printf("Successfully cleaned up storage resources for MicroVM [%s]", vmID)
+	slog.Info("storage resources cleaned up", "vm_id", vmID)
 	return nil
 }

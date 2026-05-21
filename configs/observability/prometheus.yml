@@ -1,0 +1,17 @@
+# Prometheus scrape config for the ephemera observability demo.
+# Generated/consumed by observability_demo.sh. Standalone use is fine too:
+#   prometheus --config.file=configs/observability/prometheus.yml
+#
+# scrape_interval is intentionally short (5s) so the demo dashboard fills in
+# quickly. A production deployment would typically use 15s or 30s.
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: ephemera
+    static_configs:
+      - targets: ['localhost:3000']
+        labels:
+          service: ephemera-control-plane

@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"time"
@@ -27,7 +28,12 @@ type AgentInfo struct {
 
 // Flock is a named group of agents sharing one Town Wall.
 type Flock struct {
-	mu           sync.RWMutex
+	mu sync.RWMutex
+	// writeMu serializes metadata.json writes against any concurrent Persist
+	// caller (createFlock, watchdog.onFailure, recovery.markFlockAgentDead,
+	// per-agent restart). Held only for the duration of ToMetadata + tmp+rename
+	// inside Persist; never overlaps with the per-agent f.mu critical sections.
+	writeMu      sync.Mutex
 	ID           string                `json:"flock_id"`
 	Task         string                `json:"task"`
 	TenantID     string                `json:"tenant_id,omitempty"`
@@ -52,6 +58,32 @@ func (f *Flock) UpdateAgentStatus(agentID, status string) {
 	if a, ok := f.Agents[agentID]; ok {
 		a.Status = status
 	}
+}
+
+// UpdateAgentVM swaps the VM identity of an existing agent (vm_id / agent_url)
+// and resets status to ready. Used by per-agent restart so a single failed
+// agent can be replaced without recreating the whole flock; the AgentID and
+// Role stay unchanged so callers can keep addressing the same agent slot.
+// No-op when the agent ID is unknown.
+func (f *Flock) UpdateAgentVM(agentID, newVMID, newAgentURL string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if a, ok := f.Agents[agentID]; ok {
+		a.VMID = newVMID
+		a.AgentURL = newAgentURL
+		a.Status = AgentStatusReady
+	}
+}
+
+// Persist atomically writes the flock's current metadata to disk. Holds
+// writeMu so concurrent callers (createFlock, watchdog, recovery) cannot
+// race the tmp+rename inside SaveFlockMetadata. All flock metadata writers
+// MUST go through this helper rather than calling SaveFlockMetadata
+// directly, otherwise the serialization invariant is lost.
+func (f *Flock) Persist(workDir string) error {
+	f.writeMu.Lock()
+	defer f.writeMu.Unlock()
+	return SaveFlockMetadata(workDir, f.ToMetadata())
 }
 
 // Snapshot returns a defensive copy of the agent map for safe iteration
@@ -132,8 +164,20 @@ func NewFlockManager(workDir string) *FlockManager {
 // WorkDir returns the directory used to root flock-local files.
 func (fm *FlockManager) WorkDir() string { return fm.workDir }
 
-// Create allocates a flock, opens its Town Wall at townWallPath, and registers it.
-func (fm *FlockManager) Create(flockID, task, tenantID, egressPolicy, townWallPath string) (*Flock, error) {
+// Create allocates a flock, opens its Town Wall, and registers it.
+// Supported call forms:
+//   - Create(flockID, task, townWallPath)
+//   - Create(flockID, task, tenantID, egressPolicy, townWallPath)
+func (fm *FlockManager) Create(flockID, task string, args ...string) (*Flock, error) {
+	var tenantID, egressPolicy, townWallPath string
+	switch len(args) {
+	case 1:
+		townWallPath = args[0]
+	case 3:
+		tenantID, egressPolicy, townWallPath = args[0], args[1], args[2]
+	default:
+		return nil, fmt.Errorf("Create expects townWallPath or tenantID, egressPolicy, townWallPath")
+	}
 	tw, err := NewTownWall(flockID, townWallPath)
 	if err != nil {
 		return nil, err
@@ -192,7 +236,7 @@ func (fm *FlockManager) Delete(flockID string) (*Flock, bool) {
 // Recovered flocks are read-mostly: their VMID references no longer correspond
 // to live Firecracker processes (those died with the previous daemon), so
 // DELETE on a recovered flock relies on destroyVM's missing-vm guard. Live VM
-// re-registration is deferred to v0.4.0.
+// re-registration is deferred to v0.3.2.
 func (fm *FlockManager) LoadFromDisk() (recovered int, failed []string, err error) {
 	metas, err := ListFlockMetadata(fm.workDir)
 	if err != nil {

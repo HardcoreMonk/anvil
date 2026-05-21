@@ -72,6 +72,7 @@ const (
 	workspaceRoot          = "/workspace"
 	flockMetaPath          = "/root/.ephemera-flock"
 	systemPromptPath       = "/root/.goose-system-prompt"
+	cpTokenPath            = "/root/.ephemera-cp-token"
 	maxWorkspaceFileBytes  = 4 << 20
 	townWallPostTimeout    = 10 * time.Second
 	workloadDirName        = "workloads"
@@ -118,6 +119,18 @@ func loadFlockMeta() (flockID, agentID string) {
 		}
 	}
 	return
+}
+
+// loadCPToken returns the bearer the in-VM /townwall/post forwarder uses
+// when calling back into the control plane. Prefers the host-injected file
+// (matches apiClients[0]); falls back to EPHEMERA_CONTROL_PLANE_TOKEN for
+// older golden images that predate v0.3.3. Returns "" when neither is set
+// (auth disabled mode).
+func loadCPToken() string {
+	if b, err := os.ReadFile(cpTokenPath); err == nil {
+		return strings.TrimSpace(string(b))
+	}
+	return os.Getenv("EPHEMERA_CONTROL_PLANE_TOKEN")
 }
 
 // loadSystemPrompt returns the role's system prompt or "" when absent.
@@ -220,7 +233,10 @@ func startVsockListener() {
 }
 
 // handleVsockConn processes a single vsock connection from the host.
-// Protocol: "CHANGE_IP <cidr_ip> <gateway>\n" → "OK\n" or "ERROR: ...\n"
+// Protocol: newline-delimited "<COMMAND> [args...]\n" → "OK\n" or "ERROR: ...\n".
+// Supported commands:
+//   - CHANGE_IP <cidr_ip> <gateway>     — reconfigure eth0 after snapshot restore
+//   - SET_CP_TOKEN <token>              — atomically rewrite /root/.ephemera-cp-token (v0.3.4)
 func handleVsockConn(fd int) {
 	defer unix.Close(fd)
 	f := os.NewFile(uintptr(fd), "vsock-conn")
@@ -232,19 +248,57 @@ func handleVsockConn(fd int) {
 		return
 	}
 	parts := strings.Fields(strings.TrimSpace(line))
-	if len(parts) != 3 || parts[0] != "CHANGE_IP" {
-		fmt.Fprintf(f, "ERROR: expected CHANGE_IP <cidr_ip> <gateway>\n")
+	if len(parts) == 0 {
+		fmt.Fprintf(f, "ERROR: empty command\n")
 		return
 	}
-	cidrIP, gateway := parts[1], parts[2]
 
-	if err := applyIPConfig(cidrIP, gateway); err != nil {
-		fmt.Fprintf(f, "ERROR: %v\n", err)
-		log.Printf("vsock CHANGE_IP failed: %v", err)
-		return
+	switch parts[0] {
+	case "CHANGE_IP":
+		if len(parts) != 3 {
+			fmt.Fprintf(f, "ERROR: expected CHANGE_IP <cidr_ip> <gateway>\n")
+			return
+		}
+		cidrIP, gateway := parts[1], parts[2]
+		if err := applyIPConfig(cidrIP, gateway); err != nil {
+			fmt.Fprintf(f, "ERROR: %v\n", err)
+			log.Printf("vsock CHANGE_IP failed: %v", err)
+			return
+		}
+		fmt.Fprintf(f, "OK\n")
+		log.Printf("IP reconfigured: eth0 → %s via %s", cidrIP, gateway)
+
+	case "SET_CP_TOKEN":
+		if len(parts) != 2 {
+			fmt.Fprintf(f, "ERROR: expected SET_CP_TOKEN <token>\n")
+			return
+		}
+		if err := writeCPTokenAtomic(parts[1]); err != nil {
+			fmt.Fprintf(f, "ERROR: %v\n", err)
+			log.Printf("vsock SET_CP_TOKEN failed: %v", err)
+			return
+		}
+		fmt.Fprintf(f, "OK\n")
+		log.Printf("CP token updated via vsock")
+
+	default:
+		fmt.Fprintf(f, "ERROR: unknown command %q\n", parts[0])
 	}
-	fmt.Fprintf(f, "OK\n")
-	log.Printf("IP reconfigured: eth0 → %s via %s", cidrIP, gateway)
+}
+
+// writeCPTokenAtomic rewrites /root/.ephemera-cp-token with the supplied bearer.
+// Uses tmp-and-rename so a reader (the per-request loadCPToken in handleTownWallPost)
+// never observes a partial write. Mode is 0600 to match the original injectVMFiles write.
+func writeCPTokenAtomic(token string) error {
+	tmp := cpTokenPath + ".tmp"
+	if err := os.WriteFile(tmp, []byte(token), 0600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, cpTokenPath); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // applyIPConfig reconfigures eth0 with a new IP/mask and default gateway.
@@ -725,7 +779,7 @@ func handleTownWallPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if cpTok := os.Getenv("EPHEMERA_CONTROL_PLANE_TOKEN"); cpTok != "" {
+	if cpTok := loadCPToken(); cpTok != "" {
 		req.Header.Set("Authorization", "Bearer "+cpTok)
 	}
 	resp, err := http.DefaultClient.Do(req)

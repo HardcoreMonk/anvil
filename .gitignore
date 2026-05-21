@@ -33,6 +33,8 @@ vmlinux*
 # 4. Runtime-generated directories
 /internal-recordings/
 /snapshots/
+/flocks/
+/vms/
 /tmp/
 
 # 5. Goose runtime config (contains API keys)
@@ -48,6 +50,7 @@ Handoff.md
 .superpowers/
 EPHEMERA_GOOSETOWN_INTEGRATION.md
 EPHEMERA_v0.3.1_WORK_ORDER.md
+EPHEMERA_v0.3.2_WORK_ORDER.md
 
 # 7. OS & Editor generated files
 .vscode/

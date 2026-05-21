@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -124,5 +125,79 @@ func TestFlockManager_LoadFromDisk_EmptyWorkdir(t *testing.T) {
 	}
 	if recovered != 0 || len(failed) != 0 {
 		t.Errorf("empty workdir should yield (0, [], nil); got (%d, %v)", recovered, failed)
+	}
+}
+
+// TestFlock_Persist_StatusRoundTrip verifies that a status change persisted
+// via Flock.Persist survives a fresh FlockManager.LoadFromDisk — the contract
+// the watchdog and recovery rely on to keep dead markings sticky across
+// daemon restarts.
+func TestFlock_Persist_StatusRoundTrip(t *testing.T) {
+	tmp := t.TempDir()
+	fm := NewFlockManager(tmp)
+	flock, err := fm.Create("flock-persist", "rt", filepath.Join(tmp, "flock-persist", "TOWN_WALL.log"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	flock.AddAgent(&AgentInfo{AgentID: "worker-1", Role: "worker", VMID: "vm-1", Status: AgentStatusReady})
+	if err := flock.Persist(tmp); err != nil {
+		t.Fatalf("Persist initial: %v", err)
+	}
+
+	flock.UpdateAgentStatus("worker-1", AgentStatusDead)
+	if err := flock.Persist(tmp); err != nil {
+		t.Fatalf("Persist dead: %v", err)
+	}
+
+	fm2 := NewFlockManager(tmp)
+	if _, _, err := fm2.LoadFromDisk(); err != nil {
+		t.Fatalf("LoadFromDisk: %v", err)
+	}
+	loaded, ok := fm2.Get("flock-persist")
+	if !ok {
+		t.Fatal("flock-persist not recovered")
+	}
+	if got := loaded.Snapshot()[0].Status; got != AgentStatusDead {
+		t.Errorf("expected status=dead after round-trip, got %q", got)
+	}
+}
+
+// TestFlock_Persist_ConcurrentSafe drives many goroutines into Persist at
+// once. The writeMu must serialize them so the on-disk metadata.json is
+// always a complete, parseable JSON document. -race must remain clean.
+func TestFlock_Persist_ConcurrentSafe(t *testing.T) {
+	tmp := t.TempDir()
+	fm := NewFlockManager(tmp)
+	flock, err := fm.Create("flock-concurrent", "race", filepath.Join(tmp, "flock-concurrent", "TOWN_WALL.log"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	flock.AddAgent(&AgentInfo{AgentID: "w", Role: "worker", VMID: "vm-1", Status: AgentStatusReady})
+
+	const goroutines = 10
+	const writesEach = 20
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < writesEach; j++ {
+				if err := flock.Persist(tmp); err != nil {
+					t.Errorf("Persist: %v", err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	// Final on-disk file must be parseable — proves no torn tmp+rename ever
+	// won the race and overwrote a complete one with a half-written file.
+	loaded, err := LoadFlockMetadata(tmp, "flock-concurrent")
+	if err != nil {
+		t.Fatalf("LoadFlockMetadata after concurrent Persist: %v", err)
+	}
+	if loaded.FlockID != "flock-concurrent" {
+		t.Errorf("metadata corrupted: got flock_id=%q", loaded.FlockID)
 	}
 }

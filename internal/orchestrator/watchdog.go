@@ -3,7 +3,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -26,13 +26,15 @@ type VMRef struct {
 // Watchdog polls every registered VM's in-guest /health endpoint on a fixed
 // interval. After dyingThreshold consecutive failures the agent is marked
 // dead in the flock registry and a notice is posted to that flock's Town
-// Wall. A revived VM is not auto-marked back to ready — operators decide
-// when to clear the dead state (typically by deleting and respawning).
+// Wall. By default a revived VM is NOT auto-marked back to ready — operators
+// decide when to clear the dead state. Setting autoHeal=true via Configure
+// flips this to opt-in self-healing.
 type Watchdog struct {
 	interval       time.Duration
 	httpTimeout    time.Duration
 	dyingThreshold int
 	agentPort      int
+	autoHeal       bool
 
 	flockMgr *FlockManager
 	locator  AgentLocator
@@ -43,14 +45,26 @@ type Watchdog struct {
 	failCount  map[string]int
 	deadMarked map[string]bool
 
+	// Observability hooks (v0.3.5). Nil-safe — the watchdog package does not
+	// depend on cmd/goose-daemon's metrics registry. The daemon wires these
+	// after constructing the watchdog so package orchestrator stays free of
+	// metrics imports.
+	//
+	// OnDead fires once per agent at the moment the dyingThreshold is crossed.
+	// OnHeal fires once when autoHeal returns a dead agent to ready.
+	// OnProbeDuration fires after every /health probe, regardless of outcome.
+	OnDead          func(flockID, agentID, vmID string)
+	OnHeal          func(flockID, agentID, vmID string)
+	OnProbeDuration func(d time.Duration)
+
 	stopCh chan struct{}
 	doneCh chan struct{}
 }
 
 // NewWatchdog wires the watchdog with all dependencies it needs from the
-// control plane. Tunables (interval, httpTimeout, dyingThreshold) can be
-// overridden on the returned struct before Start is called — useful for tests
-// that need a faster cadence.
+// control plane. Default tunables are 5s interval / 1s timeout / 3 fails.
+// Use Configure (from external packages) or set the unexported fields
+// directly in in-package tests to override before Start is called.
 func NewWatchdog(fm *FlockManager, locator AgentLocator, lister VMLister, agentPort int) *Watchdog {
 	return &Watchdog{
 		interval:       5 * time.Second,
@@ -66,6 +80,34 @@ func NewWatchdog(fm *FlockManager, locator AgentLocator, lister VMLister, agentP
 		stopCh:         make(chan struct{}),
 		doneCh:         make(chan struct{}),
 	}
+}
+
+// Configure overrides watchdog tunables. Must be called BEFORE Start.
+// Zero or negative interval/httpTimeout/threshold values are ignored
+// (defaults preserved). When interval < httpTimeout, interval is clamped up
+// to httpTimeout and a warning is logged — otherwise a probe could outlast
+// its own tick window.
+//
+// autoHeal=true enables opt-in self-healing: a VM previously marked dead
+// that starts responding will be returned to AgentStatusReady, the new
+// status persisted, and a recovery notice posted to the flock's Town Wall.
+// Default (false) preserves the sticky-dead policy.
+func (wd *Watchdog) Configure(interval, httpTimeout time.Duration, threshold int, autoHeal bool) {
+	if interval > 0 {
+		wd.interval = interval
+	}
+	if httpTimeout > 0 {
+		wd.httpTimeout = httpTimeout
+		wd.client.Timeout = httpTimeout
+	}
+	if threshold > 0 {
+		wd.dyingThreshold = threshold
+	}
+	if wd.interval < wd.httpTimeout {
+		slog.Warn("watchdog: clamping interval up to http timeout", "interval", wd.interval, "http_timeout", wd.httpTimeout)
+		wd.interval = wd.httpTimeout
+	}
+	wd.autoHeal = autoHeal
 }
 
 // Start launches the polling goroutine. Safe to call exactly once per
@@ -118,6 +160,12 @@ func (wd *Watchdog) tick() {
 
 func (wd *Watchdog) checkOne(v VMRef) {
 	url := fmt.Sprintf("http://%s:%d/health", v.GuestIP, wd.agentPort)
+	start := time.Now()
+	defer func() {
+		if wd.OnProbeDuration != nil {
+			wd.OnProbeDuration(time.Since(start))
+		}
+	}()
 	ctx, cancel := context.WithTimeout(context.Background(), wd.httpTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -138,13 +186,44 @@ func (wd *Watchdog) checkOne(v VMRef) {
 	wd.onFailure(v)
 }
 
-// onSuccess clears any accumulated fail count. deadMarked is preserved on
-// purpose — a flapping VM that revived briefly should not be auto-cleared.
+// onSuccess clears any accumulated fail count. By default, deadMarked is
+// preserved — a flapping VM that revived briefly should not be auto-cleared.
+// With Configure(..., autoHeal=true), a previously-dead VM that responds
+// successfully is returned to AgentStatusReady, the change persisted, and
+// a recovery notice posted to the flock's Town Wall.
 func (wd *Watchdog) onSuccess(vmID string) {
 	wd.mu.Lock()
-	defer wd.mu.Unlock()
 	if wd.failCount[vmID] > 0 {
 		delete(wd.failCount, vmID)
+	}
+	wasDead := wd.deadMarked[vmID]
+	if !wd.autoHeal || !wasDead {
+		wd.mu.Unlock()
+		return
+	}
+	delete(wd.deadMarked, vmID)
+	wd.mu.Unlock()
+
+	flockID, agentID, ok := wd.locator(vmID)
+	if !ok {
+		return
+	}
+	flock, ok := wd.flockMgr.Get(flockID)
+	if !ok {
+		return
+	}
+	flock.UpdateAgentStatus(agentID, AgentStatusReady)
+	if err := flock.Persist(wd.flockMgr.WorkDir()); err != nil {
+		slog.Warn("watchdog: persist auto-heal failed", "agent_id", agentID, "err", err)
+	}
+	if _, err := flock.TownWall.Post(
+		"orchestrator",
+		fmt.Sprintf("%s recovered - auto-healed to ready", agentID),
+	); err != nil {
+		slog.Warn("watchdog: post auto-heal notice failed", "agent_id", agentID, "err", err)
+	}
+	if wd.OnHeal != nil {
+		wd.OnHeal(flockID, agentID, vmID)
 	}
 }
 
@@ -172,15 +251,36 @@ func (wd *Watchdog) onFailure(v VMRef) {
 		return
 	}
 	flock.UpdateAgentStatus(agentID, AgentStatusDead)
+	if err := flock.Persist(wd.flockMgr.WorkDir()); err != nil {
+		// The in-memory mark already took effect; a missed disk write means
+		// the dead state will be lost on the next daemon restart, which the
+		// next probe will re-detect. Logged for operator visibility.
+		slog.Warn("watchdog: persist dead status failed", "agent_id", agentID, "err", err)
+	}
 	if _, err := flock.TownWall.Post(
 		"orchestrator",
 		fmt.Sprintf("%s unresponsive after %d health probes - marked dead",
 			agentID, wd.dyingThreshold),
 	); err != nil {
-		log.Printf("Watchdog: failed to post dead notice for %s: %v", agentID, err)
+		slog.Warn("watchdog: post dead notice failed", "agent_id", agentID, "err", err)
 	}
 
 	wd.mu.Lock()
 	wd.deadMarked[v.VMID] = true
 	wd.mu.Unlock()
+
+	if wd.OnDead != nil {
+		wd.OnDead(flockID, agentID, v.VMID)
+	}
+}
+
+// ForgetVM clears any cached failure state for vmID. Call after a VM is
+// destroyed (per-agent restart, DELETE) so a recycled vmID — or a future
+// probe of a long-dead one — does not inherit the previous run's
+// deadMarked bit. Safe to call concurrently with the polling loop.
+func (wd *Watchdog) ForgetVM(vmID string) {
+	wd.mu.Lock()
+	defer wd.mu.Unlock()
+	delete(wd.failCount, vmID)
+	delete(wd.deadMarked, vmID)
 }
