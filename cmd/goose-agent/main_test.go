@@ -341,6 +341,50 @@ func TestWorkloadScriptPathRejectsNonRegularFiles(t *testing.T) {
 	}
 }
 
+func TestWorkloadScriptPathRejectsSymlinkDirectories(t *testing.T) {
+	t.Run("workload root symlink", func(t *testing.T) {
+		root := t.TempDir()
+		outside := t.TempDir()
+		if err := os.WriteFile(filepath.Join(outside, "run.sh"), []byte("#!/usr/bin/env bash\n"), 0755); err != nil {
+			t.Fatalf("write outside script: %v", err)
+		}
+		if err := os.Symlink(outside, filepath.Join(root, "workloads")); err != nil {
+			t.Fatalf("symlink workloads: %v", err)
+		}
+
+		_, _, status, err := workloadScriptPath(root, "workloads/run.sh")
+		if err == nil {
+			t.Fatal("workloadScriptPath returned nil error")
+		}
+		if status != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", status, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("nested directory symlink", func(t *testing.T) {
+		root := t.TempDir()
+		workloads := filepath.Join(root, "workloads")
+		if err := os.MkdirAll(workloads, 0755); err != nil {
+			t.Fatalf("mkdir workloads: %v", err)
+		}
+		outside := t.TempDir()
+		if err := os.WriteFile(filepath.Join(outside, "run.sh"), []byte("#!/usr/bin/env bash\n"), 0755); err != nil {
+			t.Fatalf("write outside script: %v", err)
+		}
+		if err := os.Symlink(outside, filepath.Join(workloads, "linked")); err != nil {
+			t.Fatalf("symlink nested dir: %v", err)
+		}
+
+		_, _, status, err := workloadScriptPath(root, "workloads/linked/run.sh")
+		if err == nil {
+			t.Fatal("workloadScriptPath returned nil error")
+		}
+		if status != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", status, http.StatusBadRequest)
+		}
+	})
+}
+
 func TestWorkloadTimeoutSeconds(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -517,6 +561,31 @@ func TestHandleWorkloadRunTruncatesOutput(t *testing.T) {
 	}
 	if !result.StderrTruncated {
 		t.Fatalf("stderr_truncated = false, want true")
+	}
+}
+
+func TestHandleWorkloadRunUsesMinimalEnvironment(t *testing.T) {
+	t.Setenv("ANVIL_WORKLOAD_SECRET_FOR_TEST", "must-not-leak")
+	root := t.TempDir()
+	writeWorkloadScript(t, root, "workloads/env.sh", "#!/usr/bin/env bash\nif env | grep -q ANVIL_WORKLOAD_SECRET_FOR_TEST; then\n  echo leaked >&2\n  exit 9\nfi\necho clean\n")
+	handler := workloadRunHandler(root)
+
+	req := httptest.NewRequest(http.MethodPost, "/workloads/run", strings.NewReader(`{"script":"workloads/env.sh","timeout_seconds":5}`))
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q; want 200", rr.Code, rr.Body.String())
+	}
+	var result WorkloadRunResult
+	if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("exit_code = %d, stderr = %q; want 0", result.ExitCode, result.Stderr)
+	}
+	if !strings.Contains(result.Stdout, "clean") {
+		t.Fatalf("stdout = %q, want clean", result.Stdout)
 	}
 }
 

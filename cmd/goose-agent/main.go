@@ -364,6 +364,9 @@ func workloadScriptPath(root, script string) (fullPath, clean string, status int
 	if fullPath != workloadRoot && !strings.HasPrefix(fullPath, workloadRoot+string(os.PathSeparator)) {
 		return "", "", http.StatusBadRequest, fmt.Errorf("script must stay within workloads/")
 	}
+	if status, err := validateWorkloadParentDirs(workloadRoot, filepath.Dir(fullPath)); err != nil {
+		return "", "", status, err
+	}
 
 	info, err := os.Lstat(fullPath)
 	if err != nil {
@@ -376,6 +379,45 @@ func workloadScriptPath(root, script string) (fullPath, clean string, status int
 		return "", "", http.StatusBadRequest, fmt.Errorf("workload script must be a regular file")
 	}
 	return fullPath, filepath.ToSlash(clean), http.StatusOK, nil
+}
+
+func validateWorkloadParentDirs(workloadRoot, scriptDir string) (int, error) {
+	rel, err := filepath.Rel(workloadRoot, scriptDir)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
+		return http.StatusBadRequest, fmt.Errorf("script must stay within workloads/")
+	}
+
+	current := workloadRoot
+	if status, err := requireRealWorkloadDir(current); err != nil {
+		return status, err
+	}
+	if rel == "." {
+		return http.StatusOK, nil
+	}
+	for _, part := range strings.Split(rel, string(os.PathSeparator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		current = filepath.Join(current, part)
+		if status, err := requireRealWorkloadDir(current); err != nil {
+			return status, err
+		}
+	}
+	return http.StatusOK, nil
+}
+
+func requireRealWorkloadDir(path string) (int, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return http.StatusNotFound, fmt.Errorf("workload script not found")
+		}
+		return http.StatusInternalServerError, fmt.Errorf("stat workload directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return http.StatusBadRequest, fmt.Errorf("workload script parent must be a real directory")
+	}
+	return http.StatusOK, nil
 }
 
 func workloadTimeoutSeconds(seconds int) (time.Duration, error) {
@@ -579,7 +621,7 @@ func runWorkloadScript(parent context.Context, root, cleanScript, fullPath strin
 	cmd.Dir = root
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	cmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+	cmd.Env = workloadEnvironment()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	err := cmd.Start()
@@ -629,6 +671,18 @@ func runWorkloadScript(parent context.Context, root, cleanScript, fullPath strin
 		result.Stderr = err.Error()
 	}
 	return result
+}
+
+func workloadEnvironment() []string {
+	return []string{
+		"DEBIAN_FRONTEND=noninteractive",
+		"HOME=/root",
+		"LANG=C.UTF-8",
+		"LOGNAME=root",
+		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"SHELL=/bin/bash",
+		"USER=root",
+	}
 }
 
 // TownWallPostBody is the JSON body accepted by /townwall/post inside the VM.

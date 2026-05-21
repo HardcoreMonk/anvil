@@ -184,8 +184,8 @@ bash scripts/vm-workload-e2e.sh
 전달한다.
 
 결과 artifact는 기본적으로 `/tmp/anvil-workload-e2e-<timestamp>/` 아래에 남는다.
-핵심 파일은 `summary.json`, `task-output.json`, `nginx.log`, `go-http.log`,
-`bench.txt`, `host-bench.txt`이다. 이 파일에는 provider token, API key,
+핵심 파일은 `summary.json`, `nginx-run.json`, `go-http-run.json`, `nginx.log`,
+`go-http.log`, `bench.txt`, `host-bench.txt`이다. 이 파일에는 provider token, API key,
 control-plane token, agent token을 남기지 않는다.
 
 daemon이 이미 실행 중이면 MCP adapter smoke도 별도로 확인할 수 있다.
