@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAgentAuthMiddleware_EmptyToken_Passthrough(t *testing.T) {
@@ -247,6 +248,93 @@ func TestHandleWorkspaceErrorsAreJSON(t *testing.T) {
 		t.Fatalf("status = %d, want 400", rr.Code)
 	}
 	assertJSONError(t, rr, "path must stay within workspace")
+}
+
+func TestWorkloadScriptPathAcceptsOnlyWorkloadShellScripts(t *testing.T) {
+	root := t.TempDir()
+	workloads := filepath.Join(root, "workloads")
+	if err := os.MkdirAll(workloads, 0755); err != nil {
+		t.Fatalf("mkdir workloads: %v", err)
+	}
+	script := filepath.Join(workloads, "nginx-smoke.sh")
+	if err := os.WriteFile(script, []byte("#!/usr/bin/env bash\n"), 0755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	fullPath, clean, status, err := workloadScriptPath(root, "workloads/nginx-smoke.sh")
+	if err != nil {
+		t.Fatalf("workloadScriptPath returned error: %v", err)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if clean != "workloads/nginx-smoke.sh" {
+		t.Fatalf("clean path = %q, want workloads/nginx-smoke.sh", clean)
+	}
+	if fullPath != script {
+		t.Fatalf("full path = %q, want %q", fullPath, script)
+	}
+}
+
+func TestWorkloadScriptPathRejectsUnsafePaths(t *testing.T) {
+	root := t.TempDir()
+	cases := []struct {
+		name   string
+		script string
+		status int
+	}{
+		{"empty", "", http.StatusBadRequest},
+		{"absolute", "/workspace/workloads/run.sh", http.StatusBadRequest},
+		{"traversal", "workloads/../secret.sh", http.StatusBadRequest},
+		{"outside", "notes/run.sh", http.StatusBadRequest},
+		{"not shell", "workloads/run.txt", http.StatusBadRequest},
+		{"missing", "workloads/missing.sh", http.StatusNotFound},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, status, err := workloadScriptPath(root, tc.script)
+			if err == nil {
+				t.Fatalf("workloadScriptPath(%q) returned nil error", tc.script)
+			}
+			if status != tc.status {
+				t.Fatalf("status = %d, want %d", status, tc.status)
+			}
+		})
+	}
+}
+
+func TestWorkloadTimeoutSeconds(t *testing.T) {
+	cases := []struct {
+		name    string
+		seconds int
+		want    time.Duration
+		wantErr bool
+	}{
+		{"default", 0, defaultWorkloadTimeout, false},
+		{"minimum", 1, time.Second, false},
+		{"maximum", 1800, 1800 * time.Second, false},
+		{"negative", -1, 0, true},
+		{"too high", 1801, 0, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := workloadTimeoutSeconds(tc.seconds)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("duration = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }
 
 func assertJSONError(t *testing.T, rr *httptest.ResponseRecorder, want string) {

@@ -33,6 +33,22 @@ type TaskResult struct {
 	Error  string `json:"error,omitempty"`
 }
 
+type WorkloadRunRequest struct {
+	Script         string `json:"script"`
+	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
+}
+
+type WorkloadRunResult struct {
+	Script          string `json:"script"`
+	ExitCode        int    `json:"exit_code"`
+	Stdout          string `json:"stdout"`
+	Stderr          string `json:"stderr"`
+	DurationMs      int64  `json:"duration_ms"`
+	TimedOut        bool   `json:"timed_out"`
+	StdoutTruncated bool   `json:"stdout_truncated,omitempty"`
+	StderrTruncated bool   `json:"stderr_truncated,omitempty"`
+}
+
 var (
 	mu   sync.Mutex
 	busy bool
@@ -50,12 +66,17 @@ func agentListenAddr() string {
 }
 
 const (
-	agentTokenPath        = "/root/.ephemera-agent-token"
-	workspaceRoot         = "/workspace"
-	flockMetaPath         = "/root/.ephemera-flock"
-	systemPromptPath      = "/root/.goose-system-prompt"
-	maxWorkspaceFileBytes = 4 << 20
-	townWallPostTimeout   = 10 * time.Second
+	agentTokenPath         = "/root/.ephemera-agent-token"
+	workspaceRoot          = "/workspace"
+	flockMetaPath          = "/root/.ephemera-flock"
+	systemPromptPath       = "/root/.goose-system-prompt"
+	maxWorkspaceFileBytes  = 4 << 20
+	townWallPostTimeout    = 10 * time.Second
+	workloadDirName        = "workloads"
+	workloadScriptSuffix   = ".sh"
+	defaultWorkloadTimeout = 600 * time.Second
+	maxWorkloadTimeout     = 1800 * time.Second
+	maxWorkloadOutputBytes = 1 << 20
 	// defaultControlPlaneAddr is the gateway IP the host uses inside the VM's
 	// /24 network. Overridable via EPHEMERA_CONTROL_PLANE for testing.
 	defaultControlPlaneAddr = "http://10.0.1.1:3000"
@@ -282,6 +303,63 @@ func workspaceFilePath(root, relPath string) (string, error) {
 		return "", fmt.Errorf("path must stay within workspace")
 	}
 	return fullPath, nil
+}
+
+func workloadScriptPath(root, script string) (fullPath, clean string, status int, err error) {
+	script = strings.TrimSpace(script)
+	if script == "" || filepath.IsAbs(script) {
+		return "", "", http.StatusBadRequest, fmt.Errorf("script must be a non-empty relative path")
+	}
+
+	clean = filepath.Clean(script)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.Contains(clean, string(os.PathSeparator)+".."+string(os.PathSeparator)) {
+		return "", "", http.StatusBadRequest, fmt.Errorf("script must stay within workspace workloads")
+	}
+	if !strings.HasPrefix(clean, workloadDirName+string(os.PathSeparator)) && !strings.HasPrefix(clean, workloadDirName+"/") {
+		return "", "", http.StatusBadRequest, fmt.Errorf("script must be under workloads/")
+	}
+	if !strings.HasSuffix(clean, workloadScriptSuffix) {
+		return "", "", http.StatusBadRequest, fmt.Errorf("script must end with .sh")
+	}
+
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return "", "", http.StatusInternalServerError, fmt.Errorf("resolve workspace root: %w", err)
+	}
+	workloadRoot := filepath.Join(rootAbs, workloadDirName)
+	fullPath, err = filepath.Abs(filepath.Join(rootAbs, clean))
+	if err != nil {
+		return "", "", http.StatusInternalServerError, fmt.Errorf("resolve workload script: %w", err)
+	}
+	if fullPath != workloadRoot && !strings.HasPrefix(fullPath, workloadRoot+string(os.PathSeparator)) {
+		return "", "", http.StatusBadRequest, fmt.Errorf("script must stay within workloads/")
+	}
+
+	info, err := os.Stat(fullPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", "", http.StatusNotFound, fmt.Errorf("workload script not found")
+		}
+		return "", "", http.StatusInternalServerError, fmt.Errorf("stat workload script: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", "", http.StatusBadRequest, fmt.Errorf("workload script must be a regular file")
+	}
+	return fullPath, filepath.ToSlash(clean), http.StatusOK, nil
+}
+
+func workloadTimeoutSeconds(seconds int) (time.Duration, error) {
+	if seconds == 0 {
+		return defaultWorkloadTimeout, nil
+	}
+	if seconds < 1 {
+		return 0, fmt.Errorf("timeout_seconds must be >= 1")
+	}
+	timeout := time.Duration(seconds) * time.Second
+	if timeout > maxWorkloadTimeout {
+		return 0, fmt.Errorf("timeout_seconds must be <= %d", int(maxWorkloadTimeout/time.Second))
+	}
+	return timeout, nil
 }
 
 func workspaceOverwriteAllowed(r *http.Request) bool {
