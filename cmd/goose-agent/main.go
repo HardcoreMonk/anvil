@@ -335,7 +335,7 @@ func workloadScriptPath(root, script string) (fullPath, clean string, status int
 		return "", "", http.StatusBadRequest, fmt.Errorf("script must stay within workloads/")
 	}
 
-	info, err := os.Stat(fullPath)
+	info, err := os.Lstat(fullPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", "", http.StatusNotFound, fmt.Errorf("workload script not found")

@@ -304,6 +304,40 @@ func TestWorkloadScriptPathRejectsUnsafePaths(t *testing.T) {
 	}
 }
 
+func TestWorkloadScriptPathRejectsNonRegularFiles(t *testing.T) {
+	root := t.TempDir()
+	workloads := filepath.Join(root, "workloads")
+	if err := os.MkdirAll(workloads, 0755); err != nil {
+		t.Fatalf("mkdir workloads: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(workloads, "dir.sh"), 0755); err != nil {
+		t.Fatalf("mkdir dir workload: %v", err)
+	}
+	outside := filepath.Join(root, "outside.sh")
+	if err := os.WriteFile(outside, []byte("#!/usr/bin/env bash\n"), 0755); err != nil {
+		t.Fatalf("write outside script: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(workloads, "link.sh")); err != nil {
+		t.Fatalf("symlink workload: %v", err)
+	}
+
+	cases := []string{
+		"workloads/dir.sh",
+		"workloads/link.sh",
+	}
+	for _, script := range cases {
+		t.Run(script, func(t *testing.T) {
+			_, _, status, err := workloadScriptPath(root, script)
+			if err == nil {
+				t.Fatalf("workloadScriptPath(%q) returned nil error", script)
+			}
+			if status != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d", status, http.StatusBadRequest)
+			}
+		})
+	}
+}
+
 func TestWorkloadTimeoutSeconds(t *testing.T) {
 	cases := []struct {
 		name    string
