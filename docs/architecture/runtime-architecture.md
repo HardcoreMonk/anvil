@@ -68,7 +68,7 @@ agent proxy를 모두 소유한다.
 | VM wrapper | `internal/vm/machine.go` | Firecracker config 구성, cold VM 시작, snapshot state restore, vsock 기반 guest IP 재설정 |
 | Network manager | `internal/network/manager.go` | `goose-br0` 생성, `10.0.1.0/24` 관리, guest IP/TAP 할당과 재사용, NAT 설정 |
 | Guest init | `cmd/micro-init/main.go` | guest PID 1, virtual filesystem mount, `goose-agent` 시작, 종료/신호 수신 시 clean poweroff |
-| Guest agent | `cmd/goose-agent/main.go` | guest 내부 `/tasks`, `/health`, `/stop` 제공, mutating endpoint token 인증, Goose task 실행 |
+| Guest agent | `cmd/goose-agent/main.go` | guest 내부 `/tasks`, `/workloads/run`, `/health`, `/stop` 제공, mutating endpoint token 인증, Goose task와 script-only workload 실행 |
 | Image builder | `scripts/build_image.sh` | Debian Trixie 기반 golden rootfs에 Goose, `goose-agent`, `micro-init` 설치 |
 
 ## 런타임 상태
@@ -124,6 +124,12 @@ Guest disk 상태:
 | `/usr/local/bin/goose-agent.sha256` | golden image에 설치된 guest agent source hash stamp |
 | `/usr/local/bin/gtwall` | VM 내부 Town Wall post helper |
 | `/usr/local/sbin/micro-init` | guest PID 1 |
+
+Guest agent API/workload surface:
+
+| 경로 | 의미 |
+|---|---|
+| `/workloads/run` | VM 내부 `/workspace/workloads/*.sh` script-only runner. LLM provider를 거치지 않고 deterministic workload smoke와 benchmark를 실행한다. |
 
 ## 시작 흐름
 

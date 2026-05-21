@@ -163,6 +163,9 @@ sudo bash e2e_test.sh
 VM 내부 서비스 설치, 기동, host-to-VM 접근, 기초 성능 artifact를 확인할 때는
 workload E2E를 실행한다. 이 검증은 root/KVM/network 조건이 필요하며, VM 내부에서
 `apt-get`을 사용하므로 outbound와 DNS 경로도 함께 검증한다.
+이 workload 경로는 `/workloads/run`을 사용하므로 Gemini/Goose provider key 없이도
+서비스 설치와 host-to-VM probe를 검증한다. real LLM 검증은 기존 `/tasks` 기반
+suite에서 별도로 수행한다.
 
 ```bash
 go build -o anvil-daemon ./cmd/goose-daemon/

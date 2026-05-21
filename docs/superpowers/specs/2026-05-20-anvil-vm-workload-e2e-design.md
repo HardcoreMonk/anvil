@@ -35,6 +35,13 @@ anvil의 full KVM E2E를 VM lifecycle smoke에서 실제 workload 검증으로 �
 상태가 task 시작 단계에 영향을 줄 수 있으므로, benchmark 수치는 script output marker와
 artifact를 기준으로만 판정한다.
 
+## 후속 반영: Script Workload Runner
+
+`2026-05-21-anvil-script-workload-runner-design.md`가 승인되면 deterministic workload
+E2E는 `/tasks` 대신 `/vms/{vm_id}/workloads/run`을 사용한다. 이 변경 후 nginx/Go HTTP
+workload 실행은 LLM provider credential에 의존하지 않는다. `/tasks`는 real LLM smoke
+전용 경로로 유지한다.
+
 ## 아키텍처
 
 새 테스트는 기존 `e2e_test.sh`와 분리한다.
