@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -31,6 +31,11 @@ var (
 	watchdogTimeoutSec  = envInt("EPHEMERA_WATCHDOG_TIMEOUT_SEC", 1)
 	watchdogThreshold   = envInt("EPHEMERA_WATCHDOG_THRESHOLD", 3)
 	watchdogAutoHeal    = envBool("EPHEMERA_WATCHDOG_AUTO_HEAL", false)
+
+	// metricsRequireAuth gates the /metrics endpoint behind the same Bearer
+	// authentication as the rest of the API. Default false matches the
+	// standard Prometheus scrape model (network-level isolation expected).
+	metricsRequireAuth = envBool("EPHEMERA_METRICS_REQUIRE_AUTH", false)
 
 	// apiAddr is the address the control plane API binds to.
 	// Default 127.0.0.1:3000 makes the API reachable only on localhost,
@@ -75,7 +80,7 @@ func loadAPIClients() []APIClient {
 		if err == nil {
 			return parseAPIClients(string(raw))
 		}
-		log.Printf("EPHEMERA_API_TOKENS_FILE %q unreadable: %v - falling back to env", path, err)
+		slog.Warn("api tokens file unreadable, falling back to env", "path", path, "err", err)
 	}
 	if raw := os.Getenv("EPHEMERA_API_TOKENS"); raw != "" {
 		return parseAPIClients(raw)

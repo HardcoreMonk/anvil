@@ -3,7 +3,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -44,6 +44,18 @@ type Watchdog struct {
 	mu         sync.Mutex
 	failCount  map[string]int
 	deadMarked map[string]bool
+
+	// Observability hooks (v0.3.5). Nil-safe — the watchdog package does not
+	// depend on cmd/goose-daemon's metrics registry. The daemon wires these
+	// after constructing the watchdog so package orchestrator stays free of
+	// metrics imports.
+	//
+	// OnDead fires once per agent at the moment the dyingThreshold is crossed.
+	// OnHeal fires once when autoHeal returns a dead agent to ready.
+	// OnProbeDuration fires after every /health probe, regardless of outcome.
+	OnDead          func(flockID, agentID, vmID string)
+	OnHeal          func(flockID, agentID, vmID string)
+	OnProbeDuration func(d time.Duration)
 
 	stopCh chan struct{}
 	doneCh chan struct{}
@@ -92,7 +104,7 @@ func (wd *Watchdog) Configure(interval, httpTimeout time.Duration, threshold int
 		wd.dyingThreshold = threshold
 	}
 	if wd.interval < wd.httpTimeout {
-		log.Printf("Watchdog: interval %s < httpTimeout %s; clamping interval up", wd.interval, wd.httpTimeout)
+		slog.Warn("watchdog: clamping interval up to http timeout", "interval", wd.interval, "http_timeout", wd.httpTimeout)
 		wd.interval = wd.httpTimeout
 	}
 	wd.autoHeal = autoHeal
@@ -148,6 +160,12 @@ func (wd *Watchdog) tick() {
 
 func (wd *Watchdog) checkOne(v VMRef) {
 	url := fmt.Sprintf("http://%s:%d/health", v.GuestIP, wd.agentPort)
+	start := time.Now()
+	defer func() {
+		if wd.OnProbeDuration != nil {
+			wd.OnProbeDuration(time.Since(start))
+		}
+	}()
 	ctx, cancel := context.WithTimeout(context.Background(), wd.httpTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -196,13 +214,16 @@ func (wd *Watchdog) onSuccess(vmID string) {
 	}
 	flock.UpdateAgentStatus(agentID, AgentStatusReady)
 	if err := flock.Persist(wd.flockMgr.WorkDir()); err != nil {
-		log.Printf("Watchdog: failed to persist auto-heal for %s: %v", agentID, err)
+		slog.Warn("watchdog: persist auto-heal failed", "agent_id", agentID, "err", err)
 	}
 	if _, err := flock.TownWall.Post(
 		"orchestrator",
 		fmt.Sprintf("%s recovered - auto-healed to ready", agentID),
 	); err != nil {
-		log.Printf("Watchdog: failed to post auto-heal notice for %s: %v", agentID, err)
+		slog.Warn("watchdog: post auto-heal notice failed", "agent_id", agentID, "err", err)
+	}
+	if wd.OnHeal != nil {
+		wd.OnHeal(flockID, agentID, vmID)
 	}
 }
 
@@ -234,19 +255,23 @@ func (wd *Watchdog) onFailure(v VMRef) {
 		// The in-memory mark already took effect; a missed disk write means
 		// the dead state will be lost on the next daemon restart, which the
 		// next probe will re-detect. Logged for operator visibility.
-		log.Printf("Watchdog: failed to persist dead status for %s: %v", agentID, err)
+		slog.Warn("watchdog: persist dead status failed", "agent_id", agentID, "err", err)
 	}
 	if _, err := flock.TownWall.Post(
 		"orchestrator",
 		fmt.Sprintf("%s unresponsive after %d health probes - marked dead",
 			agentID, wd.dyingThreshold),
 	); err != nil {
-		log.Printf("Watchdog: failed to post dead notice for %s: %v", agentID, err)
+		slog.Warn("watchdog: post dead notice failed", "agent_id", agentID, "err", err)
 	}
 
 	wd.mu.Lock()
 	wd.deadMarked[v.VMID] = true
 	wd.mu.Unlock()
+
+	if wd.OnDead != nil {
+		wd.OnDead(flockID, agentID, v.VMID)
+	}
 }
 
 // ForgetVM clears any cached failure state for vmID. Call after a VM is

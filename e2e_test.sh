@@ -992,10 +992,13 @@ check_http "$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/flocks/$RES
 # unit tests cover behavior. Here we only confirm the watchdog was
 # started by both daemon invocations.
 step "57h. Watchdog start log line present"
-WD_COUNT=$(grep -c "Watchdog started" "$LOG" 2>/dev/null || echo 0)
+# v0.3.5: slog migration changed messages to lowercase ("watchdog started"
+# replaces "Watchdog started"). The TextHandler emits them as
+# `msg="watchdog started"`, but a plain substring grep still matches.
+WD_COUNT=$(grep -c "watchdog started" "$LOG" 2>/dev/null || echo 0)
 [ "$WD_COUNT" -ge "2" ] \
     && ok "Watchdog start log line present in $WD_COUNT daemon run(s) ✓" \
-    || fail "Expected ≥2 'Watchdog started' log lines, got $WD_COUNT"
+    || fail "Expected ≥2 'watchdog started' log lines, got $WD_COUNT"
 
 # ════════════════════════════════════════════════════════════════
 # v0.3.3 — Operational polish scenarios (57i, 57j, 58b, 59*)
@@ -1289,21 +1292,22 @@ ls -la "/tmp/firecracker-vsock-${ROT_VM_ID}.sock" 2>&1 | sed 's/^/    /'
 kill -HUP "$DAEMON_PID"
 sleep 8   # vsock fan-out budget is now 4 s/VM × 1 VM; sleep generously for log flush
 
-# Match the count form ("propagated to N/M VM(s)") and verify N == M >= 1.
-# Plain substring grep would pass even on "0/1" — i.e. silent fan-out failure.
-PROP_LINE=$(grep -E 'SIGHUP: CP token propagated to [0-9]+/[0-9]+' "$LOG" | tail -1 || true)
+# Match the slog form (`msg="sighup: cp token propagated" ok=N total=M`) and
+# verify ok == total >= 1. Plain substring grep on "propagated" would pass
+# even on ok=0 — i.e. silent fan-out failure.
+PROP_LINE=$(grep -E 'msg="sighup: cp token propagated" ok=[0-9]+ total=[0-9]+' "$LOG" | tail -1 || true)
 if [ -z "$PROP_LINE" ]; then
     fail "Propagation line missing from $LOG"
     echo "    Last 20 daemon log lines:"; tail -20 "$LOG" | sed 's/^/      /'
 else
-    PROP_OK=$(echo "$PROP_LINE" | sed -E 's|.*propagated to ([0-9]+)/[0-9]+.*|\1|')
-    PROP_TOTAL=$(echo "$PROP_LINE" | sed -E 's|.*propagated to [0-9]+/([0-9]+).*|\1|')
+    PROP_OK=$(echo "$PROP_LINE" | sed -E 's|.* ok=([0-9]+) .*|\1|')
+    PROP_TOTAL=$(echo "$PROP_LINE" | sed -E 's|.* total=([0-9]+).*|\1|')
     if [ "$PROP_OK" = "$PROP_TOTAL" ] && [ "$PROP_TOTAL" -ge "1" ]; then
         ok "vsock fan-out: $PROP_OK/$PROP_TOTAL VMs OK"
     else
         fail "vsock fan-out incomplete: $PROP_OK/$PROP_TOTAL (line: $PROP_LINE)"
         echo "    Per-VM failure lines:"
-        grep -E 'CP token propagation to .* failed' "$LOG" | tail -5 | sed 's/^/      /'
+        grep -E 'sighup: cp token propagation failed' "$LOG" | tail -5 | sed 's/^/      /'
         echo "    Last 30 daemon log lines:"; tail -30 "$LOG" | sed 's/^/      /'
     fi
 fi
@@ -1321,7 +1325,7 @@ if [ "$POST_CODE" = "200" ]; then
 else
     fail "Post-rotation /townwall/post failed (HTTP $POST_CODE) — vsock fan-out broken or VM unreachable"
     echo "    Recent daemon log lines (forwarder / SIGHUP / vsock context):"
-    grep -E 'townwall|forward|401|SIGHUP|propagat|SET_CP|vsock' "$LOG" | tail -20 | sed 's/^/      /'
+    grep -E -i 'townwall|forward|401|sighup|propagat|set_cp|vsock' "$LOG" | tail -20 | sed 's/^/      /'
 fi
 
 step "58c.v. v1 operator bearer must now be rejected"
@@ -1345,6 +1349,52 @@ curl -s -o /dev/null -H "Authorization: Bearer e2e-cp-token-v2" \
 rm -f /tmp/ephemera-tokens.txt
 sleep 2
 ok "Rotation flock deleted, tokens file removed"
+
+# ── 61. /metrics endpoint (v0.3.5) ───────────────────────────────
+step "61. /metrics endpoint exposes Prometheus format"
+METRICS_BODY=$(curl -s -m 5 -w "\n%{http_code}" "$API/metrics" 2>/dev/null || echo "000")
+METRICS_CODE=$(echo "$METRICS_BODY" | tail -1)
+METRICS_OUT=$(echo "$METRICS_BODY" | head -n -1)
+[ "$METRICS_CODE" = "200" ] \
+    && ok "GET /metrics returned 200 (unauthenticated by default) ✓" \
+    || fail "GET /metrics returned $METRICS_CODE (expected 200)"
+
+echo "$METRICS_OUT" | grep -qE '^# HELP ephemera_vm_spawn_total ' \
+    && ok "HELP line present" || fail "HELP missing"
+echo "$METRICS_OUT" | grep -qE '^# TYPE ephemera_vm_count gauge$' \
+    && ok "gauge TYPE present" || fail "gauge TYPE missing"
+echo "$METRICS_OUT" | grep -qE '^ephemera_vm_count [0-9]+$' \
+    && ok "vm_count value present" || fail "vm_count missing"
+echo "$METRICS_OUT" | grep -qE '^ephemera_sighup_reload_total [0-9]+$' \
+    && ok "sighup_reload counter present" || fail "sighup_reload counter missing"
+
+# ── 62. /vms/{vm_id}/stats (v0.3.5) ──────────────────────────────
+step "62. /vms/{vm_id}/stats returns per-VM snapshot"
+STATS_SPAWN=$(curl -s -m 10 -H "Authorization: Bearer e2e-cp-token-v2" \
+    -H "Content-Type: application/json" -d '{}' -X POST "$API/vms" 2>/dev/null || echo "{}")
+STATS_VM_ID=$(echo "$STATS_SPAWN" | jq -r '.vm_id // empty' 2>/dev/null)
+[ -n "$STATS_VM_ID" ] && ok "stats test VM spawned: $STATS_VM_ID" \
+    || fail "could not spawn stats test VM (response: $STATS_SPAWN)"
+
+# Give the agent a moment to come up and CPU sampling some signal.
+sleep 3
+
+STATS_RESP=$(curl -s -m 10 -H "Authorization: Bearer e2e-cp-token-v2" \
+    "$API/vms/$STATS_VM_ID/stats" 2>/dev/null || echo "{}")
+echo "$STATS_RESP" | jq -e '.uptime_seconds >= 0 and .mem_total_mib > 0 and (.cpu_percent | type == "number")' >/dev/null 2>&1 \
+    && ok "stats schema verified (uptime, mem_total, cpu_percent)" \
+    || fail "stats schema invalid: $STATS_RESP"
+
+# 62a. ?stats=true inline.
+STATS_LIST=$(curl -s -m 10 -H "Authorization: Bearer e2e-cp-token-v2" \
+    "$API/vms?stats=true" 2>/dev/null || echo "[]")
+echo "$STATS_LIST" | jq -e --arg id "$STATS_VM_ID" '[.[] | select(.vm_id==$id) | .stats.mem_total_mib > 0] | length > 0' >/dev/null 2>&1 \
+    && ok "?stats=true inlines per-VM stats ✓" \
+    || fail "?stats=true did not return stats block (response: $STATS_LIST)"
+
+# Cleanup stats test VM.
+curl -s -o /dev/null -H "Authorization: Bearer e2e-cp-token-v2" -X DELETE "$API/vms/$STATS_VM_ID"
+ok "stats test VM cleaned up"
 
 # ── 60. Shut down rotation daemon ────────────────────────────────
 step "60. Shut down rotation daemon"

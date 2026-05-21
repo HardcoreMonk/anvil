@@ -22,8 +22,8 @@ type SnapshotMetadata struct {
 	SnapshotType   string    `json:"snapshot_type"`              // "full" | "diff"
 	BaseSnapshotID string    `json:"base_snapshot_id,omitempty"` // set for diff snapshots
 	GuestIP        string    `json:"guest_ip"`
-	TapDevice      string    `json:"tap_device"`   // original TAP device name; Firecracker v1.x embeds this in state.bin
-	VsockPath      string    `json:"vsock_path"`   // original vsock UDS path; Firecracker recreates it from snapshot state on restore
+	TapDevice      string    `json:"tap_device"` // original TAP device name; Firecracker v1.x embeds this in state.bin
+	VsockPath      string    `json:"vsock_path"` // original vsock UDS path; Firecracker recreates it from snapshot state on restore
 	MacAddr        string    `json:"mac_addr"`
 	AgentToken     string    `json:"agent_token"`
 	DiskPath       string    `json:"disk_path"`      // original workspace path (required by Firecracker on restore)
