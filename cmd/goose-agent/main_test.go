@@ -3,12 +3,15 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -447,6 +450,73 @@ func TestHandleWorkloadRunTimeout(t *testing.T) {
 	}
 	if result.ExitCode != -1 {
 		t.Fatalf("exit_code = %d, want -1", result.ExitCode)
+	}
+}
+
+func TestHandleWorkloadRunTimeoutKillsChildProcesses(t *testing.T) {
+	root := t.TempDir()
+	writeWorkloadScript(t, root, "workloads/child.sh", "#!/usr/bin/env bash\n(sleep 2; echo survived > child-survived) &\necho $! > child.pid\nwait\n")
+	handler := workloadRunHandler(root)
+
+	req := httptest.NewRequest(http.MethodPost, "/workloads/run", strings.NewReader(`{"script":"workloads/child.sh","timeout_seconds":1}`))
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q; want 200", rr.Code, rr.Body.String())
+	}
+	var result WorkloadRunResult
+	if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if !result.TimedOut {
+		t.Fatalf("timed_out = false, want true")
+	}
+	if b, err := os.ReadFile(filepath.Join(root, "child.pid")); err == nil {
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
+			defer syscall.Kill(pid, syscall.SIGKILL)
+		}
+	}
+
+	time.Sleep(1500 * time.Millisecond)
+	if _, err := os.Stat(filepath.Join(root, "child-survived")); err == nil {
+		t.Fatalf("background child process survived workload timeout")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat child-survived: %v", err)
+	}
+}
+
+func TestHandleWorkloadRunTruncatesOutput(t *testing.T) {
+	root := t.TempDir()
+	outputBytes := maxWorkloadOutputBytes + 1
+	writeWorkloadScript(t, root, "workloads/noisy.sh", fmt.Sprintf("#!/usr/bin/env bash\nhead -c %d /dev/zero | tr '\\0' 'x'\nhead -c %d /dev/zero | tr '\\0' 'y' >&2\n", outputBytes, outputBytes))
+	handler := workloadRunHandler(root)
+
+	req := httptest.NewRequest(http.MethodPost, "/workloads/run", strings.NewReader(`{"script":"workloads/noisy.sh","timeout_seconds":5}`))
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q; want 200", rr.Code, rr.Body.String())
+	}
+	var result WorkloadRunResult
+	if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("exit_code = %d, want 0", result.ExitCode)
+	}
+	if len(result.Stdout) != maxWorkloadOutputBytes {
+		t.Fatalf("stdout len = %d, want %d", len(result.Stdout), maxWorkloadOutputBytes)
+	}
+	if len(result.Stderr) != maxWorkloadOutputBytes {
+		t.Fatalf("stderr len = %d, want %d", len(result.Stderr), maxWorkloadOutputBytes)
+	}
+	if !result.StdoutTruncated {
+		t.Fatalf("stdout_truncated = false, want true")
+	}
+	if !result.StderrTruncated {
+		t.Fatalf("stderr_truncated = false, want true")
 	}
 }
 

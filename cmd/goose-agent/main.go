@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -574,13 +575,31 @@ func runWorkloadScript(parent context.Context, root, cleanScript, fullPath strin
 
 	stdout := &truncatingBuffer{limit: maxWorkloadOutputBytes}
 	stderr := &truncatingBuffer{limit: maxWorkloadOutputBytes}
-	cmd := exec.CommandContext(ctx, "bash", fullPath)
+	cmd := exec.Command("bash", fullPath)
 	cmd.Dir = root
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	cmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	err := cmd.Run()
+	err := cmd.Start()
+	ctxDone := false
+	if err == nil {
+		done := make(chan error, 1)
+		go func() {
+			done <- cmd.Wait()
+		}()
+
+		select {
+		case err = <-done:
+		case <-ctx.Done():
+			ctxDone = true
+			if cmd.Process != nil {
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			}
+			err = <-done
+		}
+	}
 	result := WorkloadRunResult{
 		Script:          cleanScript,
 		Stdout:          stdout.String(),
@@ -589,7 +608,7 @@ func runWorkloadScript(parent context.Context, root, cleanScript, fullPath strin
 		StdoutTruncated: stdout.truncated,
 		StderrTruncated: stderr.truncated,
 	}
-	if err == nil {
+	if err == nil && !ctxDone {
 		return result
 	}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
