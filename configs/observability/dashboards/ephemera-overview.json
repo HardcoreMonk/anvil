@@ -1,0 +1,186 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "uid": "ephemera-overview",
+  "title": "Ephemera Overview",
+  "tags": ["ephemera", "v0.3.5"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timepicker": {},
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Running VMs",
+      "gridPos": {"x": 0, "y": 0, "w": 6, "h": 4},
+      "datasource": {"type": "prometheus", "uid": "prometheus-ephemera"},
+      "targets": [
+        {"expr": "ephemera_vm_count", "refId": "A", "legendFormat": "vms"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 5},
+              {"color": "red", "value": 15}
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Flocks",
+      "gridPos": {"x": 6, "y": 0, "w": 6, "h": 4},
+      "datasource": {"type": "prometheus", "uid": "prometheus-ephemera"},
+      "targets": [
+        {"expr": "ephemera_flock_count", "refId": "A", "legendFormat": "flocks"}
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}
+      },
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Snapshots catalogued",
+      "gridPos": {"x": 12, "y": 0, "w": 6, "h": 4},
+      "datasource": {"type": "prometheus", "uid": "prometheus-ephemera"},
+      "targets": [
+        {"expr": "ephemera_snapshot_count", "refId": "A", "legendFormat": "snapshots"}
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}
+      },
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "SIGHUP reloads (total)",
+      "gridPos": {"x": 18, "y": 0, "w": 6, "h": 4},
+      "datasource": {"type": "prometheus", "uid": "prometheus-ephemera"},
+      "targets": [
+        {"expr": "ephemera_sighup_reload_total", "refId": "A", "legendFormat": "reloads"}
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}
+      },
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "VM spawn rate by outcome (per minute)",
+      "gridPos": {"x": 0, "y": 4, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus-ephemera"},
+      "targets": [
+        {"expr": "rate(ephemera_vm_spawn_total{outcome=\"ok\"}[1m])", "refId": "A", "legendFormat": "ok"},
+        {"expr": "rate(ephemera_vm_spawn_total{outcome=\"fail\"}[1m])", "refId": "B", "legendFormat": "fail"},
+        {"expr": "rate(ephemera_vm_destroy_total{outcome=\"ok\"}[1m])", "refId": "C", "legendFormat": "destroy"}
+      ],
+      "options": {
+        "legend": {"displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "none"}
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "spanNulls": false},
+          "unit": "ops"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Snapshot creates by type (per minute)",
+      "gridPos": {"x": 12, "y": 4, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus-ephemera"},
+      "targets": [
+        {"expr": "rate(ephemera_snapshot_create_total{type=\"full\"}[1m])", "refId": "A", "legendFormat": "full"},
+        {"expr": "rate(ephemera_snapshot_create_total{type=\"diff\"}[1m])", "refId": "B", "legendFormat": "diff"},
+        {"expr": "rate(ephemera_snapshot_restore_total[1m])", "refId": "C", "legendFormat": "restore"}
+      ],
+      "options": {
+        "legend": {"displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "none"}
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "spanNulls": false},
+          "unit": "ops"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "VM spawn duration p50 / p95 (seconds)",
+      "gridPos": {"x": 0, "y": 12, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus-ephemera"},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(ephemera_vm_spawn_duration_seconds_bucket[5m])) by (le))", "refId": "A", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.95, sum(rate(ephemera_vm_spawn_duration_seconds_bucket[5m])) by (le))", "refId": "B", "legendFormat": "p95"}
+      ],
+      "options": {
+        "legend": {"displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "none"}
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "spanNulls": false},
+          "unit": "s"
+        }
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Watchdog probe duration p50 / p95 (seconds)",
+      "gridPos": {"x": 12, "y": 12, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus-ephemera"},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(ephemera_watchdog_probe_duration_seconds_bucket[5m])) by (le))", "refId": "A", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.95, sum(rate(ephemera_watchdog_probe_duration_seconds_bucket[5m])) by (le))", "refId": "B", "legendFormat": "p95"}
+      ],
+      "options": {
+        "legend": {"displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "none"}
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "spanNulls": false},
+          "unit": "s"
+        }
+      }
+    }
+  ]
+}
