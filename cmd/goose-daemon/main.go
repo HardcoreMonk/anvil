@@ -1,40 +1,73 @@
 package main
 
 import (
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"ephemera/internal/network"
 	"ephemera/internal/storage"
 )
 
+// initSlog configures the global slog default handler from
+// EPHEMERA_LOG_FORMAT (text|json) and EPHEMERA_LOG_LEVEL (debug|info|warn|error).
+// Default level is Warn to match the historical log.Printf tone — lifecycle
+// transitions are logged at Warn or higher so operators see them by default.
+func initSlog() {
+	level := slog.LevelWarn
+	switch strings.ToLower(os.Getenv("EPHEMERA_LOG_LEVEL")) {
+	case "debug":
+		level = slog.LevelDebug
+	case "info":
+		level = slog.LevelInfo
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	opts := &slog.HandlerOptions{Level: level}
+	var h slog.Handler
+	if strings.EqualFold(os.Getenv("EPHEMERA_LOG_FORMAT"), "json") {
+		h = slog.NewJSONHandler(os.Stderr, opts)
+	} else {
+		h = slog.NewTextHandler(os.Stderr, opts)
+	}
+	slog.SetDefault(slog.New(h))
+}
+
+func fatal(msg string, args ...any) {
+	slog.Error(msg, args...)
+	os.Exit(1)
+}
+
 func main() {
-	log.Println("Starting Ephemera Control Plane...")
+	initSlog()
+	slog.Warn("starting ephemera control plane")
 	if len(apiClients) == 0 {
-		log.Println("Warning: no API token configured (EPHEMERA_API_TOKENS / EPHEMERA_API_TOKEN unset) — API is unauthenticated.")
+		slog.Warn("api unauthenticated (no tokens configured)")
 	}
 
 	cwd, err := os.Getwd()
 	if err != nil {
-		log.Fatalf("Fatal: %v", err)
+		fatal("fatal: getwd", "err", err)
 	}
 
-	goldenImagePath  := filepath.Join(cwd, "artifacts/golden-image.ext4")
-	buildScriptPath  := filepath.Join(cwd, "scripts/build_image.sh")
-	kernelPath       := filepath.Join(cwd, "artifacts/vmlinux.bin")
-	firecrackerPath  := filepath.Join(cwd, "artifacts/firecracker")
-	microInitPath    := filepath.Join(cwd, "artifacts/micro-init")
-	gooseAgentPath   := filepath.Join(cwd, "artifacts/goose-agent")
-	gooseConfigPath  := filepath.Join(cwd, "configs/goose.yaml")
+	goldenImagePath := filepath.Join(cwd, "artifacts/golden-image.ext4")
+	buildScriptPath := filepath.Join(cwd, "scripts/build_image.sh")
+	kernelPath := filepath.Join(cwd, "artifacts/vmlinux.bin")
+	firecrackerPath := filepath.Join(cwd, "artifacts/firecracker")
+	microInitPath := filepath.Join(cwd, "artifacts/micro-init")
+	gooseAgentPath := filepath.Join(cwd, "artifacts/goose-agent")
+	gooseConfigPath := filepath.Join(cwd, "configs/goose.yaml")
 	gooseSecretsPath := filepath.Join(cwd, "configs/goose-secrets.yaml")
-	snapshotDir      := filepath.Join(cwd, "snapshots")
+	snapshotDir := filepath.Join(cwd, "snapshots")
 
 	if err := os.MkdirAll(snapshotDir, 0755); err != nil {
-		log.Fatalf("Fatal: failed to create snapshot directory: %v", err)
+		fatal("fatal: create snapshot dir", "err", err, "dir", snapshotDir)
 	}
 
 	const (
@@ -44,35 +77,35 @@ func main() {
 	)
 
 	// 1. Build in-VM binaries (included in the golden image).
-	log.Println("Ensuring micro-init binary...")
+	slog.Warn("ensuring micro-init binary")
 	if err := storage.EnsureMicroInit(microInitPath, cwd); err != nil {
-		log.Fatalf("Fatal: %v", err)
+		fatal("fatal: ensure micro-init", "err", err)
 	}
 
-	log.Println("Ensuring goose-agent binary...")
+	slog.Warn("ensuring goose-agent binary")
 	if err := storage.EnsureGooseAgent(gooseAgentPath, cwd); err != nil {
-		log.Fatalf("Fatal: %v", err)
+		fatal("fatal: ensure goose-agent", "err", err)
 	}
 
 	// 2. Bootstrap storage artifacts.
-	log.Println("Initializing Storage Provisioner...")
+	slog.Warn("initializing storage provisioner")
 	provisioner, err := storage.NewProvisioner(goldenImagePath, "/tmp/goose-workspaces", buildScriptPath)
 	if err != nil {
-		log.Fatalf("Fatal: %v", err)
+		fatal("fatal: storage provisioner", "err", err)
 	}
 
-	log.Println("Ensuring kernel binary...")
+	slog.Warn("ensuring kernel binary")
 	if err := storage.EnsureKernel(kernelPath, kernelDownloadURL); err != nil {
-		log.Fatalf("Fatal: %v", err)
+		fatal("fatal: ensure kernel", "err", err)
 	}
 
-	log.Println("Ensuring Firecracker binary...")
+	slog.Warn("ensuring firecracker binary")
 	if err := storage.EnsureFirecracker(firecrackerPath, firecrackerDownloadURL, firecrackerSHA256); err != nil {
-		log.Fatalf("Fatal: %v", err)
+		fatal("fatal: ensure firecracker", "err", err)
 	}
 
 	// 3. Network.
-	log.Println("Initializing Network Manager...")
+	slog.Warn("initializing network manager")
 	netManager := network.NewManager("10.0.1.", "10.0.1.1")
 
 	// 4. Start control plane.
@@ -88,7 +121,7 @@ func main() {
 		// Logging-and-continuing here would leave a "live" daemon process with
 		// a dead API, which silently masks the failure for any liveness probe.
 		if err := cp.Start(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Fatal: control plane API error: %v", err)
+			fatal("fatal: control plane api", "err", err)
 		}
 	}()
 	defer cp.Shutdown()
@@ -104,5 +137,5 @@ func main() {
 		}
 		break
 	}
-	log.Println("Shutting down...")
+	slog.Warn("shutting down")
 }

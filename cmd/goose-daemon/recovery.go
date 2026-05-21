@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"time"
 
@@ -31,24 +31,24 @@ func (cp *ControlPlane) RecoverVMs() (recovered int, failed []string, err error)
 	}
 	for _, s := range states {
 		if s.DiskMode == storage.DiskModeCOW {
-			log.Printf("Recovery: skipping VM [%s] (disk_mode=cow not supported in v0.3.2)", s.VMID)
+			slog.Warn("recovery: skipping cow vm (not supported in v0.3.2)", "vm_id", s.VMID)
 			continue
 		}
 		if _, statErr := os.Stat(s.DiskPath); os.IsNotExist(statErr) {
-			log.Printf("Recovery: VM [%s] disk missing at %s — dropping state", s.VMID, s.DiskPath)
+			slog.Warn("recovery: disk missing, dropping state", "vm_id", s.VMID, "disk_path", s.DiskPath)
 			storage.DeleteVMState(cp.workDir, s.VMID)
 			continue
 		}
 
 		// Clear orphans left by the previous daemon process.
 		if killErr := storage.KillStaleFirecracker(s.SocketPath); killErr != nil {
-			log.Printf("Recovery: VM [%s] stale Firecracker probe failed: %v (continuing)", s.VMID, killErr)
+			slog.Warn("recovery: stale firecracker probe failed", "vm_id", s.VMID, "err", killErr)
 		}
 		logFifoPath := fmt.Sprintf("/tmp/fc-%s-log.fifo", s.VMID)
 		storage.RemoveStaleVMArtifacts(s.SocketPath, s.VsockPath, logFifoPath)
 
 		if reErr := cp.netManager.ReclaimAllocation(s.TapDevice, s.GuestIP, s.MacAddr); reErr != nil {
-			log.Printf("Recovery: VM [%s] network reclaim failed: %v — dropping state", s.VMID, reErr)
+			slog.Warn("recovery: network reclaim failed, dropping state", "vm_id", s.VMID, "err", reErr)
 			storage.DeleteVMState(cp.workDir, s.VMID)
 			failed = append(failed, s.VMID)
 			cp.markFlockAgentDead(s.FlockID, s.AgentID)
@@ -70,7 +70,7 @@ func (cp *ControlPlane) RecoverVMs() (recovered int, failed []string, err error)
 			MemSizeMib:     s.MemSizeMib,
 		})
 		if startErr != nil {
-			log.Printf("Recovery: VM [%s] Firecracker start failed: %v", s.VMID, startErr)
+			slog.Warn("recovery: firecracker start failed", "vm_id", s.VMID, "err", startErr)
 			cp.netManager.Release(s.TapDevice, s.GuestIP)
 			storage.DeleteVMState(cp.workDir, s.VMID)
 			failed = append(failed, s.VMID)
@@ -81,7 +81,7 @@ func (cp *ControlPlane) RecoverVMs() (recovered int, failed []string, err error)
 		// 60s matches the spawn-path waitForAgent budget; cold boot of the
 		// golden image typically completes in 4–10s.
 		if waitErr := waitForAgent(s.GuestIP, 60*time.Second); waitErr != nil {
-			log.Printf("Recovery: VM [%s] goose-agent did not respond: %v", s.VMID, waitErr)
+			slog.Warn("recovery: agent did not respond", "vm_id", s.VMID, "err", waitErr)
 			machine.StopVMM()
 			cp.netManager.Release(s.TapDevice, s.GuestIP)
 			storage.DeleteVMState(cp.workDir, s.VMID)
@@ -96,6 +96,10 @@ func (cp *ControlPlane) RecoverVMs() (recovered int, failed []string, err error)
 			AgentURL: s.AgentURL,
 			Profile:  s.Profile,
 		}
+		memSize := s.MemSizeMib
+		if memSize == 0 {
+			memSize = 2048
+		}
 		cp.mu.Lock()
 		cp.vms[s.VMID] = &runningVM{
 			VMInfo:     info,
@@ -105,6 +109,8 @@ func (cp *ControlPlane) RecoverVMs() (recovered int, failed []string, err error)
 			machine:    machine,
 			tapDevice:  s.TapDevice,
 			socketPath: s.SocketPath,
+			memSizeMib: memSize,
+			spawnedAt:  s.CreatedAt,
 		}
 		cp.mu.Unlock()
 
@@ -114,12 +120,12 @@ func (cp *ControlPlane) RecoverVMs() (recovered int, failed []string, err error)
 				// Persist so a future LoadFromDisk reads ready rather than
 				// the dead state left by the previous daemon's watchdog.
 				if err := f.Persist(cp.workDir); err != nil {
-					log.Printf("Recovery: failed to persist ready status for %s: %v", s.AgentID, err)
+					slog.Warn("recovery: persist ready status failed", "agent_id", s.AgentID, "err", err)
 				}
 			}
 		}
 
-		log.Printf("Recovery: VM [%s] back up at %s (flock=%q agent=%q)", s.VMID, s.GuestIP, s.FlockID, s.AgentID)
+		slog.Warn("recovery: vm back up", "vm_id", s.VMID, "guest_ip", s.GuestIP, "flock_id", s.FlockID, "agent_id", s.AgentID)
 		recovered++
 	}
 	return recovered, failed, nil
@@ -138,7 +144,7 @@ func (cp *ControlPlane) markFlockAgentDead(flockID, agentID string) {
 	}
 	f.UpdateAgentStatus(agentID, orchestrator.AgentStatusDead)
 	if err := f.Persist(cp.workDir); err != nil {
-		log.Printf("Recovery: failed to persist dead status for %s: %v", agentID, err)
+		slog.Warn("recovery: persist dead status failed", "agent_id", agentID, "err", err)
 	}
 	if f.TownWall != nil {
 		f.TownWall.Post("<orchestrator>", fmt.Sprintf("agent %s could not be recovered after daemon restart (marked dead)", agentID))

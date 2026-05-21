@@ -3,7 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -165,7 +165,7 @@ func (cp *ControlPlane) createFlock(w http.ResponseWriter, r *http.Request) {
 
 	if _, err := flock.TownWall.Post("orchestrator",
 		fmt.Sprintf("Flock spawned with %d agents: %v", len(req.Roles), req.Roles)); err != nil {
-		log.Printf("Flock [%s]: failed to post initial Town Wall message: %v", flockID, err)
+		slog.Warn("flock: initial town wall post failed", "flock_id", flockID, "err", err)
 	}
 
 	// Persist before responding so a daemon crash between here and the next
@@ -174,7 +174,7 @@ func (cp *ControlPlane) createFlock(w http.ResponseWriter, r *http.Request) {
 	// for the duration of this daemon process. Uses Flock.Persist so the
 	// writeMu serializes against any concurrent watchdog/recovery write.
 	if err := flock.Persist(cp.workDir); err != nil {
-		log.Printf("Flock [%s]: failed to persist metadata: %v (still usable in memory)", flockID, err)
+		slog.Warn("flock: persist metadata failed (still in memory)", "flock_id", flockID, "err", err)
 	}
 
 	resp := FlockCreateResponse{
@@ -185,6 +185,7 @@ func (cp *ControlPlane) createFlock(w http.ResponseWriter, r *http.Request) {
 		TownWallURL: buildPublicURLPath("/flocks/" + flockID + "/wall"),
 		PostURL:     buildPublicURLPath("/flocks/" + flockID + "/post"),
 	}
+	cp.metrics.flockSpawn.Inc()
 	writeJSON(w, http.StatusCreated, resp)
 }
 
@@ -223,7 +224,7 @@ func (cp *ControlPlane) deleteFlock(w http.ResponseWriter, flockID string) {
 			_, alive := cp.vms[vmID]
 			cp.mu.RUnlock()
 			if !alive {
-				log.Printf("Flock [%s]: VM %s already absent (recovered or pre-destroyed)", flockID, vmID)
+				slog.Warn("flock: vm already absent", "flock_id", flockID, "vm_id", vmID)
 				return
 			}
 			cp.destroyVM(vmID)
@@ -231,9 +232,10 @@ func (cp *ControlPlane) deleteFlock(w http.ResponseWriter, flockID string) {
 	}
 	wg.Wait()
 	if err := orchestrator.DeleteFlockMetadata(cp.workDir, flockID); err != nil {
-		log.Printf("Flock [%s]: failed to remove persisted metadata: %v", flockID, err)
+		slog.Warn("flock: remove persisted metadata failed", "flock_id", flockID, "err", err)
 	}
-	log.Printf("Flock [%s] destroyed (%d agents)", flockID, len(agents))
+	slog.Warn("flock destroyed", "flock_id", flockID, "agents", len(agents))
+	cp.metrics.flockDestroy.Inc()
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "flock_id": flockID})
 }
 
@@ -381,7 +383,7 @@ func (cp *ControlPlane) restartAgent(w http.ResponseWriter, flockID, agentID str
 		// and let them decide whether to retry or DELETE the flock entirely.
 		f.UpdateAgentStatus(agentID, orchestrator.AgentStatusDead)
 		if perr := f.Persist(cp.workDir); perr != nil {
-			log.Printf("restartAgent: persist dead status failed for %s: %v", agentID, perr)
+			slog.Warn("restart agent: persist dead status failed", "agent_id", agentID, "err", perr)
 		}
 		writeJSONError(w, http.StatusInternalServerError, err)
 		return
@@ -389,9 +391,9 @@ func (cp *ControlPlane) restartAgent(w http.ResponseWriter, flockID, agentID str
 
 	f.UpdateAgentVM(agentID, info.VMID, info.AgentURL)
 	if err := f.Persist(cp.workDir); err != nil {
-		log.Printf("restartAgent: persist failed for flock %s: %v", flockID, err)
+		slog.Warn("restart agent: persist failed", "flock_id", flockID, "err", err)
 	}
-	log.Printf("Flock [%s]: agent %s restarted (vm %s → %s)", flockID, agentID, oldVMID, info.VMID)
+	slog.Warn("flock: agent restarted", "flock_id", flockID, "agent_id", agentID, "old_vm_id", oldVMID, "new_vm_id", info.VMID)
 	writeJSON(w, http.StatusOK, info)
 }
 
@@ -437,7 +439,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(v); err != nil {
-		log.Printf("writeJSON encode: %v", err)
+		slog.Warn("writeJSON encode failed", "err", err)
 	}
 }
 
