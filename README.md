@@ -149,6 +149,7 @@ DELETE /vms/{id}
 | **Auto-injected control-plane token** (v0.3.3) | When `EPHEMERA_API_TOKENS` is set, the host writes `apiClients[0].Token` into each flock VM at `/root/.ephemera-cp-token` (mode 0600); the in-VM `/townwall/post` forwarder reads it automatically. No more manual `EPHEMERA_CONTROL_PLANE_TOKEN` env inside every VM. |
 | **CP token hot rotation** (v0.3.4) | `EPHEMERA_API_TOKENS_FILE=/path/to/tokens` enables true hot rotation: edit the file, send SIGHUP, and the daemon both swaps `cp.clients` and fans the new token out to every running VM over vsock (`SET_CP_TOKEN` command, atomic file rewrite inside the guest). No per-VM restart needed for the in-VM forwarder to pick up the new bearer. |
 | **Env-tunable watchdog** (v0.3.4) | `EPHEMERA_WATCHDOG_INTERVAL_SEC` / `_TIMEOUT_SEC` / `_THRESHOLD` override the 5 s / 1 s / 3-fail defaults at startup. `EPHEMERA_WATCHDOG_AUTO_HEAL=true` opts in to self-healing — a `dead` agent that resumes responding is auto-marked `ready` (default off preserves sticky-dead). |
+| **Observability trio** (v0.3.5) | Prometheus `/metrics` endpoint (zero-dep exposition format, counters + gauges + histograms), per-VM `GET /vms/{vm_id}/stats` snapshot (cpu/mem/net/uptime/agent_busy), and a `log/slog` migration with `EPHEMERA_LOG_FORMAT=json` + `EPHEMERA_LOG_LEVEL=...` controls. See [Observability](#observability-v035). |
 
 ---
 
@@ -540,6 +541,9 @@ All settings are read from environment variables at startup.
 | `EPHEMERA_WATCHDOG_TIMEOUT_SEC` | `1` | Watchdog per-probe HTTP timeout (v0.3.4). Clamped: `interval` is bumped up to `timeout` if smaller. |
 | `EPHEMERA_WATCHDOG_THRESHOLD` | `3` | Consecutive probe failures before marking an agent `dead` (v0.3.4). |
 | `EPHEMERA_WATCHDOG_AUTO_HEAL` | `false` | When `true` (`1`/`yes`/`on` also accepted), a `dead` agent that resumes responding is auto-marked `ready` and a recovery notice posted to the Town Wall (v0.3.4). Default off preserves sticky-dead. |
+| `EPHEMERA_METRICS_REQUIRE_AUTH` | `false` | When `true`, `GET /metrics` requires a valid Bearer token like every other endpoint (v0.3.5). Default off matches the standard Prometheus scrape pattern; flip on when the metrics endpoint is exposed beyond a trusted network. |
+| `EPHEMERA_LOG_FORMAT` | `text` | `text` (default) emits `key=value` lines from `log/slog`'s TextHandler; `json` switches to JSONHandler for log-aggregation pipelines (v0.3.5). |
+| `EPHEMERA_LOG_LEVEL` | `warn` | Minimum slog level: `debug`, `info`, `warn`, or `error` (v0.3.5). Default `warn` preserves the previous `log.Printf` tone — every lifecycle event in the daemon is emitted at warn-or-higher so operators see it without configuration. |
 
 `EPHEMERA_API_ADDR` takes precedence over `EPHEMERA_API_PORT`. Most variables are read at startup; use SIGHUP to reload tokens. With `EPHEMERA_API_TOKENS_FILE` SIGHUP also propagates the new `apiClients[0].Token` to running VMs via vsock (v0.3.4).
 
@@ -680,6 +684,71 @@ curl -X DELETE http://localhost:3000/snapshots/snap-1778227847573 \
 ```
 
 > **Dependency rule**: A Full snapshot that is the base for one or more Diff snapshots cannot be deleted (returns `409 Conflict`). Delete all referencing Diff snapshots first.
+
+---
+
+### Per-VM Stats (v0.3.5)
+
+```
+GET /vms/{vm_id}/stats
+```
+
+Returns a point-in-time snapshot of host-observable VM stats. Authentication uses the **control plane Bearer token**.
+
+```json
+{
+  "vm_id": "vm-1778227000000",
+  "cpu_percent": 12.4,
+  "mem_used_mib": 187,
+  "mem_total_mib": 2048,
+  "uptime_seconds": 312,
+  "network_rx_bytes": 12849,
+  "network_tx_bytes": 5328,
+  "agent_busy": false
+}
+```
+
+| Field | Source |
+|-------|--------|
+| `cpu_percent` | 100 ms sample of `/proc/<firecracker_pid>/stat` (utime+stime). 100 = one full host core. |
+| `mem_used_mib` | `VmRSS:` line of `/proc/<firecracker_pid>/status`. |
+| `mem_total_mib` | VM spawn sizing (mirrors `VMState.MemSizeMib`). |
+| `uptime_seconds` | `time.Since(spawned_at)` — `VMState.CreatedAt` for recovered VMs. |
+| `network_rx_bytes`, `network_tx_bytes` | `/sys/class/net/<tap>/statistics/{tx,rx}_bytes`, swapped to VM perspective. |
+| `agent_busy` | 1 s `GET /health` against the in-VM agent; `true` when `status == "busy"`. |
+
+Per-VM stats failures (firecracker PID not resolvable, `/proc` race, agent unreachable) degrade fields to zero and emit a slog `Warn`; the endpoint still returns 200 so dashboards see partial data instead of intermittent errors.
+
+For bulk dashboards, `GET /vms?stats=true` returns the standard `[]VMInfo` list with an embedded `stats` field on each element.
+
+> The endpoint emits a snapshot. Streaming (`text/event-stream`) is on the v0.4.3 roadmap.
+
+---
+
+### Metrics (v0.3.5)
+
+```
+GET /metrics
+```
+
+Returns the control plane's Prometheus exposition payload (text format version 0.0.4). Unauthenticated by default; set `EPHEMERA_METRICS_REQUIRE_AUTH=true` to require a Bearer token like the other endpoints.
+
+Exposed series (additive — never breaks the wire format on minor bumps):
+
+| Family | Type | Labels | Notes |
+|--------|------|--------|-------|
+| `ephemera_vm_spawn_total` | counter | `outcome=ok\|fail` | every `spawnVMInternal` exit |
+| `ephemera_vm_destroy_total` | counter | `outcome=ok` | `destroyVM` after teardown |
+| `ephemera_snapshot_create_total` | counter | `type=full\|diff` | success path of `createSnapshot` |
+| `ephemera_snapshot_restore_total` | counter | `outcome` | dm-snapshot and bind-mount fallback both contribute |
+| `ephemera_flock_spawn_total` / `_destroy_total` | counter | — | success path of `createFlock` / `deleteFlock` |
+| `ephemera_watchdog_dead_total` / `_heal_total` | counter | — | dyingThreshold and autoHeal transitions |
+| `ephemera_sighup_reload_total` | counter | — | after `ReloadClients` completes |
+| `ephemera_cp_token_propagated_total` | counter | `outcome` | per-VM vsock fan-out result |
+| `ephemera_vm_count` / `_flock_count` / `_snapshot_count` / `_api_clients_count` | gauge | — | re-read on each scrape (GaugeFunc) |
+| `ephemera_vm_spawn_duration_seconds` | histogram | — | wall-clock spawn time |
+| `ephemera_snapshot_restore_duration_seconds` | histogram | — | wall-clock restore time |
+| `ephemera_watchdog_probe_duration_seconds` | histogram | — | per-probe `/health` duration |
 
 ---
 
@@ -1370,6 +1439,40 @@ done
 
 ---
 
+## Observability (v0.3.5)
+
+### Prometheus metrics
+
+The control plane exposes a counter / gauge / histogram catalogue at `GET /metrics`. Defaults follow the standard scrape model (unauthenticated, text format 0.0.4); see the [Metrics endpoint](#metrics-v035) under API Reference for the full catalogue and `EPHEMERA_METRICS_REQUIRE_AUTH` to gate it behind Bearer auth. The exposition formatter is self-implemented (`internal/metrics/`) — the project keeps its zero-runtime-dependency policy.
+
+### Structured logging (`log/slog`)
+
+Every daemon-side log call (control plane, recovery, watchdog, network, storage) was migrated from `log.Printf` to `log/slog`. Two env knobs control output:
+
+- `EPHEMERA_LOG_FORMAT=text` (default) — `key=value` lines from slog's TextHandler.
+- `EPHEMERA_LOG_FORMAT=json` — slog's JSONHandler, suitable for log-aggregation pipelines.
+- `EPHEMERA_LOG_LEVEL=debug|info|warn|error` (default `warn`) — minimum level emitted.
+
+Context fields are attached as structured pairs (`vm_id`, `flock_id`, `agent_id`, `err`, …) rather than embedded in the message string. The in-VM `goose-agent` keeps its existing `log.Printf` output unchanged this cycle to avoid touching the golden-image bake budget; revisit in v0.4.3.
+
+### Per-VM stats endpoint
+
+`GET /vms/{vm_id}/stats` returns a JSON snapshot of cpu/mem/network/uptime/agent_busy (see [Per-VM Stats](#per-vm-stats-v035) under API Reference). The endpoint is a point-in-time snapshot — repeated polling is the intended scrape pattern; streaming is on the v0.4.3 roadmap.
+
+### Try the demo (`observability_demo.sh`)
+
+`sudo bash observability_demo.sh` spins up the daemon, downloads + launches Prometheus and Grafana (cached under `artifacts/`), then runs an automatic workload that exercises every metric family (VM spawn/destroy, snapshot create, flock spawn, SIGHUP reload). After ~2 minutes a banner prints the URLs:
+
+| Service | URL | Notes |
+|---------|-----|-------|
+| Daemon API + `/metrics` | http://localhost:3000 | Bearer `demo-token-v035` for API calls; `/metrics` is unauthenticated |
+| Prometheus | http://localhost:9090 | 5-second scrape interval (demo-only) |
+| Grafana | http://localhost:3001 | `admin` / `admin`, dashboard "Ephemera Overview" pre-provisioned |
+
+The daemon, Prometheus, and Grafana remain running until you press `Ctrl-C`; the trap then shuts down all three and removes the per-run TSDB / data dir under `/tmp/observability-demo-*`. Targets Prometheus 2.51.x and Grafana 10.4.x (versions + SHA256 are pinned in the script).
+
+---
+
 ## Known Limitations
 
 | Limitation | Detail |
@@ -1381,6 +1484,7 @@ done
 | **COW-mode VMs are not auto-recovered** (v0.3.2) | VMs spawned with `EPHEMERA_DISK_MODE=cow` are skipped during cold-restart (logged on startup). dm-snapshot orphan cleanup is deferred. Workaround: re-spawn the agent if you depend on it. |
 | **Snapshot-restored VMs are not auto-recovered** (v0.3.2) | Only spawn-path VMs are cold-restarted. After a daemon restart, call `POST /snapshots/{id}/restore` again to bring back a snapshot-derived VM. |
 | **CP token rotation needs v0.3.4 VMs and `_TOKENS_FILE`** (updated v0.3.4) | v0.3.4 hot-propagates the new `apiClients[0].Token` to running VMs via vsock on SIGHUP. Two prerequisites: (a) the daemon must source tokens from `EPHEMERA_API_TOKENS_FILE` rather than env (env values are fixed at exec time and cannot change on SIGHUP); (b) the VMs must run a v0.3.4+ `goose-agent` (older ones lack the `SET_CP_TOKEN` vsock handler). When either is missing the v0.3.3 fallback (`POST /flocks/{id}/agents/{agent_id}/restart`) still works. |
+| **Metrics retention is external** (v0.3.5) | `/metrics` exposes raw counters and gauges only — the daemon does not aggregate, store, or rotate history. Operators are expected to wire an external Prometheus (or any text-exposition-compatible) scraper. |
 
 ---
 

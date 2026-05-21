@@ -1,3 +1,81 @@
+# v0.3.5 — Observability Trio
+
+**Ephemera** v0.3.5 lays down the observability primitives every later cycle will depend on: a Prometheus `/metrics` endpoint, a per-VM `/stats` snapshot endpoint, and a `log/slog` migration of every daemon-side log call. The release is additive — defaults preserve every v0.3.4 behavior, no wire format changed, no external dependency was added.
+
+---
+
+## What's New
+
+### Prometheus `/metrics` endpoint
+
+- New unauthenticated `GET /metrics` returns the daemon's Prometheus text exposition payload (format 0.0.4). `EPHEMERA_METRICS_REQUIRE_AUTH=true` gates the endpoint behind the same Bearer auth as the rest of the API (defaults follow the standard scrape model — network-level isolation expected).
+- Exposition formatter is hand-written (`internal/metrics/registry.go`, `internal/metrics/exposition.go`) so the project keeps its zero-runtime-dependency policy. Supports counters (`Counter`, `CounterVec` with label vectors), gauges (`Gauge`, `GaugeFunc` re-evaluated on every scrape), and histograms with configurable buckets (default `{0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60}`). All collectors are race-safe via `sync/atomic`.
+- Counters: `ephemera_vm_spawn_total{outcome}`, `ephemera_vm_destroy_total{outcome}`, `ephemera_snapshot_create_total{type}`, `ephemera_snapshot_restore_total{outcome}`, `ephemera_flock_spawn_total`, `ephemera_flock_destroy_total`, `ephemera_watchdog_dead_total`, `ephemera_watchdog_heal_total`, `ephemera_sighup_reload_total`, `ephemera_cp_token_propagated_total{outcome}`.
+- Gauges (GaugeFunc — re-read on every scrape): `ephemera_vm_count`, `ephemera_flock_count`, `ephemera_snapshot_count`, `ephemera_api_clients_count`.
+- Histograms: `ephemera_vm_spawn_duration_seconds`, `ephemera_snapshot_restore_duration_seconds`, `ephemera_watchdog_probe_duration_seconds` (per-probe bucket set tuned to `{0.05, 0.1, 0.25, 0.5, 1, 2, 5}`).
+- The mux is now two-level: `externalMux.Handle("/metrics", …)` is registered before the catch-all `externalMux.Handle("/", authMiddleware(internalMux))`, so ServeMux's most-specific-pattern rule routes scrape traffic past the bearer check by default. Watchdog observations flow into the registry through `Watchdog.OnDead` / `OnHeal` / `OnProbeDuration` callbacks — `internal/orchestrator/` deliberately does not import `internal/metrics/`.
+
+### Structured logging via `log/slog`
+
+- `go.mod` bumped from `go 1.18` to `go 1.21` to access `log/slog` from the standard library. CI's `go-version-file: go.mod` clause picks the new toolchain automatically; no `.github/workflows/` edits needed.
+- Every `log.Printf` / `log.Println` / `log.Fatalf` call in `cmd/goose-daemon/`, `internal/storage/`, `internal/orchestrator/`, and `internal/network/` (138 sites total) was migrated to `slog.Info` / `slog.Warn` / `slog.Error`. Messages were rewritten as short lowercase phrases (`"recovery: disk missing"`, `"snapshot: copying disk"`); inline format args became structured fields (`vm_id`, `flock_id`, `agent_id`, `snapshot_id`, `err`, …).
+- Two new env knobs: `EPHEMERA_LOG_FORMAT=text|json` (default `text`) selects TextHandler or JSONHandler; `EPHEMERA_LOG_LEVEL=debug|info|warn|error` (default `warn`) sets the minimum emitted level. The default preserves the previous `log.Printf` tone — every lifecycle event is emitted at warn-or-higher so operators see it without configuration.
+- `cmd/goose-agent/` (in-VM) deliberately retains its existing `log.Printf` output this cycle — touching the agent would trigger a golden-image rebuild, which is deferred to v0.4.3 (the streaming-tasks cycle that already touches in-VM code).
+
+### Per-VM `/stats` endpoint
+
+- New `GET /vms/{vm_id}/stats` returns `{vm_id, cpu_percent, mem_used_mib, mem_total_mib, uptime_seconds, network_rx_bytes, network_tx_bytes, agent_busy}` as a point-in-time snapshot. Authentication uses the same control-plane Bearer token as every other VM endpoint.
+- `cpu_percent` is sampled over 100 ms from `/proc/<firecracker_pid>/stat` (utime + stime). The Firecracker PID is resolved by tracing the socket path through `/proc/net/unix` (path → inode) and `/proc/<pid>/fd` (inode → process) — `firecracker-go-sdk` v1.0.0 does not expose the child PID directly. The resolved PID is cached on `runningVM.fcPID` (atomic) and re-validated on every stats request via `/proc/<pid>/comm`.
+- `mem_used_mib` from `VmRSS:` in `/proc/<pid>/status`; `mem_total_mib` from the per-VM spawn sizing (mirrored on `runningVM.memSizeMib`).
+- `network_rx_bytes` / `network_tx_bytes` from `/sys/class/net/<tap>/statistics/{tx,rx}_bytes`, swapped to the VM's perspective (host TAP `rx_bytes` = VM `tx_bytes`).
+- `uptime_seconds` from a new `runningVM.spawnedAt` (UTC) that mirrors the already-persisted `VMState.CreatedAt`. Recovered VMs inherit their original spawn time across daemon restarts.
+- `agent_busy` from a 1 s `GET /health` against the in-VM agent's existing endpoint, parsed as `{status: "idle"|"busy"}`. Direct HTTP (not via the proxy) so the response body can be JSON-decoded.
+- `GET /vms?stats=true` returns the full list with embedded `stats` blocks for bulk dashboards. Per-VM stats failures (PID not resolvable, `/proc` race, agent unreachable) degrade to zero values and emit a slog `Warn`; the response never partial-errors.
+
+### Tests
+
+- `internal/metrics/registry_test.go` adds `TestRegistry_Counter_Increments`, `TestRegistry_CounterVec_LabelsSeparate`, `TestRegistry_Gauge_SetReturnsLastValue`, `TestRegistry_GaugeFunc_CallsFunctionEachWrite`, `TestRegistry_Histogram_BucketsCumulative`, `TestRegistry_WriteTo_FormatMatchesSpec` (golden text output), `TestRegistry_WriteTo_EscapesLabelValues`, `TestRegistry_Concurrent_NoRace`, `TestRegistry_DuplicateName_Panics`, `TestRegistry_InvalidName_Panics`, `TestFormatFloat_IntegralVsFractional`.
+- `cmd/goose-daemon/metrics_handler_test.go` covers content-type, method enforcement, default-unauth, counter updates, and gauge func observation.
+- `cmd/goose-daemon/stats_handler_test.go` covers `/proc/<pid>/stat` parsing, `VmRSS` parsing, TAP statistics, the `/health` probe (busy / timeout), the 404 and method-not-allowed handler paths, and `?stats=true` partial-failure behaviour.
+- `cmd/goose-daemon/main_test.go` validates the slog format / level handler-selection logic.
+- `e2e_test.sh` step 61 (`/metrics` endpoint format) and step 62 (`/vms/{vm_id}/stats` schema + `?stats=true` inline form) live between the existing rotation cleanup (`58c.vii`) and the rotation-daemon shutdown (`60`).
+
+---
+
+## Upgrade Notes
+
+- **Go 1.21 toolchain required for local builds.** CI's `setup-go@v5` step picks this up from `go.mod` automatically, but contributors building locally must have `go1.21+` installed (`go version` to check). No source changes outside of the new `log/slog` imports rely on 1.21-specific stdlib.
+- **Wire compatibility is unchanged.** Every pre-existing endpoint behaves identically; the only additions are `GET /metrics` and `GET /vms/{vm_id}/stats` plus the optional `?stats=true` query on `GET /vms`.
+- **Log format change is opt-in.** The default `EPHEMERA_LOG_FORMAT=text` matches the previous `log.Printf` style closely enough that existing log scrapers / journals see the same kind of output (with structured fields appended). Set `EPHEMERA_LOG_FORMAT=json` only when an aggregator expects JSON. `EPHEMERA_LOG_LEVEL` defaults to `warn` so existing baseline noise stays the same; lower it to `info` or `debug` for troubleshooting.
+- **No new env var is required for default operation.** `EPHEMERA_METRICS_REQUIRE_AUTH`, `EPHEMERA_LOG_FORMAT`, `EPHEMERA_LOG_LEVEL` are all optional with sensible defaults.
+
+---
+
+## Changed / new files
+
+- `go.mod` — `go 1.21` (bump). `go.sum` regenerated by `go mod tidy`.
+- `internal/metrics/registry.go` — new. Registry + Counter/CounterVec/Gauge/GaugeFunc/Histogram.
+- `internal/metrics/exposition.go` — new. Prometheus text format 0.0.4 encoder.
+- `internal/metrics/registry_test.go` — new. 11 tests.
+- `cmd/goose-daemon/metrics_handler.go` — new. `daemonMetrics` bundle + `handleMetrics`.
+- `cmd/goose-daemon/metrics_handler_test.go` — new.
+- `cmd/goose-daemon/stats_handler.go` — new. `VMStats` + `VMInfoWithStats` + `handleVMStats` + `?stats=true` branch helper.
+- `cmd/goose-daemon/stats_handler_test.go` — new.
+- `cmd/goose-daemon/stats_collector.go` — new. PID resolution, `/proc` parsing, TAP stats, agent-busy probe.
+- `cmd/goose-daemon/main_test.go` — new. slog handler tests.
+- `cmd/goose-daemon/main.go` — `initSlog`, full `log` → `slog` migration, `fatal` helper.
+- `cmd/goose-daemon/config.go` — `metricsRequireAuth` var; `log` → `slog`.
+- `cmd/goose-daemon/api.go` — `ControlPlane.metrics`, `runningVM` adds `memSizeMib` / `spawnedAt` / `fcPID`, two-mux split, `/stats` routing, `?stats=true` branch, spawn / destroy / snapshot / restore / SIGHUP / CP-token counter wiring, `log` → `slog`.
+- `cmd/goose-daemon/orchestrator_api.go` — `flockSpawn` / `flockDestroy` counters, `log` → `slog`.
+- `cmd/goose-daemon/recovery.go` — `log` → `slog`, `runningVM.spawnedAt` / `memSizeMib` initialized from `VMState.CreatedAt` / `MemSizeMib`.
+- `internal/orchestrator/watchdog.go` — `OnDead` / `OnHeal` / `OnProbeDuration` callback fields; per-probe timer wraps `checkOne`. `log` → `slog`.
+- `internal/storage/provisioner.go` — `log` → `slog` (29 sites).
+- `internal/network/manager.go` — `log` → `slog` (6 sites).
+- `README.md` — `EPHEMERA_METRICS_REQUIRE_AUTH` / `EPHEMERA_LOG_FORMAT` / `EPHEMERA_LOG_LEVEL` rows; Per-VM Stats and Metrics endpoint subsections under API Reference; new Observability section under Resilience; Known Limitations row for external metrics retention; Key Features row for the observability trio.
+- `CONTRIBUTING.md` — three new "extra care" items: metrics counter discipline, slog message convention, per-VM stats PID resolution.
+
+---
+
 # v0.3.4 — Operational Convenience
 
 **Ephemera** v0.3.4 closes the last three operator-touch corners after v0.3.3: rotating the control-plane bearer no longer requires per-VM restarts, the watchdog cadence is overridable from the environment, and an opt-in self-heal returns recovered agents to `ready` for operators who prefer liveness over the sticky-dead default. The release is additive — defaults preserve every v0.3.3 behavior, no wire format changed, and every existing env var keeps working.
