@@ -61,6 +61,7 @@ go build ./cmd/anvil-mcp
 go build ./cmd/anvil-scheduler
 bash -n e2e_test.sh
 bash -n scripts/anvil-mcp-e2e.sh
+bash -n scripts/vm-workload-e2e.sh
 ```
 
 `anvil-v0.1.0` Release 본문은 이미 게시된 첫 통합 release의 historical body다.
@@ -69,6 +70,14 @@ trace export, ephemera `v0.3.1` Goosetown hardening, Goosetown MCP tool surface�
 포함하는 두 번째 integration release로 게시됐다. KVM host가 준비된 release
 candidate에서는 58단계 `sudo bash e2e_test.sh`와 `scripts/anvil-mcp-e2e.sh flock`을
 함께 확인한다.
+
+script-only workload runner를 포함하는 release candidate에서는 KVM host에서
+`sudo -n bash scripts/vm-workload-e2e.sh`도 확인한다. 이 검증은
+`/vms/{vm_id}/workloads/run`을 사용하므로 LLM provider key 없이 nginx 설치/기동,
+Go HTTP server 기동, VM 내부 benchmark, host-to-VM probe를 확인한다. 결과 artifact는
+`summary.json`, `nginx-run.json`, `go-http-run.json`, `nginx.log`, `go-http.log`,
+`bench.txt`, `host-bench.txt`를 포함해야 하며 provider token, API key,
+control-plane token, agent token을 포함하지 않아야 한다.
 
 ### 다음 upstream runtime 후보
 

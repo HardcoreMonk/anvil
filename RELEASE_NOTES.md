@@ -1,12 +1,58 @@
 # Unreleased — 다음 운영 확장 후보
 
-아직 `anvil-v0.2.0` 이후 확정된 runtime/product release 변경은 없다. 다음 후보는
-upstream ephemera `v0.3.2`/`v0.3.3` sync 검토, scheduler service production
-deployment automation, cross-host snapshot replication, scheduler-aware cross-host
-flock placement, L7 egress proxy/SNI hardening, snapshot storage quota dashboard다.
+`anvil-v0.2.0` 이후 다음 runtime/product 변경이 release candidate로 준비됐다.
+
+## 추가됨
+
+- guest `goose-agent`에 authenticated `POST /workloads/run` endpoint를 추가했다.
+  이 경로는 `/workspace/workloads/*.sh` script만 실행하며 LLM provider credential과
+  `/tasks` prompt 실행에 의존하지 않는다.
+- daemon에 `POST /vms/{vm_id}/workloads/run` proxy route를 추가했다. 기존 agent
+  token 주입 proxy 경로를 재사용하므로 외부 caller는 control-plane auth만 사용한다.
+- `scripts/vm-workload-e2e.sh`는 deterministic workload 실행을 `/tasks`에서
+  `/workloads/run`으로 전환했다. 결과 artifact는 `nginx-run.json`,
+  `go-http-run.json`, `nginx.log`, `go-http.log`, `bench.txt`, `host-bench.txt`를
+  사용한다.
+- Go HTTP workload는 VM 내부에서 대형 Go toolchain을 설치하지 않고 host에서
+  `linux/amd64` static binary를 build한 뒤 gzip artifact로 업로드한다.
+
+## 보안/운영 hardening
+
+- workload path는 `workloads/` prefix, `.sh` suffix, regular file 조건을 만족해야
+  하며 final file symlink, `workloads` root symlink, nested parent directory symlink를
+  거부한다.
+- workload timeout 시 `bash` process group 전체에 `SIGKILL`을 보내 background child
+  process가 남지 않도록 했다.
+- workload process는 parent process `os.Environ()`을 상속하지 않고 최소 env만 받는다.
+- stdout/stderr는 각각 1 MiB로 cap하고 truncation flag를 JSON result에 기록한다.
+
+## 검증됨
+
+- `go test ./...`
+- `go build -o anvil-daemon ./cmd/goose-daemon/`
+- `bash -n scripts/workloads/nginx-smoke.sh`
+- `bash -n scripts/workloads/go-http-bench.sh`
+- `bash -n scripts/vm-workload-e2e.sh`
+- 실제 KVM host에서 `sudo -n bash scripts/vm-workload-e2e.sh`
+  - artifact: `/tmp/anvil-workload-e2e-20260521-114816`
+  - `pass: true`
+  - nginx host probe: `200`
+  - Go HTTP host probe: `200`
+  - host benchmark: `curl-loop`
+- artifact secret scan:
+  `GOOGLE_API_KEY|ANTHROPIC_API_KEY|OPENAI_API_KEY|Authorization: Bearer|agent_token`
+  패턴 없음.
+
+다음 후보는 upstream ephemera `v0.3.2`/`v0.3.3` sync 검토, scheduler service
+production deployment automation, cross-host snapshot replication,
+scheduler-aware cross-host flock placement, L7 egress proxy/SNI hardening,
+snapshot storage quota dashboard다.
 
 ## 문서화됨
 
+- script-only workload runner의 design/implementation plan, runtime/service
+  architecture, runbook, workload E2E design spec을 현재 `/workloads/run` 계약에
+  맞춰 갱신했다.
 - upstream ephemera `v0.3.2`와 `v0.3.3`의 tag, commit, diff 근거와 anvil 채택
   검토 포인트를
   `docs/analysis/08-v0.3.2-v0.3.3-upstream-change-review.md`에 추가했다.
