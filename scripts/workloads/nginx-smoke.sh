@@ -4,7 +4,21 @@ set -Eeuo pipefail
 result_dir="/workspace/workloads/results"
 log_file="$result_dir/nginx.log"
 mkdir -p "$result_dir"
-exec > >(tee "$log_file") 2>&1
+
+log_fifo="$result_dir/nginx.log.fifo"
+rm -f "$log_fifo"
+mkfifo "$log_fifo"
+tee "$log_file" <"$log_fifo" &
+tee_pid=$!
+exec >"$log_fifo" 2>&1
+rm -f "$log_fifo"
+cleanup_log_tee() {
+  local status=$?
+  exec >/dev/null 2>&1
+  wait "$tee_pid" 2>/dev/null || true
+  exit "$status"
+}
+trap cleanup_log_tee EXIT
 
 export DEBIAN_FRONTEND=noninteractive
 
