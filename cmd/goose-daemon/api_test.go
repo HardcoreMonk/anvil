@@ -1458,3 +1458,66 @@ func TestDeleteSnapshotFailureDoesNotExposeSnapshotPath(t *testing.T) {
 		t.Fatalf("gc body = %q, must not expose snapshot path %q", gcRR.Body.String(), snapDir)
 	}
 }
+
+func TestHandleVMProxiesWorkloadRun(t *testing.T) {
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/workloads/run" {
+			t.Fatalf("agent path = %q, want /workloads/run", r.URL.Path)
+		}
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer agent-token" {
+			t.Fatalf("Authorization = %q, want Bearer agent-token", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"script":"workloads/ok.sh","exit_code":0,"stdout":"ok","stderr":"","duration_ms":1,"timed_out":false}`))
+	}))
+	defer agent.Close()
+
+	host, port, err := net.SplitHostPort(strings.TrimPrefix(agent.URL, "http://"))
+	if err != nil {
+		t.Fatalf("split host port: %v", err)
+	}
+	oldAgentPort := agentPort
+	agentPort, err = strconv.Atoi(port)
+	if err != nil {
+		t.Fatalf("parse port: %v", err)
+	}
+	defer func() { agentPort = oldAgentPort }()
+
+	cp := newTestCP(t)
+	cp.agentHTTPClient = agent.Client()
+	cp.vms["vm-1"] = &runningVM{
+		VMInfo: VMInfo{
+			VMID:    "vm-1",
+			GuestIP: host,
+		},
+		agentToken: "agent-token",
+	}
+	req := httptest.NewRequest(http.MethodPost, "/vms/vm-1/workloads/run", strings.NewReader(`{"script":"workloads/ok.sh"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	cp.handleVM(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q; want 200", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"exit_code":0`) {
+		t.Fatalf("body = %q, want exit_code 0", rr.Body.String())
+	}
+}
+
+func TestHandleVMWorkloadRunRequiresPost(t *testing.T) {
+	cp := newTestCP(t)
+	req := httptest.NewRequest(http.MethodGet, "/vms/vm-1/workloads/run", nil)
+	rr := httptest.NewRecorder()
+
+	cp.handleVM(rr, req)
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", rr.Code)
+	}
+}

@@ -379,6 +379,7 @@ func (cp *ControlPlane) Start() error {
 	log.Printf("  DELETE /vms/{vm_id}                      — stop VM")
 	log.Printf("  POST   /vms/{vm_id}/snapshot             — create snapshot")
 	log.Printf("  POST   /vms/{vm_id}/tasks                — proxy: run task on agent")
+	log.Printf("  POST   /vms/{vm_id}/workloads/run        - proxy: run workload script on agent")
 	log.Printf("  GET/PUT /vms/{vm_id}/workspace?path=...  — proxy: workspace file read/write")
 	log.Printf("  GET    /vms/{vm_id}/health               — proxy: agent health check")
 	log.Printf("  POST   /vms/{vm_id}/stop                 — proxy: stop agent")
@@ -496,6 +497,16 @@ func (cp *ControlPlane) handleVM(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		cp.proxyAgentEndpoint(w, r, vmID, "/tasks")
+		return
+	}
+
+	if strings.HasSuffix(path, "/workloads/run") {
+		vmID := strings.TrimSuffix(path, "/workloads/run")
+		if r.Method != http.MethodPost {
+			http.Error(w, `{"error":"POST required"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		cp.proxyAgentEndpoint(w, r, vmID, "/workloads/run")
 		return
 	}
 
