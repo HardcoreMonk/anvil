@@ -158,17 +158,29 @@ DELETE /vms/{id}
 ```
 cmd/
   goose-daemon/       Control plane daemon (main binary)
-    main.go           Startup, artifact bootstrap, ControlPlane init
+    main.go           Startup, artifact bootstrap, ControlPlane init,
+                      initSlog (TextHandler/JSONHandler + level gating, v0.3.5)
     api.go            HTTP API: VM + snapshot CRUD, auth middleware,
+                      two-mux split for unauthenticated /metrics (v0.3.5),
                       spawnVMInternal (shared by /vms and /flocks paths;
                       AgentToken / ControlPlaneToken plumb-through),
+                      counter/histogram wiring for spawn/destroy/snapshot/
+                      flock/SIGHUP/CP-token paths (v0.3.5),
                       controlPlaneTokenForVM (apiClients[0] → in-VM bearer)
     config.go         Env-var configuration + AgentProfile / LookupProfile
-                      (role → vCPU, memory, profile directory mapping)
+                      (role → vCPU, memory, profile directory mapping);
+                      EPHEMERA_METRICS_REQUIRE_AUTH (v0.3.5)
     orchestrator_api.go  /flocks endpoints, SSE Town Wall streaming,
-                      restartAgent (per-agent restart endpoint)
+                      restartAgent (per-agent restart endpoint),
+                      flock_spawn / flock_destroy counter increments (v0.3.5)
     recovery.go       RecoverVMs (cold-restart) + flock cross-link;
-                      markFlockAgentDead persists dead status
+                      markFlockAgentDead persists dead status;
+                      restores runningVM.spawnedAt from VMState.CreatedAt (v0.3.5)
+    metrics_handler.go   daemonMetrics bundle + handleMetrics (v0.3.5)
+    stats_handler.go     /vms/{vm_id}/stats + ?stats=true branch (v0.3.5)
+    stats_collector.go   Firecracker PID resolution via /proc/net/unix →
+                      /proc/<pid>/fd inode trace, /proc/<pid>/stat CPU sampling,
+                      VmRSS, TAP statistics, agent /health probe (v0.3.5)
   goose-agent/        In-VM HTTP agent (baked into golden image)
     main.go           /tasks, /health, /stop, /townwall/post  (Bearer token auth);
                       prepends role system prompt to /tasks bodies
@@ -198,8 +210,14 @@ internal/
     persistence.go    FlockMetadata Save/Load/Delete/List (raw API;
                       always go through Flock.Persist for live flocks)
     watchdog.go       Per-VM health probing + dead marking;
-                      onFailure persists status, ForgetVM clears restart caches
+                      onFailure persists status, ForgetVM clears restart caches;
+                      OnDead/OnHeal/OnProbeDuration metric callbacks (v0.3.5)
     handoff.go        Structured JSON handoff between agents
+  metrics/            Self-implemented Prometheus exposition formatter (v0.3.5)
+    registry.go       Registry + Counter/CounterVec/Gauge/GaugeFunc/Histogram
+                      types (atomic, race-safe; zero external dependency)
+    exposition.go     Text format 0.0.4 writer — HELP/TYPE/value lines,
+                      label-value escaping, histogram bucket + _count + _sum
 
 configs/
   goose.yaml.example             Default provider/model template
@@ -210,6 +228,12 @@ configs/
       goose-secrets.yaml         (gitignored; copied from .example)
       system.md                  Role system prompt prepended to /tasks (optional)
     researcher/  worker/  reviewer/  orchestrator/    ← built-in role profiles
+  observability/                 Provisioning bundle for observability_demo.sh (v0.3.5)
+    prometheus.yml               Prometheus scrape config (localhost:3000, 5s)
+    grafana-datasource.yml       Prometheus datasource provisioning
+    grafana-dashboards.yml       Grafana dashboards-provider provisioning
+    dashboards/
+      ephemera-overview.json     Pre-built Grafana 10.x dashboard (8 panels)
 
 .github/
   workflows/ci.yml    go build + go vet + go test on push/PR (ubuntu-22.04)
@@ -221,7 +245,8 @@ snapshots/            Stored snapshot directories (auto-created, gitignored)
     rootfs.ext4       Disk copy (always full, ~700 MB)
     metadata.json     Restore params (IP, TAP, MAC, token, type, base_snapshot_id)
 
-e2e_test.sh           End-to-end integration test (60 numbered steps incl. resilience + v0.3.3 sub-steps; requires /dev/kvm + root)
+e2e_test.sh           End-to-end integration test (62 numbered steps incl. resilience + v0.3.3 / v0.3.4 / v0.3.5 sub-steps; requires /dev/kvm + root)
+observability_demo.sh One-shot live demo: daemon + Prometheus + Grafana, auto workload, browser-driven exploration until Ctrl-C (v0.3.5)
 
 scripts/
   build_image.sh      Builds golden image (Debian Bookworm + Goose + goose-agent + micro-init + gtwall)
@@ -242,6 +267,8 @@ artifacts/            Auto-populated at runtime (gitignored)
   firecracker         Firecracker VMM binary (SHA256-verified)
   goose-agent         In-VM HTTP agent binary (compiled from source)
   micro-init          PID 1 init binary (compiled from source)
+  prometheus-X.Y.Z.linux-amd64/   Prometheus binary (downloaded by observability_demo.sh, SHA256-pinned, v0.3.5)
+  grafana-vX.Y.Z/                 Grafana OSS binary (downloaded by observability_demo.sh, SHA256-pinned, v0.3.5)
 ```
 
 ---
@@ -252,12 +279,12 @@ artifacts/            Auto-populated at runtime (gitignored)
 |-------------|--------|
 | **Host OS** | Ubuntu 22.04 or 24.04 (bare metal, or VM with nested virtualization) |
 | **CPU** | `/dev/kvm` accessible |
-| **Go** | 1.18+ |
-| **Packages** | `curl`, `debootstrap`, `e2fsprogs`, `util-linux` |
+| **Go** | 1.21+ (bumped in v0.3.5 for stdlib `log/slog`) |
+| **Packages** | `curl`, `debootstrap`, `e2fsprogs`, `util-linux`, `jq` (e2e + demo), `dmsetup` (snapshot/COW tests) |
 | **Privileges** | `sudo` at runtime (KVM + network interface management) |
 
 ```bash
-sudo apt-get install -y curl debootstrap e2fsprogs util-linux
+sudo apt-get install -y curl debootstrap e2fsprogs util-linux jq dmsetup
 ```
 
 Firecracker, the Linux kernel, and the golden image are **downloaded and built automatically** on first run.
@@ -326,7 +353,7 @@ go test ./...           # standard
 go test -race ./...     # mandatory before merging concurrency-sensitive changes
 ```
 
-Covers: API token parsing, LLM profile path resolution, agent auth middleware, token generation, Town Wall append/history/seq monotonicity, flock metadata persistence round-trip and disk recovery, watchdog dead-marking under failure thresholds, artifact staleness check, per-VM state.json round-trip/sort/idempotent-delete/empty-workdir.
+Covers: API token parsing, LLM profile path resolution, agent auth middleware, token generation, Town Wall append/history/seq monotonicity, flock metadata persistence round-trip and disk recovery, watchdog dead-marking under failure thresholds (incl. v0.3.4 Configure + auto-heal tunables), artifact staleness check, per-VM state.json round-trip/sort/idempotent-delete/empty-workdir, **Prometheus registry counters / counter-vecs / gauges / histograms** (race-safe, exposition format spec compliance, label escaping) (v0.3.5), **`/metrics` handler** (content-type, GET-only, default-unauth, counter/gauge reflection) (v0.3.5), **`/vms/{vm_id}/stats` handler** (`/proc/<pid>/stat`+`/status` parsing, TAP statistics, agent-busy probe with timeout, `?stats=true` inline branch) (v0.3.5), **slog handler selection** (TextHandler vs JSONHandler, `EPHEMERA_LOG_LEVEL` gating) (v0.3.5).
 
 ### End-to-end test (`e2e_test.sh`)
 
@@ -340,7 +367,7 @@ go build -o ephemera-daemon ./cmd/goose-daemon/
 sudo bash e2e_test.sh
 ```
 
-**What it tests (58 steps):**
+**What it tests (62 numbered steps incl. sub-steps):**
 
 | Steps | Scenario |
 |-------|----------|
@@ -375,13 +402,15 @@ sudo bash e2e_test.sh
 | 57e | **Cold-restart VM IDs preserved** — every pre-restart `vm_id` reappears in `GET /vms` with same identity |
 | 57f | **Recovered VM `/health` responds** — proxy `GET /vms/{id}/health` returns 200 for each cold-restarted member |
 | 57g | `DELETE` on a recovered flock removes its `metadata.json` |
-| 57h | Daemon log shows the `Watchdog started` line for each daemon invocation |
+| 57h | Daemon log shows the `watchdog started` slog line for each daemon invocation (lowercase since the v0.3.5 slog migration) |
 | 57i | **Watchdog persists dead status to disk** (v0.3.3) — kill an in-VM agent, watchdog marks `dead`, `flocks/{id}/metadata.json` on disk reflects `dead` before the next probe (Persist hook fired). Daemon restart is intentionally not part of this step because cold-restart of a healthy guest legitimately re-flips to `ready`. |
 | 57j | **Per-agent restart preserves identity + token** (v0.3.3) — `POST /flocks/{id}/agents/{agent_id}/restart` swaps `vm_id`, keeps role/token; new VM's `/townwall/post` accepts the OLD token |
 | 58 | Daemon graceful shutdown |
 | 58b | **Auth-on CP token auto-injection** (v0.3.3) — restart daemon with `EPHEMERA_API_TOKENS` set; flock VM's `/townwall/post` forward to CP returns 200 without any in-VM env setup |
 | 59 | **Real-LLM round-trip** (v0.3.3) — when `GOOGLE_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` is in env, spawn researcher, send `/tasks`, verify `ROUNDTRIP_OK` reaches Town Wall via `gtwall`. Skipped (ok) when no key. |
-| 58c | **CP token hot rotation via SIGHUP** (v0.3.4) — restart daemon with `EPHEMERA_API_TOKENS_FILE`; spawn flock under v1; edit file to v2 + SIGHUP; verify post-rotation `/townwall/post` still 200 (in-VM `/root/.ephemera-cp-token` rewritten via vsock), v1 operator bearer now 401, and the daemon log carries `SIGHUP: CP token propagated`. |
+| 58c | **CP token hot rotation via SIGHUP** (v0.3.4) — restart daemon with `EPHEMERA_API_TOKENS_FILE`; spawn flock under v1; edit file to v2 + SIGHUP; verify post-rotation `/townwall/post` still 200 (in-VM `/root/.ephemera-cp-token` rewritten via vsock), v1 operator bearer now 401, and the daemon log carries `msg="sighup: cp token propagated" ok=N total=M` (slog form since v0.3.5). |
+| 61 | **`/metrics` endpoint format** (v0.3.5) — `GET /metrics` returns 200 unauthenticated, `Content-Type: text/plain; version=0.0.4`, body contains `# HELP`/`# TYPE` lines plus `ephemera_vm_count` gauge and `ephemera_sighup_reload_total` counter samples. |
+| 62 | **Per-VM `/stats` endpoint + `?stats=true`** (v0.3.5) — spawn a VM, `GET /vms/{vm_id}/stats` returns a JSON snapshot with `uptime_seconds ≥ 0`, `mem_total_mib > 0`, numeric `cpu_percent`; `GET /vms?stats=true` inlines the same `stats` block on every VM list entry. |
 | 60 | Rotation daemon shutdown |
 
 **Example output (passing, flock steps 51–60):**
