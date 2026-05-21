@@ -22,22 +22,22 @@ anvil의 full KVM E2E를 VM lifecycle smoke에서 실제 workload 검증으로 �
 
 ## 현재 제약
 
-현재 VM 내부 실행 surface는 다음 두 endpoint다.
+현재 deterministic workload 실행 surface는 다음 endpoint다.
 
 - `PUT/GET /vms/{vm_id}/workspace`
-- `POST /vms/{vm_id}/tasks`
+- `POST /vms/{vm_id}/workloads/run`
 
-`/tasks`는 guest `goose-agent`가 `/usr/local/bin/goose run -i -`를 실행하는 구조다.
-따라서 1차 구현은 host가 workload script를 `/workspace`로 업로드하고, task prompt는
-"업로드된 script를 그대로 실행하고 marker를 출력하라"는 제한된 역할만 맡긴다.
+`/workloads/run`은 guest `goose-agent`가 `/workspace/workloads/*.sh` script를 직접
+실행하는 script-only 경로다. Host는 workload script를 `/workspace`로 업로드한 뒤,
+script 상대 경로를 `/vms/{vm_id}/workloads/run`에 전달한다.
 
-이 방식은 raw shell API보다 보안 표면이 작고 기존 API와 호환된다. 대신 LLM/provider
-상태가 task 시작 단계에 영향을 줄 수 있으므로, benchmark 수치는 script output marker와
-artifact를 기준으로만 판정한다.
+이 방식은 raw shell API보다 보안 표면이 작고, LLM/provider 상태가 workload 시작 단계에
+영향을 주지 않는다. `/tasks`는 guest `goose-agent`가 `/usr/local/bin/goose run -i -`를
+실행하는 real LLM smoke 전용 경로로 유지한다.
 
 ## 후속 반영: Script Workload Runner
 
-`2026-05-21-anvil-script-workload-runner-design.md`가 승인되면 deterministic workload
+`2026-05-21-anvil-script-workload-runner-design.md`가 반영되어 deterministic workload
 E2E는 `/tasks` 대신 `/vms/{vm_id}/workloads/run`을 사용한다. 이 변경 후 nginx/Go HTTP
 workload 실행은 LLM provider credential에 의존하지 않는다. `/tasks`는 real LLM smoke
 전용 경로로 유지한다.
@@ -52,7 +52,7 @@ workload 실행은 LLM provider credential에 의존하지 않는다. `/tasks`�
 - `scripts/workloads/go-http-server.go`: VM 내부 테스트 HTTP server
 - `scripts/workloads/go-http-bench.sh`: Go server 실행과 간단 benchmark
 
-`scripts/vm-workload-e2e.sh`는 daemon 시작, VM 생성, workload 업로드, task 실행,
+`scripts/vm-workload-e2e.sh`는 daemon 시작, VM 생성, workload 업로드, workload 실행,
 host-side 검증, artifact 수집, cleanup을 소유한다.
 
 ## 실행 흐름
@@ -65,7 +65,7 @@ host-side 검증, artifact 수집, cleanup을 소유한다.
 2. `anvil-daemon`을 시작하거나 명시된 기존 daemon에 연결한다.
 3. `POST /vms`로 workload VM을 생성한다.
 4. workload 파일을 `/workspace/workloads/` 아래로 업로드한다.
-5. `POST /vms/{vm_id}/tasks`로 VM 내부 script 실행을 요청한다.
+5. `POST /vms/{vm_id}/workloads/run`로 VM 내부 script 실행을 요청한다.
 6. VM 내부 script는 다음 marker를 출력한다.
    - `ANVIL_WORKLOAD_NGINX_READY`
    - `ANVIL_WORKLOAD_GO_HTTP_READY`
@@ -86,7 +86,8 @@ network를 함께 검증한다.
 각 실행은 `/tmp/anvil-workload-e2e-<timestamp>/` 아래에 결과를 남긴다.
 
 - `summary.json`: pass/fail/skipped, VM ID, guest IP, timing, benchmark 요약
-- `task-output.json`: `/tasks` raw response
+- `nginx-run.json`: `workloads/nginx-smoke.sh` runner response
+- `go-http-run.json`: `workloads/go-http-bench.sh` runner response
 - `nginx.log`: nginx 설치, 기동, curl 결과
 - `go-http.log`: Go server build/run 결과
 - `bench.txt`: VM 내부 및 host-side benchmark output
