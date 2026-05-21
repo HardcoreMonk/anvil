@@ -155,9 +155,12 @@ fetch_workspace_file() {
 
 build_go_http_server() {
   local output="$ARTIFACT_DIR/go-http-server"
+  local compressed="$ARTIFACT_DIR/go-http-server.gz"
   require_cmd go || exit 1
-  if env CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$output" ./scripts/workloads/go-http-server.go; then
-    ok "Built workload asset go-http-server"
+  require_cmd gzip || exit 1
+  if env CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "$output" ./scripts/workloads/go-http-server.go &&
+    gzip -c "$output" >"$compressed"; then
+    ok "Built workload asset go-http-server.gz"
   else
     fail "workspace_upload_failed: could not build go-http-server"
     exit 1
@@ -342,7 +345,7 @@ build_go_http_server
 step "Upload workload files"
 upload_workspace_file scripts/workloads/nginx-smoke.sh workloads/nginx-smoke.sh
 upload_workspace_file scripts/workloads/go-http-server.go workloads/go-http-server.go
-upload_workspace_file "$ARTIFACT_DIR/go-http-server" workloads/go-http-server
+upload_workspace_file "$ARTIFACT_DIR/go-http-server.gz" workloads/go-http-server.gz
 upload_workspace_file scripts/workloads/go-http-bench.sh workloads/go-http-bench.sh
 
 # Current workload artifacts: nginx-run.json and go-http-run.json.

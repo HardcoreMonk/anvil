@@ -46,6 +46,10 @@ if ! command -v curl >/dev/null 2>&1; then
   apt-get install -y --no-install-recommends curl ca-certificates
 fi
 
+if [ ! -f "$server_bin" ] && [ -f "$server_bin.gz" ]; then
+  gzip -dc "$server_bin.gz" >"$server_bin"
+fi
+
 if [ -f "$server_bin" ]; then
   chmod +x "$server_bin"
   echo "[go-http] using prebuilt server binary $server_bin"
