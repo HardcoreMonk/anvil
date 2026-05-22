@@ -1,0 +1,30 @@
+[Unit]
+Description=anvil runtime scheduler service
+Documentation=file:/usr/share/doc/anvil/runbook.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=anvil
+Group=anvil
+WorkingDirectory=/var/lib/anvil
+EnvironmentFile=-/etc/anvil/anvil-scheduler.env
+ExecStart=/usr/local/bin/anvil-scheduler
+Restart=on-failure
+RestartSec=2s
+
+StateDirectory=anvil
+RuntimeDirectory=anvil
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/anvil
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryDenyWriteExecute=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

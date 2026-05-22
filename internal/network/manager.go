@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"strconv"
 	"sync"
 )
 
@@ -92,6 +93,33 @@ func (m *Manager) setupBridge() error {
 		}
 	}
 
+	return nil
+}
+
+// AllowBridgeHostPort permits VM-to-host callbacks from the private bridge to
+// a specific TCP port on the bridge gateway. This is required on hosts whose
+// INPUT policy is DROP; FORWARD/NAT rules alone do not allow packets addressed
+// to the host itself, such as in-VM Town Wall posts to 10.0.1.1:3000.
+func (m *Manager) AllowBridgeHostPort(port int) error {
+	if port <= 0 || port > 65535 {
+		return fmt.Errorf("invalid host port %d", port)
+	}
+	rule := []string{
+		"INPUT",
+		"-i", m.bridgeName,
+		"-s", m.subnet + "0/24",
+		"-d", m.gatewayIP,
+		"-p", "tcp",
+		"--dport", strconv.Itoa(port),
+		"-j", "ACCEPT",
+		"-m", "comment", "--comment", "anvil-cp-callback",
+	}
+	if m.command("iptables", append([]string{"-C"}, rule...)...) == nil {
+		return nil
+	}
+	if err := m.command("iptables", append([]string{"-I"}, rule...)...); err != nil {
+		return fmt.Errorf("add bridge host input rule: %w", err)
+	}
 	return nil
 }
 

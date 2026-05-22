@@ -213,6 +213,31 @@ func TestResolveAPIAddr_InvalidCanonicalPortDoesNotFallBackToAlias(t *testing.T)
 	}
 }
 
+func TestBridgeCallbackPortAllowsWildcardBinds(t *testing.T) {
+	for _, addr := range []string{"0.0.0.0:3000", ":3000", "[::]:3000"} {
+		port, ok := bridgeCallbackPort(addr)
+		if !ok || port != 3000 {
+			t.Fatalf("bridgeCallbackPort(%q) = %d, %v; want 3000, true", addr, port, ok)
+		}
+	}
+}
+
+func TestBridgeCallbackPortRejectsLoopbackBinds(t *testing.T) {
+	for _, addr := range []string{"127.0.0.1:3000", "localhost:3000", "[::1]:3000"} {
+		port, ok := bridgeCallbackPort(addr)
+		if ok || port != 0 {
+			t.Fatalf("bridgeCallbackPort(%q) = %d, %v; want 0, false", addr, port, ok)
+		}
+	}
+}
+
+func TestBridgeCallbackPortRejectsUnparseableAddr(t *testing.T) {
+	port, ok := bridgeCallbackPort("not-a-listen-addr")
+	if ok || port != 0 {
+		t.Fatalf("bridgeCallbackPort invalid addr = %d, %v; want 0, false", port, ok)
+	}
+}
+
 func TestResolvePublicURL_FromAnvilAlias(t *testing.T) {
 	clearDaemonConfigEnv(t)
 	t.Setenv("ANVIL_PUBLIC_URL", "http://192.168.3.73:3000/")

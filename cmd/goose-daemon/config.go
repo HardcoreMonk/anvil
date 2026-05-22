@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -156,6 +157,35 @@ func resolveAPIAddr() string {
 		return v
 	}
 	return fmt.Sprintf("127.0.0.1:%d", envIntWithAlias(envEphemeraAPIPort, envAnvilAPIPort, defaultAPIPort))
+}
+
+// bridgeCallbackPort returns the API port that flock VMs can reach through the
+// bridge gateway. Loopback binds are intentionally rejected: an iptables allow
+// rule cannot make a 127.0.0.1-only listener reachable from 10.0.1.1.
+func bridgeCallbackPort(addr string) (int, bool) {
+	host, rawPort, err := net.SplitHostPort(addr)
+	if err != nil {
+		return 0, false
+	}
+	port, err := strconv.Atoi(rawPort)
+	if err != nil || port <= 0 || port > 65535 {
+		return 0, false
+	}
+	host = strings.TrimSpace(host)
+	if strings.EqualFold(host, "localhost") {
+		return 0, false
+	}
+	if host == "" {
+		return port, true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || ip.IsLoopback() {
+		return 0, false
+	}
+	if ip.IsUnspecified() || ip.Equal(net.ParseIP("10.0.1.1")) {
+		return port, true
+	}
+	return 0, false
 }
 
 func envWithAlias(canonicalKey, aliasKey string) string {

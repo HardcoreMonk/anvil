@@ -111,6 +111,11 @@ func main() {
 	// 3. Network.
 	slog.Warn("initializing network manager")
 	netManager := network.NewManager("10.0.1.", "10.0.1.1")
+	if port, ok := bridgeCallbackPort(apiAddr); ok {
+		if err := netManager.AllowBridgeHostPort(port); err != nil {
+			slog.Warn("bridge host callback rule failed", "port", port, "err", err)
+		}
+	}
 
 	// 4. Start control plane.
 	cp := NewControlPlane(

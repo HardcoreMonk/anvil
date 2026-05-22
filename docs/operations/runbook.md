@@ -38,6 +38,22 @@ ANVIL_SCHEDULER_QUOTA_STORE=/var/lib/anvil/tenants.json \
 ./anvil-scheduler
 ```
 
+systemd로 운영할 host에서는 설치 스크립트를 먼저 dry-run으로 확인한다. 기본 unit은
+`127.0.0.1:3010`에 bind하고 `/var/lib/anvil/{scheduler.json,tenants.json}`을
+state로 사용한다.
+
+```bash
+bash scripts/install-anvil-scheduler-systemd.sh --dry-run
+sudo bash scripts/install-anvil-scheduler-systemd.sh
+sudo systemctl start anvil-scheduler.service
+curl http://127.0.0.1:3010/health
+```
+
+설치 후 설정을 바꿔야 하면 `/etc/anvil/anvil-scheduler.env`를 수정한 뒤
+`sudo systemctl restart anvil-scheduler.service`를 실행한다. scheduler service는
+자체 인증 계층을 두지 않으므로 loopback/private network 또는 reverse proxy policy
+뒤에서만 노출한다.
+
 ## Daemon API 확인
 
 daemon process 상태와 API 인증 경로는 top-level `/health` endpoint로 확인한다.

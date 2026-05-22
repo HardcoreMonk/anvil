@@ -224,7 +224,7 @@ start_daemon() {
 
     local log="${RUNDIR}/daemon.log"
     (
-        cd "$REPO_ROOT"
+        cd "$REPO_ROOT" || exit
         EPHEMERA_API_ADDR=0.0.0.0:3000 \
         EPHEMERA_API_TOKENS_FILE="$tokens_file" \
         EPHEMERA_LOG_FORMAT=json \
@@ -286,7 +286,7 @@ start_grafana() {
 
     local log="${RUNDIR}/grafana.log"
     (
-        cd "${GRAFANA_DIR}"
+        cd "${GRAFANA_DIR}" || exit
         GF_DEFAULT_INSTANCE_NAME="ephemera-demo" \
         GF_PATHS_DATA="${RUNDIR}/grafana-data" \
         GF_PATHS_LOGS="${RUNDIR}/grafana-logs" \
@@ -333,7 +333,7 @@ run_workload() {
         sleep 5
 
         # 7a. VM single-cycle, 3 times.
-        for i in 1 2 3; do
+        for _ in 1 2 3; do
             local resp
             resp=$(api_curl -X POST -H 'Content-Type: application/json' -d '{}' "$API/vms" || true)
             local vmid

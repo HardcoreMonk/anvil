@@ -154,6 +154,13 @@ snapshot location을 JSON으로 보존하고, `ReconcilePlacements`는 daemon `G
 `GET /health`, `GET/PUT /hosts`, `GET /placements`, `POST /reconcile`,
 `POST /schedule/spawn`, `POST /schedule/restore`다.
 
+운영 배포 자동화는 `deploy/systemd/anvil-scheduler.service`,
+`deploy/systemd/anvil-scheduler.env.example`,
+`scripts/install-anvil-scheduler-systemd.sh`가 담당한다. 기본 배포는 loopback
+bind(`127.0.0.1:3010`), `/var/lib/anvil` state, systemd restart policy와 제한된
+filesystem/network 권한을 사용한다. scheduler service 자체에는 bearer auth가 없으므로
+host-local/private network 경계 밖으로 직접 노출하지 않는다.
+
 ## Egress 정책
 
 Egress policy는 host network policy에서 먼저 강제되어야 한다. VM profile은 어떤
@@ -229,7 +236,6 @@ restore 경로의 direct token exposure는 제거됐다. 새로운 audit record,
 이 roadmap의 non-goals는 다음이다.
 
 - 완전한 multi-tenant runtime 즉시 구현
-- scheduler service production deployment automation
 - cross-host snapshot replication
 - scheduler-aware cross-host flock placement
 - L7 egress proxy 또는 full HTTP CONNECT/SNI gateway

@@ -48,6 +48,13 @@ check_no_cow_devices() {
         dmsetup ls 2>/dev/null | awk '/^cow-vm-/ {print "  dm device: " $0}' || true
     fi
 }
+agent_token_from_state() {
+    local vm_id=$1
+    local state_path
+    state_path="$(pwd)/vms/$vm_id/state.json"
+    [ -f "$state_path" ] || return 1
+    jq -r '.agent_token // empty' "$state_path"
+}
 
 # ── Pre-flight: clean up any leftover files from previous test runs ──
 cleanup_stale_cow_devices
@@ -327,14 +334,12 @@ CSA_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/vms" -H "Content-Type: appl
 check_http "$(echo "$CSA_RESP" | tail -1)" "201" "POST /vms (snap-source A)"
 CSA_BODY=$(echo "$CSA_RESP" | head -1)
 CSA_ID=$(echo "$CSA_BODY" | jq -r '.vm_id')
-CSA_TOKEN=$(echo "$CSA_BODY" | jq -r '.agent_token')
 ok "Source A: $CSA_ID  IP: $(echo "$CSA_BODY" | jq -r '.guest_ip')"
 
 CSB_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/vms" -H "Content-Type: application/json")
 check_http "$(echo "$CSB_RESP" | tail -1)" "201" "POST /vms (snap-source B)"
 CSB_BODY=$(echo "$CSB_RESP" | head -1)
 CSB_ID=$(echo "$CSB_BODY" | jq -r '.vm_id')
-CSB_TOKEN=$(echo "$CSB_BODY" | jq -r '.agent_token')
 ok "Source B: $CSB_ID  IP: $(echo "$CSB_BODY" | jq -r '.guest_ip')"
 
 # ── 20. Snapshot both VMs (stop_after=true) ──────────────────────
@@ -584,7 +589,6 @@ COW_VM_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/vms" -H "Content-Type: a
 check_http "$(echo "$COW_VM_RESP" | tail -1)" "201" "POST /vms (cow-test source)"
 COW_VM_BODY=$(echo "$COW_VM_RESP" | head -1)
 COW_VM_ID=$(echo    "$COW_VM_BODY" | jq -r '.vm_id')
-COW_VM_TOKEN=$(echo "$COW_VM_BODY" | jq -r '.agent_token')
 ok "COW-test source VM: $COW_VM_ID"
 
 # ── 37. Take snapshot (stop_after=true) ─────────────────────────
@@ -684,7 +688,6 @@ PROXY_VM_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/vms" -H "Content-Type:
 check_http "$(echo "$PROXY_VM_RESP" | tail -1)" "201" "POST /vms (proxy-test)"
 PROXY_VM_BODY=$(echo "$PROXY_VM_RESP" | head -1)
 PROXY_VM_ID=$(echo "$PROXY_VM_BODY" | jq -r '.vm_id')
-PROXY_VM_TOKEN=$(echo "$PROXY_VM_BODY" | jq -r '.agent_token')
 ok "Proxy-test VM: $PROXY_VM_ID"
 
 # ── 46. Test proxy: GET /vms/{vm_id}/health ──────────────────────
@@ -1057,7 +1060,13 @@ RJ_FLOCK_ID=$(echo "$RJ_BODY" | jq -r '.flock_id')
 # GET /flocks/{id} returns it as a MAP (Flock.MarshalJSON). Use the array
 # form here.
 RJ_OLD_VM=$(echo "$RJ_BODY" | jq -r '.agents[] | select(.agent_id=="reviewer-1") | .vm_id')
-RJ_TOKEN=$(echo "$RJ_BODY" | jq -r '.agent_tokens["reviewer-1"]')
+# anvil intentionally omits agent_tokens from public flock responses. This
+# host-local E2E reads the pre-restart token from state.json without printing it
+# so the token-preservation check can still exercise the guest auth contract.
+RJ_TOKEN=$(agent_token_from_state "$RJ_OLD_VM" || true)
+[ -n "$RJ_TOKEN" ] \
+    && ok "Captured host-local pre-restart agent token from state.json ✓" \
+    || fail "Missing host-local state token for $RJ_OLD_VM"
 
 NEW_RESP=$(curl -s -w "\n%{http_code}" -X POST \
     "$API/flocks/$RJ_FLOCK_ID/agents/reviewer-1/restart")
@@ -1081,17 +1090,16 @@ HE_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$API/vms/$NEW_VM/health")
                        || fail "New VM /health → $HE_CODE (expected 200)"
 
 # Token preservation check: the in-VM goose-agent on the new VM must
-# accept the OLD token. If restartAgent regenerated the token this 200
-# becomes 401.
+# accept the OLD token. Use /workspace so this tests guest auth only,
+# without coupling the assertion to Town Wall control-plane forwarding.
 NEW_GUEST_IP=$(curl -s "$API/vms" | jq -r ".[] | select(.vm_id==\"$NEW_VM\") | .guest_ip")
-TW_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-    -X POST "http://${NEW_GUEST_IP}:8080/townwall/post" \
+TOKEN_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+    -X PUT "http://${NEW_GUEST_IP}:8080/workspace?path=restart-token-still-valid.txt&overwrite=true" \
     -H "Authorization: Bearer $RJ_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d '{"body":"restart-token-still-valid"}')
-[ "$TW_CODE" = "200" ] \
+    --data-binary "ok")
+[ "$TOKEN_CODE" = "200" ] \
     && ok "Old agent_token still valid on the new VM (token preserved) ✓" \
-    || fail "Old token rejected by new VM (got $TW_CODE) — restart changed the token"
+    || fail "Old token rejected by new VM (got $TOKEN_CODE) — restart changed the token"
 curl -s -o /dev/null -X DELETE "$API/flocks/$RJ_FLOCK_ID"
 sleep 2
 
@@ -1114,7 +1122,7 @@ ok "Daemon stopped"
 step "58b. Auth-on daemon spawned for v0.3.3 CP-token scenarios"
 EPHEMERA_API_TOKENS="e2etest:e2e-cp-token-deadbeef" \
     EPHEMERA_API_ADDR=0.0.0.0:3000 \
-    ./ephemera-daemon >>"$LOG" 2>&1 &
+    ./anvil-daemon >>"$LOG" 2>&1 &
 DAEMON_PID=$!
 AUTH_HDR="Authorization: Bearer e2e-cp-token-deadbeef"
 AUTH_OK=false
@@ -1134,7 +1142,10 @@ check_http "$(echo "$AU_RESP" | tail -1)" "201" "POST /flocks (auth-on)"
 AU_BODY=$(echo "$AU_RESP" | head -1)
 AU_FLOCK_ID=$(echo "$AU_BODY" | jq -r '.flock_id')
 AU_VM_ID=$(echo "$AU_BODY" | jq -r '.agents[] | select(.agent_id=="worker-1") | .vm_id')
-AU_TOKEN=$(echo "$AU_BODY" | jq -r '.agent_tokens["worker-1"]')
+AU_TOKEN=$(agent_token_from_state "$AU_VM_ID" || true)
+[ -n "$AU_TOKEN" ] \
+    && ok "Captured auth-on agent token from host-local state.json ✓" \
+    || fail "Missing host-local state token for $AU_VM_ID"
 AU_GUEST_IP=$(curl -s -H "$AUTH_HDR" "$API/vms" | \
     jq -r ".[] | select(.vm_id==\"$AU_VM_ID\") | .guest_ip")
 
@@ -1195,7 +1206,6 @@ else
     LLM_BODY=$(echo "$LLM_RESP" | head -1)
     LLM_FLOCK_ID=$(echo "$LLM_BODY" | jq -r '.flock_id')
     RES_VM_ID=$(echo "$LLM_BODY" | jq -r '.agents[] | select(.agent_id=="researcher-1") | .vm_id')
-    RES_TOKEN=$(echo "$LLM_BODY" | jq -r '.agent_tokens["researcher-1"]')
     ok "Spawned researcher flock $LLM_FLOCK_ID"
 
     # ── 59c. Send a deterministic /tasks prompt ──────────────────────
@@ -1203,7 +1213,6 @@ else
     TASK_BODY=$(jq -n '{prompt:"Use the gtwall command exactly once to post the literal text: ROUNDTRIP_OK. Do not post anything else. Then respond with the JSON {\"done\":true}."}')
     curl -s -m 180 -X POST "$API/vms/$RES_VM_ID/tasks" \
         -H "$AUTH_HDR" \
-        -H "Authorization: Bearer $RES_TOKEN" \
         -H "Content-Type: application/json" \
         -d "$TASK_BODY" > /tmp/t59c.json || true
     ok "/tasks invocation returned (see /tmp/t59c.json)"
@@ -1247,7 +1256,7 @@ step "58c.i. Spawn TOKENS_FILE-backed daemon (token=v1)"
 echo "e2etest:e2e-cp-token-v1" > /tmp/ephemera-tokens.txt
 EPHEMERA_API_TOKENS_FILE=/tmp/ephemera-tokens.txt \
     EPHEMERA_API_ADDR=0.0.0.0:3000 \
-    ./ephemera-daemon >>"$LOG" 2>&1 &
+    ./anvil-daemon >>"$LOG" 2>&1 &
 DAEMON_PID=$!
 ROT_HDR_V1="Authorization: Bearer e2e-cp-token-v1"
 ROT_OK=false
@@ -1267,7 +1276,10 @@ check_http "$(echo "$ROT_RESP" | tail -1)" "201" "POST /flocks (rotation)"
 ROT_BODY=$(echo "$ROT_RESP" | head -1)
 ROT_FLOCK_ID=$(echo "$ROT_BODY" | jq -r '.flock_id')
 ROT_VM_ID=$(echo "$ROT_BODY" | jq -r '.agents[] | select(.agent_id=="worker-1") | .vm_id')
-ROT_TOKEN=$(echo "$ROT_BODY" | jq -r '.agent_tokens["worker-1"]')
+ROT_TOKEN=$(agent_token_from_state "$ROT_VM_ID" || true)
+[ -n "$ROT_TOKEN" ] \
+    && ok "Captured rotation agent token from host-local state.json ✓" \
+    || fail "Missing host-local state token for $ROT_VM_ID"
 ROT_GUEST_IP=$(curl -s -H "$ROT_HDR_V1" "$API/vms" | \
     jq -r ".[] | select(.vm_id==\"$ROT_VM_ID\") | .guest_ip")
 
