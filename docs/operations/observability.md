@@ -1,13 +1,21 @@
 # anvil 관측성 운영 메모
 
-현재 anvil/ephemera 운영 관측성은 daemon log, top-level daemon `/health`,
-Prometheus text 형식의 `/metrics`, VM/guest health endpoint, API 상태 응답,
-snapshot GC audit 파일을 중심으로 한다.
+현재 anvil/ephemera 운영 관측성은 daemon structured log, top-level daemon
+`/health`, Prometheus text 형식의 `/metrics`, legacy `/metrics/vms`, per-VM
+`/vms/{vm_id}/stats`, `GET /vms?stats=true`, VM/guest health endpoint, API 상태
+응답, runtime audit API, snapshot GC audit 파일을 중심으로 한다.
 
 ## 현재 log
 
-`goose-daemon`은 stdout/stderr에 운영 log를 출력한다. service manager를 사용한다면
-해당 manager의 log 수집 설정으로 stdout/stderr를 보관한다.
+`goose-daemon`은 `log/slog` 기반 structured log를 stdout/stderr에 출력한다.
+service manager를 사용한다면 해당 manager의 log 수집 설정으로 stdout/stderr를
+보관한다.
+
+운영 log 설정:
+
+- `EPHEMERA_LOG_FORMAT=text`: 기본값. `key=value` 형태의 text log를 출력한다.
+- `EPHEMERA_LOG_FORMAT=json`: log aggregation pipeline용 JSON log를 출력한다.
+- `EPHEMERA_LOG_LEVEL=debug|info|warn|error`: 기본값은 `warn`.
 
 시작 시 확인할 log:
 
@@ -70,10 +78,18 @@ curl -H "Authorization: Bearer $TOKEN" \
 Town Wall SSE stream은 실시간 관찰에 사용할 수 있지만 MCP smoke에서는 history
 endpoint를 사용한다.
 
-ephemera `v0.3.1` 기반 hardening 이후 watchdog은 flock member health 실패를
-`status=dead`와 Town Wall notice로 드러낸다. daemon restart 뒤 복구된 flock은
-read-mostly 상태이므로 Town Wall history와 registry 확인은 가능하지만, 이전 daemon
-process와 함께 종료된 VM process가 자동 재시작된 것으로 해석하지 않는다.
+현재 runtime baseline은 upstream ephemera `v0.3.5`이며, `v0.3.2` 이후 spawn-path
+VM은 `vms/<vm_id>/state.json`을 기반으로 daemon restart 뒤 cold-restart된다. 이때
+VM ID, IP, TAP, MAC, agent token, agent URL은 유지되지만 memory state와 진행 중인
+task는 보존되지 않는다.
+
+watchdog은 flock member health 실패를 `status=dead`와 Town Wall notice로 드러내며,
+`v0.3.3` 이후 dead status는 `flocks/<flock_id>/metadata.json`에 persist된다.
+`EPHEMERA_WATCHDOG_AUTO_HEAL=true`가 아닌 기본 설정에서는 once-dead agent를 자동으로
+`ready`로 되돌리지 않는다.
+
+COW-mode VM과 snapshot-restored VM은 daemon restart 뒤 자동 복구 범위가 아니다.
+이 경우에는 snapshot에서 다시 restore하거나 해당 workload를 재생성한다.
 
 ## Snapshot GC audit
 
@@ -118,46 +134,81 @@ curl -X POST http://127.0.0.1:3000/audit/runtime/prune \
 
 ## Metrics endpoint
 
-`GET /metrics`는 Prometheus text 형식의 host-local counter를 반환한다. 현재
-제공하는 주요 counter는 다음이다.
+`GET /metrics`는 Prometheus text 형식의 host-local metric을 반환한다. upstream
+runtime baseline의 canonical metric namespace는 `ephemera_*`다. anvil 기존 scraper
+호환을 위해 legacy `anvil_*` lifecycle line도 같은 response 끝에 append된다.
 
-- `anvil_vm_create_total`
-- `anvil_vm_restore_total`
-- `anvil_vm_delete_total`
-- `anvil_snapshot_create_total`
-- `anvil_snapshot_delete_total`
-- `anvil_snapshot_gc_total`
-- `anvil_cleanup_failure_total`
-- `anvil_auth_failure_total`
-- `anvil_lifecycle_queue_depth`
-- `anvil_vm_create_duration_seconds_count`
-- `anvil_vm_create_duration_seconds_sum`
-- `anvil_vm_restore_duration_seconds_count`
-- `anvil_vm_restore_duration_seconds_sum`
-- `anvil_vm_delete_duration_seconds_count`
-- `anvil_vm_delete_duration_seconds_sum`
-- `anvil_snapshot_create_duration_seconds_count`
-- `anvil_snapshot_create_duration_seconds_sum`
-- `anvil_snapshot_delete_duration_seconds_count`
-- `anvil_snapshot_delete_duration_seconds_sum`
-- `anvil_snapshot_gc_duration_seconds_count`
-- `anvil_snapshot_gc_duration_seconds_sum`
-- `anvil_agent_health_readiness_duration_seconds_count`
-- `anvil_agent_health_readiness_duration_seconds_sum`
+현재 제공하는 주요 metric family:
+
+- `ephemera_vm_spawn_total{outcome="ok|fail"}`
+- `ephemera_vm_destroy_total{outcome="ok|fail"}`
+- `ephemera_snapshot_create_total{type="full|diff"}`
+- `ephemera_snapshot_restore_total{outcome="ok|fail"}`
+- `ephemera_snapshot_gc_total`
+- `ephemera_flock_spawn_total`
+- `ephemera_flock_destroy_total`
+- `ephemera_watchdog_dead_total`
+- `ephemera_watchdog_heal_total`
+- `ephemera_sighup_reload_total`
+- `ephemera_cp_token_propagated_total{outcome="ok|fail"}`
+- `ephemera_cleanup_failure_total`
+- `ephemera_auth_failure_total`
+- `ephemera_lifecycle_queue_depth`
+- `ephemera_vm_count`
+- `ephemera_flock_count`
+- `ephemera_snapshot_count`
+- `ephemera_api_clients_count`
+- `ephemera_vm_spawn_duration_seconds`
+- `ephemera_snapshot_restore_duration_seconds`
+- `ephemera_watchdog_probe_duration_seconds`
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" \
   http://127.0.0.1:3000/metrics
 ```
 
-구조화된 per-VM metrics는 `/metrics/vms`에서 JSON으로 확인한다. 응답에는 VM ID,
-guest IP, profile, tenant ID, egress policy, host-local start time만 포함하며
+`/metrics`는 Prometheus scrape 관례에 맞춰 기본적으로 unauthenticated다.
+`EPHEMERA_METRICS_REQUIRE_AUTH=true`를 설정하면 다른 control-plane endpoint와 같은
+Bearer token 인증 뒤에 놓인다. localhost 밖으로 노출하는 배포에서는 이 값을 켜거나
+network-level isolation을 둔다.
+
+구조화된 legacy per-VM metadata는 `/metrics/vms`에서 JSON으로 확인한다. 응답에는
+VM ID, guest IP, profile, tenant ID, egress policy, host-local start time만 포함하며
 `agent_token`은 포함하지 않는다.
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" \
   http://127.0.0.1:3000/metrics/vms
 ```
+
+## Per-VM stats endpoint
+
+`GET /vms/{vm_id}/stats`는 한 VM의 point-in-time resource snapshot을 JSON으로
+반환한다. `GET /vms?stats=true`는 VM 목록 response에 같은 `stats` block을 inline으로
+붙인다.
+
+주요 field:
+
+- `vm_id`
+- `cpu_percent`
+- `mem_used_mib`
+- `mem_total_mib`
+- `uptime_seconds`
+- `network_rx_bytes`
+- `network_tx_bytes`
+- `agent_busy`
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:3000/vms/$VM_ID/stats
+
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:3000/vms?stats=true"
+```
+
+stats response는 host `/proc`, TAP statistics, guest `/health` probe를 조합한다. PID
+resolution race나 agent busy probe 실패는 log warning으로 남기고 가능한 field만
+반환한다. token, daemon raw body, snapshot metadata는 포함하지 않는다.
 
 ## Trace export
 
@@ -178,10 +229,10 @@ ANVIL_OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 ./anvil-daemon
 - label cardinality를 제어한 상세 cleanup failure breakdown
 - snapshot storage quota dashboard
 
-현재 운영 판단은 daemon log, `/health`, `/metrics`, `GET /vms`, `GET /snapshots`,
-`GET /flocks`, Town Wall history, `/metrics/vms`, VM health endpoint,
-`snapshots/gc-audit.jsonl`, runtime audit API, optional trace export를 조합해서
-수행한다.
+현재 운영 판단은 daemon structured log, `/health`, `/metrics`, `GET /vms`,
+`GET /vms?stats=true`, `GET /vms/{vm_id}/stats`, `GET /snapshots`, `GET /flocks`,
+Town Wall history, `/metrics/vms`, VM health endpoint, `snapshots/gc-audit.jsonl`,
+runtime audit API, optional trace export를 조합해서 수행한다.
 
 ## 향후 metrics 후보
 

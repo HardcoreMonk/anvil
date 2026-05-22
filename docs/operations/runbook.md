@@ -128,10 +128,11 @@ Town Wall message body는 `flocks/<flock_id>/TOWN_WALL.log`와 history 응답에
 남는다. provider token, API key, `agent_token` 같은 secret을 Town Wall에 게시하지
 않는다.
 
-`metadata.json`이 있는 flock은 daemon restart 뒤 read-mostly 상태로 복구될 수 있다.
-이 상태에서는 Town Wall 조회와 flock 삭제는 가능하지만, 이전 Firecracker VM process는
-자동 재시작되지 않는다. agent `status=dead`는 watchdog이 연속 health probe 실패를
-감지했을 때 표시된다.
+`metadata.json`이 있는 flock은 daemon restart 뒤 registry와 Town Wall log가 복구된다.
+spawn-path member VM은 `vms/<vm_id>/state.json` 기반으로 cold-restart되어 같은 VM ID,
+IP, TAP, MAC, agent token, agent URL을 유지한다. memory state와 진행 중인 task는
+보존되지 않는다. COW-mode VM과 snapshot-restored VM은 자동 복구 대상이 아니다.
+agent `status=dead`는 watchdog이 연속 health probe 실패를 감지했을 때 표시된다.
 
 ## 일반 검증
 

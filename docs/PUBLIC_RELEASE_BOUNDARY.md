@@ -1,7 +1,7 @@
 # anvil 공개 릴리즈 경계
 
 > **대상:** anvil downstream repository
-> **현행화 기준:** 2026-05-19
+> **현행화 기준:** 2026-05-22
 > **목적:** anvil이 공개적으로 책임지는 기능 표면과, upstream ephemera에서 가져오더라도 anvil 정책상 수정하거나 제외해야 하는 표면을 구분한다.
 
 ---
@@ -32,6 +32,8 @@
 | VM lifecycle | VM 생성, task 실행, health, stop, delete | ephemera daemon API + anvil MCP wrapper |
 | Snapshot lifecycle | full/diff snapshot 생성, 목록, restore, 삭제 | `internal/storage`, `anvil_create_snapshot` 계열 MCP tool |
 | Runtime boundary | Firecracker MicroVM, TAP/IP, rootfs, guest agent proxy | `cmd/goose-daemon`, `internal/vm`, `internal/network`, `internal/storage` |
+| Runtime observability | `/metrics`, `/metrics/vms`, `/vms/{vm_id}/stats`, structured daemon logs | upstream ephemera runtime namespace + anvil 운영 문서 |
+| Workload automation | script-only `POST /vms/{vm_id}/workloads/run` 계약 | `cmd/goose-agent`, `cmd/goose-daemon`, `scripts/vm-workload-e2e.sh` |
 | Token policy | daemon token과 guest `agent_token` 분리, MCP output token redaction | `CONTEXT.md`, `README.md`, MCP adapter |
 | IronClaw integration | IronClaw 전용 실행 layer 계약 | `CONTEXT.md`, `README.md` |
 | 문서 계약 | 한국어 운영 문서, 실제 API/env/file 이름 보존 | `AGENTS.md`, `CONTEXT.md` |
@@ -43,8 +45,8 @@
 
 ## 3. 조건부 포함 표면
 
-다음 표면은 runtime에는 존재할 수 있지만, anvil 공개 표면으로 노출할 때 별도
-검토가 필요하다.
+다음 표면은 runtime에는 존재할 수 있지만, anvil product 공개 표면으로 승격할 때
+별도 검토가 필요하다.
 
 | 영역 | 조건 |
 |---|---|
@@ -53,7 +55,8 @@
 | multi-host/scheduler/quota | runtime 안정성, 보안 경계, 운영 문서, full KVM E2E 기준이 먼저 정리되어야 한다. |
 | audit/metrics/job store | public API 계약과 retention/보안 정책이 함께 정의되어야 한다. |
 | replay/player 산출물 | 검증 근거와 운영 URL을 문서화한 경우에만 공개 문서 표면으로 취급한다. |
-| upstream `v0.3.2`/`v0.3.3` runtime 변경 | cold-restart, per-agent restart, in-VM CP token 주입은 token/auth/lifecycle 의미가 바뀌므로 sync branch에서 채택 상태를 명시해야 한다. |
+| upstream runtime namespace | `EPHEMERA_*`, `goose-*`, `ephemera_*` 이름은 runtime 호환성으로 유지한다. anvil product 표면으로 rename하려면 별도 ADR이 필요하다. |
+| upstream ephemera low-level API | anvil MCP tool로 노출하려면 token redaction, tenant/egress, cleanup, audit 의미를 먼저 정의한다. |
 
 조건부 표면을 공개 표면으로 올릴 때는 ADR을 추가하거나 기존 ADR 적용 상태를
 갱신한다.
@@ -95,19 +98,36 @@ upstream ephemera 변경을 병합할 때는 다음 상태 중 하나로 분류�
 `adapted`, `excluded`, `deferred` 판단은 README나 RELEASE_NOTES만으로 처리하지
 말고 ADR 또는 ADR_INDEX에 남긴다.
 
-현재 확인된 upstream 후보:
+현재 anvil `main`의 upstream runtime baseline 채택 상태:
 
 | upstream tag | 주요 변경 | 현재 anvil 분류 |
 |---|---|---|
-| `v0.3.2` | live VM cold-restart, `vms/<vm_id>/state.json`, same-identity recovery | `deferred` |
-| `v0.3.3` | watchdog dead persistence, per-agent restart, in-VM CP token auto-injection, real-LLM e2e | `deferred` |
+| `v0.3.2` | live VM cold-restart, `vms/<vm_id>/state.json`, same-identity recovery | `adapted` — runtime recovery는 채택, token persistence는 보안/문서 redaction 정책으로 관리 |
+| `v0.3.3` | watchdog dead persistence, per-agent restart, in-VM CP token auto-injection, real-LLM e2e | `adapted` — daemon 기능은 채택, MCP/public output token 노출은 금지 |
+| `v0.3.4` | `EPHEMERA_API_TOKENS_FILE`, SIGHUP CP-token vsock fan-out, watchdog tunables/auto-heal, Firecracker SIGHUP forwarding hot-fix | `adapted` — hot rotation은 채택, file permission/VM version caveat를 운영 문서에 명시 |
+| `v0.3.5` | Prometheus `/metrics`, `/vms/{vm_id}/stats`, `log/slog`, observability demo | `adapted` — runtime observability는 채택, `ephemera_*` metric namespace와 `/metrics` auth 정책을 compatibility로 설명 |
 
-두 tag는 아직 anvil `main`에 병합되지 않았다. 채택 전 근거 문서는
-`docs/analysis/08-v0.3.2-v0.3.3-upstream-change-review.md`다.
+`v0.3.2`/`v0.3.3` 병합 전 검토 근거는
+`docs/analysis/08-v0.3.2-v0.3.3-upstream-change-review.md`에 historical analysis로
+보존한다.
+
+## 6. 이름/브랜드 경계
+
+anvil은 ephemera를 이름만 바꾼 프로젝트가 아니다. 공개 문서에서는 다음 규칙을
+유지한다.
+
+- `anvil`: IronClaw MCP 실행 계층, scheduler, tenant/egress governance, workload
+  automation, product release 경계.
+- `ephemera`: Firecracker MicroVM runtime baseline, daemon HTTP API, guest agent,
+  upstream runtime release tag.
+- `EPHEMERA_*`, `goose-*`, `ephemera_*`는 runtime compatibility namespace다.
+  호환성 때문에 보존하며 anvil product identity의 약화로 해석하지 않는다.
+- anvil release note는 "upstream runtime baseline"과 "anvil product changes"를
+  분리해 작성한다.
 
 ---
 
-## 6. 릴리즈 전 경계 확인
+## 7. 릴리즈 전 경계 확인
 
 공개 릴리즈 또는 push 전에는 변경 성격에 맞게 다음을 확인한다.
 

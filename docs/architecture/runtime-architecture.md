@@ -2,13 +2,13 @@
 
 ## 상태
 
-- 기준 버전: ephemera `v0.3.1` + anvil runtime control-plane updates
+- 기준 버전: upstream ephemera `v0.3.5` + anvil runtime control-plane updates
 - anvil 관점: ephemera runtime은 IronClaw 결합 프로젝트의 기반 실행 계층
 - upstream: `https://github.com/steve-seungeui/ephemera`. anvil fork network를
   유지하며 ephemera runtime version을 merge로 반영한다.
-- upstream `v0.3.2`/`v0.3.3`은 확인된 sync 후보지만 아직 이 문서의 현재 runtime
-  구조로 반영하지 않는다. 변경 근거는
-  `docs/analysis/08-v0.3.2-v0.3.3-upstream-change-review.md`를 기준으로 한다.
+- upstream `v0.3.2`-`v0.3.5`는 현재 baseline으로 반영되어 있다. `v0.3.2`는
+  cold-restart, `v0.3.3`은 watchdog/restart/CP-token polish, `v0.3.4`는 token
+  hot rotation과 watchdog tunable, `v0.3.5`는 metrics/stats/slog 관측성을 제공한다.
 - 저장소/모듈 이름: `ephemera`
 - 런타임 소유 파일:
   - `cmd/goose-daemon/`
@@ -60,7 +60,7 @@ agent proxy를 모두 소유한다.
 
 | 구성 요소 | 파일 | 책임 |
 |---|---|---|
-| Control plane daemon | `cmd/goose-daemon/main.go`, `cmd/goose-daemon/api.go`, `cmd/goose-daemon/config.go`, `cmd/goose-daemon/orchestrator_api.go` | host artifact bootstrap, HTTP API 시작, client 인증, 실행 중인 VM 관리, agent proxy, snapshot 생성/복원/삭제, Goosetown flock/Town Wall API, flock watchdog 시작/중지 |
+| Control plane daemon | `cmd/goose-daemon/main.go`, `cmd/goose-daemon/api.go`, `cmd/goose-daemon/config.go`, `cmd/goose-daemon/metrics_handler.go`, `cmd/goose-daemon/stats_handler.go`, `cmd/goose-daemon/orchestrator_api.go` | host artifact bootstrap, HTTP API 시작, client 인증, 실행 중인 VM 관리와 cold-restart, agent proxy, snapshot 생성/복원/삭제, metrics/stats, Goosetown flock/Town Wall API, flock watchdog 시작/중지 |
 | Runtime scheduler service | `cmd/anvil-scheduler/main.go`, `internal/anvilmcp/scheduler_service.go` | host inventory, quota store, placement/snapshot locality state를 기준으로 runtime host schedule decision 반환 |
 | Goosetown orchestrator | `internal/orchestrator/` | flock registry, agent 상태 snapshot, Town Wall append-only log와 SSE subscriber 관리, flock metadata persistence, health watchdog |
 | Storage provisioner | `internal/storage/provisioner.go` | golden image build/검증, stale input 감지, VM별 disk clone, Goose config/secrets 주입, VM별 agent token 작성, timezone data 주입 |
@@ -68,7 +68,7 @@ agent proxy를 모두 소유한다.
 | VM wrapper | `internal/vm/machine.go` | Firecracker config 구성, cold VM 시작, snapshot state restore, vsock 기반 guest IP 재설정 |
 | Network manager | `internal/network/manager.go` | `goose-br0` 생성, `10.0.1.0/24` 관리, guest IP/TAP 할당과 재사용, NAT 설정 |
 | Guest init | `cmd/micro-init/main.go` | guest PID 1, virtual filesystem mount, `goose-agent` 시작, 종료/신호 수신 시 clean poweroff |
-| Guest agent | `cmd/goose-agent/main.go` | guest 내부 `/tasks`, `/workloads/run`, `/health`, `/stop` 제공, mutating endpoint token 인증, Goose task와 script-only workload 실행 |
+| Guest agent | `cmd/goose-agent/main.go` | guest 내부 `/tasks`, `/workloads/run`, `/health`, `/stop` 제공, mutating endpoint token 인증, Goose task와 script-only workload 실행, vsock CP-token update 처리 |
 | Image builder | `scripts/build_image.sh` | Debian Trixie 기반 golden rootfs에 Goose, `goose-agent`, `micro-init` 설치 |
 
 ## 런타임 상태
@@ -82,7 +82,7 @@ Host memory 상태:
 | `ControlPlane.clients` | `cmd/goose-daemon/api.go` | 현재 control-plane API client 목록. `SIGHUP`으로 reload |
 | `ControlPlane.flockMgr` | `cmd/goose-daemon/orchestrator_api.go`, `internal/orchestrator` | host-local live flock registry와 Town Wall handle |
 | `ControlPlane.tenantStore` | `cmd/goose-daemon/api.go` | `tenants/tenants.json` 기반 tenant quota/usage store |
-| `ControlPlane.metrics` | `cmd/goose-daemon/api.go` | lifecycle counter, duration, queue depth |
+| `ControlPlane.metrics` | `cmd/goose-daemon/metrics_handler.go` | `ephemera_*` Prometheus registry, legacy `anvil_*` lifecycle compatibility lines |
 | `PlacementStore` | `internal/anvilmcp/placement_store.go` | scheduler host, VM placement, snapshot location state |
 | `QuotaStore` | `internal/anvilmcp/quota_store.go` | scheduler와 daemon tenant API에서 사용하는 quota/usage JSON state |
 | `network.Manager.ipInUse` | `internal/network/manager.go` | 할당된 private guest IP |
@@ -101,7 +101,8 @@ Host disk 상태:
 | `tenants/tenants.json` | daemon-local tenant quota/usage state, mode `0600` |
 | `audit/runtime-audit.jsonl` | daemon runtime audit 조회/보관 API가 읽는 JSONL record |
 | `flocks/<flock_id>/TOWN_WALL.log` | Goosetown flock별 append-only Town Wall log |
-| `flocks/<flock_id>/metadata.json` | daemon restart 뒤 read-mostly flock registry 복구를 위한 flock metadata |
+| `flocks/<flock_id>/metadata.json` | daemon restart 뒤 flock registry 복구와 watchdog status persistence를 위한 flock metadata |
+| `vms/<vm_id>/state.json` | spawn-path VM cold-restart state. network identity, disk path, profile, flock link, agent token 포함 |
 | `ANVIL_SCHEDULER_STATE` path | scheduler service placement/snapshot locality JSON state |
 | `ANVIL_SCHEDULER_QUOTA_STORE` path | scheduler service tenant quota/usage JSON state |
 | `/tmp/goose-workspaces/<vm_id>.ext4` | cold-spawn VM의 writable rootfs clone |
@@ -118,6 +119,7 @@ Guest disk 상태:
 | `/root/.config/goose/config.yaml` | 주입된 Goose config |
 | `/root/.config/goose/secrets.yaml` | 주입된 Goose secrets |
 | `/root/.ephemera-agent-token` | VM별 guest agent Bearer token, mode `0600` |
+| `/root/.ephemera-cp-token` | in-VM Town Wall forwarder가 control plane으로 callback할 때 쓰는 control-plane token. v0.3.4+에서 SIGHUP fan-out으로 갱신 |
 | `/root/.ephemera-flock` | flock member VM의 flock ID, agent ID, role, Town Wall endpoint context |
 | `/root/.goose-system-prompt` | role profile의 system prompt |
 | `/usr/local/bin/goose-agent` | guest task server |
@@ -135,7 +137,9 @@ Guest agent API/workload surface:
 
 ```text
 cmd/goose-daemon/main.go
+  -> EPHEMERA_LOG_FORMAT / EPHEMERA_LOG_LEVEL 기준 slog handler 설정
   -> project-relative artifact/config path 해석
+  -> EPHEMERA_API_TOKENS_FILE 또는 token env에서 API client list load
   -> snapshots/ 없으면 생성
   -> artifacts/micro-init compile 또는 재사용
   -> artifacts/goose-agent source hash 확인 후 compile 또는 재사용
@@ -153,8 +157,12 @@ cmd/goose-daemon/main.go
        -> iptables MASQUERADE rule 추가
   -> ControlPlane 생성
        -> snapshots/*/metadata.json에서 snapshot metadata load
+       -> flocks/*/metadata.json에서 flock metadata와 Town Wall load
+       -> vms/*/state.json에서 spawn-path VM cold-restart
        -> tenants/tenants.json load
        -> optional trace exporter load
+       -> Prometheus metric registry와 stats endpoint wiring
+       -> watchdog tunable 적용
        -> HTTP route 등록
   -> API serve
   -> SIGINT/SIGTERM shutdown 처리
@@ -294,6 +302,7 @@ fallback한다. 이 경우 snapshot rootfs를 per-restore ext4 file로 copy한�
 | Guest private network | `goose-br0` 뒤 host-only `10.0.1.0/24` |
 | 외부 공개 | localhost 밖에서는 TLS 종료 reverse proxy 뒤에서 운영 |
 | Secrets | gitignore된 로컬 config file에서 guest disk로 주입 |
+| Metrics scrape | `/metrics`는 기본 unauthenticated. 외부 노출 시 `EPHEMERA_METRICS_REQUIRE_AUTH=true` 또는 network isolation 필요 |
 
 `GET /health`는 readiness poll을 위해 guest agent에서 인증 없이 유지한다.
 mutating guest endpoint는 token file이 없을 때를 제외하면 VM별 agent token을
@@ -320,11 +329,15 @@ mutating guest endpoint는 token file이 없을 때를 제외하면 VM별 agent 
 - snapshot restore 전에 source VM을 삭제해야 한다.
 - diff snapshot이 참조 중인 full snapshot은 삭제할 수 없다.
 - diff restore에는 임시 merged memory file을 만들 disk space가 필요하다.
-- control-plane auth는 API token 환경 변수가 없으면 비활성화된다.
+- control-plane auth는 API token file/env가 없으면 비활성화된다.
+- `/metrics`는 Prometheus scrape 관례에 따라 기본적으로 control-plane auth 밖에 있다.
+  외부 노출 시 `EPHEMERA_METRICS_REQUIRE_AUTH=true`로 보호한다.
 - MCP v1은 runtime control plane의 일부가 아니라 client adapter다.
 - flock registry는 daemon process memory가 주 상태지만, `metadata.json`이 있는 flock은
-  daemon 재시작 뒤 read-mostly registry와 Town Wall history가 복구된다. 이전 daemon
-  process와 함께 종료된 Firecracker VM은 자동 재시작하지 않는다.
+  daemon 재시작 뒤 registry와 Town Wall history가 복구된다. spawn-path member VM은
+  `vms/<vm_id>/state.json` 기반 cold-restart 대상이며, memory state와 in-flight task는
+  보존되지 않는다.
+- COW-mode VM과 snapshot-restored VM은 cold-restart 대상이 아니다.
 - `POST /flocks` 응답은 anvil 보안 불변 조건에 따라 `agent_token`/`agent_tokens`를
   노출하지 않는다.
 
@@ -333,6 +346,10 @@ mutating guest endpoint는 token file이 없을 때를 제외하면 VM별 agent 
 - `cmd/goose-daemon/main.go`
 - `cmd/goose-daemon/api.go`
 - `cmd/goose-daemon/config.go`
+- `cmd/goose-daemon/metrics_handler.go`
+- `cmd/goose-daemon/stats_handler.go`
+- `cmd/goose-daemon/stats_collector.go`
+- `cmd/goose-daemon/recovery.go`
 - `cmd/goose-daemon/orchestrator_api.go`
 - `cmd/goose-daemon/egress_policy.go`
 - `cmd/goose-daemon/otel.go`

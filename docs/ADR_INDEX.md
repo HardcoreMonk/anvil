@@ -1,7 +1,7 @@
 # ADR 적용 상태 인덱스
 
 > **대상:** anvil downstream repository
-> **현행화 기준:** 2026-05-19
+> **현행화 기준:** 2026-05-22
 > **목적:** anvil에서 장기 유지할 설계 결정과 upstream ephemera 변경 채택 상태를 추적한다.
 
 ---
@@ -46,16 +46,17 @@
 
 ---
 
-## 4. upstream 채택 대기 상태
+## 4. upstream runtime baseline 채택 상태
 
-다음 upstream tag는 확인됐지만 아직 anvil `main`에 병합되지 않았다. 새 sync branch에서
-병합할 때 공개 표면과 보안 경계를 검토해 `adopted`, `adapted`, `excluded`,
-`deferred` 중 하나로 다시 확정한다.
+다음 upstream tag는 anvil `main`에 병합되어 runtime baseline으로 사용된다. 분류는
+`PUBLIC_RELEASE_BOUNDARY.md`의 공개 표면과 보안 경계를 기준으로 한다.
 
 | upstream tag | 상태 | 적용 전 검토 요약 |
 |---|---|---|
-| `v0.3.2` | deferred | live VM cold-restart가 `agent_token`을 `vms/<vm_id>/state.json`에 보존하고 daemon restart semantics를 바꾼다. file mode, audit/replay/MCP output redaction, disaster recovery 문서 갱신이 필요하다. |
-| `v0.3.3` | deferred | per-agent restart와 in-VM CP token auto-injection이 token/auth 경계에 닿는다. MCP tool로 노출할지, guest disk에 들어가는 CP token의 rotation/blast radius를 어떻게 문서화할지 결정해야 한다. |
+| `v0.3.2` | adapted | live VM cold-restart와 `vms/<vm_id>/state.json`은 채택한다. `agent_token` persistence는 host-local recovery state로 취급하고 MCP output, audit, metrics, replay fixture에는 노출하지 않는다. |
+| `v0.3.3` | adapted | watchdog dead persistence, per-agent restart, in-VM CP token auto-injection은 채택한다. `/root/.ephemera-cp-token`은 secret file로 취급하고 standalone VM에는 주입하지 않는 경계를 유지한다. |
+| `v0.3.4` | adapted | `EPHEMERA_API_TOKENS_FILE`, SIGHUP CP-token vsock fan-out, watchdog tunables/auto-heal, Firecracker SIGHUP forwarding hot-fix는 채택한다. true hot rotation은 token file과 v0.3.4+ guest agent가 있을 때만 보장한다. |
+| `v0.3.5` | adapted | `/metrics`, `/vms/{vm_id}/stats`, `log/slog`, observability demo는 채택한다. `ephemera_*` metric namespace와 `EPHEMERA_*` env는 runtime compatibility namespace로 유지한다. |
 
 ---
 

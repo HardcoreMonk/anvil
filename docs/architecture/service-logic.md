@@ -2,7 +2,7 @@
 
 ## 상태
 
-- 기준 버전: ephemera `v0.3.1` + anvil runtime control-plane updates
+- 기준 버전: upstream ephemera `v0.3.5` + anvil runtime control-plane updates
 - 범위: ephemera daemon HTTP 동작, VM lifecycle, agent proxy, snapshot lifecycle,
   Goosetown flock/Town Wall, tenant/egress/audit/observability endpoint, guest agent 동작
 - 제외 범위: IronClaw MCP client 동작. 해당 내용은
@@ -19,13 +19,14 @@ control plane daemon은 하나의 HTTP service를 노출한다.
 | API group | 소유자 | 목적 |
 |---|---|---|
 | `/health` | `cmd/goose-daemon/api.go` | daemon 상태, VM 수, snapshot 수, auth 활성 여부 |
-| `/metrics` | `cmd/goose-daemon/api.go` | Prometheus text 형식 lifecycle metrics |
-| `/metrics/vms` | `cmd/goose-daemon/api.go` | 실행 중인 VM별 JSON metrics |
+| `/metrics` | `cmd/goose-daemon/metrics_handler.go` | Prometheus text 형식 daemon metrics. 기본 unauth, `EPHEMERA_METRICS_REQUIRE_AUTH=true`일 때 Bearer token 필요 |
+| `/metrics/vms` | `cmd/goose-daemon/api.go` | 실행 중인 VM별 legacy JSON metadata metrics |
 | `/tenants` | `cmd/goose-daemon/api.go` | tenant quota/usage 목록 |
 | `/tenants/{tenant_id}` | `cmd/goose-daemon/api.go` | tenant quota/usage 조회와 quota 설정 |
 | `/audit/runtime` | `cmd/goose-daemon/api.go` | runtime audit 조회 |
 | `/audit/runtime/prune` | `cmd/goose-daemon/api.go` | runtime audit 보관 정책 적용 |
-| `/vms` | `cmd/goose-daemon/api.go` | VM 생성, 목록, 삭제 |
+| `/vms` | `cmd/goose-daemon/api.go` | VM 생성, 목록, 삭제. `?stats=true`면 per-VM stats inline |
+| `/vms/{vm_id}/stats` | `cmd/goose-daemon/stats_handler.go` | VM별 cpu/mem/net/uptime/agent_busy point-in-time stats |
 | `/vms/{vm_id}/tasks` | `cmd/goose-daemon/api.go` | guest agent로 task 실행 proxy |
 | `/vms/{vm_id}/workloads/run` | `cmd/goose-daemon/api.go` | guest agent로 script-only workload 실행 proxy |
 | `/vms/{vm_id}/workspace` | `cmd/goose-daemon/api.go` | guest `/workspace` 단일 파일 read/write proxy |
@@ -72,6 +73,19 @@ daemon은 기존 `EPHEMERA_*` 환경 변수를 canonical 계약으로 유지하�
 | `EPHEMERA_PUBLIC_URL` | `ANVIL_PUBLIC_URL` |
 | `EPHEMERA_EGRESS_PROFILE_DIR` | `ANVIL_EGRESS_PROFILE_DIR` |
 
+Canonical-only upstream runtime 설정:
+
+| 변수 | 의미 |
+|---|---|
+| `EPHEMERA_API_TOKENS_FILE` | `name:token` entry file. 파일 source는 SIGHUP 때 다시 읽히므로 hot rotation의 권장 경로 |
+| `EPHEMERA_WATCHDOG_INTERVAL_SEC` | watchdog poll cadence, 기본 `5` |
+| `EPHEMERA_WATCHDOG_TIMEOUT_SEC` | watchdog per-probe HTTP timeout, 기본 `1` |
+| `EPHEMERA_WATCHDOG_THRESHOLD` | dead marking 전 연속 실패 횟수, 기본 `3` |
+| `EPHEMERA_WATCHDOG_AUTO_HEAL` | `true`면 dead agent가 다시 응답할 때 `ready`로 auto-heal, 기본 `false` |
+| `EPHEMERA_METRICS_REQUIRE_AUTH` | `true`면 `/metrics`도 control-plane Bearer token 필요, 기본 `false` |
+| `EPHEMERA_LOG_FORMAT` | `text` 또는 `json`, 기본 `text` |
+| `EPHEMERA_LOG_LEVEL` | `debug`, `info`, `warn`, `error`, 기본 `warn` |
+
 추가 optional 운영 hook:
 
 | 변수 | 의미 |
@@ -100,13 +114,15 @@ token 비교는 constant-time comparison을 사용하고 첫 후보에서 멈추
 partial token match가 timing으로 새지 않게 하기 위한 선택이다.
 
 `SIGHUP`은 `ControlPlane.ReloadClients`를 호출한다. daemon 재시작이나 실행 중
-VM 중단 없이 `EPHEMERA_API_TOKENS`/`ANVIL_API_TOKENS` 또는
-`EPHEMERA_API_TOKEN`/`ANVIL_API_TOKEN`을 메모리에 다시 로드한다.
+VM 중단 없이 API client list를 다시 로드한다. `EPHEMERA_API_TOKENS_FILE`을 쓰는
+경우 파일을 매번 다시 읽기 때문에 true hot rotation이 가능하다. env var source는
+process exec 시점에 고정되므로 SIGHUP이 env 값 변경을 볼 수 없다.
 
 환경 변수 precedence:
 
 ```text
-EPHEMERA_API_TOKENS
+EPHEMERA_API_TOKENS_FILE
+  -> EPHEMERA_API_TOKENS
   -> ANVIL_API_TOKENS
   -> EPHEMERA_API_TOKEN
   -> ANVIL_API_TOKEN
@@ -115,6 +131,11 @@ EPHEMERA_API_TOKENS
 
 `EPHEMERA_*`는 ephemera runtime의 canonical 설정이고 `ANVIL_*`는 anvil 운영자를
 위한 alias다. canonical 값이 있으면 alias 값보다 우선한다.
+
+reload 후 daemon은 새 `apiClients[0].Token`을 running VM의 vsock으로 fan-out해
+guest 내부 `/root/.ephemera-cp-token`을 갱신한다. 이 propagation은 best-effort이며
+v0.3.4+ guest agent가 있어야 성공한다. 실패한 VM은 log와
+`ephemera_cp_token_propagated_total{outcome="fail"}`로 관측한다.
 
 ## Health, metrics, tenant, audit 로직
 
@@ -130,13 +151,21 @@ Metrics:
 
 ```text
 GET /metrics
-  -> VM/snapshot lifecycle counter
-  -> cleanup/auth failure counter
-  -> lifecycle queue depth
-  -> observed lifecycle duration count/sum 반환
+  -> Prometheus exposition format 0.0.4 반환
+  -> ephemera_* counter/gauge/histogram 반환
+  -> legacy anvil_* lifecycle line append
+  -> 기본 unauthenticated, EPHEMERA_METRICS_REQUIRE_AUTH=true면 Bearer token 필요
 
 GET /metrics/vms
   -> 실행 중인 VM별 vm_id, guest_ip, profile, tenant_id, egress_policy, started_at 반환
+
+GET /vms/{vm_id}/stats
+  -> host /proc, TAP statistics, guest /health probe를 조합
+  -> vm_id, cpu_percent, mem_used_mib, mem_total_mib, uptime_seconds,
+     network_rx_bytes, network_tx_bytes, agent_busy 반환
+
+GET /vms?stats=true
+  -> VMInfo 목록에 stats block을 inline으로 포함
 ```
 
 Metrics response에는 `agent_token`, daemon raw body, snapshot metadata를 포함하지
@@ -330,8 +359,9 @@ Town Wall body는 사용자가 제공한 message다. runtime audit record에는 
 사용하지 않는다.
 
 daemon startup은 `flocks/*/metadata.json`을 scan해 flock registry와 Town Wall log를
-read-mostly 상태로 복구한다. 복구된 flock의 VM process는 자동 재시작하지 않으며,
-watchdog은 live `cp.vms`에 남아 있는 flock member VM만 probe한다.
+복구한 뒤, `vms/<vm_id>/state.json`이 남아 있는 spawn-path VM을 cold-restart한다.
+복구 성공한 flock member VM은 `cp.vms`에 다시 등록되므로 proxy endpoint와 watchdog
+probe 대상이 된다. COW-mode VM과 snapshot-restored VM은 자동 복구 대상이 아니다.
 
 ## VM 삭제 로직
 

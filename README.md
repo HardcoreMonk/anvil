@@ -48,10 +48,13 @@ daemon 이름, HTTP API, 일부 환경 변수에는 `ephemera` 또는 `goose` �
 runtime으로 구분한다.
 
 버전별 ephemera 소스 snapshot은 Git tag로 공개된다. 현재 anvil `main`의 runtime
-baseline은 upstream ephemera `v0.3.1` 병합분이고, IronClaw 통합 프로젝트 anvil의
-최신 공개 tag는 `anvil-v0.2.0`이다. upstream ephemera에는 `v0.3.2`, `v0.3.3`
-tag가 추가로 존재하지만, 아직 anvil `main`에 병합된 현재 기능으로 설명하지 않는다.
-첫 공개 tag는 `anvil-v0.1.0`이다.
+baseline은 upstream ephemera `v0.3.5`까지 병합한 상태다. 이 병합은 MicroVM
+lifecycle, flock resilience, token rotation, observability 같은 runtime substrate를
+끌어올린 것이며, anvil의 제품 정체성을 ephemera로 바꾸는 작업이 아니다.
+
+IronClaw 통합 프로젝트 anvil의 최신 공개 tag는 아직 `anvil-v0.2.0`이다. 다음
+anvil product release에서는 ephemera `v0.3.2`-`v0.3.5` runtime baseline과 anvil
+고유 변경분을 분리해 기록한다. 첫 공개 tag는 `anvil-v0.1.0`이다.
 
 <p align="center">
   <img src="docs/assets/ironclaw-e2e.gif" alt="IronClaw anvil E2E terminal replay" width="900">
@@ -87,6 +90,21 @@ anvil은 ephemera를 이름만 바꾼 프로젝트가 아니다. anvil은 IronCl
 가진다. 따라서 runtime API와 환경 변수는 호환성을 위해 ephemera/goose 이름을
 유지하고, IronClaw가 직접 사용하는 표면은 `anvil_*` MCP tool로 노출한다.
 
+### Runtime Baseline
+
+`main`은 upstream ephemera `v0.3.5`를 runtime baseline으로 사용한다.
+
+| 구분 | 현재 기준 | anvil에서의 의미 |
+|---|---|---|
+| ephemera runtime baseline | `v0.3.5` | Firecracker VM lifecycle, cold-restart, flock recovery, token rotation, `/metrics`, `/stats`, `slog` 기반 |
+| anvil product surface | `anvil_*` MCP tool, scheduler, tenant/egress, workload runner | IronClaw가 직접 사용하는 공개 실행 계약 |
+| namespace policy | `EPHEMERA_*`, `goose-*`, `ephemera_*` 유지 | upstream runtime 호환성. anvil 이름으로 일괄 rename하지 않는다. |
+
+ephemera `v0.3.2`-`v0.3.5`는 anvil 안에서 runtime baseline으로 채택/적응된 변경이다.
+anvil release note에서는 이 내용을 "upstream runtime baseline"으로 분리해 기록하고,
+MCP/scheduler/workload/tenant/egress 같은 anvil 고유 기능과 섞어 제품명처럼 쓰지
+않는다.
+
 ## Fork와 upstream 관리
 
 `HardcoreMonk/anvil`은 `steve-seungeui/ephemera`의 fork network를 유지한다. 이
@@ -108,7 +126,7 @@ upstream sync는 별도 branch에서 수행한다.
 ```bash
 git fetch upstream main
 git ls-remote --tags upstream
-git checkout -b sync/ephemera-v0.3.3 origin/main
+git checkout -b sync/ephemera-v0.3.x origin/main
 git merge --no-ff upstream/main
 ```
 
@@ -368,7 +386,9 @@ DELETE /vms/{id}
 
 - **Flock metadata persistence**:
   `flocks/<flock_id>/metadata.json`을 기록하고 daemon restart 뒤 flock registry와
-  Town Wall log를 read-mostly 상태로 복구한다. live VM auto-restart는 포함하지 않는다.
+  Town Wall log를 복구한다. 현재 upstream `v0.3.5` baseline에서는 spawn-path member
+  VM도 `vms/<vm_id>/state.json` 기반으로 cold-restart된다. memory state와 in-flight
+  task는 보존되지 않는다.
 
 - **Town Wall sequence**:
   Town Wall message는 per-flock monotonic `seq`를 포함해 subscriber가 gap을
@@ -604,8 +624,8 @@ artifacts/            Auto-populated at runtime (gitignored)
   anvil 장기 설계 결정의 현재 적용 상태와 ADR 작성 기준.
 
 - [RELEASE_NOTES.md](RELEASE_NOTES.md):
-  `anvil-v0.2.0` runtime scheduler/network/observability release와 ephemera
-  `v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.3.1`, anvil `anvil-v0.1.0` 변경 사항.
+  anvil product release note와 upstream ephemera runtime release note를 분리해
+  기록한다. 현재 `v0.3.2`-`v0.3.5`는 anvil `main`에 병합된 runtime baseline이다.
 
 - [docs/architecture/runtime-architecture.md](docs/architecture/runtime-architecture.md):
   ephemera daemon, MicroVM, storage, network, guest runtime 구조.
@@ -638,7 +658,8 @@ artifacts/            Auto-populated at runtime (gitignored)
 
 - [ephemera v0.3.2/v0.3.3 upstream 변경 검토](docs/analysis/08-v0.3.2-v0.3.3-upstream-change-review.md):
   upstream `v0.3.2` live VM cold-restart와 `v0.3.3` operational polish 변경의
-  태그/commit/diff 근거, anvil 채택 검토 포인트.
+  태그/commit/diff 근거, anvil 채택 검토 포인트. 현재는 병합 전 분석 근거로
+  보존한다.
 
 - [anvil redesign handoff](docs/operations/2026-05-11-anvil-redesign-handoff.md):
   재설계 release/operate handoff 근거.
@@ -1625,9 +1646,10 @@ profile 이름에는 `/` 또는 `\`를 사용할 수 없다.
 - source VM이 실행 중인 동안 해당 VM의 snapshot restore는 거부된다.
 - diff snapshot은 memory만 diff다. rootfs는 snapshot마다 full copy다.
 - diff restore는 임시 merged memory file을 만들 disk space가 필요하다.
-- daemon restart 후 복구된 flock은 read-mostly 상태다. Town Wall 조회, post,
-  delete는 가능하지만 이전 daemon process와 함께 종료된 Firecracker VM을 자동
-  재시작하지 않는다.
+- daemon restart 후 spawn-path VM은 `vms/<vm_id>/state.json` 기반으로 cold-restart된다.
+  같은 VM ID, IP, TAP, MAC, agent token, agent URL을 유지하지만 memory state와
+  in-flight task는 보존하지 않는다.
+- COW-mode VM과 snapshot-restored VM은 daemon restart 후 자동 복구 대상이 아니다.
 - watchdog이 표시한 `dead` status는 `flocks/<flock_id>/metadata.json`에
   persist된다. per-agent restart 또는 watchdog auto-heal opt-in이 상태를 다시
   `ready`로 바꾸는 명시 경로다.

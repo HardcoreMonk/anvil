@@ -4,6 +4,15 @@
 
 ## 추가됨
 
+- upstream ephemera `v0.3.2`-`v0.3.5` runtime baseline을 anvil `main`에 병합했다.
+  이 변경은 anvil의 제품 정체성을 ephemera로 바꾸지 않고, Firecracker MicroVM
+  runtime substrate를 최신 baseline으로 끌어올린다.
+  - `v0.3.2`: live VM cold-restart와 `vms/<vm_id>/state.json`.
+  - `v0.3.3`: watchdog dead persistence, per-agent restart, in-VM CP token
+    auto-injection.
+  - `v0.3.4`: `EPHEMERA_API_TOKENS_FILE`, SIGHUP CP-token vsock fan-out,
+    watchdog tunables/auto-heal, Firecracker SIGHUP forwarding hot-fix.
+  - `v0.3.5`: `/metrics`, `/vms/{vm_id}/stats`, `log/slog`, observability demo.
 - guest `goose-agent`에 authenticated `POST /workloads/run` endpoint를 추가했다.
   이 경로는 `/workspace/workloads/*.sh` script만 실행하며 LLM provider credential과
   `/tasks` prompt 실행에 의존하지 않는다.
@@ -25,6 +34,15 @@
   process가 남지 않도록 했다.
 - workload process는 parent process `os.Environ()`을 상속하지 않고 최소 env만 받는다.
 - stdout/stderr는 각각 1 MiB로 cap하고 truncation flag를 JSON result에 기록한다.
+- `EPHEMERA_*`, `goose-*`, `ephemera_*`는 upstream runtime compatibility namespace로
+  유지한다. anvil 공개 product surface는 `anvil_*` MCP tool, scheduler,
+  tenant/egress, workload automation으로 설명한다.
+- `/metrics`는 upstream 기본값상 unauthenticated이다. 외부 노출 환경에서는
+  `EPHEMERA_METRICS_REQUIRE_AUTH=true` 또는 network isolation을 release/runbook에
+  명시해야 한다.
+- `/root/.ephemera-cp-token`, `vms/<vm_id>/state.json` 안의 `agent_token`,
+  API bearer token은 runtime secret으로 취급하고 MCP output, audit, metrics, trace,
+  replay fixture, release artifact에 노출하지 않는다.
 
 ## 검증됨
 
@@ -43,22 +61,24 @@
   `GOOGLE_API_KEY|ANTHROPIC_API_KEY|OPENAI_API_KEY|Authorization: Bearer|agent_token`
   패턴 없음.
 
-다음 후보는 upstream ephemera `v0.3.2`/`v0.3.3` sync 검토, scheduler service
-production deployment automation, cross-host snapshot replication,
-scheduler-aware cross-host flock placement, L7 egress proxy/SNI hardening,
-snapshot storage quota dashboard다.
+다음 후보는 scheduler service production deployment automation, cross-host snapshot
+replication, scheduler-aware cross-host flock placement, L7 egress proxy/SNI
+hardening, snapshot storage quota dashboard다.
 
 ## 문서화됨
 
 - script-only workload runner의 design/implementation plan, runtime/service
   architecture, runbook, workload E2E design spec을 현재 `/workloads/run` 계약에
   맞춰 갱신했다.
-- upstream ephemera `v0.3.2`와 `v0.3.3`의 tag, commit, diff 근거와 anvil 채택
-  검토 포인트를
-  `docs/analysis/08-v0.3.2-v0.3.3-upstream-change-review.md`에 추가했다.
+- upstream ephemera `v0.3.2`-`v0.3.5`를 anvil runtime baseline으로 분류하고,
+  product identity와 runtime namespace 경계를 README, public release boundary,
+  ADR index, upstream sync policy, release checklist에 반영했다.
+- upstream ephemera `v0.3.2`와 `v0.3.3`의 병합 전 검토 근거는
+  `docs/analysis/08-v0.3.2-v0.3.3-upstream-change-review.md`에 historical analysis로
+  보존한다.
 - `PUBLIC_RELEASE_BOUNDARY.md`, `ADR_INDEX.md`, `upstream-sync-policy.md`,
-  `release-checklist.md`에 두 upstream tag가 아직 anvil `main`에 병합되지 않은
-  `deferred` 후보임을 반영했다.
+  `release-checklist.md`에 upstream `v0.3.2`-`v0.3.5`가 `adapted` runtime
+  baseline임을 반영했다.
 
 # anvil v0.2.0 — Runtime scheduler, Goosetown MCP, observability foundation
 
