@@ -1,0 +1,12 @@
+/* PLACEHOLDER — agent should overwrite this with global styles via the
+   <<<FILE: src/index.css>>>...<<<END>>> sentinel block. */
+
+* {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+}

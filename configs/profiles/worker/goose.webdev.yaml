@@ -1,0 +1,18 @@
+# Demo override for webdev_demo.sh — Google Gemini 2.5 Flash-Lite.
+# Originally tried gemini-2.5-flash but its free tier is only 10 RPM / 250 RPD
+# after Google's Dec-2025 quota cut. Flash-Lite gets 15 RPM / 1000 RPD and is
+# plenty for plain React+inline-styles code on a 4-file demo. Drop in to
+# gemini-2.5-flash later when on a paid tier for noticeably stronger code.
+
+GOOSE_PROVIDER: google
+GOOSE_MODEL: gemini-2.5-flash-lite
+GOOSE_TELEMETRY_ENABLED: false
+GOOSE_DISABLE_KEYRING: true
+
+extensions:
+  developer:
+    bundled: true
+    enabled: true
+    name: developer
+    timeout: 600
+    type: builtin
