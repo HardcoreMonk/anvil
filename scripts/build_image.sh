@@ -54,9 +54,11 @@ echo "==> 3. Installing Debian Bookworm minbase via debootstrap <=="
 # --include: batched into the same pass to avoid a separate apt-get run
 #   libgomp1:    OpenMP runtime required by Goose
 #   ca-certificates: for HTTPS LLM API calls from within the VM
+#   curl, jq:    used by in-VM agents to call peer agents' /tasks endpoints
+#                (e.g. orchestrator dispatching to worker/reviewer in a flock)
 debootstrap \
     --variant=minbase \
-    --include=libgomp1,ca-certificates,tzdata,iproute2 \
+    --include=libgomp1,ca-certificates,tzdata,iproute2,curl,jq \
     bookworm "$MNT_DIR" http://deb.debian.org/debian/
 
 echo "==> 4. Installing Goose binary and goose-agent <=="
@@ -91,10 +93,15 @@ fi
 mkdir -p "$MNT_DIR/usr/local/sbin"
 install -m 755 "$MICRO_INIT_BIN" "$MNT_DIR/usr/local/sbin/micro-init"
 
-echo "==> 5b. Installing gtwall CLI <=="
+echo "==> 5b. Installing gtwall and gtcall CLIs <=="
 # gtwall posts to the in-VM goose-agent /townwall/post, which forwards to the
 # host control plane /flocks/{id}/post. Available only inside flock-spawned VMs.
 install -m 755 scripts/gtwall "$MNT_DIR/usr/local/bin/gtwall"
+# gtcall dispatches a prompt to a peer agent in the same flock via the control
+# plane's POST /vms/{vm_id}/tasks proxy. Hides curl + jq + bearer + JSON
+# quoting behind a `gtcall <agent_id> <prompt>` single-line interface so
+# LLM-authored bash does not have to assemble these correctly itself.
+install -m 755 scripts/gtcall "$MNT_DIR/usr/local/bin/gtcall"
 
 printf 'goose-agent\n'                       > "$MNT_DIR/etc/hostname"
 printf '127.0.0.1\tlocalhost goose-agent\n'  > "$MNT_DIR/etc/hosts"

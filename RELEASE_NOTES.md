@@ -1,3 +1,47 @@
+# v0.3.6 — Autonomous Multi-Agent Webdev Demo
+
+**Ephemera** v0.3.6 turns the multi-agent flock from a spawn primitive into a demonstrated autonomous collaboration: `webdev_demo.sh` stands up an orchestrator + worker + reviewer team that designs, generates, reviews, and publishes a complete React + Vite site — every file authored inside the VMs, with the host acting only as a passive Town Wall harvester. Getting there required three pieces of in-VM tooling, all included here. The release is additive — no wire format changed and the `/tasks` response shape is unchanged; the only behavior change to an existing endpoint is that `/tasks` output is now cleaner and no longer truncated.
+
+---
+
+## What's New
+
+### `webdev_demo.sh` — autonomous 3-agent flock
+
+- A one-shot operator demo (manual gate, like `observability_demo.sh`): preflight → swap per-role `*.webdev.{md,yaml}` overrides → spawn an `orchestrator + worker + reviewer` flock → background SSE harvester on the Town Wall → one `POST /vms/{orchestrator}/tasks` that drives the whole job → `npm install` + `vite build` → `vite preview` on `:5173` until `Ctrl-C`.
+- The orchestrator drives a single Goose session through ~13 tool calls: for each of `src/App.jsx`, `src/main.jsx`, `src/index.css`, `index.html` it calls `gtcall worker-1` to generate the file, `gtwall` to publish it to the Town Wall, and a best-effort `gtcall reviewer-1` review note — then posts `<<<DONE>>>`. All four `<<<FILE:>>>` posts are authored by `orchestrator-1`; there is no host authorship.
+- Per-role models: orchestrator `gemini-2.5-flash` (must drive the loop without stalling), worker + reviewer `gemini-2.5-flash-lite` (single-shot). Assumes a paid-tier Gemini key — the free tier's shared 20 RPM cap across all models cannot sustain multi-turn orchestration.
+- See [Multi-Agent Webdev Demo](README.md#multi-agent-webdev-demo-v036) in the README.
+
+### In-VM agent-to-agent dispatch — `gtcall`
+
+- New `gtcall <agent_id> "<prompt>"` CLI baked into the golden image alongside `gtwall`. It resolves the peer's `vm_id` from `GET /flocks/{id}` and posts to the control plane's `POST /vms/{vm_id}/tasks` proxy, which injects the peer's agent token — so a calling agent never needs peer credentials.
+- The request body is built with `jq -n --arg`, so arbitrary multi-line prompts (newlines, quotes, backticks) dispatch safely, replacing the fragile LLM-authored `curl`/quoting that earlier demo attempts choked on.
+
+### goose-agent `--output-format json` — clean, untruncated task output
+
+- `cmd/goose-agent/main.go` now runs `goose run --output-format json` and returns the assistant text extracted from the envelope (`extractGooseJSONText`): it slices from the first `{` to skip Goose's startup banner, concatenates every assistant `text` block, and falls back to raw stdout if the envelope cannot be parsed.
+- This is the only working escape from goose-cli's `streaming_buffer.rs` truncation, which otherwise caps fenced code at 50 lines and spills the overflow into an in-VM `/tmp/goose-*.txt` the host caller cannot reach (neither `--debug` nor `GOOSE_SHOW_FULL_OUTPUT` disables it). The `{ "output": ..., "error": ... }` response shape is unchanged.
+- 4 new unit tests cover the happy path, multi-block concatenation, non-JSON fallback, and banner-prefix skip.
+
+### `gtwall` multi-line fix
+
+- `gtwall` now builds its JSON body with `jq -n --arg b "$1" '{body: $b}'` instead of a hand-rolled `sed` escape. The old escape did not handle newlines, so a multi-line body (a whole source file) became invalid JSON and the in-VM agent rejected it with HTTP 400 (curl `-f` → exit 22). Single-line posts are unaffected; multi-line posts now succeed. Latent for the entire v0.3.x line because gtwall had only ever posted single-line status messages.
+
+### Golden image: `curl` + `jq`
+
+- `scripts/build_image.sh` now installs `curl` and `jq` into the Debian Bookworm golden image (~6 MiB), which `gtcall`/`gtwall` and any future in-VM scripting rely on. `scripts/gtcall` is added to `EnsureGoldenImage`'s staleness input list so editing it triggers a rebuild.
+
+---
+
+## Compatibility
+
+- **Additive.** No control-plane wire format changed. `/tasks` returns the same `{ "output", "error" }` shape (the value is now cleaner). `gtwall`'s single-line behavior is unchanged.
+- **Golden-image rebuild.** The in-VM changes (`goose-agent`, `build_image.sh`, `gtwall`, new `gtcall`) trigger one automatic golden-image rebuild on the next daemon start via the mtime staleness check.
+- **No new daemon dependency.** `jq` / `curl` are added inside the guest image only; the host already required `jq` since v0.3.5.
+
+---
+
 # v0.3.5 — Observability Trio
 
 **Ephemera** v0.3.5 lays down the observability primitives every later cycle will depend on: a Prometheus `/metrics` endpoint, a per-VM `/stats` snapshot endpoint, and a `log/slog` migration of every daemon-side log call. The release is additive — defaults preserve every v0.3.4 behavior, no wire format changed, no external dependency was added.

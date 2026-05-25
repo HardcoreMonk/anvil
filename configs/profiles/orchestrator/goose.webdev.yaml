@@ -1,0 +1,22 @@
+# Demo override for webdev_demo.sh — Google Gemini 2.5 Flash.
+#
+# On the paid tier (1000 RPM) the free-tier 20 RPM cap that forced Flash-Lite no
+# longer applies, so the orchestrator runs the stronger model. Flash-Lite proved
+# too weak to drive the multi-step operating loop: in testing it wrote a todo
+# list and then ended the session without ever dispatching gtcall/gtwall (and
+# intermittently hallucinated tool names like `todo_write`). Flash follows the
+# loop reliably. Worker and reviewer stay on Flash-Lite — they do single-shot
+# generation/review, not multi-turn orchestration.
+
+GOOSE_PROVIDER: google
+GOOSE_MODEL: gemini-2.5-flash
+GOOSE_TELEMETRY_ENABLED: false
+GOOSE_DISABLE_KEYRING: true
+
+extensions:
+  developer:
+    bundled: true
+    enabled: true
+    name: developer
+    timeout: 600
+    type: builtin

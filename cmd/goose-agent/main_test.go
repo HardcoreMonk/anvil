@@ -77,3 +77,51 @@ func TestLoadAgentToken_TrimsWhitespace(t *testing.T) {
 		t.Errorf("expected trimmed token, got %q", got)
 	}
 }
+
+func TestExtractGooseJSONText_HappyPath(t *testing.T) {
+	in := []byte(`{
+	  "messages": [
+	    {"role":"user", "content":[{"type":"text","text":"hello"}]},
+	    {"role":"assistant", "content":[{"type":"text","text":"world"}]}
+	  ],
+	  "metadata": {"status":"ok"}
+	}`)
+	if got := extractGooseJSONText(in); got != "world" {
+		t.Errorf("expected %q, got %q", "world", got)
+	}
+}
+
+func TestExtractGooseJSONText_MultipleAssistantBlocks(t *testing.T) {
+	in := []byte(`{"messages":[
+	  {"role":"assistant","content":[
+	    {"type":"text","text":"line one"},
+	    {"type":"toolRequest","id":"x"},
+	    {"type":"text","text":"line two"}
+	  ]},
+	  {"role":"assistant","content":[{"type":"text","text":"line three"}]}
+	]}`)
+	want := "line one\nline two\nline three"
+	if got := extractGooseJSONText(in); got != want {
+		t.Errorf("expected %q, got %q", want, got)
+	}
+}
+
+func TestExtractGooseJSONText_NonJSONInput_ReturnsEmpty(t *testing.T) {
+	// goose may crash before producing JSON — caller falls back to raw stdout.
+	if got := extractGooseJSONText([]byte("panic at the disco")); got != "" {
+		t.Errorf("expected empty string for non-JSON input, got %q", got)
+	}
+}
+
+func TestExtractGooseJSONText_StripsBannerPrefix(t *testing.T) {
+	// `goose run --output-format json` prints a startup banner to stdout
+	// before the JSON envelope. Our extractor must skip it instead of
+	// failing the whole unmarshal.
+	in := []byte("    __( O)>  ● new session · google gemini-2.5-flash-lite\n" +
+		"   \\____)    20260522_1 · /\n" +
+		"     L L     goose is ready\n" +
+		`{"messages":[{"role":"assistant","content":[{"type":"text","text":"hi"}]}]}`)
+	if got := extractGooseJSONText(in); got != "hi" {
+		t.Errorf("expected %q after banner strip, got %q", "hi", got)
+	}
+}

@@ -25,8 +25,11 @@ fi
 PORT="${GOOSE_AGENT_PORT:-8080}"
 TOKEN="$(cat /root/.ephemera-agent-token 2>/dev/null || true)"
 
-# Escape backslashes and double quotes for safe JSON embedding.
-BODY=$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
+# Build a JSON-safe request body. jq --arg handles embedded newlines, double
+# quotes, backslashes, and control characters that multi-line message bodies
+# carry. A hand-rolled sed escape leaves raw newlines in the JSON string, which
+# the agent rejects with HTTP 400 (curl -f then exits 22).
+BODY=$(jq -n --arg b "$1" '{body: $b}')
 
 AUTH_HEADER=""
 if [ -n "$TOKEN" ]; then
@@ -36,4 +39,4 @@ fi
 curl -sf -X POST "http://localhost:${PORT}/townwall/post" \
     ${AUTH_HEADER:+ -H "$AUTH_HEADER"} \
     -H "Content-Type: application/json" \
-    -d "{\"body\":\"${BODY}\"}"
+    -d "$BODY"
