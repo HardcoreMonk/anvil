@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,10 +27,11 @@ type SnapshotMetadata struct {
 	VsockPath      string    `json:"vsock_path"` // original vsock UDS path; Firecracker recreates it from snapshot state on restore
 	MacAddr        string    `json:"mac_addr"`
 	AgentToken     string    `json:"agent_token"`
-	DiskPath       string    `json:"disk_path"`      // original workspace path (required by Firecracker on restore)
-	MemFilePath    string    `json:"mem_file_path"`  // absolute path to memory.bin (or sparse diff)
-	StatFilePath   string    `json:"stat_file_path"` // absolute path to state.bin
-	DiskCopyPath   string    `json:"disk_copy_path"` // copy of disk inside snapshot dir
+	DiskPath       string    `json:"disk_path"`                  // original workspace path (required by Firecracker on restore)
+	MemFilePath    string    `json:"mem_file_path"`              // absolute path to memory.bin (or sparse diff)
+	StatFilePath   string    `json:"stat_file_path"`             // absolute path to state.bin
+	DiskCopyPath   string    `json:"disk_copy_path"`             // full rootfs copy inside snapshot dir (full snapshots; empty for v0.4.0 diff snapshots)
+	RootfsDiffPath string    `json:"rootfs_diff_path,omitempty"` // v0.4.0+ diff: sparse rootfs delta vs base.DiskCopyPath
 	CreatedAt      time.Time `json:"created_at"`
 }
 
@@ -93,30 +95,15 @@ func DeleteSnapshot(snapDir string) error {
 	return nil
 }
 
-// CopyDiskToSnapshot copies the VM disk into the snapshot directory as rootfs.ext4.
-// Returns the destination path.
+// CopyDiskToSnapshot copies the VM disk into the snapshot directory as rootfs.ext4
+// (the full read-only base for full snapshots). Uses reflink/sparse copy so the ~22%
+// sparse golden image stays sparse and the copy is instant on btrfs/XFS. Returns the
+// destination path.
 func CopyDiskToSnapshot(diskPath, snapDir string) (string, error) {
 	dst := filepath.Join(snapDir, "rootfs.ext4")
-
-	src, err := os.Open(diskPath)
-	if err != nil {
-		return "", fmt.Errorf("open source disk: %w", err)
-	}
-	defer src.Close()
-
-	out, err := os.Create(dst)
-	if err != nil {
-		return "", fmt.Errorf("create snapshot disk copy: %w", err)
-	}
-
-	if _, err := io.Copy(out, src); err != nil {
-		out.Close()
+	if err := reflinkOrSparseCopy(diskPath, dst); err != nil {
 		os.Remove(dst)
 		return "", fmt.Errorf("copy disk to snapshot: %w", err)
-	}
-	if err := out.Close(); err != nil {
-		os.Remove(dst)
-		return "", fmt.Errorf("flush snapshot disk: %w", err)
 	}
 	return dst, nil
 }
@@ -312,10 +299,26 @@ func SetupDMSnapshot(baseDiskPath, exceptionStorePath, mountTargetPath string) (
 	}, nil
 }
 
-// TeardownDMSnapshot releases all kernel resources created by SetupDMSnapshot.
-// Uses lazy unmount so any Firecracker fd that was already opened continues to work
-// until the process exits, at which point the underlying inode is freed.
+// TeardownDMSnapshot releases all kernel resources created by SetupDMSnapshot and
+// removes the sparse exception store. Use this on explicit VM delete, where the COW
+// writes are no longer needed.
 func TeardownDMSnapshot(info *DMSnapshotInfo) {
+	teardownDMSnapshot(info, false)
+}
+
+// TeardownDMSnapshotKeepStore releases the kernel objects (mount, dm device, loop
+// devices) but preserves the sparse exception store file. Used on graceful daemon
+// shutdown so a COW VM can be cold-restarted: RecoverVMs re-layers the same store
+// over the golden image to reconstruct the disk.
+func TeardownDMSnapshotKeepStore(info *DMSnapshotInfo) {
+	teardownDMSnapshot(info, true)
+}
+
+// teardownDMSnapshot releases the kernel resources created by SetupDMSnapshot.
+// Uses lazy unmount so any Firecracker fd that was already opened continues to work
+// until the process exits, at which point the underlying inode is freed. When
+// keepStore is true the exception store file is left on disk for a later restore.
+func teardownDMSnapshot(info *DMSnapshotInfo, keepStore bool) {
 	if info == nil {
 		return
 	}
@@ -332,25 +335,43 @@ func TeardownDMSnapshot(info *DMSnapshotInfo) {
 	}
 	exec.Command("losetup", "-d", info.COWLoopDevice).Run()
 	exec.Command("losetup", "-d", info.LoopDevice).Run()
-	os.Remove(info.ExceptionStore)
+	if !keepStore {
+		os.Remove(info.ExceptionStore)
+	}
 }
 
 // MergeMemoryDiff produces a merged memory file by overlaying dirty pages from a diff
-// snapshot onto a full (base) snapshot. The diff file is sparse: only dirty pages are
-// written; clean pages are holes. SEEK_DATA/SEEK_HOLE is used to iterate only over the
-// written regions, avoiding a full 2 GB read/write of the base.
+// snapshot onto a full (base) snapshot.
 //
 // outputPath must not exist; caller is responsible for cleanup on success.
-// On error, outputPath is removed if it was created.
 func MergeMemoryDiff(baseMemPath, diffMemPath, outputPath string) error {
 	if err := copyFile(baseMemPath, outputPath); err != nil {
 		return fmt.Errorf("copy base memory: %w", err)
 	}
+	return overlaySparseDiff(diffMemPath, outputPath)
+}
 
-	diff, err := os.Open(diffMemPath)
+// MergeRootfsDiff reconstructs a full rootfs image by overlaying a sparse rootfs diff
+// (changed 4 KiB blocks only) onto a copy of the base snapshot's full rootfs. The result
+// is a complete ext4 image suitable as the read-only origin of a dm-snapshot on restore.
+//
+// outputPath must not exist; caller is responsible for cleanup on success.
+func MergeRootfsDiff(baseRootfsPath, diffPath, outputPath string) error {
+	if err := reflinkOrSparseCopy(baseRootfsPath, outputPath); err != nil {
+		return fmt.Errorf("copy base rootfs: %w", err)
+	}
+	return overlaySparseDiff(diffPath, outputPath)
+}
+
+// overlaySparseDiff overlays the data (non-hole) regions of a sparse diff file onto
+// outputPath, which must already contain the base image. It walks the diff with
+// SEEK_DATA/SEEK_HOLE so only written regions are touched, avoiding a full read/write of
+// the base. On error outputPath is removed.
+func overlaySparseDiff(diffPath, outputPath string) error {
+	diff, err := os.Open(diffPath)
 	if err != nil {
 		os.Remove(outputPath)
-		return fmt.Errorf("open diff memory: %w", err)
+		return fmt.Errorf("open diff: %w", err)
 	}
 	defer diff.Close()
 
@@ -361,30 +382,21 @@ func MergeMemoryDiff(baseMemPath, diffMemPath, outputPath string) error {
 	}
 	defer out.Close()
 
-	// Walk the sparse regions of the diff file using SEEK_DATA / SEEK_HOLE.
-	// Each data region contains dirty pages that must overwrite the corresponding
-	// region in the merged output.
 	const bufSize = 2 << 20 // 2 MiB transfer buffer
 	buf := make([]byte, bufSize)
 	var offset int64
 
 	diffFd := int(diff.Fd())
 	for {
-		// Find the start of the next dirty data region.
 		dataStart, err := unix.Seek(diffFd, offset, unix.SEEK_DATA)
 		if err != nil {
 			break // no more data regions (ENXIO at EOF)
 		}
-
-		// Find the end of this data region (start of next hole).
 		holeStart, err := unix.Seek(diffFd, dataStart, unix.SEEK_HOLE)
 		if err != nil {
-			// Rest of file is data.
 			fi, _ := diff.Stat()
 			holeStart = fi.Size()
 		}
-
-		// Copy dirty pages from diff → output at the same offset.
 		remaining := holeStart - dataStart
 		if _, err := diff.Seek(dataStart, io.SeekStart); err != nil {
 			os.Remove(outputPath)
@@ -394,7 +406,6 @@ func MergeMemoryDiff(baseMemPath, diffMemPath, outputPath string) error {
 			os.Remove(outputPath)
 			return fmt.Errorf("seek output at %d: %w", dataStart, err)
 		}
-
 		for remaining > 0 {
 			n := int64(bufSize)
 			if n > remaining {
@@ -416,9 +427,174 @@ func MergeMemoryDiff(baseMemPath, diffMemPath, outputPath string) error {
 			}
 			remaining -= int64(nr)
 		}
-
 		offset = holeStart
 	}
+	return nil
+}
 
+// WriteRootfsDiff compares currentPath against basePath in 4 KiB blocks and writes only
+// the differing blocks into diffPath at the same offset, leaving matching ranges as holes
+// so diffPath is sparse. currentPath and basePath MUST be the same length (both are clones
+// of the golden image). Reading goes through os.Open, so a bind-mounted dm-snapshot block
+// device (COW / restored source VM) yields its full ext4 view correctly — the diff is
+// computed by comparison, never from source sparseness (a block device reports no holes).
+// Returns the number of changed bytes written. On error diffPath is removed if created.
+func WriteRootfsDiff(currentPath, basePath, diffPath string) (changedBytes int64, err error) {
+	cur, err := os.Open(currentPath)
+	if err != nil {
+		return 0, fmt.Errorf("open current rootfs: %w", err)
+	}
+	defer cur.Close()
+	base, err := os.Open(basePath)
+	if err != nil {
+		return 0, fmt.Errorf("open base rootfs: %w", err)
+	}
+	defer base.Close()
+
+	curInfo, err := cur.Stat()
+	if err != nil {
+		return 0, fmt.Errorf("stat current rootfs: %w", err)
+	}
+	baseInfo, err := base.Stat()
+	if err != nil {
+		return 0, fmt.Errorf("stat base rootfs: %w", err)
+	}
+	size := curInfo.Size()
+	if size != baseInfo.Size() {
+		return 0, fmt.Errorf("rootfs size mismatch: current %d != base %d", size, baseInfo.Size())
+	}
+
+	out, err := os.Create(diffPath)
+	if err != nil {
+		return 0, fmt.Errorf("create rootfs diff: %w", err)
+	}
+	defer out.Close()
+	// Set apparent size up front so trailing equal blocks leave the diff at full length
+	// (holes), keeping apparent size == rootfs size for a clean SEEK_DATA/SEEK_HOLE merge.
+	if err := out.Truncate(size); err != nil {
+		os.Remove(diffPath)
+		return 0, fmt.Errorf("truncate rootfs diff: %w", err)
+	}
+
+	const block = 4096     // diff granularity: dm-snapshot "P 8" chunk + ext4 block + page
+	const window = 1 << 20 // 1 MiB read window (fewer syscalls than per-block reads)
+	cbuf := make([]byte, window)
+	bbuf := make([]byte, window)
+	var offset int64
+	for offset < size {
+		n := int64(window)
+		if size-offset < n {
+			n = size - offset
+		}
+		cr, cerr := io.ReadFull(cur, cbuf[:n])
+		br, berr := io.ReadFull(base, bbuf[:n])
+		if (cerr != nil && cerr != io.ErrUnexpectedEOF) || (berr != nil && berr != io.ErrUnexpectedEOF) {
+			os.Remove(diffPath)
+			return 0, fmt.Errorf("read rootfs at %d: cur=%v base=%v", offset, cerr, berr)
+		}
+		if cr != br {
+			os.Remove(diffPath)
+			return 0, fmt.Errorf("short read mismatch at %d: cur=%d base=%d", offset, cr, br)
+		}
+		// Compare in 4 KiB sub-blocks; write only the differing ones (sparse elsewhere).
+		for i := 0; i < cr; i += block {
+			end := i + block
+			if end > cr {
+				end = cr
+			}
+			if !bytes.Equal(cbuf[i:end], bbuf[i:end]) {
+				if _, werr := out.WriteAt(cbuf[i:end], offset+int64(i)); werr != nil {
+					os.Remove(diffPath)
+					return 0, fmt.Errorf("write rootfs diff at %d: %w", offset+int64(i), werr)
+				}
+				changedBytes += int64(end - i)
+			}
+		}
+		offset += int64(cr)
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(diffPath)
+		return 0, fmt.Errorf("flush rootfs diff: %w", err)
+	}
+	return changedBytes, nil
+}
+
+// reflinkOrSparseCopy copies src→dst. `cp` (non-recursive) copies the CONTENTS of src even
+// when src is a bind-mounted block device (COW / restored VM disk); --reflink=auto is an
+// instant CoW clone on btrfs/XFS (transparently a full copy on ext4) and --sparse=always
+// keeps holes. Falls back to a Go sparse copy if cp is unavailable.
+func reflinkOrSparseCopy(src, dst string) error {
+	if err := exec.Command("cp", "--reflink=auto", "--sparse=always", src, dst).Run(); err == nil {
+		return nil
+	}
+	return sparseCopyFile(src, dst)
+}
+
+// sparseCopyFile copies src→dst preserving holes via SEEK_DATA/SEEK_HOLE. A source with no
+// holes (e.g. a block device) is read in full — still correct, just not sparse.
+func sparseCopyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	fi, err := in.Stat()
+	if err != nil {
+		return err
+	}
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	if err := out.Truncate(fi.Size()); err != nil {
+		os.Remove(dst)
+		return err
+	}
+	const bufSize = 2 << 20
+	buf := make([]byte, bufSize)
+	inFd := int(in.Fd())
+	var offset int64
+	for {
+		dataStart, err := unix.Seek(inFd, offset, unix.SEEK_DATA)
+		if err != nil {
+			break
+		}
+		holeStart, err := unix.Seek(inFd, dataStart, unix.SEEK_HOLE)
+		if err != nil {
+			holeStart = fi.Size()
+		}
+		if _, err := in.Seek(dataStart, io.SeekStart); err != nil {
+			os.Remove(dst)
+			return err
+		}
+		if _, err := out.Seek(dataStart, io.SeekStart); err != nil {
+			os.Remove(dst)
+			return err
+		}
+		remaining := holeStart - dataStart
+		for remaining > 0 {
+			n := int64(bufSize)
+			if n > remaining {
+				n = remaining
+			}
+			nr, rerr := in.Read(buf[:n])
+			if nr > 0 {
+				if _, werr := out.Write(buf[:nr]); werr != nil {
+					os.Remove(dst)
+					return werr
+				}
+			}
+			if rerr != nil {
+				if rerr == io.EOF {
+					break
+				}
+				os.Remove(dst)
+				return rerr
+			}
+			remaining -= int64(nr)
+		}
+		offset = holeStart
+	}
 	return nil
 }

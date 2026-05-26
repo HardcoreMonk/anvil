@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -652,6 +653,22 @@ func (cp *ControlPlane) spawnVMInternal(opts spawnVMOptions) (*VMInfo, string, e
 	}
 	vmID := fmt.Sprintf("vm-%d", time.Now().UnixNano())
 
+	// Disk-space pre-flight (v0.4.0): refuse before allocating any resources if
+	// the clone would push free space below the operator margin. A full clone
+	// copies the entire golden image; COW's exception store is a sparse 8 GiB
+	// file (~0 bytes up front), so only the margin must be free.
+	{
+		var needBytes uint64
+		if os.Getenv("EPHEMERA_DISK_MODE") != "cow" {
+			if fi, statErr := os.Stat(cp.provisioner.GoldenImagePath); statErr == nil {
+				needBytes = uint64(fi.Size())
+			}
+		}
+		if err := storage.EnsureFreeSpace(cp.provisioner.WorkspaceDir, needBytes, uint64(diskMinFreeMiB)<<20); err != nil {
+			return nil, "", err
+		}
+	}
+
 	tapDevice, guestIP, macAddr, err := cp.netManager.Allocate()
 	if err != nil {
 		return nil, "", fmt.Errorf("network allocation: %w", err)
@@ -754,9 +771,9 @@ func (cp *ControlPlane) spawnVMInternal(opts spawnVMOptions) (*VMInfo, string, e
 	}
 	cp.mu.Unlock()
 
-	// Persist VM state for cold-restart recovery after daemon restart.
-	// COW-mode VMs are marked but excluded from automatic recovery in v0.3.2;
-	// the recovery path checks DiskMode and skips them with a warning.
+	// Persist VM state for cold-restart recovery after daemon restart. Both plain
+	// and COW VMs are recovered: DiskMode tells RecoverVMs whether to boot the full
+	// rootfs clone or re-layer the dm-snapshot exception store over the golden image.
 	diskMode := storage.DiskModePlain
 	if dmInfo != nil {
 		diskMode = storage.DiskModeCOW
@@ -839,7 +856,12 @@ func (cp *ControlPlane) spawnVM(w http.ResponseWriter, r *http.Request) {
 		MemSizeMib:  agentProfile.MemSizeMib,
 	})
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		status := http.StatusInternalServerError
+		var ise *storage.InsufficientStorageError
+		if errors.As(err, &ise) {
+			status = http.StatusInsufficientStorage
+		}
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), status)
 		return
 	}
 
@@ -946,14 +968,16 @@ func (cp *ControlPlane) destroyVM(vmID string) {
 }
 
 // DestroyAll is called on graceful daemon shutdown. It stops every running
-// Firecracker process but preserves each VM's state.json and rootfs clone so
-// the next daemon start can cold-restart them with the same identity.
+// Firecracker process but preserves each recoverable VM's state.json + rootfs so
+// the next daemon start can cold-restart it with the same identity. For plain VMs
+// that means keeping the rootfs clone; for COW spawn VMs it means releasing the
+// dm-snapshot kernel objects while keeping the sparse exception store.
 // Explicit DELETE /vms/{id} (which routes through destroyVM) still does a full
 // cleanup — only the daemon-lifecycle path takes the preserving branch.
 //
-// COW-restored and snapshot-restored VMs are torn down fully here because
-// v0.3.2 does not recover them: leaving their dm-snapshot devices or bind
-// mounts behind would leak kernel resources without any benefit.
+// Snapshot-restored VMs (dm-snapshot or legacy bind-mount) persist no state.json,
+// so they are torn down fully here: leaving their devices or per-restore disk
+// copies behind would leak resources without any benefit.
 func (cp *ControlPlane) DestroyAll() {
 	cp.mu.RLock()
 	snapshot := make([]*runningVM, 0, len(cp.vms))
@@ -968,14 +992,20 @@ func (cp *ControlPlane) DestroyAll() {
 		if v.vsockPath != "" {
 			os.Remove(v.vsockPath)
 		}
-		if v.dmSnapshot != nil {
-			// COW VMs are not auto-recovered in v0.3.2; release the dm-snapshot
-			// device and exception store now. Also drop the state.json so the
-			// next start does not log a confusing "skipping COW VM" line for
-			// what is really an intentional teardown.
+		if v.dmSnapshot != nil && storage.VMStateExists(cp.workDir, v.VMID) {
+			// COW spawn VM: release the dm-snapshot kernel objects (mount, dm device,
+			// loops) but PRESERVE the exception store + state.json so RecoverVMs can
+			// re-layer the store over the golden image and bring the VM back with the
+			// same identity on the next start.
+			storage.TeardownDMSnapshotKeepStore(v.dmSnapshot)
+		} else if v.dmSnapshot != nil {
+			// dm-snapshot restored VM (no persisted state → not recoverable):
+			// full teardown including the exception store.
 			storage.TeardownDMSnapshot(v.dmSnapshot)
 			storage.DeleteVMState(cp.workDir, v.VMID)
 		} else if v.bindMountTarget != "" {
+			// Bind-mount restored VM (legacy, not recoverable): drop the per-restore
+			// disk copy and state.json.
 			storage.TeardownBindMount(v.bindMountTarget, v.diskPath)
 			storage.DeleteVMState(cp.workDir, v.VMID)
 		}
@@ -1133,12 +1163,36 @@ func (cp *ControlPlane) createSnapshot(w http.ResponseWriter, r *http.Request, v
 		return
 	}
 
-	// Determine snapshot type (full or diff) and base snapshot ID.
+	// Determine snapshot type (full or diff) and base ID first, so the disk pre-flight
+	// can reserve accurately (a diff stores only the changed rootfs blocks).
 	snapType, baseSnapID, err := cp.resolveSnapshotType(req.Type, vmID)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusBadRequest)
 		return
+	}
+
+	// Disk-space pre-flight (v0.4.0): refuse before pausing the VM if the snapshot would
+	// push free space below the operator margin. Full snapshots reserve memory.bin (≈ guest
+	// RAM) + a full rootfs copy; diff snapshots reserve memory only (the rootfs delta is
+	// bounded by changed blocks, typically a few MB).
+	{
+		needBytes := uint64(v.memSizeMib) << 20
+		if snapType != "diff" {
+			if fi, statErr := os.Stat(filepath.Join("/tmp/goose-workspaces", vmID+".ext4")); statErr == nil {
+				needBytes += uint64(fi.Size())
+			}
+		}
+		if err := storage.EnsureFreeSpace(cp.workDir, needBytes, uint64(diskMinFreeMiB)<<20); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			status := http.StatusInternalServerError
+			var ise *storage.InsufficientStorageError
+			if errors.As(err, &ise) {
+				status = http.StatusInsufficientStorage
+			}
+			http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), status)
+			return
+		}
 	}
 
 	snapID := fmt.Sprintf("snap-%d", time.Now().UnixNano())
@@ -1176,16 +1230,40 @@ func (cp *ControlPlane) createSnapshot(w http.ResponseWriter, r *http.Request, v
 		return
 	}
 
-	// Copy disk while VM is still paused (ensures consistent state).
-	// Diff snapshots still copy the full rootfs — rootfs diff is a future optimization.
+	// Capture the rootfs while the VM is still paused (consistent state). Full snapshots
+	// store a complete rootfs.ext4; diff snapshots store only the 4 KiB blocks changed since
+	// the base snapshot (sparse rootfs.diff), merged back to a full image on restore.
 	diskPath := filepath.Join("/tmp/goose-workspaces", vmID+".ext4")
-	slog.Warn("snapshot: copying disk", "snapshot_id", snapID)
-	diskCopyPath, err := storage.CopyDiskToSnapshot(diskPath, snapDir)
-	if err != nil {
-		v.machine.ResumeVM(context.Background())
-		os.RemoveAll(snapDir)
-		http.Error(w, fmt.Sprintf(`{"error":"failed to copy disk: %v"}`, err), http.StatusInternalServerError)
-		return
+	var diskCopyPath, rootfsDiffPath string
+	if snapType == "diff" {
+		cp.snapshotsMu.RLock()
+		base, baseOK := cp.snapshots[baseSnapID]
+		cp.snapshotsMu.RUnlock()
+		if !baseOK {
+			v.machine.ResumeVM(context.Background())
+			os.RemoveAll(snapDir)
+			http.Error(w, fmt.Sprintf(`{"error":"base snapshot %s not found"}`, baseSnapID), http.StatusInternalServerError)
+			return
+		}
+		rootfsDiffPath = filepath.Join(snapDir, "rootfs.diff")
+		slog.Warn("snapshot: writing rootfs diff", "snapshot_id", snapID, "base", base.DiskCopyPath)
+		changed, derr := storage.WriteRootfsDiff(diskPath, base.DiskCopyPath, rootfsDiffPath)
+		if derr != nil {
+			v.machine.ResumeVM(context.Background())
+			os.RemoveAll(snapDir)
+			http.Error(w, fmt.Sprintf(`{"error":"failed to write rootfs diff: %v"}`, derr), http.StatusInternalServerError)
+			return
+		}
+		slog.Warn("snapshot: rootfs diff written", "snapshot_id", snapID, "changed_bytes", changed)
+	} else {
+		slog.Warn("snapshot: copying disk", "snapshot_id", snapID)
+		diskCopyPath, err = storage.CopyDiskToSnapshot(diskPath, snapDir)
+		if err != nil {
+			v.machine.ResumeVM(context.Background())
+			os.RemoveAll(snapDir)
+			http.Error(w, fmt.Sprintf(`{"error":"failed to copy disk: %v"}`, err), http.StatusInternalServerError)
+			return
+		}
 	}
 
 	if !req.StopAfter {
@@ -1215,6 +1293,7 @@ func (cp *ControlPlane) createSnapshot(w http.ResponseWriter, r *http.Request, v
 		MemFilePath:    memPath,
 		StatFilePath:   statPath,
 		DiskCopyPath:   diskCopyPath,
+		RootfsDiffPath: rootfsDiffPath,
 		CreatedAt:      time.Now().UTC(),
 	}
 
@@ -1243,6 +1322,15 @@ func pickMergedMemPath(workDir, newVMID string) string {
 		return filepath.Join(tmpfsDir, "ephemera-"+newVMID+"-merged.bin")
 	}
 	return filepath.Join(workDir, "tmp", newVMID+"-merged.bin")
+}
+
+// pickMergedRootfsPath returns the path for the transient full rootfs produced by merging a
+// base snapshot's rootfs with a diff's sparse delta on restore. Unlike pickMergedMemPath it
+// is NOT placed on /dev/shm: the merged rootfs is the dm-snapshot's read-only origin, pinned
+// by a loop device for the VM's entire life, so tmpfs would hold ~570 MB RAM per restored
+// VM. Disk-backed; unlinked right after losetup (its blocks are freed at teardown).
+func pickMergedRootfsPath(workDir, newVMID string) string {
+	return filepath.Join(workDir, "tmp", newVMID+"-rootfs-merged.ext4")
 }
 
 // deriveMACFromTap reproduces the MAC address from a tap device name (e.g. "tap3").
@@ -1304,43 +1392,80 @@ func (cp *ControlPlane) restoreSnapshot(w http.ResponseWriter, snapID string) {
 	// Serialize dm-snapshot setup + Firecracker open so each restore sees its own COW device.
 	cp.restoreMu.Lock()
 
-	slog.Warn("restore: setting up dm-snapshot cow", "snapshot_id", snapID, "base", meta.DiskCopyPath, "store", exceptionStorePath)
-	dmInfo, err := storage.SetupDMSnapshot(meta.DiskCopyPath, exceptionStorePath, meta.DiskPath)
-	if err != nil {
-		cp.restoreMu.Unlock()
-		cp.netManager.Release(tapDevice, newGuestIP)
-		slog.Warn("restore: dm-snapshot failed, falling back to bind mount", "snapshot_id", snapID, "err", err)
-		// Fallback: use the existing bind-mount approach if dm-snapshot is unavailable.
-		newDiskPath := filepath.Join(cp.provisioner.WorkspaceDir, newVMID+".ext4")
-		cp.restoreMu.Lock()
-		if bmErr := storage.SetupBindMount(meta.DiskCopyPath, newDiskPath, meta.DiskPath); bmErr != nil {
-			cp.restoreMu.Unlock()
-			cp.netManager.Release(tapDevice, newGuestIP)
-			http.Error(w, fmt.Sprintf(`{"error":"failed to set up disk: dm-snapshot: %v; bind-mount fallback: %v"}`, err, bmErr), http.StatusInternalServerError)
-			return
-		}
-		// Continue with bind-mount path (legacy runningVM fields).
-		cp.restoreMu.Unlock()
-		delegated = true
-		cp.restoreLegacyBindMount(w, snapID, meta, newVMID, newDiskPath, tapDevice, newGuestIP, socketPath)
-		return
-	}
-
-	// For diff snapshots: merge base memory + diff memory into a temp file.
-	// The merged file is used for restoration and deleted when the VM is destroyed.
-	memFileToUse := meta.MemFilePath
-	var mergedMemPath string
+	// Look up the base snapshot once for diff restores (shared by the rootfs + memory
+	// merges below). A diff's base is always a full snapshot (resolveSnapshotType).
+	var base storage.SnapshotMetadata
 	if meta.SnapshotType == "diff" {
 		cp.snapshotsMu.RLock()
-		base, baseOK := cp.snapshots[meta.BaseSnapshotID]
+		b, baseOK := cp.snapshots[meta.BaseSnapshotID]
 		cp.snapshotsMu.RUnlock()
 		if !baseOK {
 			cp.restoreMu.Unlock()
-			storage.TeardownDMSnapshot(dmInfo)
 			cp.netManager.Release(tapDevice, newGuestIP)
 			http.Error(w, fmt.Sprintf(`{"error":"base snapshot %s not found (was it deleted?)"}`, meta.BaseSnapshotID), http.StatusConflict)
 			return
 		}
+		base = b
+	}
+
+	// Resolve the read-only base disk for the COW device. v0.4.0 diff snapshots store only
+	// a sparse rootfs delta (RootfsDiffPath); merge it onto the base's full rootfs into a
+	// transient full image. Legacy diff + full snapshots use their full rootfs.ext4 directly.
+	baseDiskForCOW := meta.DiskCopyPath
+	var mergedRootfs string
+	if meta.RootfsDiffPath != "" {
+		mergedRootfs = pickMergedRootfsPath(cp.workDir, newVMID)
+		os.MkdirAll(filepath.Dir(mergedRootfs), 0755)
+		os.Remove(mergedRootfs)
+		slog.Warn("restore: merging base rootfs and diff", "snapshot_id", snapID, "base", base.DiskCopyPath, "diff", meta.RootfsDiffPath)
+		if mErr := storage.MergeRootfsDiff(base.DiskCopyPath, meta.RootfsDiffPath, mergedRootfs); mErr != nil {
+			cp.restoreMu.Unlock()
+			cp.netManager.Release(tapDevice, newGuestIP)
+			os.Remove(mergedRootfs)
+			http.Error(w, fmt.Sprintf(`{"error":"failed to merge rootfs diff: %v"}`, mErr), http.StatusInternalServerError)
+			return
+		}
+		baseDiskForCOW = mergedRootfs
+	}
+
+	slog.Warn("restore: setting up dm-snapshot cow", "snapshot_id", snapID, "base", baseDiskForCOW, "store", exceptionStorePath)
+	dmInfo, err := storage.SetupDMSnapshot(baseDiskForCOW, exceptionStorePath, meta.DiskPath)
+	if err != nil {
+		cp.restoreMu.Unlock()
+		cp.netManager.Release(tapDevice, newGuestIP)
+		slog.Warn("restore: dm-snapshot failed, falling back to bind mount", "snapshot_id", snapID, "err", err)
+		// Fallback: bind-mount the base disk if dm-snapshot is unavailable.
+		newDiskPath := filepath.Join(cp.provisioner.WorkspaceDir, newVMID+".ext4")
+		cp.restoreMu.Lock()
+		if bmErr := storage.SetupBindMount(baseDiskForCOW, newDiskPath, meta.DiskPath); bmErr != nil {
+			cp.restoreMu.Unlock()
+			cp.netManager.Release(tapDevice, newGuestIP)
+			if mergedRootfs != "" {
+				os.Remove(mergedRootfs)
+			}
+			http.Error(w, fmt.Sprintf(`{"error":"failed to set up disk: dm-snapshot: %v; bind-mount fallback: %v"}`, err, bmErr), http.StatusInternalServerError)
+			return
+		}
+		cp.restoreMu.Unlock()
+		// SetupBindMount copied baseDiskForCOW into newDiskPath; the transient merge is done.
+		if mergedRootfs != "" {
+			os.Remove(mergedRootfs)
+		}
+		delegated = true
+		cp.restoreLegacyBindMount(w, snapID, meta, newVMID, newDiskPath, tapDevice, newGuestIP, socketPath)
+		return
+	}
+	// dm-snapshot pins the merged rootfs via its read-only loop device; unlink the transient
+	// file now (its blocks are freed by losetup -d in TeardownDMSnapshot at VM destroy).
+	if mergedRootfs != "" {
+		os.Remove(mergedRootfs)
+	}
+
+	// For diff snapshots: merge base memory + diff memory into a temp file (used for
+	// restoration, deleted right after RestoreMachine loads it).
+	memFileToUse := meta.MemFilePath
+	var mergedMemPath string
+	if meta.SnapshotType == "diff" {
 		mergedMemPath = pickMergedMemPath(cp.workDir, newVMID)
 		os.MkdirAll(filepath.Dir(mergedMemPath), 0755)
 		slog.Warn("restore: merging base memory and diff", "snapshot_id", snapID, "base", base.MemFilePath, "diff", meta.MemFilePath)

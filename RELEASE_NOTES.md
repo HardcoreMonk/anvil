@@ -1,3 +1,36 @@
+# v0.4.0 — Storage / Recovery Core (in progress)
+
+**Ephemera** v0.4.0 hardens the storage and cold-restart paths. The headline is **COW spawn cold-restart**: a VM started with `EPHEMERA_DISK_MODE=cow` now survives a daemon restart with the same identity, just like a plain-rootfs VM — closing the v0.3.2 limitation where COW VMs were skipped on recovery. This entry grows as the remaining v0.4.0 storage items land. Additive: no wire format changed.
+
+---
+
+## What's New
+
+### COW spawn cold-restart (item A)
+
+- A COW VM's writes accumulate in a sparse dm-snapshot exception store (`<workspace>/<vm_id>.cow`). On graceful shutdown, `DestroyAll` now releases the dm-snapshot kernel objects (mount, dm device, loop devices) via the new `TeardownDMSnapshotKeepStore` but **preserves the exception store + `state.json`**. On the next start, `RecoverVMs` re-layers that store over the golden image (`SetupDMSnapshot`) and cold-restarts the VM — same `vm_id`, IP, TAP, MAC, and agent token.
+- A crashed previous run can leave a live `cow-<vm_id>` dm device for a VM whose `state.json` survived; recovery clears it first with the new store-preserving `ReclaimCOWDeviceKeepStore` before re-creating the snapshot, so `dmsetup create` never collides.
+- The graceful-shutdown preserve-vs-teardown decision keys on `storage.VMStateExists`: only state-backed spawn VMs are preserved. Snapshot-restored VMs (`POST /snapshots/{id}/restore`) persist no `state.json` and their base is a snapshot copy, not the golden image, so they remain out of scope and are torn down fully.
+- **Assumption:** the golden image is unchanged between spawn and restart. A golden-image rebuild invalidates the block-level COW layering; a missing store is logged and the VM boots from the pristine golden image (writes lost) rather than failing recovery.
+
+### True rootfs diff snapshots (item C)
+
+- A diff snapshot now stores only the **changed rootfs blocks** (`rootfs.diff` — a sparse 4 KiB-block delta vs its base, computed by `WriteRootfsDiff`) instead of a full ~570 MB `rootfs.ext4` copy, mirroring the existing memory diff (a few MB vs a full copy). On restore, `MergeRootfsDiff` overlays the delta onto the base's full rootfs into a transient `merged.ext4` (under `{workDir}/tmp`) that becomes the dm-snapshot read-only origin; it is unlinked right after `losetup` (blocks freed at VM destroy) and never placed on `/dev/shm`.
+- Full snapshots now copy the rootfs with `cp --reflink=auto --sparse=always` — an instant CoW clone on btrfs/XFS, and a sparse copy that skips the golden image's ~22% holes on ext4.
+- **Backward-compatible:** restore keys the rootfs-merge branch on a new `rootfs_diff_path` metadata field, so existing full snapshots and pre-v0.4.0 diff snapshots (which carry a full `rootfs.ext4`) restore byte-identically. A diff's base is always a full snapshot (no diff chains); the existing 409-on-delete dependency guard protects the base.
+
+### Storage hardening (items F + E)
+
+- **Disk-space pre-flight** — clone/snapshot operations check free space against `EPHEMERA_DISK_MIN_FREE_MIB` (default 1024) and return `507 Insufficient Storage` instead of failing mid-write.
+- **Orphan COW inventory** — `RemoveOrphanCOWDevices` runs in the recovery preamble and reclaims dm-snapshot/loop devices + exception stores left by a crashed run whose `state.json` did not survive.
+
+### Tests
+
+- e2e steps **40–46** exercise COW graceful cold-restart (store preserved, dm device re-created, same `vm_id`, `/health` 200), a SIGKILL crash that reclaims an orphaned COW device while cold-restarting the survivor, and restoration of plain disk mode.
+- e2e step **26b** asserts a diff snapshot's `rootfs.diff` is a sparse delta far smaller than the full rootfs; diff-restore steps (28–29) exercise the rootfs merge end-to-end. New `internal/storage` unit tests cover the `WriteRootfsDiff`/`MergeRootfsDiff` round-trip (byte-exact, sparse, size-mismatch guard).
+
+---
+
 # v0.3.6 — Autonomous Multi-Agent Webdev Demo
 
 **Ephemera** v0.3.6 turns the multi-agent flock from a spawn primitive into a demonstrated autonomous collaboration: `webdev_demo.sh` stands up an orchestrator + worker + reviewer team that designs, generates, reviews, and publishes a complete React + Vite site — every file authored inside the VMs, with the host acting only as a passive Town Wall harvester. Getting there required three pieces of in-VM tooling, all included here. The release is additive — no wire format changed and the `/tasks` response shape is unchanged; the only behavior change to an existing endpoint is that `/tasks` output is now cleaner and no longer truncated.

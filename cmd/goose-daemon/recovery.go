@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"time"
 
 	"ephemera/internal/orchestrator"
@@ -14,13 +15,17 @@ import (
 
 // RecoverVMs cold-restarts every previously-spawned VM whose state.json is
 // still on disk. Memory is not preserved — this is a fresh boot of the same
-// rootfs clone, reusing the same IP, TAP, MAC, and agent token so external
-// callers and any flock association stay stable across the daemon restart.
+// rootfs (a full clone for plain VMs, or a dm-snapshot re-layered over the
+// golden image for COW VMs), reusing the same IP, TAP, MAC, and agent token so
+// external callers and any flock association stay stable across the restart.
 //
-// Recovery skips:
-//   - DiskMode=cow VMs: dm-snapshot orphan cleanup is out of scope for v0.3.2
-//   - VMs whose disk file is missing (logged + state dropped)
-//   - VMs whose network identity can no longer be reclaimed (failed + state dropped)
+// COW VMs (DiskMode=cow) reconstruct their dm-snapshot from the preserved
+// exception store; this assumes the golden image is unchanged since spawn.
+//
+// A VM's state is dropped (and any flock agent marked dead) when:
+//   - its disk file is missing (logged only, not counted as a failure)
+//   - its network identity can no longer be reclaimed
+//   - dm-snapshot setup, Firecracker boot, or the agent handshake fails
 //
 // Returns the number of VMs brought back and the list of VMIDs that had state
 // but could not be restored.
@@ -29,11 +34,19 @@ func (cp *ControlPlane) RecoverVMs() (recovered int, failed []string, err error)
 	if err != nil {
 		return 0, nil, err
 	}
+
+	// Reclaim COW dm-snapshot + loop devices left behind by a crashed previous
+	// run (no surviving state.json). VMs that still have state are preserved for
+	// the recovery loop below to handle (v0.4.0 E).
+	liveVMIDs := make(map[string]struct{}, len(states))
 	for _, s := range states {
-		if s.DiskMode == storage.DiskModeCOW {
-			slog.Warn("recovery: skipping cow vm (not supported in v0.3.2)", "vm_id", s.VMID)
-			continue
-		}
+		liveVMIDs[s.VMID] = struct{}{}
+	}
+	if n := storage.RemoveOrphanCOWDevices(cp.provisioner.WorkspaceDir, liveVMIDs); n > 0 {
+		slog.Warn("recovery: reclaimed orphan cow devices", "count", n)
+	}
+
+	for _, s := range states {
 		if _, statErr := os.Stat(s.DiskPath); os.IsNotExist(statErr) {
 			slog.Warn("recovery: disk missing, dropping state", "vm_id", s.VMID, "disk_path", s.DiskPath)
 			storage.DeleteVMState(cp.workDir, s.VMID)
@@ -55,6 +68,36 @@ func (cp *ControlPlane) RecoverVMs() (recovered int, failed []string, err error)
 			continue
 		}
 
+		// COW VMs reconstruct their dm-snapshot before boot by re-layering the
+		// preserved exception store over the golden image. A crashed previous run
+		// may have left a live "cow-<vm_id>" device or a dangling store loop, so
+		// clear them first (keeping the store) to avoid a dmsetup name collision.
+		var dmInfo *storage.DMSnapshotInfo
+		if s.DiskMode == storage.DiskModeCOW {
+			storage.ReclaimCOWDeviceKeepStore(cp.provisioner.WorkspaceDir, s.VMID)
+			// The exception store path is not persisted; it is always
+			// "<workspace>/<vm_id>.cow" (see CloneDiskCOW). The base is the golden
+			// image, assumed unchanged since spawn — a rebuild would invalidate the
+			// block-level COW layering.
+			exceptionStore := filepath.Join(cp.provisioner.WorkspaceDir, s.VMID+".cow")
+			if _, statErr := os.Stat(exceptionStore); os.IsNotExist(statErr) {
+				// Store gone but state survived: SetupDMSnapshot truncates a fresh
+				// empty store, so the VM boots from the pristine golden image (writes
+				// lost). A clean boot is still usable, so warn rather than fail.
+				slog.Warn("recovery: cow exception store missing, booting from golden image", "vm_id", s.VMID, "store", exceptionStore)
+			}
+			dmSnap, setupErr := storage.SetupDMSnapshot(cp.provisioner.GoldenImagePath, exceptionStore, s.DiskPath)
+			if setupErr != nil {
+				slog.Warn("recovery: cow dm-snapshot setup failed, dropping state", "vm_id", s.VMID, "err", setupErr)
+				cp.netManager.Release(s.TapDevice, s.GuestIP)
+				storage.DeleteVMState(cp.workDir, s.VMID)
+				failed = append(failed, s.VMID)
+				cp.markFlockAgentDead(s.FlockID, s.AgentID)
+				continue
+			}
+			dmInfo = dmSnap
+		}
+
 		machine, startErr := vm.StartMachine(context.Background(), vm.VMConfig{
 			VMID:           s.VMID,
 			SocketPath:     s.SocketPath,
@@ -71,6 +114,9 @@ func (cp *ControlPlane) RecoverVMs() (recovered int, failed []string, err error)
 		})
 		if startErr != nil {
 			slog.Warn("recovery: firecracker start failed", "vm_id", s.VMID, "err", startErr)
+			if dmInfo != nil {
+				storage.TeardownDMSnapshot(dmInfo)
+			}
 			cp.netManager.Release(s.TapDevice, s.GuestIP)
 			storage.DeleteVMState(cp.workDir, s.VMID)
 			failed = append(failed, s.VMID)
@@ -83,6 +129,9 @@ func (cp *ControlPlane) RecoverVMs() (recovered int, failed []string, err error)
 		if waitErr := waitForAgent(s.GuestIP, 60*time.Second); waitErr != nil {
 			slog.Warn("recovery: agent did not respond", "vm_id", s.VMID, "err", waitErr)
 			machine.StopVMM()
+			if dmInfo != nil {
+				storage.TeardownDMSnapshot(dmInfo)
+			}
 			cp.netManager.Release(s.TapDevice, s.GuestIP)
 			storage.DeleteVMState(cp.workDir, s.VMID)
 			failed = append(failed, s.VMID)
@@ -105,6 +154,7 @@ func (cp *ControlPlane) RecoverVMs() (recovered int, failed []string, err error)
 			VMInfo:     info,
 			agentToken: s.AgentToken,
 			diskPath:   s.DiskPath,
+			dmSnapshot: dmInfo,
 			vsockPath:  s.VsockPath,
 			machine:    machine,
 			tapDevice:  s.TapDevice,

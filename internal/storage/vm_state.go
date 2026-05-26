@@ -13,9 +13,9 @@ import (
 // Bump when the wire layout changes in a way that needs migration logic.
 const vmStateSchemaVersion = 1
 
-// Disk mode tags recorded in VMState.DiskMode. Cold-restart recovery in v0.3.2
-// only handles "plain"; "cow" entries are skipped with a warning since dm-snapshot
-// orphan cleanup is out of scope for the first cut.
+// Disk mode tags recorded in VMState.DiskMode. Cold-restart recovery handles both:
+// "plain" boots the full rootfs clone, "cow" re-layers the preserved dm-snapshot
+// exception store over the golden image (v0.4.0).
 const (
 	DiskModePlain = "plain"
 	DiskModeCOW   = "cow"
@@ -89,6 +89,15 @@ func LoadVMState(workDir, vmID string) (VMState, error) {
 		return VMState{}, fmt.Errorf("vm_state: unmarshal: %w", err)
 	}
 	return s, nil
+}
+
+// VMStateExists reports whether a persisted state.json is present for vmID. Only
+// spawn VMs persist state (SaveVMState), so a present file means RecoverVMs will
+// bring the VM back — the graceful-shutdown path uses this to decide whether to
+// preserve a COW exception store or tear it down.
+func VMStateExists(workDir, vmID string) bool {
+	_, err := os.Stat(vmStatePath(workDir, vmID))
+	return err == nil
 }
 
 // DeleteVMState removes a VM's state.json and its parent directory if empty.
