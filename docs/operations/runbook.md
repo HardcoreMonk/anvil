@@ -40,19 +40,30 @@ ANVIL_SCHEDULER_QUOTA_STORE=/var/lib/anvil/tenants.json \
 
 systemd로 운영할 host에서는 설치 스크립트를 먼저 dry-run으로 확인한다. 기본 unit은
 `127.0.0.1:3010`에 bind하고 `/var/lib/anvil/{scheduler.json,tenants.json}`을
-state로 사용한다.
+state로 사용한다. `--verify`와 standalone smoke harness는 host에 `curl`,
+`python3`가 있어야 실행된다.
 
 ```bash
-bash scripts/install-anvil-scheduler-systemd.sh --dry-run
-sudo bash scripts/install-anvil-scheduler-systemd.sh
-sudo systemctl start anvil-scheduler.service
-curl http://127.0.0.1:3010/health
+bash scripts/install-anvil-scheduler-systemd.sh --dry-run --verify
+sudo bash scripts/install-anvil-scheduler-systemd.sh --start --verify
+```
+
+이미 실행 중인 service만 재검증할 때는 다음 명령을 사용한다.
+
+```bash
+bash scripts/anvil-scheduler-smoke.sh --base-url http://127.0.0.1:3010
 ```
 
 설치 후 설정을 바꿔야 하면 `/etc/anvil/anvil-scheduler.env`를 수정한 뒤
 `sudo systemctl restart anvil-scheduler.service`를 실행한다. scheduler service는
 자체 인증 계층을 두지 않으므로 loopback/private network 또는 reverse proxy policy
 뒤에서만 노출한다.
+
+`--verify`가 실패하면 먼저 `sudo systemctl status anvil-scheduler.service`와
+`journalctl -u anvil-scheduler.service -n 100 --no-pager`를 확인한다.
+`health_failed`는 service bind/start 문제, `host_put_failed`는 state path 권한 또는
+JSON body 처리 문제, `schedule_spawn_failed`는 host inventory나 quota/usage 입력
+문제를 우선 의심한다.
 
 ## Daemon API 확인
 

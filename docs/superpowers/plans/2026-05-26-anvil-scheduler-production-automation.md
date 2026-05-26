@@ -814,11 +814,7 @@ Add this included scope bullet under `anvil deploy/operations hardening`:
   - scheduler smoke harness와 systemd installer `--verify`
 ```
 
-Remove this excluded scope bullet:
-
-```markdown
-- scheduler service production deployment automation
-```
+이미 구현된 scheduler 운영 검증 자동화를 제외 범위로 보이게 하던 stale bullet을 제거한다.
 
 Replace the stale release remaining-work bullet:
 
@@ -837,7 +833,7 @@ with:
 Run:
 
 ```bash
-rg -n "scheduler service production deployment automation|install-anvil-scheduler|anvil-scheduler-smoke|--verify" README.md docs/operations
+rg -n "install-anvil-scheduler|anvil-scheduler-smoke|--verify" README.md docs/operations
 ```
 
 Expected: no remaining wording says scheduler production automation is excluded; install/verify

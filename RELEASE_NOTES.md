@@ -89,10 +89,11 @@
   - git history: `WARN` — 과거 secret-like fixture/history가 있어 rotate 필요
   - ignored/local files: `WARN` — local `goose-secrets.yaml` 계열 값은 출력하지 않음
 
-다음 후보는 upstream ephemera `v0.4.0` PR-A storage/recovery 변경의
-adoption review, scheduler service production deployment automation,
-cross-host snapshot replication, scheduler-aware cross-host flock placement,
-L7 egress proxy/SNI hardening, snapshot storage quota dashboard다.
+scheduler service 운영 검증 자동화는 `scripts/anvil-scheduler-smoke.sh`와
+`scripts/install-anvil-scheduler-systemd.sh --verify`로 포함됐다. 다음 후보는 upstream
+ephemera `v0.4.0` PR-A storage/recovery 변경의 adoption review, cross-host snapshot
+replication, scheduler-aware cross-host flock placement, L7 egress proxy/SNI hardening,
+snapshot storage quota dashboard다.
 
 ## 문서화됨
 

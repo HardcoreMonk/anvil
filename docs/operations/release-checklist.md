@@ -61,6 +61,7 @@ go build ./cmd/anvil-mcp
 go build ./cmd/anvil-scheduler
 bash -n e2e_test.sh
 bash -n scripts/anvil-mcp-e2e.sh
+bash -n scripts/anvil-scheduler-smoke.sh
 bash -n scripts/vm-workload-e2e.sh
 ```
 
@@ -78,6 +79,18 @@ Go HTTP server 기동, VM 내부 benchmark, host-to-VM probe를 확인한다. �
 `summary.json`, `nginx-run.json`, `go-http-run.json`, `nginx.log`, `go-http.log`,
 `bench.txt`, `host-bench.txt`를 포함해야 하며 provider token, API key,
 control-plane token, agent token을 포함하지 않아야 한다.
+
+scheduler production automation을 포함하는 release candidate에서는 systemd host에서
+다음 검증을 수행한다. `--verify`는 host에 `curl`, `python3`가 있어야 실행된다.
+
+```bash
+bash scripts/install-anvil-scheduler-systemd.sh --dry-run --verify
+sudo bash scripts/install-anvil-scheduler-systemd.sh --start --verify
+```
+
+`--verify`는 `GET /health`, `PUT/GET /hosts`, `POST /schedule/spawn`,
+`GET /placements`를 확인한다. scheduler는 기본적으로 `127.0.0.1:3010`에 bind하며,
+외부 노출은 private network 또는 TLS 종료 reverse proxy policy 뒤에서만 수행한다.
 
 ### 현재 upstream runtime baseline
 

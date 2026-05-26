@@ -16,9 +16,11 @@
   profile allowlist/DNS egress rule을 제공한다. Goosetown flock spawn도
   `tenant_id`와 `egress_policy`를 VM 생성 경로에 전달하고 flock metadata와
   persisted `metadata.json`에 보존한다.
-- 비구현 범위: scheduler service의 production deployment automation, cross-host
-  snapshot replication, scheduler-aware cross-host flock placement, L7 egress proxy,
-  billing, UI.
+- scheduler 운영 검증 자동화: `scripts/anvil-scheduler-smoke.sh`와
+  `scripts/install-anvil-scheduler-systemd.sh --verify`는 `GET /health`,
+  `PUT/GET /hosts`, `POST /schedule/spawn`, `GET /placements` smoke를 제공한다.
+- 비구현 범위: multi-node HA, migration, cross-host snapshot replication,
+  scheduler-aware cross-host flock placement, L7 egress proxy, billing, UI.
 
 이 문서는 anvil이 IronClaw와 ephemera runtime을 multi-tenant 실행 기반으로
 확장할 때 필요한 경계를 정리한다. 현재 ephemera daemon의 단일 호스트 VM
@@ -43,6 +45,8 @@ daemon 계약 확장을 필요로 한다.
 - `PlacementStore`: runtime host, VM placement, snapshot location JSON persistence
 - `cmd/anvil-scheduler`: persistent host/quota state로 schedule decision을 반환하는
   얇은 HTTP scheduler service
+- `scripts/anvil-scheduler-smoke.sh`, `scripts/install-anvil-scheduler-systemd.sh --verify`:
+  scheduler service 운영 검증 자동화
 - `QuotaStore`: tenant quota/usage JSON persistence와 scheduler input 제공
 - `NormalizeEgressPolicy`: `deny_all`, `profile`, `allow_all` policy normalization
 - `AppendRuntimeAudit`, `ReadRuntimeAudit`, `PruneRuntimeAudit`: symlink를 거부하는
@@ -73,8 +77,10 @@ Multi-tenant runtime의 설계 범위는 다음이다.
 
 이 문서는 위 구성 요소의 책임 경계를 정의한다. 현재 구현은 in-process scheduler
 decision helper, host inventory polling, runtime router, scheduler service binary,
-tenant API, `deny_all`/`profile` host enforcement까지 포함한다. scheduler service의
-production deployment automation과 cross-host snapshot replication은 포함하지 않는다.
+tenant API, `deny_all`/`profile` host enforcement, scheduler smoke harness,
+systemd installer `--verify`까지 포함한다. multi-node HA, migration,
+cross-host snapshot replication, scheduler-aware cross-host flock placement는 포함하지
+않는다.
 
 ## Tenant 식별자
 

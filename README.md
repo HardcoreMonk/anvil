@@ -1212,6 +1212,21 @@ ANVIL_SCHEDULER_QUOTA_STORE=/var/lib/anvil/tenants.json \
 ./anvil-scheduler
 ```
 
+`--verify`와 standalone smoke harness는 host에 `curl`, `python3`가 있어야
+실행된다. systemd 설치 host에서는 dry-run, start, smoke verify를 같은 installer로
+수행한다.
+
+```bash
+bash scripts/install-anvil-scheduler-systemd.sh --dry-run --verify
+sudo bash scripts/install-anvil-scheduler-systemd.sh --start --verify
+```
+
+이미 실행 중인 scheduler만 확인할 때는 standalone smoke harness를 사용한다.
+
+```bash
+bash scripts/anvil-scheduler-smoke.sh --base-url http://127.0.0.1:3010
+```
+
 Scheduler service API는 operator가 host inventory와 placement 상태를 관리하는
 얇은 control-plane surface다.
 
