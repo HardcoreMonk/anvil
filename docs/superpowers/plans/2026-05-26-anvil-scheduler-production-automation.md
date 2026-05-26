@@ -279,7 +279,7 @@ USAGE
 }
 
 base_url="${ANVIL_SCHEDULER_BASE_URL:-http://127.0.0.1:3010}"
-host_id="smoke-host-1"
+host_id=""
 json_out=""
 
 while [[ $# -gt 0 ]]; do

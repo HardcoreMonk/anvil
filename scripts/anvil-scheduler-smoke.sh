@@ -21,13 +21,11 @@ USAGE
 BASE_URL="${ANVIL_SCHEDULER_BASE_URL:-http://127.0.0.1:3010}"
 CONNECT_TIMEOUT="${ANVIL_SCHEDULER_CONNECT_TIMEOUT:-2}"
 REQUEST_TIMEOUT="${ANVIL_SCHEDULER_REQUEST_TIMEOUT:-10}"
-HOST_ID="smoke-host-1"
+HOST_ID=""
 JSON_OUT=""
 SELECTED_HOST_ID=""
 TMP_DIR=""
 SMOKE_HOST_REGISTERED=0
-SMOKE_HOST_PREEXISTING=0
-ORIGINAL_HOST_BODY=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -65,6 +63,10 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ -z "$HOST_ID" ]]; then
+  HOST_ID="anvil-scheduler-smoke-$RANDOM-$$"
+fi
 
 BASE_URL="${BASE_URL%/}"
 
@@ -202,33 +204,20 @@ PY
 
 cleanup_registered_host() {
   local encoded_host_id
-  local cleanup_body
   local cleanup_err
   local cleanup_status
+  local cleanup_body
 
-  if [[ "$SMOKE_HOST_PREEXISTING" == "1" ]]; then
-    cleanup_body="$TMP_DIR/host_restore.json"
-    cleanup_err="$TMP_DIR/host_restore.err"
-    if ! cleanup_status="$(request_json PUT /hosts "$ORIGINAL_HOST_BODY" "$cleanup_body" "$cleanup_err")"; then
-      printf 'host_cleanup_failed: PUT /hosts restore request failed: %s\n' "$(<"$cleanup_err")" >&2
-      return 1
-    fi
-    if [[ "$cleanup_status" != "200" ]]; then
-      printf 'host_cleanup_failed: PUT /hosts restore returned HTTP %s body=%s\n' "$cleanup_status" "$(response_body_snippet "$cleanup_body")" >&2
-      return 1
-    fi
-  else
-    encoded_host_id="$(urlencode_path_segment "$HOST_ID")"
-    cleanup_body="$TMP_DIR/host_delete.json"
-    cleanup_err="$TMP_DIR/host_delete.err"
-    if ! cleanup_status="$(request_json DELETE "/hosts/${encoded_host_id}" "" "$cleanup_body" "$cleanup_err")"; then
-      printf 'host_cleanup_failed: DELETE /hosts/%s request failed: %s\n' "$encoded_host_id" "$(<"$cleanup_err")" >&2
-      return 1
-    fi
-    if [[ "$cleanup_status" != "200" ]]; then
-      printf 'host_cleanup_failed: DELETE /hosts/%s returned HTTP %s body=%s\n' "$encoded_host_id" "$cleanup_status" "$(response_body_snippet "$cleanup_body")" >&2
-      return 1
-    fi
+  encoded_host_id="$(urlencode_path_segment "$HOST_ID")"
+  cleanup_body="$TMP_DIR/host_delete.json"
+  cleanup_err="$TMP_DIR/host_delete.err"
+  if ! cleanup_status="$(request_json DELETE "/hosts/${encoded_host_id}" "" "$cleanup_body" "$cleanup_err")"; then
+    printf 'host_cleanup_failed: DELETE /hosts/%s request failed: %s\n' "$encoded_host_id" "$(<"$cleanup_err")" >&2
+    return 1
+  fi
+  if [[ "$cleanup_status" != "200" ]]; then
+    printf 'host_cleanup_failed: DELETE /hosts/%s returned HTTP %s body=%s\n' "$encoded_host_id" "$cleanup_status" "$(response_body_snippet "$cleanup_body")" >&2
+    return 1
   fi
 
   SMOKE_HOST_REGISTERED=0
@@ -272,13 +261,12 @@ PY
 existing_host_from_list() {
   local path="$1"
   local host_id="$2"
-  local output_json="$3"
 
-  python3 - "$path" "$host_id" "$output_json" <<'PY'
+  python3 - "$path" "$host_id" <<'PY'
 import json
 import sys
 
-path, host_id, output_json = sys.argv[1:4]
+path, host_id = sys.argv[1:3]
 try:
     with open(path, encoding="utf-8") as handle:
         value = json.load(handle)
@@ -288,12 +276,6 @@ if not isinstance(value, list):
     raise SystemExit(2)
 for host in value:
     if isinstance(host, dict) and host.get("name") == host_id:
-        try:
-            with open(output_json, "w", encoding="utf-8") as output:
-                json.dump(host, output)
-                output.write("\n")
-        except OSError:
-            raise SystemExit(2)
         raise SystemExit(0)
 raise SystemExit(1)
 PY
@@ -371,7 +353,6 @@ require_command python3
 TMP_DIR="$(mktemp -d)"
 HOST_BODY="$TMP_DIR/host.json"
 SCHEDULE_BODY="$TMP_DIR/schedule.json"
-ORIGINAL_HOST_BODY="$TMP_DIR/original_host.json"
 write_request_bodies "$HOST_BODY" "$SCHEDULE_BODY"
 
 HEALTH_BODY="$TMP_DIR/health.json"
@@ -394,8 +375,8 @@ fi
 if [[ "$HOST_PREFLIGHT_STATUS" != "200" ]]; then
   fail_step host_list_failed "GET /hosts returned HTTP $HOST_PREFLIGHT_STATUS body=$(response_body_snippet "$HOST_PREFLIGHT_BODY")"
 fi
-if existing_host_from_list "$HOST_PREFLIGHT_BODY" "$HOST_ID" "$ORIGINAL_HOST_BODY"; then
-  SMOKE_HOST_PREEXISTING=1
+if existing_host_from_list "$HOST_PREFLIGHT_BODY" "$HOST_ID"; then
+  fail_step host_list_failed "host $HOST_ID already exists; choose a unique --host-id"
 else
   EXISTING_HOST_STATUS=$?
   if [[ "$EXISTING_HOST_STATUS" != "1" ]]; then

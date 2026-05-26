@@ -87,3 +87,56 @@ func TestPlacementStoreReplacesVMPlacementsDuringReconciliation(t *testing.T) {
 		t.Fatalf("live-vm placement = %q,%v want host-b,true", host, ok)
 	}
 }
+
+func TestPlacementStoreSetHostAndSaveRollsBackOnFailure(t *testing.T) {
+	store := NewPlacementStore(t.TempDir())
+	if err := store.SetHost(RuntimeHost{Name: "host-a", Endpoint: "http://old-host-a", Healthy: true, AvailableVMs: 1}); err != nil {
+		t.Fatalf("SetHost old host-a: %v", err)
+	}
+	if err := store.SetHostAndSave(RuntimeHost{Name: "host-a", Endpoint: "http://new-host-a", Healthy: true, AvailableVMs: 9}); err == nil {
+		t.Fatal("SetHostAndSave unexpectedly succeeded with directory path")
+	}
+	host, ok := store.Host("host-a")
+	if !ok {
+		t.Fatal("host-a missing after failed SetHostAndSave")
+	}
+	if host.Endpoint != "http://old-host-a" || host.AvailableVMs != 1 {
+		t.Fatalf("host-a after failed SetHostAndSave = %+v, want old host", host)
+	}
+
+	if err := store.SetHostAndSave(RuntimeHost{Name: "host-new", Endpoint: "http://host-new", Healthy: true, AvailableVMs: 1}); err == nil {
+		t.Fatal("SetHostAndSave new host unexpectedly succeeded with directory path")
+	}
+	if _, ok := store.Host("host-new"); ok {
+		t.Fatal("host-new retained after failed SetHostAndSave")
+	}
+}
+
+func TestPlacementStoreRemoveHostAndSaveRollsBackOnFailure(t *testing.T) {
+	store := NewPlacementStore(t.TempDir())
+	if err := store.SetHost(RuntimeHost{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 1}); err != nil {
+		t.Fatalf("SetHost host-a: %v", err)
+	}
+	deleted, err := store.RemoveHostAndSave("host-a")
+	if err == nil {
+		t.Fatal("RemoveHostAndSave unexpectedly succeeded with directory path")
+	}
+	if !deleted {
+		t.Fatal("deleted = false, want true for existing host")
+	}
+	host, ok := store.Host("host-a")
+	if !ok {
+		t.Fatal("host-a missing after failed RemoveHostAndSave")
+	}
+	if host.Endpoint != "http://host-a" {
+		t.Fatalf("host-a after failed RemoveHostAndSave = %+v, want original host", host)
+	}
+
+	deleted, err = store.RemoveHostAndSave("missing")
+	if err != nil {
+		t.Fatalf("RemoveHostAndSave missing returned error: %v", err)
+	}
+	if deleted {
+		t.Fatal("deleted = true, want false for missing host")
+	}
+}

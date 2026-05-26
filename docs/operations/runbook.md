@@ -54,9 +54,10 @@ sudo bash scripts/install-anvil-scheduler-systemd.sh --start --verify
 bash scripts/anvil-scheduler-smoke.sh --base-url http://127.0.0.1:3010
 ```
 
-smoke harness는 `GET /hosts`로 같은 host id의 기존 inventory record를 먼저
-확인한다. 기존 record가 있으면 종료 시 원본 JSON을 `PUT /hosts`로 복원하고, 없으면
-검증 중 등록한 fake host를 `DELETE /hosts/{name}`로 정리한다. 본 검증은 cleanup
+smoke harness는 기본 host id를 `anvil-scheduler-smoke-*`로 생성하고,
+`GET /hosts`로 같은 host id의 기존 inventory record가 없는지 먼저 확인한다.
+충돌이 있으면 `PUT /hosts` 전에 실패하므로 운영 host record를 덮어쓰지 않는다.
+검증 중 등록한 fake host는 `DELETE /hosts/{name}`로 정리한다. 본 검증은 cleanup
 실패를 성공으로 취급하지 않는다. 검증용 fake host는 `smoke_only: true`로 등록되며,
 smoke 요청의 `PreferredHosts`에 host id가 명시된 경우에만 선택된다. 일반 fallback
 scheduling은 smoke-only host를 무시한다.

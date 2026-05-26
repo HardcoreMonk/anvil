@@ -65,7 +65,7 @@ ANVIL_SCHEDULER_BASE_URL=http://127.0.0.1:3010
 지원 옵션:
 
 - `--base-url URL`: 대상 scheduler URL
-- `--host-id ID`: smoke용 host id, 기본값 `smoke-host-1`
+- `--host-id ID`: smoke용 host id, 기본값은 `anvil-scheduler-smoke-*` 자동 생성
 - `--json-out PATH`: 결과 summary JSON 저장
 
 검증 순서:
@@ -145,7 +145,7 @@ summary JSON을 요청받은 경우에는 다음 구조를 쓴다.
   "ok": false,
   "base_url": "http://127.0.0.1:3010",
   "failed_step": "schedule_spawn_failed",
-  "host_id": "smoke-host-1"
+  "host_id": "anvil-scheduler-smoke-12345"
 }
 ```
 
@@ -155,8 +155,8 @@ summary JSON을 요청받은 경우에는 다음 구조를 쓴다.
 {
   "ok": true,
   "base_url": "http://127.0.0.1:3010",
-  "host_id": "smoke-host-1",
-  "selected_host_id": "smoke-host-1"
+  "host_id": "anvil-scheduler-smoke-12345",
+  "selected_host_id": "anvil-scheduler-smoke-12345"
 }
 ```
 

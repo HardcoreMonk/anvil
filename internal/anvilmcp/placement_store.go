@@ -71,12 +71,18 @@ func (s *PlacementStore) Save() error {
 	if strings.TrimSpace(s.path) == "" {
 		return nil
 	}
-	state := s.State()
+	s.mu.RLock()
+	state := clonePlacementStoreState(s.state)
+	s.mu.RUnlock()
+	return writePlacementStoreState(s.path, state)
+}
+
+func writePlacementStoreState(path string, state PlacementStoreState) error {
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode placement store: %w", err)
 	}
-	dir := filepath.Dir(s.path)
+	dir := filepath.Dir(path)
 	if dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			return fmt.Errorf("create placement store dir: %w", err)
@@ -101,11 +107,18 @@ func (s *PlacementStore) Save() error {
 		os.Remove(tmpName)
 		return fmt.Errorf("close placement store temp file: %w", err)
 	}
-	if err := os.Rename(tmpName, s.path); err != nil {
+	if err := os.Rename(tmpName, path); err != nil {
 		os.Remove(tmpName)
 		return fmt.Errorf("replace placement store: %w", err)
 	}
 	return nil
+}
+
+func (s *PlacementStore) saveLocked() error {
+	if strings.TrimSpace(s.path) == "" {
+		return nil
+	}
+	return writePlacementStoreState(s.path, clonePlacementStoreState(s.state))
 }
 
 func (s *PlacementStore) SetHost(host RuntimeHost) error {
@@ -118,6 +131,28 @@ func (s *PlacementStore) SetHost(host RuntimeHost) error {
 	defer s.mu.Unlock()
 	s.ensureMaps()
 	s.state.Hosts[name] = host
+	return nil
+}
+
+func (s *PlacementStore) SetHostAndSave(host RuntimeHost) error {
+	name := strings.TrimSpace(host.Name)
+	if name == "" {
+		return fmt.Errorf("host name must be non-empty")
+	}
+	host.Name = name
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensureMaps()
+	previous, existed := s.state.Hosts[name]
+	s.state.Hosts[name] = host
+	if err := s.saveLocked(); err != nil {
+		if existed {
+			s.state.Hosts[name] = previous
+		} else {
+			delete(s.state.Hosts, name)
+		}
+		return err
+	}
 	return nil
 }
 
@@ -134,6 +169,26 @@ func (s *PlacementStore) RemoveHost(name string) bool {
 	}
 	delete(s.state.Hosts, name)
 	return true
+}
+
+func (s *PlacementStore) RemoveHostAndSave(name string) (bool, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensureMaps()
+	previous, existed := s.state.Hosts[name]
+	if !existed {
+		return false, nil
+	}
+	delete(s.state.Hosts, name)
+	if err := s.saveLocked(); err != nil {
+		s.state.Hosts[name] = previous
+		return true, err
+	}
+	return true, nil
 }
 
 func (s *PlacementStore) Host(name string) (RuntimeHost, bool) {
@@ -280,4 +335,22 @@ func normalizePlacementStoreState(state *PlacementStoreState) {
 	if state.SnapshotLocations == nil {
 		state.SnapshotLocations = make(map[string][]string)
 	}
+}
+
+func clonePlacementStoreState(state PlacementStoreState) PlacementStoreState {
+	out := PlacementStoreState{
+		Hosts:             make(map[string]RuntimeHost, len(state.Hosts)),
+		VMPlacements:      make(map[string]string, len(state.VMPlacements)),
+		SnapshotLocations: make(map[string][]string, len(state.SnapshotLocations)),
+	}
+	for name, host := range state.Hosts {
+		out.Hosts[name] = host
+	}
+	for vmID, hostName := range state.VMPlacements {
+		out.VMPlacements[vmID] = hostName
+	}
+	for snapshotID, locations := range state.SnapshotLocations {
+		out.SnapshotLocations[snapshotID] = append([]string(nil), locations...)
+	}
+	return out
 }

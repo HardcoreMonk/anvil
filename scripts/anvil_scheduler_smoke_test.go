@@ -46,6 +46,30 @@ func TestAnvilSchedulerSmokePassesAgainstFakeScheduler(t *testing.T) {
 	}
 }
 
+func TestAnvilSchedulerSmokeGeneratesDefaultHostID(t *testing.T) {
+	server := newAnvilSchedulerSmokeFakeServer(t, 0)
+	defer server.Close()
+
+	outPath := filepath.Join(t.TempDir(), "summary.json")
+	cmd := exec.Command("bash", "anvil-scheduler-smoke.sh", "--base-url", server.URL, "--json-out", outPath)
+	cmd.Dir = scriptsDir(t)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("smoke script failed: %v\n%s", err, output)
+	}
+
+	summary := readSmokeSummary(t, outPath)
+	if summary.HostID == "smoke-host-1" {
+		t.Fatalf("host_id = %q, want generated unique host id", summary.HostID)
+	}
+	if !strings.HasPrefix(summary.HostID, "anvil-scheduler-smoke-") {
+		t.Fatalf("host_id = %q, want anvil-scheduler-smoke-*", summary.HostID)
+	}
+	if summary.SelectedHostID != summary.HostID {
+		t.Fatalf("selected_host_id = %q, want generated host_id %q", summary.SelectedHostID, summary.HostID)
+	}
+}
+
 func TestAnvilSchedulerSmokeDeletesRegisteredHostAfterSuccess(t *testing.T) {
 	server := newAnvilSchedulerSmokeFakeServer(t, 0)
 	defer server.Close()
@@ -67,7 +91,7 @@ func TestAnvilSchedulerSmokeDeletesRegisteredHostAfterSuccess(t *testing.T) {
 	}
 }
 
-func TestAnvilSchedulerSmokeRestoresPreexistingHostAfterSuccess(t *testing.T) {
+func TestAnvilSchedulerSmokeRejectsPreexistingHostID(t *testing.T) {
 	originalHost := map[string]any{
 		"name":                     "smoke-test-host",
 		"endpoint":                 "http://real-smoke-host",
@@ -83,16 +107,33 @@ func TestAnvilSchedulerSmokeRestoresPreexistingHostAfterSuccess(t *testing.T) {
 	cmd := exec.Command("bash", "anvil-scheduler-smoke.sh", "--base-url", server.URL, "--host-id", "smoke-test-host", "--json-out", outPath)
 	cmd.Dir = scriptsDir(t)
 	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("smoke script failed: %v\n%s", err, output)
+	if err == nil {
+		t.Fatalf("smoke script unexpectedly succeeded:\n%s", output)
+	}
+	if !strings.Contains(string(output), "host_list_failed") {
+		t.Fatalf("output = %s, want host_list_failed", output)
+	}
+	if !strings.Contains(string(output), "already exists") {
+		t.Fatalf("output = %s, want already exists", output)
 	}
 
 	storedHost, ok := server.hostSnapshot("smoke-test-host")
 	if !ok {
-		t.Fatalf("preexisting smoke host was deleted after successful smoke:\n%s", output)
+		t.Fatalf("preexisting smoke host was deleted:\n%s", output)
 	}
 	if storedHost["endpoint"] != "http://real-smoke-host" {
 		t.Fatalf("stored host endpoint = %q, want http://real-smoke-host; host=%+v output=%s", storedHost["endpoint"], storedHost, output)
+	}
+	if len(server.hostPutSnapshots()) != 0 {
+		t.Fatalf("smoke script overwrote preexisting host before failing; puts=%+v output=%s", server.hostPutSnapshots(), output)
+	}
+
+	summary := readSmokeSummary(t, outPath)
+	if summary.OK {
+		t.Fatalf("summary ok = true, want false")
+	}
+	if summary.FailedStep != "host_list_failed" {
+		t.Fatalf("failed_step = %q, want host_list_failed", summary.FailedStep)
 	}
 }
 
@@ -121,86 +162,6 @@ func TestAnvilSchedulerSmokeFailsWhenCleanupDeleteReturns500(t *testing.T) {
 	}
 	if summary.FailedStep != "host_cleanup_failed" {
 		t.Fatalf("failed_step = %q, want host_cleanup_failed", summary.FailedStep)
-	}
-}
-
-func TestAnvilSchedulerSmokeFailsWhenCleanupRestoreReturns500(t *testing.T) {
-	originalHost := map[string]any{
-		"name":                     "smoke-test-host",
-		"endpoint":                 "http://real-smoke-host",
-		"healthy":                  true,
-		"available_vms":            float64(3),
-		"available_snapshot_bytes": float64(8192),
-		"egress_policies":          []any{"profile"},
-	}
-	server := newAnvilSchedulerSmokeFakeServerWithHost(t, 0, originalHost)
-	server.failHostPutAfterStores("", "restore failed")
-	defer server.Close()
-
-	outPath := filepath.Join(t.TempDir(), "summary.json")
-	cmd := exec.Command("bash", "anvil-scheduler-smoke.sh", "--base-url", server.URL, "--host-id", "smoke-test-host", "--json-out", outPath)
-	cmd.Dir = scriptsDir(t)
-	output, err := cmd.CombinedOutput()
-	if err == nil {
-		t.Fatalf("smoke script unexpectedly succeeded:\n%s", output)
-	}
-	if !strings.Contains(string(output), "host_cleanup_failed") {
-		t.Fatalf("output = %s, want host_cleanup_failed", output)
-	}
-	if !strings.Contains(string(output), "restore failed") {
-		t.Fatalf("output = %s, want restore failed", output)
-	}
-
-	summary := readSmokeSummary(t, outPath)
-	if summary.OK {
-		t.Fatalf("summary ok = true, want false")
-	}
-	if summary.FailedStep != "host_cleanup_failed" {
-		t.Fatalf("failed_step = %q, want host_cleanup_failed", summary.FailedStep)
-	}
-}
-
-func TestAnvilSchedulerSmokeRestoresPreexistingHostAfterPutFailure(t *testing.T) {
-	originalHost := map[string]any{
-		"name":                     "smoke-test-host",
-		"endpoint":                 "http://real-smoke-host",
-		"healthy":                  true,
-		"available_vms":            float64(3),
-		"available_snapshot_bytes": float64(8192),
-		"egress_policies":          []any{"profile"},
-	}
-	server := newAnvilSchedulerSmokeFakeServerWithHost(t, 0, originalHost)
-	server.failHostPutAfterStore("save failed")
-	defer server.Close()
-
-	outPath := filepath.Join(t.TempDir(), "summary.json")
-	cmd := exec.Command("bash", "anvil-scheduler-smoke.sh", "--base-url", server.URL, "--host-id", "smoke-test-host", "--json-out", outPath)
-	cmd.Dir = scriptsDir(t)
-	output, err := cmd.CombinedOutput()
-	if err == nil {
-		t.Fatalf("smoke script unexpectedly succeeded:\n%s", output)
-	}
-	if !strings.Contains(string(output), "host_put_failed") {
-		t.Fatalf("output = %s, want host_put_failed", output)
-	}
-	if !strings.Contains(string(output), "save failed") {
-		t.Fatalf("output = %s, want save failed", output)
-	}
-
-	storedHost, ok := server.hostSnapshot("smoke-test-host")
-	if !ok {
-		t.Fatalf("preexisting smoke host was deleted after failed PUT:\n%s", output)
-	}
-	if storedHost["endpoint"] != "http://real-smoke-host" {
-		t.Fatalf("stored host endpoint = %q, want http://real-smoke-host; host=%+v output=%s", storedHost["endpoint"], storedHost, output)
-	}
-
-	summary := readSmokeSummary(t, outPath)
-	if summary.OK {
-		t.Fatalf("summary ok = true, want false")
-	}
-	if summary.FailedStep != "host_put_failed" {
-		t.Fatalf("failed_step = %q, want host_put_failed", summary.FailedStep)
 	}
 }
 
