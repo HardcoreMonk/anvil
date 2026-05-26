@@ -404,13 +404,13 @@ fi
 
 HOST_PUT_BODY="$TMP_DIR/host_put.json"
 HOST_PUT_ERR="$TMP_DIR/host_put.err"
+SMOKE_HOST_REGISTERED=1
 if ! HOST_PUT_STATUS="$(request_json PUT /hosts "$HOST_BODY" "$HOST_PUT_BODY" "$HOST_PUT_ERR")"; then
   fail_step host_put_failed "PUT /hosts request failed: $(<"$HOST_PUT_ERR")"
 fi
 if [[ "$HOST_PUT_STATUS" != "200" ]]; then
   fail_step host_put_failed "PUT /hosts returned HTTP $HOST_PUT_STATUS body=$(response_body_snippet "$HOST_PUT_BODY")"
 fi
-SMOKE_HOST_REGISTERED=1
 
 HOST_LIST_BODY="$TMP_DIR/host_list.json"
 HOST_LIST_ERR="$TMP_DIR/host_list.err"
