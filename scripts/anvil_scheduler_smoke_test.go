@@ -37,6 +37,13 @@ func TestAnvilSchedulerSmokePassesAgainstFakeScheduler(t *testing.T) {
 	if summary.SelectedHostID != "smoke-test-host" {
 		t.Fatalf("selected_host_id = %q, want smoke-test-host", summary.SelectedHostID)
 	}
+	hostPuts := server.hostPutSnapshots()
+	if len(hostPuts) == 0 {
+		t.Fatalf("fake scheduler did not receive PUT /hosts body")
+	}
+	if hostPuts[0]["smoke_only"] != true {
+		t.Fatalf("PUT /hosts smoke_only = %v, want true; body=%+v", hostPuts[0]["smoke_only"], hostPuts[0])
+	}
 }
 
 func TestAnvilSchedulerSmokeDeletesRegisteredHostAfterSuccess(t *testing.T) {
@@ -86,6 +93,70 @@ func TestAnvilSchedulerSmokeRestoresPreexistingHostAfterSuccess(t *testing.T) {
 	}
 	if storedHost["endpoint"] != "http://real-smoke-host" {
 		t.Fatalf("stored host endpoint = %q, want http://real-smoke-host; host=%+v output=%s", storedHost["endpoint"], storedHost, output)
+	}
+}
+
+func TestAnvilSchedulerSmokeFailsWhenCleanupDeleteReturns500(t *testing.T) {
+	server := newAnvilSchedulerSmokeFakeServer(t, 0)
+	server.failHostDeleteAfterStore("delete failed")
+	defer server.Close()
+
+	outPath := filepath.Join(t.TempDir(), "summary.json")
+	cmd := exec.Command("bash", "anvil-scheduler-smoke.sh", "--base-url", server.URL, "--host-id", "smoke-test-host", "--json-out", outPath)
+	cmd.Dir = scriptsDir(t)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("smoke script unexpectedly succeeded:\n%s", output)
+	}
+	if !strings.Contains(string(output), "host_cleanup_failed") {
+		t.Fatalf("output = %s, want host_cleanup_failed", output)
+	}
+	if !strings.Contains(string(output), "delete failed") {
+		t.Fatalf("output = %s, want delete failed", output)
+	}
+
+	summary := readSmokeSummary(t, outPath)
+	if summary.OK {
+		t.Fatalf("summary ok = true, want false")
+	}
+	if summary.FailedStep != "host_cleanup_failed" {
+		t.Fatalf("failed_step = %q, want host_cleanup_failed", summary.FailedStep)
+	}
+}
+
+func TestAnvilSchedulerSmokeFailsWhenCleanupRestoreReturns500(t *testing.T) {
+	originalHost := map[string]any{
+		"name":                     "smoke-test-host",
+		"endpoint":                 "http://real-smoke-host",
+		"healthy":                  true,
+		"available_vms":            float64(3),
+		"available_snapshot_bytes": float64(8192),
+		"egress_policies":          []any{"profile"},
+	}
+	server := newAnvilSchedulerSmokeFakeServerWithHost(t, 0, originalHost)
+	server.failHostPutAfterStores("", "restore failed")
+	defer server.Close()
+
+	outPath := filepath.Join(t.TempDir(), "summary.json")
+	cmd := exec.Command("bash", "anvil-scheduler-smoke.sh", "--base-url", server.URL, "--host-id", "smoke-test-host", "--json-out", outPath)
+	cmd.Dir = scriptsDir(t)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("smoke script unexpectedly succeeded:\n%s", output)
+	}
+	if !strings.Contains(string(output), "host_cleanup_failed") {
+		t.Fatalf("output = %s, want host_cleanup_failed", output)
+	}
+	if !strings.Contains(string(output), "restore failed") {
+		t.Fatalf("output = %s, want restore failed", output)
+	}
+
+	summary := readSmokeSummary(t, outPath)
+	if summary.OK {
+		t.Fatalf("summary ok = true, want false")
+	}
+	if summary.FailedStep != "host_cleanup_failed" {
+		t.Fatalf("failed_step = %q, want host_cleanup_failed", summary.FailedStep)
 	}
 }
 
@@ -196,7 +267,9 @@ type anvilSchedulerSmokeFakeServer struct {
 	*httptest.Server
 	mu                      sync.Mutex
 	host                    map[string]any
+	hostPutBodies           []map[string]any
 	hostPutFailureResponses []string
+	hostDeleteFailures      []string
 }
 
 func (s *anvilSchedulerSmokeFakeServer) hasHost(hostID string) bool {
@@ -221,10 +294,30 @@ func (s *anvilSchedulerSmokeFakeServer) hostSnapshot(hostID string) (map[string]
 	return snapshot, true
 }
 
-func (s *anvilSchedulerSmokeFakeServer) failHostPutAfterStore(message string) {
+func (s *anvilSchedulerSmokeFakeServer) hostPutSnapshots() []map[string]any {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.hostPutFailureResponses = append(s.hostPutFailureResponses, message)
+	out := make([]map[string]any, 0, len(s.hostPutBodies))
+	for _, body := range s.hostPutBodies {
+		out = append(out, cloneSmokeTestMap(body))
+	}
+	return out
+}
+
+func (s *anvilSchedulerSmokeFakeServer) failHostPutAfterStore(message string) {
+	s.failHostPutAfterStores(message)
+}
+
+func (s *anvilSchedulerSmokeFakeServer) failHostPutAfterStores(messages ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.hostPutFailureResponses = append(s.hostPutFailureResponses, messages...)
+}
+
+func (s *anvilSchedulerSmokeFakeServer) failHostDeleteAfterStore(message string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.hostDeleteFailures = append(s.hostDeleteFailures, message)
 }
 
 func newAnvilSchedulerSmokeFakeServer(t *testing.T, healthDelay time.Duration) *anvilSchedulerSmokeFakeServer {
@@ -267,6 +360,7 @@ func newAnvilSchedulerSmokeFakeServerWithHost(t *testing.T, healthDelay time.Dur
 					return
 				}
 				fake.mu.Lock()
+				fake.hostPutBodies = append(fake.hostPutBodies, cloneSmokeTestMap(next))
 				fake.host = next
 				var failureResponse string
 				if len(fake.hostPutFailureResponses) > 0 {
@@ -353,7 +447,16 @@ func newAnvilSchedulerSmokeFakeServerWithHost(t *testing.T, healthDelay time.Dur
 				if deleted {
 					fake.host = nil
 				}
+				var failureResponse string
+				if len(fake.hostDeleteFailures) > 0 {
+					failureResponse = fake.hostDeleteFailures[0]
+					fake.hostDeleteFailures = fake.hostDeleteFailures[1:]
+				}
 				fake.mu.Unlock()
+				if failureResponse != "" {
+					http.Error(w, failureResponse, http.StatusInternalServerError)
+					return
+				}
 				writeSmokeTestJSON(t, w, map[string]any{"deleted": deleted, "host": hostID})
 				return
 			}
@@ -506,6 +609,17 @@ func preferredHostsInclude(req map[string]any, hostID string) bool {
 		}
 	}
 	return false
+}
+
+func cloneSmokeTestMap(in map[string]any) map[string]any {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }
 
 type smokeSummary struct {

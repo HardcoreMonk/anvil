@@ -136,6 +136,17 @@ func (s *PlacementStore) RemoveHost(name string) bool {
 	return true
 }
 
+func (s *PlacementStore) Host(name string) (RuntimeHost, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return RuntimeHost{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	host, ok := s.state.Hosts[name]
+	return host, ok
+}
+
 func (s *PlacementStore) ListHosts() []RuntimeHost {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

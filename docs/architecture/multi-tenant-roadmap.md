@@ -150,11 +150,13 @@ TAP, IP, dm-snapshot, loop device, bind mount, sparse COW file 같은 host-local
 
 현재 `Scheduler.Schedule`은 host 목록 중 healthy, capacity, requested snapshot
 bytes, egress policy 조건을 만족하는 host를 고르며, `PreferredHosts`와
-`ExcludedHosts`로 snapshot locality와 failover를 반영한다. `HostInventory`는 daemon
-`/health` polling으로 host 상태를 갱신하고, `RuntimeRouter`는 선택된 host의 daemon
-client로 spawn/restore와 VM 후속 호출을 라우팅한다. `PlacementStore`는 VM placement와
-snapshot location을 JSON으로 보존하고, `ReconcilePlacements`는 daemon `GET /vms`
-결과로 stale placement를 교체한다.
+`ExcludedHosts`로 snapshot locality와 failover를 반영한다. `RuntimeHost`가
+`smoke_only: true`이면 해당 host id가 `PreferredHosts`에 명시된 요청에서만 선택되고,
+일반 fallback scheduling에서는 제외된다. `HostInventory`는 daemon `/health`
+polling으로 host 상태를 갱신하고, `RuntimeRouter`는 선택된 host의 daemon client로
+spawn/restore와 VM 후속 호출을 라우팅한다. `PlacementStore`는 VM placement와 snapshot
+location을 JSON으로 보존하고, `ReconcilePlacements`는 daemon `GET /vms` 결과로 stale
+placement를 교체한다.
 
 별도 process인 `cmd/anvil-scheduler`는 `ANVIL_SCHEDULER_ADDR`,
 `ANVIL_SCHEDULER_STATE`, `ANVIL_SCHEDULER_QUOTA_STORE`를 읽는다. HTTP surface는

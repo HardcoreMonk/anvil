@@ -350,6 +350,7 @@ host = {
     "available_vms": 1,
     "available_snapshot_bytes": 1073741824,
     "egress_policies": ["profile", "deny_all", "allow_all"],
+    "smoke_only": True,
 }
 schedule = {
     "tenant_id": "smoke-tenant",

@@ -54,6 +54,7 @@ type RuntimeHost struct {
 	AvailableVMs           int64          `json:"available_vms"`
 	AvailableSnapshotBytes int64          `json:"available_snapshot_bytes"`
 	EgressPolicies         []EgressPolicy `json:"egress_policies"`
+	SmokeOnly              bool           `json:"smoke_only,omitempty"`
 }
 
 type ScheduleRequest struct {
@@ -162,6 +163,8 @@ func SelectRuntimeHost(hosts []RuntimeHost, req ScheduleRequest) (RuntimeHost, e
 		return RuntimeHost{}, err
 	}
 
+	preferred := hostNameSet(req.PreferredHosts)
+	excluded := hostNameSet(req.ExcludedHosts)
 	eligible := func(host RuntimeHost) bool {
 		if strings.TrimSpace(host.Name) == "" || strings.TrimSpace(host.Endpoint) == "" {
 			return false
@@ -169,7 +172,10 @@ func SelectRuntimeHost(hosts []RuntimeHost, req ScheduleRequest) (RuntimeHost, e
 		if !host.Healthy || host.AvailableVMs <= 0 {
 			return false
 		}
-		if hostNameSet(req.ExcludedHosts)[host.Name] {
+		if excluded[host.Name] {
+			return false
+		}
+		if host.SmokeOnly && !preferred[host.Name] {
 			return false
 		}
 		if req.RequestedSnapshotBytes > 0 && host.AvailableSnapshotBytes < req.RequestedSnapshotBytes {
@@ -181,7 +187,6 @@ func SelectRuntimeHost(hosts []RuntimeHost, req ScheduleRequest) (RuntimeHost, e
 		return true
 	}
 
-	preferred := hostNameSet(req.PreferredHosts)
 	for _, host := range hosts {
 		if len(preferred) > 0 && preferred[host.Name] && eligible(host) {
 			return host, nil

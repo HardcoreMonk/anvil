@@ -64,11 +64,21 @@ func (s *SchedulerService) handleHosts(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid host body", http.StatusBadRequest)
 			return
 		}
+		host.Name = strings.TrimSpace(host.Name)
+		previous, existed := s.placements.Host(host.Name)
 		if err := s.placements.SetHost(host); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		_ = s.placements.Save()
+		if err := s.placements.Save(); err != nil {
+			if existed {
+				_ = s.placements.SetHost(previous)
+			} else {
+				s.placements.RemoveHost(host.Name)
+			}
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		writeSchedulerJSON(w, host)
 	default:
 		http.Error(w, "GET or PUT required", http.StatusMethodNotAllowed)
@@ -86,8 +96,14 @@ func (s *SchedulerService) handleHostItem(w http.ResponseWriter, r *http.Request
 		return
 	}
 	name = strings.TrimSpace(name)
+	previous, existed := s.placements.Host(name)
+	if !existed {
+		writeSchedulerJSON(w, map[string]any{"deleted": false, "host": name})
+		return
+	}
 	deleted := s.placements.RemoveHost(name)
 	if err := s.placements.Save(); err != nil {
+		_ = s.placements.SetHost(previous)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
