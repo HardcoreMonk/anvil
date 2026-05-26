@@ -1227,6 +1227,11 @@ sudo bash scripts/install-anvil-scheduler-systemd.sh --start --verify
 bash scripts/anvil-scheduler-smoke.sh --base-url http://127.0.0.1:3010
 ```
 
+smoke harness는 `GET /hosts`로 같은 host id의 기존 inventory record를 먼저
+확인한다. 기존 record가 있으면 검증 후 원본 JSON을 `PUT /hosts`로 복원하고, 없으면
+등록한 fake host를 `DELETE /hosts/{name}`로 제거한다. cleanup 실패는 smoke 성공으로
+취급하지 않는다.
+
 Scheduler service API는 operator가 host inventory와 placement 상태를 관리하는
 얇은 control-plane surface다.
 

@@ -91,8 +91,9 @@
 
 scheduler service 운영 검증 자동화는 `scripts/anvil-scheduler-smoke.sh`와
 `scripts/install-anvil-scheduler-systemd.sh --verify`로 포함됐다. smoke harness는
-등록한 fake host를 `DELETE /hosts/{name}`로 정리해 production placement 후보가
-남지 않게 한다. 다음 후보는 upstream ephemera `v0.4.0` PR-A storage/recovery 변경의
+같은 host id의 기존 inventory record가 있으면 원본을 복원하고, 없으면 등록한 fake
+host를 `DELETE /hosts/{name}`로 정리해 production placement 후보가 남지 않게 한다.
+다음 후보는 upstream ephemera `v0.4.0` PR-A storage/recovery 변경의
 adoption review, cross-host snapshot replication, scheduler-aware cross-host flock
 placement, L7 egress proxy/SNI hardening, snapshot storage quota dashboard다.
 

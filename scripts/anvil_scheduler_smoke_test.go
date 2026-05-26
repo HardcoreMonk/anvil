@@ -60,6 +60,35 @@ func TestAnvilSchedulerSmokeDeletesRegisteredHostAfterSuccess(t *testing.T) {
 	}
 }
 
+func TestAnvilSchedulerSmokeRestoresPreexistingHostAfterSuccess(t *testing.T) {
+	originalHost := map[string]any{
+		"name":                     "smoke-test-host",
+		"endpoint":                 "http://real-smoke-host",
+		"healthy":                  true,
+		"available_vms":            float64(3),
+		"available_snapshot_bytes": float64(8192),
+		"egress_policies":          []any{"profile"},
+	}
+	server := newAnvilSchedulerSmokeFakeServerWithHost(t, 0, originalHost)
+	defer server.Close()
+
+	outPath := filepath.Join(t.TempDir(), "summary.json")
+	cmd := exec.Command("bash", "anvil-scheduler-smoke.sh", "--base-url", server.URL, "--host-id", "smoke-test-host", "--json-out", outPath)
+	cmd.Dir = scriptsDir(t)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("smoke script failed: %v\n%s", err, output)
+	}
+
+	storedHost, ok := server.hostSnapshot("smoke-test-host")
+	if !ok {
+		t.Fatalf("preexisting smoke host was deleted after successful smoke:\n%s", output)
+	}
+	if storedHost["endpoint"] != "http://real-smoke-host" {
+		t.Fatalf("stored host endpoint = %q, want http://real-smoke-host; host=%+v output=%s", storedHost["endpoint"], storedHost, output)
+	}
+}
+
 func TestAnvilSchedulerSmokeFailsSlowHealthWithSummary(t *testing.T) {
 	server := newAnvilSchedulerSmokeFakeServer(t, 1500*time.Millisecond)
 	defer server.Close()
@@ -103,7 +132,24 @@ func (s *anvilSchedulerSmokeFakeServer) hasHost(hostID string) bool {
 	return s.host["name"] == hostID
 }
 
+func (s *anvilSchedulerSmokeFakeServer) hostSnapshot(hostID string) (map[string]any, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.host == nil || s.host["name"] != hostID {
+		return nil, false
+	}
+	snapshot := make(map[string]any, len(s.host))
+	for key, value := range s.host {
+		snapshot[key] = value
+	}
+	return snapshot, true
+}
+
 func newAnvilSchedulerSmokeFakeServer(t *testing.T, healthDelay time.Duration) *anvilSchedulerSmokeFakeServer {
+	return newAnvilSchedulerSmokeFakeServerWithHost(t, healthDelay, nil)
+}
+
+func newAnvilSchedulerSmokeFakeServerWithHost(t *testing.T, healthDelay time.Duration, initialHost map[string]any) *anvilSchedulerSmokeFakeServer {
 	t.Helper()
 
 	otherHost := map[string]any{
@@ -114,7 +160,7 @@ func newAnvilSchedulerSmokeFakeServer(t *testing.T, healthDelay time.Duration) *
 		"available_snapshot_bytes": float64(4096),
 		"egress_policies":          []any{"profile"},
 	}
-	fake := &anvilSchedulerSmokeFakeServer{}
+	fake := &anvilSchedulerSmokeFakeServer{host: initialHost}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/health":
