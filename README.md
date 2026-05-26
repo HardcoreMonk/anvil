@@ -1232,9 +1232,9 @@ smoke harness는 기본 host id를 `anvil-scheduler-smoke-*`로 생성하고,
 충돌이 있으면 `PUT /hosts`를 실행하기 전에 실패하므로 운영 host record를 덮어쓰지
 않는다. 등록한 fake host는 `DELETE /hosts/{name}`로 제거하며 cleanup 실패는 smoke
 성공으로 취급하지 않는다. smoke harness가 등록하는 fake host는 `smoke_only: true`이며,
-`PreferredHosts`에 해당 host id를 명시한 smoke 요청에서만 선택된다. 일반
-`/schedule/spawn` fallback은 smoke-only host를 production placement 후보로 보지
-않는다.
+`PreferredHosts`에 해당 host id를 명시한 smoke 요청에서만 선택된다. smoke harness는
+`PreferredHosts`가 없는 추가 `/schedule/spawn`도 실행해 smoke-only host가 일반
+fallback placement 후보로 선택되지 않는지 확인한다.
 
 Scheduler service API는 operator가 host inventory와 placement 상태를 관리하는
 얇은 control-plane surface다.

@@ -95,7 +95,8 @@ scheduler service 운영 검증 자동화는 `scripts/anvil-scheduler-smoke.sh`�
 record가 있으면 `PUT /hosts` 전에 실패해 운영 record를 덮어쓰지 않는다. 등록한 fake
 host는 `DELETE /hosts/{name}`로 정리해 production placement 후보가 남지 않게 한다.
 fake host는 `smoke_only: true`로 등록되어 `PreferredHosts`에 명시된 smoke 요청에서만
-선택되고, 일반 `/schedule/spawn` fallback에서는 무시된다.
+선택되고, smoke harness는 `PreferredHosts` 없는 추가 `/schedule/spawn`으로 일반
+fallback에서 무시되는지도 확인한다.
 다음 후보는 upstream ephemera `v0.4.0` PR-A storage/recovery 변경의
 adoption review, cross-host snapshot replication, scheduler-aware cross-host flock
 placement, L7 egress proxy/SNI hardening, snapshot storage quota dashboard다.

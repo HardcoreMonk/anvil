@@ -165,6 +165,37 @@ func TestAnvilSchedulerSmokeFailsWhenCleanupDeleteReturns500(t *testing.T) {
 	}
 }
 
+func TestAnvilSchedulerSmokeFailsWhenCleanupDeleteDoesNotRemoveConfirmedHost(t *testing.T) {
+	server := newAnvilSchedulerSmokeFakeServer(t, 0)
+	server.retainHostOnDelete()
+	defer server.Close()
+
+	outPath := filepath.Join(t.TempDir(), "summary.json")
+	cmd := exec.Command("bash", "anvil-scheduler-smoke.sh", "--base-url", server.URL, "--host-id", "smoke-test-host", "--json-out", outPath)
+	cmd.Dir = scriptsDir(t)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("smoke script unexpectedly succeeded:\n%s", output)
+	}
+	if !strings.Contains(string(output), "host_cleanup_failed") {
+		t.Fatalf("output = %s, want host_cleanup_failed", output)
+	}
+	if !strings.Contains(string(output), "deleted=false") {
+		t.Fatalf("output = %s, want deleted=false", output)
+	}
+	if !server.hasHost("smoke-test-host") {
+		t.Fatalf("fake scheduler deleted smoke host; test requires retained host")
+	}
+
+	summary := readSmokeSummary(t, outPath)
+	if summary.OK {
+		t.Fatalf("summary ok = true, want false")
+	}
+	if summary.FailedStep != "host_cleanup_failed" {
+		t.Fatalf("failed_step = %q, want host_cleanup_failed", summary.FailedStep)
+	}
+}
+
 func TestAnvilSchedulerSmokeDeletesNewHostAfterPutFailure(t *testing.T) {
 	server := newAnvilSchedulerSmokeFakeServer(t, 0)
 	server.failHostPutAfterStore("save failed")
@@ -193,6 +224,56 @@ func TestAnvilSchedulerSmokeDeletesNewHostAfterPutFailure(t *testing.T) {
 	}
 	if summary.FailedStep != "host_put_failed" {
 		t.Fatalf("failed_step = %q, want host_put_failed", summary.FailedStep)
+	}
+}
+
+func TestAnvilSchedulerSmokeFailsWhenSmokeOnlyHostIsFallbackCandidate(t *testing.T) {
+	server := newAnvilSchedulerSmokeFakeServer(t, 0)
+	server.selectSmokeHostWithoutPreference()
+	defer server.Close()
+
+	outPath := filepath.Join(t.TempDir(), "summary.json")
+	cmd := exec.Command("bash", "anvil-scheduler-smoke.sh", "--base-url", server.URL, "--host-id", "smoke-test-host", "--json-out", outPath)
+	cmd.Dir = scriptsDir(t)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("smoke script unexpectedly succeeded:\n%s", output)
+	}
+	if !strings.Contains(string(output), "smoke_only_failed") {
+		t.Fatalf("output = %s, want smoke_only_failed", output)
+	}
+	if !strings.Contains(string(output), "selected smoke-only host") {
+		t.Fatalf("output = %s, want selected smoke-only host", output)
+	}
+
+	summary := readSmokeSummary(t, outPath)
+	if summary.OK {
+		t.Fatalf("summary ok = true, want false")
+	}
+	if summary.FailedStep != "smoke_only_failed" {
+		t.Fatalf("failed_step = %q, want smoke_only_failed", summary.FailedStep)
+	}
+}
+
+func TestAnvilSchedulerSmokePassesWhenSmokeOnlyFallbackIsDenied(t *testing.T) {
+	server := newAnvilSchedulerSmokeFakeServer(t, 0)
+	server.denyScheduleWithoutPreference()
+	defer server.Close()
+
+	outPath := filepath.Join(t.TempDir(), "summary.json")
+	cmd := exec.Command("bash", "anvil-scheduler-smoke.sh", "--base-url", server.URL, "--host-id", "smoke-test-host", "--json-out", outPath)
+	cmd.Dir = scriptsDir(t)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("smoke script failed: %v\n%s", err, output)
+	}
+
+	summary := readSmokeSummary(t, outPath)
+	if !summary.OK {
+		t.Fatalf("summary ok = false, output=%s summary=%+v", output, summary)
+	}
+	if server.hasHost("smoke-test-host") {
+		t.Fatalf("fake scheduler still has smoke host after successful smoke:\n%s", output)
 	}
 }
 
@@ -231,6 +312,9 @@ type anvilSchedulerSmokeFakeServer struct {
 	hostPutBodies           []map[string]any
 	hostPutFailureResponses []string
 	hostDeleteFailures      []string
+	retainHostOnDeleteFlag  bool
+	selectSmokeFallback     bool
+	denyFallbackSchedule    bool
 }
 
 func (s *anvilSchedulerSmokeFakeServer) hasHost(hostID string) bool {
@@ -279,6 +363,24 @@ func (s *anvilSchedulerSmokeFakeServer) failHostDeleteAfterStore(message string)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.hostDeleteFailures = append(s.hostDeleteFailures, message)
+}
+
+func (s *anvilSchedulerSmokeFakeServer) retainHostOnDelete() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.retainHostOnDeleteFlag = true
+}
+
+func (s *anvilSchedulerSmokeFakeServer) selectSmokeHostWithoutPreference() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.selectSmokeFallback = true
+}
+
+func (s *anvilSchedulerSmokeFakeServer) denyScheduleWithoutPreference() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.denyFallbackSchedule = true
 }
 
 func newAnvilSchedulerSmokeFakeServer(t *testing.T, healthDelay time.Duration) *anvilSchedulerSmokeFakeServer {
@@ -363,8 +465,21 @@ func newAnvilSchedulerSmokeFakeServerWithHost(t *testing.T, healthDelay time.Dur
 				http.Error(w, "invalid schedule body", http.StatusBadRequest)
 				return
 			}
+			preferred := preferredHostsInclude(scheduleReq, fmt.Sprint(current["name"]))
+			fake.mu.Lock()
+			denyFallbackSchedule := fake.denyFallbackSchedule
+			selectSmokeFallback := fake.selectSmokeFallback
+			fake.mu.Unlock()
+			if !preferred && denyFallbackSchedule {
+				writeSmokeTestJSON(t, w, map[string]any{
+					"allowed":   false,
+					"reason":    "no eligible production host",
+					"tenant_id": "smoke-tenant",
+				})
+				return
+			}
 			selected := otherHost
-			if preferredHostsInclude(scheduleReq, fmt.Sprint(current["name"])) {
+			if preferred || selectSmokeFallback {
 				selected = current
 			}
 			writeSmokeTestJSON(t, w, map[string]any{
@@ -405,8 +520,11 @@ func newAnvilSchedulerSmokeFakeServerWithHost(t *testing.T, healthDelay time.Dur
 				}
 				fake.mu.Lock()
 				deleted := fake.host != nil && fake.host["name"] == hostID
-				if deleted {
+				if deleted && !fake.retainHostOnDeleteFlag {
 					fake.host = nil
+				}
+				if fake.retainHostOnDeleteFlag {
+					deleted = false
 				}
 				var failureResponse string
 				if len(fake.hostDeleteFailures) > 0 {

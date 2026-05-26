@@ -74,7 +74,9 @@ ANVIL_SCHEDULER_BASE_URL=http://127.0.0.1:3010
 2. `PUT /hosts`로 smoke host를 등록한다.
 3. `GET /hosts`에서 등록한 host id가 보인다.
 4. `POST /schedule/spawn`이 등록 host를 선택하는 schedule decision을 반환한다.
-5. `GET /placements`가 JSON으로 반환된다.
+5. `PreferredHosts` 없는 `POST /schedule/spawn`이 등록한 smoke-only host를 선택하지
+   않는다.
+6. `GET /placements`가 JSON으로 반환된다.
 
 smoke는 scheduler API에 이미 존재하는 기능만 사용한다. 실패 시 단계 이름, HTTP status,
 response body 일부를 stderr에 남기고 non-zero로 종료한다. token, provider key,
@@ -135,6 +137,7 @@ smoke harness는 실패를 한 가지 exit code로만 뭉치지 않고 사람이
 - `host_put_failed`
 - `host_list_failed`
 - `schedule_spawn_failed`
+- `smoke_only_failed`
 - `placements_failed`
 - `json_write_failed`
 

@@ -59,8 +59,9 @@ smoke harness는 기본 host id를 `anvil-scheduler-smoke-*`로 생성하고,
 충돌이 있으면 `PUT /hosts` 전에 실패하므로 운영 host record를 덮어쓰지 않는다.
 검증 중 등록한 fake host는 `DELETE /hosts/{name}`로 정리한다. 본 검증은 cleanup
 실패를 성공으로 취급하지 않는다. 검증용 fake host는 `smoke_only: true`로 등록되며,
-smoke 요청의 `PreferredHosts`에 host id가 명시된 경우에만 선택된다. 일반 fallback
-scheduling은 smoke-only host를 무시한다.
+smoke 요청의 `PreferredHosts`에 host id가 명시된 경우에만 선택된다. smoke harness는
+`PreferredHosts`가 없는 추가 `/schedule/spawn`도 실행해 일반 fallback scheduling이
+smoke-only host를 무시하는지 확인한다.
 
 설치 후 설정을 바꿔야 하면 `/etc/anvil/anvil-scheduler.env`를 수정한 뒤
 `sudo systemctl restart anvil-scheduler.service`를 실행한다. scheduler service는
