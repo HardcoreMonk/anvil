@@ -15,7 +15,38 @@ check_http() { local code=$1 expected=$2 label=$3
                [ "$code" = "$expected" ] && ok "$label (HTTP $code)" \
                                          || fail "$label (HTTP $code, expected $expected)"; }
 
+# ── Pre-flight: refuse to run against a stale daemon binary ──
+# The e2e runs the pre-built ./ephemera-daemon; it does NOT compile (a `go build`
+# here would fail under sudo when go is absent from root's secure PATH). The
+# golden-image staleness check rebuilds in-VM artifacts but NOT this host binary,
+# so an un-rebuilt binary silently invalidates the whole run. Fail fast instead.
+if [ ! -x ./ephemera-daemon ]; then
+    echo "✗ ./ephemera-daemon not found — build it first:"
+    echo "    go build -o ephemera-daemon ./cmd/goose-daemon/"
+    exit 1
+fi
+if find cmd internal -name '*.go' -newer ./ephemera-daemon 2>/dev/null | grep -q .; then
+    echo "✗ ./ephemera-daemon is older than Go source — rebuild before running e2e:"
+    echo "    go build -o ephemera-daemon ./cmd/goose-daemon/"
+    exit 1
+fi
+
 # ── Pre-flight: clean up any leftover files from previous test runs ──
+# First release stale COW kernel objects from an interrupted prior run: a leftover
+# bind mount on a <vm_id>.ext4 target survives `rm` as a dangling block node and can
+# pin a dm minor across runs. Best-effort (errexit off for the sweep); the daemon's
+# orphan reclaim handles live-state crashes, this catches the no-state residue.
+set +e
+for _mt in /tmp/goose-workspaces/*.ext4; do
+    [ -e "$_mt" ] && umount -l "$_mt" 2>/dev/null
+done
+dmsetup ls 2>/dev/null | awk '/^cow-/{print $1}' | while read -r _dm; do
+    dmsetup remove "$_dm" 2>/dev/null
+done
+losetup -a 2>/dev/null | awk -F: '/goose-workspaces.*\.cow/{print $1}' | while read -r _lp; do
+    losetup -d "$_lp" 2>/dev/null
+done
+set -e
 rm -f /tmp/goose-workspaces/*.ext4 2>/dev/null || true
 rm -f /tmp/goose-workspaces/*.cow  2>/dev/null || true
 rm -rf snapshots/snap-* 2>/dev/null || true
@@ -23,13 +54,13 @@ rm -rf flocks/flock-* 2>/dev/null || true
 rm -rf vms/vm-* 2>/dev/null || true
 
 # Restore any profile files left mangled by an interrupted v0.3.3 LLM smoke run.
-# trap-based restore in step 59a covers normal exits; this catches SIGKILL gaps.
+# trap-based restore in step 71a covers normal exits; this catches SIGKILL gaps.
 [ -f /tmp/researcher-secrets.bak ] && \
     mv /tmp/researcher-secrets.bak configs/profiles/researcher/goose-secrets.yaml
 [ -f /tmp/researcher-goose.bak ] && \
     mv /tmp/researcher-goose.bak configs/profiles/researcher/goose.yaml
 rm -f /tmp/t59c.json 2>/dev/null || true
-# v0.3.4 step 58c writes a tokens file; survive SIGKILLed prior runs.
+# v0.3.4 step 72 writes a tokens file; survive SIGKILLed prior runs.
 rm -f /tmp/ephemera-tokens.txt 2>/dev/null || true
 
 # Kill any stale ephemera-daemon left over from a prior interrupted run —
@@ -151,7 +182,7 @@ VM3_AGENT=$(echo "$VM3_BODY" | jq -r '.agent_url')
 VM3_TOKEN=$(echo "$VM3_BODY" | jq -r '.agent_token')
 ok "VM3: $VM3_ID  Agent: $VM3_AGENT"
 
-step "Verify VM list (should be 2)"
+step "6a. Verify VM list (should be 2)"
 COUNT=$(curl -s "$API/vms" | jq 'length')
 [ "$COUNT" = "2" ] && ok "VM count: $COUNT" || fail "VM count: $COUNT (expected 2)"
 curl -s "$API/vms" | jq -r '.[] | "  \(.vm_id)  \(.guest_ip)"'
@@ -188,12 +219,12 @@ step "9. Delete both VMs"
 check_http "$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/vms/$VM2_ID")" "200" "DELETE VM2"
 check_http "$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/vms/$VM3_ID")" "200" "DELETE VM3"
 
-step "Verify VM list is empty (should be 0)"
+step "9a. Verify VM list is empty (should be 0)"
 FCOUNT=$(curl -s "$API/vms" | jq 'length')
 [ "$FCOUNT" = "0" ] && ok "VM count: $FCOUNT" || fail "VM count: $FCOUNT (expected 0)"
 
-# ── 11. Create VM for snapshot test ──────────────────────────────
-step "11. Create VM for snapshot test"
+# ── 10. Create VM for snapshot test ──────────────────────────────
+step "10. Create VM for snapshot test"
 SNAPVM_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/vms" \
                   -H "Content-Type: application/json")
 SNAPVM_CODE=$(echo "$SNAPVM_RESP" | tail -1)
@@ -205,8 +236,8 @@ SNAPVM_TOKEN=$(echo "$SNAPVM_BODY" | jq -r '.agent_token')
 ok "Snap-source VM: $SNAPVM_ID  Agent: $SNAPVM_AGENT"
 [ -n "$SNAPVM_TOKEN" ] && ok "Agent token received (${#SNAPVM_TOKEN} chars)" || fail "No agent_token"
 
-# ── 12. Take snapshot (stop_after=true) ──────────────────────────
-step "12. Take snapshot of snap-source VM (stop_after=true)"
+# ── 11. Take snapshot (stop_after=true) ──────────────────────────
+step "11. Take snapshot of snap-source VM (stop_after=true)"
 SNAP_RESP=$(curl -s --max-time 300 -w "\n%{http_code}" \
                 -X POST "$API/vms/$SNAPVM_ID/snapshot" \
                 -H "Content-Type: application/json" \
@@ -223,14 +254,14 @@ GONE=$(curl -s "$API/vms" | jq --arg id "$SNAPVM_ID" '[.[] | select(.vm_id == $i
 [ "$GONE" = "0" ] && ok "Source VM removed after stop_after snapshot" \
                    || fail "Source VM still listed (expected removal)"
 
-# ── 13. Verify snapshot list ──────────────────────────────────────
-step "13. Verify snapshot list (should be 1)"
+# ── 12. Verify snapshot list ──────────────────────────────────────
+step "12. Verify snapshot list (should be 1)"
 SNAP_COUNT=$(curl -s "$API/snapshots" | jq 'length')
 [ "$SNAP_COUNT" = "1" ] && ok "Snapshot count: $SNAP_COUNT" || fail "Snapshot count: $SNAP_COUNT (expected 1)"
 curl -s "$API/snapshots" | jq -r '.[] | "  \(.snapshot_id)  source: \(.source_vm_id)  \(.created_at)"'
 
-# ── 14. Restore VM from snapshot ─────────────────────────────────
-step "14. Restore VM from snapshot"
+# ── 13. Restore VM from snapshot ─────────────────────────────────
+step "13. Restore VM from snapshot"
 RESTORE_RESP=$(curl -s --max-time 120 -w "\n%{http_code}" \
                    -X POST "$API/snapshots/$SNAP_ID/restore")
 RESTORE_CODE=$(echo "$RESTORE_RESP" | tail -1)
@@ -247,8 +278,8 @@ ok "Source snapshot: $RESTORE_SRC"
     && ok "Agent token matches original ✓" \
     || fail "Agent token mismatch (got: ${RESTORE_TOKEN:0:8}...  want: ${SNAPVM_TOKEN:0:8}...)"
 
-# ── 15. Run task on restored VM ───────────────────────────────────
-step "15. Run task on restored VM"
+# ── 14. Run task on restored VM ───────────────────────────────────
+step "14. Run task on restored VM"
 RT=$(curl -s --max-time 90 -X POST "$RESTORE_AGENT/tasks" \
          -H "Content-Type: application/json" \
          -H "Authorization: Bearer $RESTORE_TOKEN" \
@@ -256,13 +287,13 @@ RT=$(curl -s --max-time 90 -X POST "$RESTORE_AGENT/tasks" \
 RT_OUT=$(echo "$RT" | jq -r '.output' 2>/dev/null | grep -v '^$' | tail -3 | tr '\n' ' ')
 [ -n "$RT_OUT" ] && ok "Response: $(echo "$RT_OUT" | sed 's/  */ /g')" || fail "No response from restored VM"
 
-# ── 16. Delete restored VM ────────────────────────────────────────
-step "16. Delete restored VM"
+# ── 15. Delete restored VM ────────────────────────────────────────
+step "15. Delete restored VM"
 check_http "$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/vms/$RESTORE_VM_ID")" \
            "200" "DELETE /vms/$RESTORE_VM_ID"
 
-# ── 17. Delete snapshot and verify list is empty ──────────────────
-step "17. Delete snapshot"
+# ── 16. Delete snapshot and verify list is empty ──────────────────
+step "16. Delete snapshot"
 DS=$(curl -s -w "\n%{http_code}" -X DELETE "$API/snapshots/$SNAP_ID")
 check_http "$(echo "$DS" | tail -1)" "200" "DELETE /snapshots/$SNAP_ID"
 echo "  $(echo "$DS" | head -1 | jq -c .)"
@@ -288,8 +319,8 @@ SNAP_FINAL=$(curl -s "$API/snapshots" | jq 'length')
 # and the network manager's concurrent allocation correctness.
 # ════════════════════════════════════════════════════════════════
 
-# ── 19. Create two VMs and snapshot each ─────────────────────────
-step "19. Create two VMs for concurrent restore test"
+# ── 17. Create two VMs and snapshot each ─────────────────────────
+step "17. Create two VMs for concurrent restore test"
 CSA_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/vms" -H "Content-Type: application/json")
 check_http "$(echo "$CSA_RESP" | tail -1)" "201" "POST /vms (snap-source A)"
 CSA_BODY=$(echo "$CSA_RESP" | head -1)
@@ -304,8 +335,8 @@ CSB_ID=$(echo "$CSB_BODY" | jq -r '.vm_id')
 CSB_TOKEN=$(echo "$CSB_BODY" | jq -r '.agent_token')
 ok "Source B: $CSB_ID  IP: $(echo "$CSB_BODY" | jq -r '.guest_ip')"
 
-# ── 20. Snapshot both VMs (stop_after=true) ──────────────────────
-step "20. Snapshot both VMs (stop_after=true)"
+# ── 18. Snapshot both VMs (stop_after=true) ──────────────────────
+step "18. Snapshot both VMs (stop_after=true)"
 SNAPA_RESP=$(curl -s --max-time 300 -w "\n%{http_code}" \
                  -X POST "$API/vms/$CSA_ID/snapshot" \
                  -H "Content-Type: application/json" -d '{"stop_after":true}')
@@ -324,8 +355,8 @@ SNAP2_COUNT=$(curl -s "$API/snapshots" | jq 'length')
 [ "$SNAP2_COUNT" = "2" ] && ok "Snapshot count: $SNAP2_COUNT" \
                           || fail "Expected 2 snapshots, got $SNAP2_COUNT"
 
-# ── 21. Restore both snapshots concurrently ──────────────────────
-step "21. Restore two different snapshots concurrently"
+# ── 19. Restore both snapshots concurrently ──────────────────────
+step "19. Restore two different snapshots concurrently"
 curl -s --max-time 300 -w "\n%{http_code}" \
      -X POST "$API/snapshots/$SNAPA_ID/restore" >/tmp/cra.txt &
 PID_CRA=$!
@@ -358,23 +389,23 @@ ok "Restore B: $CRB_VM_ID  Agent: $CRB_AGENT"
     && ok "Restore B agent token matches source B ✓" \
     || fail "Restore B token mismatch"
 
-# ── 22. Verify both restored VMs are running simultaneously ──────
-step "22. Verify both restored VMs running at the same time"
+# ── 20. Verify both restored VMs are running simultaneously ──────
+step "20. Verify both restored VMs running at the same time"
 CONCURRENT_COUNT=$(curl -s "$API/vms" | jq 'length')
 [ "$CONCURRENT_COUNT" = "2" ] \
     && ok "VM count: $CONCURRENT_COUNT (both restores alive simultaneously ✓)" \
     || fail "VM count: $CONCURRENT_COUNT (expected 2)"
 curl -s "$API/vms" | jq -r '.[] | "  \(.vm_id)  \(.guest_ip)"'
 
-# ── 23. Health-check both agents ─────────────────────────────────
-step "23. Verify both restored agents respond"
+# ── 21. Health-check both agents ─────────────────────────────────
+step "21. Verify both restored agents respond"
 HA=$(curl -s -o /dev/null -w "%{http_code}" "$CRA_AGENT/health")
 check_http "$HA" "200" "Restore A /health"
 HB=$(curl -s -o /dev/null -w "%{http_code}" "$CRB_AGENT/health")
 check_http "$HB" "200" "Restore B /health"
 
-# ── 24. Cleanup ───────────────────────────────────────────────────
-step "24. Cleanup concurrent restore test"
+# ── 22. Cleanup ───────────────────────────────────────────────────
+step "22. Cleanup concurrent restore test"
 check_http "$(curl -s -o /dev/null -w "%{http_code}" -X POST "$CRA_AGENT/stop" \
               -H "Authorization: Bearer $CRA_TOKEN")" "200" "Restore A /stop"
 check_http "$(curl -s -o /dev/null -w "%{http_code}" -X POST "$CRB_AGENT/stop" \
@@ -409,8 +440,8 @@ FINAL_SNAP_COUNT=$(curl -s "$API/snapshots" | jq 'length')
 #     → delete Diff first, then Full
 # ════════════════════════════════════════════════════════════════
 
-# ── 26. Create VM for diff snapshot test ─────────────────────────
-step "26. Create VM for diff snapshot test"
+# ── 23. Create VM for diff snapshot test ─────────────────────────
+step "23. Create VM for diff snapshot test"
 DSNAP_VM_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/vms" -H "Content-Type: application/json")
 check_http "$(echo "$DSNAP_VM_RESP" | tail -1)" "201" "POST /vms (diff-test source)"
 DSNAP_VM_BODY=$(echo "$DSNAP_VM_RESP" | head -1)
@@ -418,8 +449,8 @@ DSNAP_VM_ID=$(echo    "$DSNAP_VM_BODY" | jq -r '.vm_id')
 DSNAP_VM_TOKEN=$(echo "$DSNAP_VM_BODY" | jq -r '.agent_token')
 ok "Diff-test source VM: $DSNAP_VM_ID"
 
-# ── 27. Take snapshot #1 (auto → Full) ───────────────────────────
-step "27. Take snapshot #1 (auto-detect → Full)"
+# ── 24. Take snapshot #1 (auto → Full) ───────────────────────────
+step "24. Take snapshot #1 (auto-detect → Full)"
 FULL_SNAP_RESP=$(curl -s --max-time 300 -w "\n%{http_code}" \
                      -X POST "$API/vms/$DSNAP_VM_ID/snapshot" \
                      -H "Content-Type: application/json")
@@ -435,8 +466,8 @@ ok "Snapshot #1: $FULL_SNAP_ID"
     && ok "base_snapshot_id is absent (full snapshot has no base) ✓" \
     || fail "Full snapshot should not have base_snapshot_id"
 
-# ── 28. Take snapshot #2 (auto → Diff) ───────────────────────────
-step "28. Take snapshot #2 (auto-detect → Diff)"
+# ── 25. Take snapshot #2 (auto → Diff) ───────────────────────────
+step "25. Take snapshot #2 (auto-detect → Diff)"
 DIFF_SNAP_RESP=$(curl -s --max-time 300 -w "\n%{http_code}" \
                      -X POST "$API/vms/$DSNAP_VM_ID/snapshot" \
                      -H "Content-Type: application/json")
@@ -453,13 +484,13 @@ ok "Snapshot #2: $DIFF_SNAP_ID"
     && ok "base_snapshot_id matches Full snapshot ✓" \
     || fail "base_snapshot_id mismatch (got: $DIFF_BASE_ID, want: $FULL_SNAP_ID)"
 
-# ── 29. Compare memory.bin disk usage (sparse-aware) ─────────────
+# ── 26. Compare memory.bin disk usage (sparse-aware) ─────────────
 # Firecracker writes Diff memory files as sparse files: only dirty pages
 # consume actual disk blocks; clean pages are holes.
 # stat -c%s reports the apparent (logical) size, which equals 2 GB for
 # both Full and Diff. stat -c%b reports the number of 512-byte blocks
 # actually allocated on disk — this is the correct metric for sparse files.
-step "29. Verify Diff memory.bin uses fewer disk blocks than Full (sparse-aware)"
+step "26. Verify Diff memory.bin uses fewer disk blocks than Full (sparse-aware)"
 FULL_MEM_PATH="$PWD/snapshots/$FULL_SNAP_ID/memory.bin"
 DIFF_MEM_PATH="$PWD/snapshots/$DIFF_SNAP_ID/memory.bin"
 FULL_MEM_BLOCKS=$(stat -c%b "$FULL_MEM_PATH" 2>/dev/null || echo 0)
@@ -476,8 +507,33 @@ else
     fail "Could not stat memory.bin files (blocks: full=$FULL_MEM_BLOCKS diff=$DIFF_MEM_BLOCKS)"
 fi
 
-# ── 30. Stop source VM (required for diff restore) ────────────────
-step "30. Stop source VM before restoring diff snapshot"
+# ── 26b. Verify Diff rootfs is a sparse delta (v0.4.0) ──────────
+step "26b. Verify Diff rootfs is a sparse delta (rootfs.diff, no full copy)"
+DIFF_ROOTFS="$PWD/snapshots/$DIFF_SNAP_ID/rootfs.diff"
+FULL_ROOTFS="$PWD/snapshots/$FULL_SNAP_ID/rootfs.ext4"
+[ -f "$DIFF_ROOTFS" ] \
+    && ok "Diff snapshot stores rootfs.diff ✓" \
+    || fail "Diff snapshot missing rootfs.diff (rootfs diff not written)"
+# -e (not -f): assert no full rootfs copy exists for a diff snapshot.
+[ ! -e "$PWD/snapshots/$DIFF_SNAP_ID/rootfs.ext4" ] \
+    && ok "Diff snapshot has no full rootfs.ext4 (delta only) ✓" \
+    || fail "Diff snapshot unexpectedly has a full rootfs.ext4"
+FULL_ROOTFS_BLOCKS=$(stat -c%b "$FULL_ROOTFS" 2>/dev/null || echo 0)
+DIFF_ROOTFS_BLOCKS=$(stat -c%b "$DIFF_ROOTFS" 2>/dev/null || echo 0)
+if [ "$FULL_ROOTFS_BLOCKS" -gt 0 ]; then
+    FULL_RMB=$(( FULL_ROOTFS_BLOCKS * 512 / 1048576 ))
+    DIFF_RMB=$(( DIFF_ROOTFS_BLOCKS * 512 / 1048576 ))
+    ok "Full rootfs disk usage: ~${FULL_RMB} MB  |  Diff rootfs.diff disk usage: ~${DIFF_RMB} MB"
+    ok "(Diff apparent size equals the rootfs; only changed 4 KiB blocks consume real disk)"
+    [ "$DIFF_ROOTFS_BLOCKS" -lt "$FULL_ROOTFS_BLOCKS" ] \
+        && ok "Diff rootfs allocates fewer blocks than Full ✓" \
+        || fail "Diff rootfs (~${DIFF_RMB} MB) is not smaller than Full (~${FULL_RMB} MB)"
+else
+    fail "Could not stat full rootfs.ext4 (blocks: $FULL_ROOTFS_BLOCKS)"
+fi
+
+# ── 27. Stop source VM (required for diff restore) ────────────────
+step "27. Stop source VM before restoring diff snapshot"
 check_http "$(curl -s -o /dev/null -w "%{http_code}" -X POST \
               "$(echo "$DSNAP_VM_BODY" | jq -r '.agent_url')/stop" \
               -H "Authorization: Bearer $DSNAP_VM_TOKEN")" "200" "source VM /stop"
@@ -485,8 +541,8 @@ sleep 2
 check_http "$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/vms/$DSNAP_VM_ID")" \
            "200" "DELETE source VM"
 
-# ── 31. Restore from Diff snapshot ───────────────────────────────
-step "31. Restore from Diff snapshot"
+# ── 28. Restore from Diff snapshot ───────────────────────────────
+step "28. Restore from Diff snapshot"
 DIFF_RESTORE_RESP=$(curl -s --max-time 300 -w "\n%{http_code}" \
                         -X POST "$API/snapshots/$DIFF_SNAP_ID/restore")
 DIFF_RESTORE_CODE=$(echo "$DIFF_RESTORE_RESP" | tail -1)
@@ -501,20 +557,20 @@ ok "Restored from Diff: $DIFF_RESTORE_VM_ID  Agent: $DIFF_RESTORE_AGENT"
     && ok "Agent token matches original ✓" \
     || fail "Token mismatch (got: ${DIFF_RESTORE_TOKEN:0:8}...)"
 
-# ── 32. Verify restored VM responds ──────────────────────────────
-step "32. Verify Diff-restored agent responds"
+# ── 29. Verify restored VM responds ──────────────────────────────
+step "29. Verify Diff-restored agent responds"
 check_http "$(curl -s -o /dev/null -w "%{http_code}" "$DIFF_RESTORE_AGENT/health")" \
            "200" "Diff-restored VM /health"
 
-# ── 33. Try deleting Full snapshot while Diff references it → 409 ─
-step "33. Attempt to delete Full snapshot (should fail — Diff depends on it)"
+# ── 30. Try deleting Full snapshot while Diff references it → 409 ─
+step "30. Attempt to delete Full snapshot (should fail — Diff depends on it)"
 FULL_DEL_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/snapshots/$FULL_SNAP_ID")
 [ "$FULL_DEL_CODE" = "409" ] \
     && ok "DELETE Full returned 409 Conflict (Diff dependency correctly blocked) ✓" \
     || fail "Expected 409 Conflict, got HTTP $FULL_DEL_CODE"
 
-# ── 34. Cleanup diff snapshot test ───────────────────────────────
-step "34. Cleanup diff snapshot test"
+# ── 31. Cleanup diff snapshot test ───────────────────────────────
+step "31. Cleanup diff snapshot test"
 check_http "$(curl -s -o /dev/null -w "%{http_code}" -X POST "$DIFF_RESTORE_AGENT/stop" \
               -H "Authorization: Bearer $DIFF_RESTORE_TOKEN")" "200" "Diff-restored VM /stop"
 sleep 2
@@ -547,8 +603,8 @@ DIFF_FINAL_SNAP=$(curl -s "$API/snapshots" | jq 'length')
 #     → delete VM → verify dm device, loop device, and .cow file all removed
 # ════════════════════════════════════════════════════════════════
 
-# ── 36. Create VM for COW rootfs test ───────────────────────────
-step "36. Create VM for COW rootfs test"
+# ── 32. Create VM for COW rootfs test ───────────────────────────
+step "32. Create VM for COW rootfs test"
 COW_VM_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/vms" -H "Content-Type: application/json")
 check_http "$(echo "$COW_VM_RESP" | tail -1)" "201" "POST /vms (cow-test source)"
 COW_VM_BODY=$(echo "$COW_VM_RESP" | head -1)
@@ -556,8 +612,8 @@ COW_VM_ID=$(echo    "$COW_VM_BODY" | jq -r '.vm_id')
 COW_VM_TOKEN=$(echo "$COW_VM_BODY" | jq -r '.agent_token')
 ok "COW-test source VM: $COW_VM_ID"
 
-# ── 37. Take snapshot (stop_after=true) ─────────────────────────
-step "37. Take snapshot of COW-test VM (stop_after=true)"
+# ── 33. Take snapshot (stop_after=true) ─────────────────────────
+step "33. Take snapshot of COW-test VM (stop_after=true)"
 COW_SNAP_RESP=$(curl -s --max-time 300 -w "\n%{http_code}" \
                     -X POST "$API/vms/$COW_VM_ID/snapshot" \
                     -H "Content-Type: application/json" \
@@ -566,8 +622,8 @@ check_http "$(echo "$COW_SNAP_RESP" | tail -1)" "201" "POST /vms/$COW_VM_ID/snap
 COW_SNAP_ID=$(echo "$COW_SNAP_RESP" | head -1 | jq -r '.snapshot_id')
 ok "Snapshot: $COW_SNAP_ID"
 
-# ── 38. Restore from snapshot ────────────────────────────────────
-step "38. Restore from snapshot (COW path)"
+# ── 34. Restore from snapshot ────────────────────────────────────
+step "34. Restore from snapshot (COW path)"
 COW_RESTORE_RESP=$(curl -s --max-time 120 -w "\n%{http_code}" \
                        -X POST "$API/snapshots/$COW_SNAP_ID/restore")
 COW_RESTORE_CODE=$(echo "$COW_RESTORE_RESP" | tail -1)
@@ -582,16 +638,16 @@ ok "Restored VM: $COW_RESTORE_VM_ID  Agent: $COW_RESTORE_AGENT"
     && ok "Agent token matches original ✓" \
     || fail "Agent token mismatch (got: ${COW_RESTORE_TOKEN:0:8}...  want: ${COW_VM_TOKEN:0:8}...)"
 
-# ── 39. Verify dm-snapshot device is active ──────────────────────
-step "39. Verify dm-snapshot COW device is active"
+# ── 35. Verify dm-snapshot device is active ──────────────────────
+step "35. Verify dm-snapshot COW device is active"
 COW_DEV_COUNT=$(dmsetup ls 2>/dev/null | grep -c "^cow-" || true)
 [ "${COW_DEV_COUNT:-0}" -ge "1" ] \
     && ok "dm-snapshot device active (count: $COW_DEV_COUNT) ✓" \
     || fail "No dm-snapshot device found in 'dmsetup ls' (expected at least one cow-* device)"
 dmsetup ls 2>/dev/null | grep "^cow-" | sed 's/^/  dm device: /' || true
 
-# ── 40. Verify exception store has minimal initial allocation ────
-step "40. Verify exception store initial disk usage is minimal"
+# ── 36. Verify exception store has minimal initial allocation ────
+step "36. Verify exception store initial disk usage is minimal"
 COW_FILE=$(ls /tmp/goose-workspaces/*.cow 2>/dev/null | head -1 || true)
 if [ -n "$COW_FILE" ]; then
     COW_BLOCKS=$(stat -c%b "$COW_FILE")
@@ -605,13 +661,13 @@ else
     fail "No .cow exception store found in /tmp/goose-workspaces/"
 fi
 
-# ── 41. Verify restored agent responds ──────────────────────────
-step "41. Verify COW-restored agent responds"
+# ── 37. Verify restored agent responds ──────────────────────────
+step "37. Verify COW-restored agent responds"
 check_http "$(curl -s -o /dev/null -w "%{http_code}" "$COW_RESTORE_AGENT/health")" \
            "200" "COW-restored VM /health"
 
-# ── 42. Delete restored VM and verify full COW cleanup ──────────
-step "42. Delete COW-restored VM and verify kernel resource cleanup"
+# ── 38. Delete restored VM and verify full COW cleanup ──────────
+step "38. Delete COW-restored VM and verify kernel resource cleanup"
 check_http "$(curl -s -o /dev/null -w "%{http_code}" -X POST "$COW_RESTORE_AGENT/stop" \
               -H "Authorization: Bearer $COW_RESTORE_TOKEN")" "200" "COW-restored VM /stop"
 sleep 2
@@ -631,13 +687,180 @@ COW_FILE_AFTER=$(find /tmp/goose-workspaces -maxdepth 1 -name "*.cow" 2>/dev/nul
     && ok "Exception store (.cow) removed after VM delete ✓" \
     || fail "Exception store file(s) still present after VM delete: $COW_FILE_AFTER"
 
-# ── 43. Delete COW snapshot ──────────────────────────────────────
-step "43. Delete COW snapshot"
+# ── 39. Delete COW snapshot ──────────────────────────────────────
+step "39. Delete COW snapshot"
 check_http "$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/snapshots/$COW_SNAP_ID")" \
            "200" "DELETE /snapshots/$COW_SNAP_ID"
 COW_FINAL_SNAP=$(curl -s "$API/snapshots" | jq 'length')
 [ "$COW_FINAL_SNAP" = "0" ] && ok "Snapshot count after cleanup: $COW_FINAL_SNAP" \
                              || fail "Expected 0 snapshots, got $COW_FINAL_SNAP"
+
+# ════════════════════════════════════════════════════════════════
+# 40–46. COW spawn cold-restart (v0.4.0 item A) + orphan reclaim (item E).
+#
+# A daemon launched with EPHEMERA_DISK_MODE=cow provisions spawn disks as
+# dm-snapshot COW views of the golden image. These steps prove such VMs survive
+# both a graceful restart (DestroyAll keeps the exception store; RecoverVMs
+# re-layers it over the golden image) and a crash (RemoveOrphanCOWDevices reclaims
+# a state-less COW device while a surviving VM is cold-restarted). The shared
+# daemon runs in plain mode, so this block relaunches it in COW mode and restores
+# plain mode at the end for the remaining flock/recovery steps.
+# ════════════════════════════════════════════════════════════════
+
+# Helper: (re)launch the daemon with optional extra env, wait until /vms answers.
+# extra_env is intentionally unquoted on the env line so "KEY=VAL" word-splits.
+relaunch_daemon() {
+    local extra_env="$1"
+    env EPHEMERA_API_ADDR=0.0.0.0:3000 $extra_env ./ephemera-daemon >>"$LOG" 2>&1 &
+    DAEMON_PID=$!
+    for i in $(seq 1 60); do
+        if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
+            fail "Daemon exited during (re)start (see $LOG)"; exit 1
+        fi
+        if curl -s -o /dev/null "$API/vms" 2>/dev/null; then return 0; fi
+        sleep 1
+    done
+    fail "Daemon did not respond after (re)start (see $LOG)"; exit 1
+}
+
+# ── 40. Relaunch daemon in COW spawn mode + spawn 2 COW VMs ─────
+step "40. Relaunch daemon in COW spawn mode (EPHEMERA_DISK_MODE=cow)"
+kill "$DAEMON_PID" 2>/dev/null
+wait "$DAEMON_PID" 2>/dev/null || true
+pkill -f "firecracker --api-sock" 2>/dev/null || true
+sleep 2
+relaunch_daemon "EPHEMERA_DISK_MODE=cow"
+ok "Daemon back up in COW spawn mode ✓"
+
+CVM1_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/vms" -H "Content-Type: application/json")
+check_http "$(echo "$CVM1_RESP" | tail -1)" "201" "POST /vms (cow spawn #1)"
+CVM1_ID=$(echo "$CVM1_RESP" | head -1 | jq -r '.vm_id')
+CVM2_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/vms" -H "Content-Type: application/json")
+check_http "$(echo "$CVM2_RESP" | tail -1)" "201" "POST /vms (cow spawn #2)"
+CVM2_ID=$(echo "$CVM2_RESP" | head -1 | jq -r '.vm_id')
+ok "COW spawn VMs: $CVM1_ID, $CVM2_ID"
+
+# ── 41. Verify COW kernel objects + persisted state ────────────
+step "41. Verify COW dm-snapshot devices + persisted state"
+CVM_DEV=$(dmsetup ls 2>/dev/null | grep -c "^cow-" || true)
+[ "${CVM_DEV:-0}" -ge "2" ] \
+    && ok "dm-snapshot devices active (count: $CVM_DEV) ✓" \
+    || fail "Expected ≥2 cow dm devices, got ${CVM_DEV:-0}"
+for VM in $CVM1_ID $CVM2_ID; do
+    [ -f "/tmp/goose-workspaces/$VM.cow" ] \
+        && ok "Exception store present: $VM.cow ✓" \
+        || fail "Exception store missing: $VM.cow"
+    if [ -f "$(pwd)/vms/$VM/state.json" ]; then
+        MODE=$(jq -r '.disk_mode' "$(pwd)/vms/$VM/state.json")
+        [ "$MODE" = "cow" ] \
+            && ok "state.json $VM disk_mode=cow ✓" \
+            || fail "state.json $VM disk_mode=$MODE (expected cow)"
+    else
+        fail "state.json missing for $VM (cold-restart will skip it)"
+    fi
+done
+
+# ── 42. Graceful shutdown preserves exception stores ───────────
+step "42. Graceful shutdown preserves COW exception stores (keep-store)"
+kill "$DAEMON_PID" 2>/dev/null
+wait "$DAEMON_PID" 2>/dev/null || true
+pkill -f "firecracker --api-sock" 2>/dev/null || true
+sleep 2
+# DestroyAll keeps each spawn VM's .cow store but releases the dm/loop objects.
+COW_KEPT=$(find /tmp/goose-workspaces -maxdepth 1 -name "*.cow" 2>/dev/null | wc -l | tr -d ' ')
+[ "$COW_KEPT" = "2" ] \
+    && ok "Both exception stores preserved across graceful shutdown ✓" \
+    || fail "Expected 2 preserved .cow stores, got $COW_KEPT"
+COW_DEV_DOWN=$(dmsetup ls 2>/dev/null | grep -c "^cow-" || true)
+[ "${COW_DEV_DOWN:-0}" = "0" ] \
+    && ok "dm-snapshot kernel objects released on shutdown ✓" \
+    || fail "cow dm devices still present after shutdown (count: ${COW_DEV_DOWN:-0})"
+relaunch_daemon "EPHEMERA_DISK_MODE=cow"
+ok "Daemon back up in COW mode ✓"
+
+# ── 43. COW VMs cold-restarted with same identity + health ─────
+step "43. COW VMs recovered with same vm_id + dm device + health"
+sleep 3
+LIVE=$(curl -s "$API/vms" | jq -r '.[].vm_id' | sort -u)
+for VM in $CVM1_ID $CVM2_ID; do
+    echo "$LIVE" | grep -qx "$VM" \
+        && ok "VM $VM live in /vms after cold-restart ✓" \
+        || fail "VM $VM missing from /vms after cold-restart"
+done
+COW_DEV_UP=$(dmsetup ls 2>/dev/null | grep -c "^cow-" || true)
+[ "${COW_DEV_UP:-0}" = "2" ] \
+    && ok "dm-snapshot devices re-created on recovery (count: 2) ✓" \
+    || fail "Expected 2 cow dm devices after recovery, got ${COW_DEV_UP:-0}"
+for VM in $CVM1_ID $CVM2_ID; do
+    HEALTH=$(curl -s -o /dev/null -w "%{http_code}" "$API/vms/$VM/health")
+    [ "$HEALTH" = "200" ] \
+        && ok "Recovered COW VM $VM /health → 200 ✓" \
+        || fail "Recovered COW VM $VM /health → $HEALTH (expected 200)"
+done
+
+# ── 44. Crash with one VM orphaned (state.json removed) ────────
+step "44. Simulated crash: SIGKILL daemon with $CVM2_ID orphaned"
+# Remove CVM2's state.json so it is NOT recovered; its still-live dm device +
+# store then become an orphan for RemoveOrphanCOWDevices to reclaim on restart.
+rm -f "$(pwd)/vms/$CVM2_ID/state.json"
+rmdir "$(pwd)/vms/$CVM2_ID" 2>/dev/null || true
+# SIGKILL: no DestroyAll runs, so live dm devices + stores survive the crash.
+kill -9 "$DAEMON_PID" 2>/dev/null
+wait "$DAEMON_PID" 2>/dev/null || true
+pkill -9 -f "firecracker --api-sock" 2>/dev/null || true
+sleep 2
+relaunch_daemon "EPHEMERA_DISK_MODE=cow"
+ok "Daemon back up in COW mode after crash ✓"
+
+# ── 45. Orphan reclaimed; surviving VM crash-recovered ─────────
+step "45. Orphan COW device reclaimed (item E) + survivor recovered (item A)"
+sleep 3
+LIVE2=$(curl -s "$API/vms" | jq -r '.[].vm_id' | sort -u)
+echo "$LIVE2" | grep -qx "$CVM1_ID" \
+    && ok "Survivor $CVM1_ID recovered after crash ✓" \
+    || fail "Survivor $CVM1_ID missing from /vms after crash"
+if echo "$LIVE2" | grep -qx "$CVM2_ID"; then
+    fail "Orphaned $CVM2_ID unexpectedly present in /vms"
+else
+    ok "Orphaned $CVM2_ID correctly not recovered ✓"
+fi
+[ ! -f "/tmp/goose-workspaces/$CVM2_ID.cow" ] \
+    && ok "Orphan exception store $CVM2_ID.cow reclaimed ✓" \
+    || fail "Orphan exception store $CVM2_ID.cow still present"
+# -e (not -f): a leaked bind mount leaves a block-device node, which -f misses.
+[ ! -e "/tmp/goose-workspaces/$CVM2_ID.ext4" ] \
+    && ok "Orphan mount target $CVM2_ID.ext4 reclaimed (no stale bind mount) ✓" \
+    || fail "Orphan mount target $CVM2_ID.ext4 still present (stale bind mount leaked)"
+[ -f "/tmp/goose-workspaces/$CVM1_ID.cow" ] \
+    && ok "Survivor exception store $CVM1_ID.cow preserved ✓" \
+    || fail "Survivor exception store $CVM1_ID.cow missing"
+grep -q "orphan cow device" "$LOG" \
+    && ok "Daemon log records orphan cow device reclaim ✓" \
+    || fail "Expected an 'orphan cow device' reclaim line in daemon log"
+HEALTH=$(curl -s -o /dev/null -w "%{http_code}" "$API/vms/$CVM1_ID/health")
+[ "$HEALTH" = "200" ] \
+    && ok "Crash-recovered COW VM $CVM1_ID /health → 200 ✓" \
+    || fail "Crash-recovered COW VM $CVM1_ID /health → $HEALTH (expected 200)"
+
+# ── 46. Clean up COW VM and restore plain disk mode ────────────
+step "46. Delete COW VM + return daemon to plain disk mode"
+check_http "$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/vms/$CVM1_ID")" \
+           "200" "DELETE COW VM $CVM1_ID"
+COW_DEV_END=$(dmsetup ls 2>/dev/null | grep -c "^cow-" || true)
+[ "${COW_DEV_END:-0}" = "0" ] \
+    && ok "All cow dm devices removed after delete ✓" \
+    || fail "cow dm devices still present after delete (count: ${COW_DEV_END:-0})"
+COW_FILE_END=$(find /tmp/goose-workspaces -maxdepth 1 -name "*.cow" 2>/dev/null | wc -l | tr -d ' ')
+[ "$COW_FILE_END" = "0" ] \
+    && ok "All exception stores removed after delete ✓" \
+    || fail "Exception store(s) still present after delete: $COW_FILE_END"
+# Restore plain disk mode so the remaining flock/recovery steps run unchanged.
+kill "$DAEMON_PID" 2>/dev/null
+wait "$DAEMON_PID" 2>/dev/null || true
+pkill -f "firecracker --api-sock" 2>/dev/null || true
+sleep 2
+relaunch_daemon ""
+ok "Daemon restored to plain disk mode ✓"
 
 # ════════════════════════════════════════════════════════════════
 # Agent Proxy test: verify control plane proxy endpoints.
@@ -651,8 +874,8 @@ COW_FINAL_SNAP=$(curl -s "$API/snapshots" | jq 'length')
 # points to the proxy path instead of the private IP.
 # ════════════════════════════════════════════════════════════════
 
-# ── 45. Create VM for agent proxy test ──────────────────────────
-step "45. Create VM for agent proxy endpoint test"
+# ── 47. Create VM for agent proxy test ──────────────────────────
+step "47. Create VM for agent proxy endpoint test"
 PROXY_VM_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/vms" -H "Content-Type: application/json")
 check_http "$(echo "$PROXY_VM_RESP" | tail -1)" "201" "POST /vms (proxy-test)"
 PROXY_VM_BODY=$(echo "$PROXY_VM_RESP" | head -1)
@@ -660,21 +883,21 @@ PROXY_VM_ID=$(echo "$PROXY_VM_BODY" | jq -r '.vm_id')
 PROXY_VM_TOKEN=$(echo "$PROXY_VM_BODY" | jq -r '.agent_token')
 ok "Proxy-test VM: $PROXY_VM_ID"
 
-# ── 46. Test proxy: GET /vms/{vm_id}/health ──────────────────────
-step "46. Test proxy: GET /vms/\$PROXY_VM_ID/health"
+# ── 48. Test proxy: GET /vms/{vm_id}/health ──────────────────────
+step "48. Test proxy: GET /vms/\$PROXY_VM_ID/health"
 check_http "$(curl -s -o /dev/null -w "%{http_code}" "$API/vms/$PROXY_VM_ID/health")" \
            "200" "GET /vms/$PROXY_VM_ID/health (proxy)"
 
-# ── 47. Test proxy: POST /vms/{vm_id}/stop + cleanup ────────────
-step "47. Test proxy: POST /vms/\$PROXY_VM_ID/stop"
+# ── 49. Test proxy: POST /vms/{vm_id}/stop + cleanup ────────────
+step "49. Test proxy: POST /vms/\$PROXY_VM_ID/stop"
 check_http "$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/vms/$PROXY_VM_ID/stop")" \
            "200" "POST /vms/$PROXY_VM_ID/stop (proxy)"
 sleep 2
 check_http "$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/vms/$PROXY_VM_ID")" \
            "200" "DELETE proxy-test VM"
 
-# ── 48. Restart daemon with EPHEMERA_PUBLIC_URL ──────────────────
-step "48. Restart daemon with EPHEMERA_PUBLIC_URL=http://localhost:3000"
+# ── 50. Restart daemon with EPHEMERA_PUBLIC_URL ──────────────────
+step "50. Restart daemon with EPHEMERA_PUBLIC_URL=http://localhost:3000"
 kill "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null || true
 EPHEMERA_API_ADDR=0.0.0.0:3000 EPHEMERA_PUBLIC_URL=http://localhost:3000 ./ephemera-daemon >>"$LOG" 2>&1 &
 DAEMON_PID=$!
@@ -702,8 +925,8 @@ EXPECTED_AGENT_URL="http://localhost:3000/vms/$PUBVM_ID"
     && ok "agent_url is proxy path ✓ ($PUBVM_AGENT_URL)" \
     || fail "agent_url mismatch (got: $PUBVM_AGENT_URL, want: $EXPECTED_AGENT_URL)"
 
-# ── 49. Test agent_url-based proxy access ────────────────────────
-step "49. Verify proxy access via agent_url"
+# ── 51. Test agent_url-based proxy access ────────────────────────
+step "51. Verify proxy access via agent_url"
 check_http "$(curl -s -o /dev/null -w "%{http_code}" "$PUBVM_AGENT_URL/health")" \
            "200" "\$agent_url/health (via proxy)"
 check_http "$(curl -s -o /dev/null -w "%{http_code}" -X POST "$PUBVM_AGENT_URL/stop")" \
@@ -720,12 +943,12 @@ check_http "$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/vms/$PUBVM_
 # (which would require real API keys).
 # ════════════════════════════════════════════════════════════════
 
-# ── 51. Prep role profile yaml files ─────────────────────────────
+# ── 52. Prep role profile yaml files ─────────────────────────────
 # profileConfigPaths requires goose.yaml + goose-secrets.yaml to exist
 # per role. Copy from the committed .example placeholders so the spawn
 # path can resolve; the API-key fields stay as placeholders since no
 # task is actually executed in this scenario.
-step "51. Prep role profile yaml files"
+step "52. Prep role profile yaml files"
 for role in researcher worker reviewer orchestrator; do
     for f in goose.yaml goose-secrets.yaml; do
         src="configs/profiles/$role/${f}.example"
@@ -737,8 +960,8 @@ for role in researcher worker reviewer orchestrator; do
 done
 ok "Profile yaml files ready"
 
-# ── 52. Create flock with 5 agents ───────────────────────────────
-step "52. Create flock with 5 agents"
+# ── 53. Create flock with 5 agents ───────────────────────────────
+step "53. Create flock with 5 agents"
 FLOCK_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/flocks" \
     -H "Content-Type: application/json" \
     -d '{
@@ -757,14 +980,14 @@ echo "$TW_URL" | grep -q "/flocks/$FLOCK_ID/wall" \
     && ok "townwall_url: $TW_URL" \
     || fail "townwall_url malformed: $TW_URL"
 
-# ── 53. Verify VM list reflects the flock ────────────────────────
-step "53. Verify /vms shows the 5 flock members"
+# ── 54. Verify VM list reflects the flock ────────────────────────
+step "54. Verify /vms shows the 5 flock members"
 VM_COUNT=$(curl -s "$API/vms" | jq 'length')
 [ "$VM_COUNT" -ge "5" ] && ok "Found $VM_COUNT VM(s) running" \
                        || fail "Expected ≥5 VMs, got $VM_COUNT"
 
-# ── 54. Post a message to the Town Wall (direct control plane) ───
-step "54. Post a message to the Town Wall"
+# ── 55. Post a message to the Town Wall (direct control plane) ───
+step "55. Post a message to the Town Wall"
 POST_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/flocks/$FLOCK_ID/post" \
     -H "Content-Type: application/json" \
     -d '{"agent_id":"researcher-1","body":"Found existing dark mode CSS variables"}')
@@ -773,7 +996,7 @@ echo "$POST_RESP" | head -1 | jq -e '.body' >/dev/null \
     && ok "Town Wall accepted the post" \
     || fail "Post body invalid"
 
-# ── 54b. Post via in-VM /townwall/post (Phase 5 forwarding path) ──
+# ── 55a. Post via in-VM /townwall/post (Phase 5 forwarding path) ──
 # Exercises the same chain that the in-VM `gtwall` CLI takes:
 #   curl → goose-agent /townwall/post → control plane /flocks/{id}/post
 # The body intentionally contains a double-quote and a backslash so the JSON
@@ -784,7 +1007,7 @@ echo "$POST_RESP" | head -1 | jq -e '.body' >/dev/null \
 # /townwall/post is intentionally NOT proxied (external callers should use
 # /flocks/{id}/post directly), so we always resolve the private IP and target
 # the agent directly to exercise the in-VM endpoint.
-step "54b. Post via agent /townwall/post (in-VM forwarding path)"
+step "55a. Post via agent /townwall/post (in-VM forwarding path)"
 TARGET_AGENT_ID="researcher-1"
 TARGET_VM_ID=$(echo "$FLOCK_BODY" | jq -r ".agents[] | select(.agent_id==\"$TARGET_AGENT_ID\") | .vm_id")
 TARGET_TOKEN=$(echo "$FLOCK_BODY" | jq -r ".agent_tokens[\"$TARGET_AGENT_ID\"]")
@@ -817,11 +1040,11 @@ check_http "$NOAUTH_CODE" "401" "POST /townwall/post without bearer (must be rej
 # Allow the in-VM HTTP forward to finish before reading history.
 sleep 1
 
-# ── 55. Retrieve Town Wall history ───────────────────────────────
-# createFlock writes one "orchestrator" entry on spawn; step 54 added one
-# (direct CP post) and step 54b added one (via in-VM /townwall/post).
-# Expect ≥3 parseable lines, including step 54b's escaped-quote body.
-step "55. Retrieve Town Wall history"
+# ── 56. Retrieve Town Wall history ───────────────────────────────
+# createFlock writes one "orchestrator" entry on spawn; step 55 added one
+# (direct CP post) and step 55a added one (via in-VM /townwall/post).
+# Expect ≥3 parseable lines, including step 55a's escaped-quote body.
+step "56. Retrieve Town Wall history"
 HIST=$(curl -s "$API/flocks/$FLOCK_ID/wall/history")
 HIST_COUNT=$(echo "$HIST" | jq 'length')
 [ "$HIST_COUNT" -ge "3" ] && ok "Town Wall has $HIST_COUNT entries" \
@@ -836,14 +1059,14 @@ MATCH=$(echo "$HIST" | jq --arg id "$TARGET_AGENT_ID" --arg body "$UNIQUE_BODY" 
     && ok "In-VM /townwall/post entry round-tripped (agent_id+body match) ✓" \
     || fail "In-VM /townwall/post entry not found in history (exact matches: $MATCH)"
 
-# ── 56. List flocks ──────────────────────────────────────────────
-step "56. Verify GET /flocks lists the new flock"
+# ── 57. List flocks ──────────────────────────────────────────────
+step "57. Verify GET /flocks lists the new flock"
 FLOCK_LIST_COUNT=$(curl -s "$API/flocks" | jq 'length')
 [ "$FLOCK_LIST_COUNT" -ge "1" ] && ok "GET /flocks returns $FLOCK_LIST_COUNT entry(ies)" \
                                 || fail "Expected ≥1 flock listed"
 
-# ── 57. Delete flock and verify cleanup ──────────────────────────
-step "57. Delete flock and verify all member VMs are torn down"
+# ── 58. Delete flock and verify cleanup ──────────────────────────
+step "58. Delete flock and verify all member VMs are torn down"
 DEL_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/flocks/$FLOCK_ID")
 check_http "$DEL_CODE" "200" "DELETE /flocks/$FLOCK_ID"
 # Allow the parallel destroyVM goroutines to finish their teardown.
@@ -857,11 +1080,11 @@ FINAL_FLOCK_COUNT=$(curl -s "$API/flocks" | jq 'length')
 
 # ════════════════════════════════════════════════════════════════
 # v0.3.1 — Goosetown resilience scenarios (sub-steps of 57; the final
-# daemon shutdown stays as step 58).
+# daemon shutdown stays as step 69).
 # ════════════════════════════════════════════════════════════════
 
-# ── 57a. Create resilience flock ─────────────────────────────────
-step "57a. Create flock for resilience scenarios"
+# ── 59. Create resilience flock ─────────────────────────────────
+step "59. Create flock for resilience scenarios"
 RESI_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/flocks" \
     -H "Content-Type: application/json" \
     -d '{"task":"resilience scenario","roles":["orchestrator","worker","reviewer"]}')
@@ -870,8 +1093,8 @@ RESI_BODY=$(echo "$RESI_RESP" | head -1)
 RESI_FLOCK_ID=$(echo "$RESI_BODY" | jq -r '.flock_id')
 ok "Resilience flock: $RESI_FLOCK_ID"
 
-# ── 57b. SSE seq monotonicity ────────────────────────────────────
-step "57b. Town Wall messages carry monotonic seq"
+# ── 60. SSE seq monotonicity ────────────────────────────────────
+step "60. Town Wall messages carry monotonic seq"
 SEQ1_RESP=$(curl -s -X POST "$API/flocks/$RESI_FLOCK_ID/post" \
     -H "Content-Type: application/json" \
     -d '{"agent_id":"worker-1","body":"seq-check-1"}')
@@ -888,8 +1111,8 @@ SECOND_SEQ=$(echo "$SEQ2_RESP" | jq -r '.seq')
     && ok "Seq monotonic: $FIRST_SEQ → $SECOND_SEQ ✓" \
     || fail "Seq did not increase: $FIRST_SEQ → $SECOND_SEQ"
 
-# ── 57c. metadata.json is written on spawn ───────────────────────
-step "57c. Flock metadata.json persisted to disk"
+# ── 61. metadata.json is written on spawn ───────────────────────
+step "61. Flock metadata.json persisted to disk"
 META_PATH="$(pwd)/flocks/$RESI_FLOCK_ID/metadata.json"
 [ -f "$META_PATH" ] && ok "metadata.json exists at $META_PATH ✓" \
                     || fail "metadata.json missing at $META_PATH"
@@ -900,10 +1123,10 @@ jq -e '.schema_version == 1' "$META_PATH" >/dev/null \
     && ok "schema_version == 1 ✓" \
     || fail "schema_version not 1"
 
-# ── 57d. Daemon restart recovers flock + cold-restarts VMs ───────
-step "57d. Daemon restart recovers flock from disk"
+# ── 62. Daemon restart recovers flock + cold-restarts VMs ───────
+step "62. Daemon restart recovers flock from disk"
 # Capture VM IDs and verify per-VM state.json was persisted, so we can later
-# confirm cold-restart preserved the same identities (steps 57g/57h).
+# confirm cold-restart preserved the same identities (steps 65/66).
 PRE_VM_IDS=$(curl -s "$API/flocks/$RESI_FLOCK_ID" | jq -r '.agents | to_entries | .[].value.vm_id' | sort -u)
 for VM in $PRE_VM_IDS; do
     [ -f "$(pwd)/vms/$VM/state.json" ] \
@@ -947,10 +1170,10 @@ RECOVERED_SEQ=$(curl -s "$API/flocks/$RESI_FLOCK_ID/wall/history" | jq '.[-1].se
     && ok "Recovered history seq $RECOVERED_SEQ ≥ pre-restart seq $SECOND_SEQ ✓" \
     || fail "Recovered seq $RECOVERED_SEQ regressed below $SECOND_SEQ"
 
-# ── 57e. Cold-restart preserves VM identities ────────────────────
+# ── 63. Cold-restart preserves VM identities ────────────────────
 # pkill kills the Firecracker processes from the previous daemon; if cold-restart
 # works, the new daemon must re-spawn them with the same vm_id / IP / TAP / token.
-step "57e. Cold-restart preserves VM IDs"
+step "63. Cold-restart preserves VM IDs"
 POST_VM_IDS=$(curl -s "$API/flocks/$RESI_FLOCK_ID" | jq -r '.agents | to_entries | .[].value.vm_id' | sort -u)
 if [ "$PRE_VM_IDS" = "$POST_VM_IDS" ]; then
     ok "VM IDs unchanged across daemon restart ✓"
@@ -968,8 +1191,8 @@ for VM in $PRE_VM_IDS; do
     fi
 done
 
-# ── 57f. Recovered VM /health responds ───────────────────────────
-step "57f. Recovered VM /health responds"
+# ── 64. Recovered VM /health responds ───────────────────────────
+step "64. Recovered VM /health responds"
 # Allow a few extra seconds for goose-agent in each recovered VM to bind :8080.
 sleep 3
 for VM in $PRE_VM_IDS; do
@@ -979,19 +1202,19 @@ for VM in $PRE_VM_IDS; do
         || fail "VM $VM /health → $HEALTH (expected 200)"
 done
 
-# ── 57g. Delete recovered flock cleans metadata.json ─────────────
-step "57g. DELETE recovered flock removes metadata.json"
+# ── 65. Delete recovered flock cleans metadata.json ─────────────
+step "65. DELETE recovered flock removes metadata.json"
 check_http "$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/flocks/$RESI_FLOCK_ID")" \
     "200" "DELETE recovered flock"
 [ ! -f "$META_PATH" ] \
     && ok "metadata.json removed after DELETE ✓" \
     || fail "metadata.json still present after DELETE"
 
-# ── 57h. Watchdog start log line ─────────────────────────────────
+# ── 66. Watchdog start log line ─────────────────────────────────
 # Watchdog timing-based VM-kill scenarios are flaky in shell; the
 # unit tests cover behavior. Here we only confirm the watchdog was
 # started by both daemon invocations.
-step "57h. Watchdog start log line present"
+step "66. Watchdog start log line present"
 # v0.3.5: slog migration changed messages to lowercase ("watchdog started"
 # replaces "Watchdog started"). The TextHandler emits them as
 # `msg="watchdog started"`, but a plain substring grep still matches.
@@ -1001,10 +1224,10 @@ WD_COUNT=$(grep -c "watchdog started" "$LOG" 2>/dev/null || echo 0)
     || fail "Expected ≥2 'watchdog started' log lines, got $WD_COUNT"
 
 # ════════════════════════════════════════════════════════════════
-# v0.3.3 — Operational polish scenarios (57i, 57j, 58b, 59*)
+# v0.3.3 — Operational polish scenarios (67, 68, 70, 71*)
 # ════════════════════════════════════════════════════════════════
 
-# ── 57i. Watchdog persists dead status to metadata.json (v0.3.3) ─
+# ── 67. Watchdog persists dead status to metadata.json (v0.3.3) ─
 # Phase 1 contract: when the watchdog flips status to dead, the new
 # state lands on disk *before* anything else can race it. We verify the
 # Flock.Persist hook fired by reading metadata.json directly.
@@ -1015,7 +1238,7 @@ WD_COUNT=$(grep -c "watchdog started" "$LOG" 2>/dev/null || echo 0)
 # TestWatchdog_PersistsDeadStatus covers the LoadFromDisk roundtrip in
 # isolation. Truly-stuck-dead-across-restart requires a failed cold-
 # restart, which has its own dedicated path (markFlockAgentDead).
-step "57i. Watchdog persists dead status to metadata.json"
+step "67. Watchdog persists dead status to metadata.json"
 WD_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/flocks" \
     -H "Content-Type: application/json" \
     -d '{"task":"watchdog persist","roles":["worker"]}')
@@ -1046,10 +1269,10 @@ META_DEAD=$(jq -r '.agents["worker-1"].status' \
 curl -s -o /dev/null -X DELETE "$API/flocks/$WD_FLOCK_ID"
 sleep 2
 
-# ── 57j. Per-agent restart preserves identity + token (v0.3.3) ───
+# ── 68. Per-agent restart preserves identity + token (v0.3.3) ───
 # Phase 2. POST /flocks/{id}/agents/{agent_id}/restart must swap vm_id
 # while preserving agent_id, role, and the original agent_token (D1).
-step "57j. Per-agent restart preserves identity and reuses agent_token"
+step "68. Per-agent restart preserves identity and reuses agent_token"
 RJ_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/flocks" \
     -H "Content-Type: application/json" \
     -d '{"task":"restart test","roles":["reviewer"]}')
@@ -1098,8 +1321,8 @@ TW_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
 curl -s -o /dev/null -X DELETE "$API/flocks/$RJ_FLOCK_ID"
 sleep 2
 
-# ── 58. Shut down daemon ──────────────────────────────────────────
-step "58. Shut down daemon"
+# ── 69. Shut down daemon ──────────────────────────────────────────
+step "69. Shut down daemon"
 kill "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null || true
 ok "Daemon stopped"
 
@@ -1108,13 +1331,13 @@ ok "Daemon stopped"
 # Both share the same auth-on daemon to avoid an extra restart cycle.
 # ════════════════════════════════════════════════════════════════
 
-# ── 58b. Auth-on daemon: in-VM CP token auto-injected (v0.3.3) ───
+# ── 70. Auth-on daemon: in-VM CP token auto-injected (v0.3.3) ───
 # Phase 3. With EPHEMERA_API_TOKENS set, the in-VM /townwall/post
 # forwarder must authenticate to the control plane using a token
 # auto-injected by the host at /root/.ephemera-cp-token (= apiClients[0]).
 # A 200 here proves the injection chain works end-to-end; a 401 would
 # mean the in-VM forwarder hit the CP without (or with the wrong) token.
-step "58b. Auth-on daemon spawned for v0.3.3 CP-token scenarios"
+step "70. Auth-on daemon spawned for v0.3.3 CP-token scenarios"
 EPHEMERA_API_TOKENS="e2etest:e2e-cp-token-deadbeef" \
     EPHEMERA_API_ADDR=0.0.0.0:3000 \
     ./ephemera-daemon >>"$LOG" 2>&1 &
@@ -1129,7 +1352,7 @@ for i in $(seq 1 60); do
 done
 $AUTH_OK && ok "Auth-on daemon ready" || { fail "Auth-on daemon did not respond"; exit 1; }
 
-step "58b.i. In-VM /townwall/post auto-authenticates under auth-on CP"
+step "70a. In-VM /townwall/post auto-authenticates under auth-on CP"
 AU_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/flocks" \
     -H "$AUTH_HDR" -H "Content-Type: application/json" \
     -d '{"task":"auth test","roles":["worker"]}')
@@ -1158,7 +1381,7 @@ HIST_OK=$(curl -s -H "$AUTH_HDR" "$API/flocks/$AU_FLOCK_ID/wall/history" | \
 curl -s -o /dev/null -H "$AUTH_HDR" -X DELETE "$API/flocks/$AU_FLOCK_ID"
 sleep 2
 
-# ── 59. Real-LLM /tasks round-trip (v0.3.3 Phase 4) ──────────────
+# ── 71. Real-LLM /tasks round-trip (v0.3.3 Phase 4) ──────────────
 # Skipped when no provider API key is in env. When run, exercises the
 # full chain: /tasks → Goose CLI → system prompt → gtwall → CP Town Wall.
 LLM_KEY=""; LLM_PROVIDER=""; LLM_SECRET_KEY=""
@@ -1171,11 +1394,11 @@ elif [ -n "${OPENAI_API_KEY:-}" ]; then
 fi
 
 if [ -z "$LLM_KEY" ]; then
-    step "59. Real-LLM /tasks smoke test"
+    step "71. Real-LLM /tasks smoke test"
     ok "Skipped — set GOOGLE_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY to run"
 else
-    # ── 59a. Inject real key into researcher profile (with restore trap) ──
-    step "59a. Inject $LLM_SECRET_KEY into researcher profile"
+    # ── 71a. Inject real key into researcher profile (with restore trap) ──
+    step "71a. Inject $LLM_SECRET_KEY into researcher profile"
     cp configs/profiles/researcher/goose-secrets.yaml /tmp/researcher-secrets.bak
     cp configs/profiles/researcher/goose.yaml /tmp/researcher-goose.bak
     trap '[ -f /tmp/researcher-secrets.bak ] && mv /tmp/researcher-secrets.bak configs/profiles/researcher/goose-secrets.yaml; [ -f /tmp/researcher-goose.bak ] && mv /tmp/researcher-goose.bak configs/profiles/researcher/goose.yaml' EXIT
@@ -1189,8 +1412,8 @@ else
         configs/profiles/researcher/goose.yaml
     ok "Researcher profile updated for provider=$LLM_PROVIDER"
 
-    # ── 59b. Spawn 1-agent researcher flock under auth-on daemon ──────
-    step "59b. Spawn researcher-only flock"
+    # ── 71b. Spawn 1-agent researcher flock under auth-on daemon ──────
+    step "71b. Spawn researcher-only flock"
     LLM_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/flocks" \
         -H "$AUTH_HDR" -H "Content-Type: application/json" \
         -d '{"task":"smoke","roles":["researcher"]}')
@@ -1201,8 +1424,8 @@ else
     RES_TOKEN=$(echo "$LLM_BODY" | jq -r '.agent_tokens["researcher-1"]')
     ok "Spawned researcher flock $LLM_FLOCK_ID"
 
-    # ── 59c. Send a deterministic /tasks prompt ──────────────────────
-    step "59c. POST /tasks with explicit gtwall instruction"
+    # ── 71c. Send a deterministic /tasks prompt ──────────────────────
+    step "71c. POST /tasks with explicit gtwall instruction"
     TASK_BODY=$(jq -n '{prompt:"Use the gtwall command exactly once to post the literal text: ROUNDTRIP_OK. Do not post anything else. Then respond with the JSON {\"done\":true}."}')
     curl -s -m 180 -X POST "$API/vms/$RES_VM_ID/tasks" \
         -H "$AUTH_HDR" \
@@ -1211,8 +1434,8 @@ else
         -d "$TASK_BODY" > /tmp/t59c.json || true
     ok "/tasks invocation returned (see /tmp/t59c.json)"
 
-    # ── 59d. Verify Town Wall received the ROUNDTRIP_OK posting ───────
-    step "59d. Town Wall received researcher's gtwall post"
+    # ── 71d. Verify Town Wall received the ROUNDTRIP_OK posting ───────
+    step "71d. Town Wall received researcher's gtwall post"
     FOUND=false
     for i in $(seq 1 30); do
         HIT=$(curl -s -H "$AUTH_HDR" "$API/flocks/$LLM_FLOCK_ID/wall/history" | \
@@ -1224,8 +1447,8 @@ else
     $FOUND && ok "Researcher posted ROUNDTRIP_OK to Town Wall via gtwall ✓" \
            || fail "Town Wall did not receive ROUNDTRIP_OK within 30s (see /tmp/t59c.json)"
 
-    # ── 59e. Cleanup ─────────────────────────────────────────────────
-    step "59e. DELETE LLM flock + restore profile files"
+    # ── 71e. Cleanup ─────────────────────────────────────────────────
+    step "71e. DELETE LLM flock + restore profile files"
     curl -s -o /dev/null -H "$AUTH_HDR" -X DELETE "$API/flocks/$LLM_FLOCK_ID"
     mv /tmp/researcher-secrets.bak configs/profiles/researcher/goose-secrets.yaml
     mv /tmp/researcher-goose.bak configs/profiles/researcher/goose.yaml
@@ -1233,7 +1456,7 @@ else
     ok "LLM smoke cleanup complete"
 fi
 
-# ── 58c. CP token rotation via TOKENS_FILE + SIGHUP (v0.3.4 #1) ───
+# ── 72. CP token rotation via TOKENS_FILE + SIGHUP (v0.3.4 #1) ───
 # Swap the auth-on daemon for one backed by EPHEMERA_API_TOKENS_FILE,
 # spawn a flock, then rotate the file and SIGHUP. The same in-VM
 # agent_token must still authenticate at /townwall/post afterwards —
@@ -1241,12 +1464,12 @@ fi
 # /root/.ephemera-cp-token to the rotated value. Without v0.3.4 #1
 # the post-rotation post would 401 because cp.clients[0] swapped but
 # the in-VM file kept the v1 token.
-step "58c. Kill auth-on daemon to prep for rotation test"
+step "72. Kill auth-on daemon to prep for rotation test"
 kill "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null || true
 sleep 1
 ok "Auth-on daemon stopped"
 
-step "58c.i. Spawn TOKENS_FILE-backed daemon (token=v1)"
+step "72a. Spawn TOKENS_FILE-backed daemon (token=v1)"
 echo "e2etest:e2e-cp-token-v1" > /tmp/ephemera-tokens.txt
 EPHEMERA_API_TOKENS_FILE=/tmp/ephemera-tokens.txt \
     EPHEMERA_API_ADDR=0.0.0.0:3000 \
@@ -1262,7 +1485,7 @@ for i in $(seq 1 60); do
 done
 $ROT_OK && ok "File-source daemon ready" || { fail "File-source daemon did not respond"; exit 1; }
 
-step "58c.ii. Spawn flock and verify v1 in-VM CP forward"
+step "72b. Spawn flock and verify v1 in-VM CP forward"
 ROT_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/flocks" \
     -H "$ROT_HDR_V1" -H "Content-Type: application/json" \
     -d '{"task":"rotation","roles":["worker"]}')
@@ -1283,7 +1506,7 @@ PRE_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
     && ok "Pre-rotation /townwall/post via v1 CP token: 200 ✓" \
     || fail "Pre-rotation /townwall/post failed: $PRE_CODE"
 
-step "58c.iii. Edit tokens file + SIGHUP daemon"
+step "72c. Edit tokens file + SIGHUP daemon"
 echo "e2etest:e2e-cp-token-v2" > /tmp/ephemera-tokens.txt
 # Show vsock UDS state before SIGHUP — helps diagnose whether Firecracker
 # actually created a listenable multiplexer for this spawn-path VM.
@@ -1314,7 +1537,7 @@ fi
 
 # `|| echo "000"` survives a curl process error (connection refused, timeout)
 # so set -e does not kill the script before we print a real ✗ message.
-step "58c.iv. Post-rotation /townwall/post must still succeed (v2 reached VM)"
+step "72d. Post-rotation /townwall/post must still succeed (v2 reached VM)"
 POST_CODE=$(curl -s -o /dev/null -m 5 -w "%{http_code}" \
     -X POST "http://${ROT_GUEST_IP}:8080/townwall/post" \
     -H "Authorization: Bearer $ROT_TOKEN" \
@@ -1328,14 +1551,14 @@ else
     grep -E -i 'townwall|forward|401|sighup|propagat|set_cp|vsock' "$LOG" | tail -20 | sed 's/^/      /'
 fi
 
-step "58c.v. v1 operator bearer must now be rejected"
+step "72e. v1 operator bearer must now be rejected"
 OLDOP_CODE=$(curl -s -o /dev/null -m 5 -w "%{http_code}" \
     -H "$ROT_HDR_V1" "$API/vms" || echo "000")
 [ "$OLDOP_CODE" = "401" ] \
     && ok "v1 operator bearer correctly rejected (401) ✓" \
     || fail "v1 operator bearer still works ($OLDOP_CODE) — SIGHUP did not swap cp.clients"
 
-step "58c.vi. Town Wall received both pre- and post-rotation posts"
+step "72f. Town Wall received both pre- and post-rotation posts"
 TW_HITS=$(curl -s -m 5 -H "Authorization: Bearer e2e-cp-token-v2" \
     "$API/flocks/$ROT_FLOCK_ID/wall/history" 2>/dev/null | \
     jq '[.[] | select(.body=="pre-rotation" or .body=="post-rotation")] | length' 2>/dev/null || echo "0")
@@ -1343,15 +1566,15 @@ TW_HITS=$(curl -s -m 5 -H "Authorization: Bearer e2e-cp-token-v2" \
     && ok "Town Wall recorded both posts ✓" \
     || fail "Town Wall missing posts (got $TW_HITS, want 2)"
 
-step "58c.vii. Cleanup rotation test"
+step "72g. Cleanup rotation test"
 curl -s -o /dev/null -H "Authorization: Bearer e2e-cp-token-v2" \
     -X DELETE "$API/flocks/$ROT_FLOCK_ID"
 rm -f /tmp/ephemera-tokens.txt
 sleep 2
 ok "Rotation flock deleted, tokens file removed"
 
-# ── 61. /metrics endpoint (v0.3.5) ───────────────────────────────
-step "61. /metrics endpoint exposes Prometheus format"
+# ── 73. /metrics endpoint (v0.3.5) ───────────────────────────────
+step "73. /metrics endpoint exposes Prometheus format"
 METRICS_BODY=$(curl -s -m 5 -w "\n%{http_code}" "$API/metrics" 2>/dev/null || echo "000")
 METRICS_CODE=$(echo "$METRICS_BODY" | tail -1)
 METRICS_OUT=$(echo "$METRICS_BODY" | head -n -1)
@@ -1368,8 +1591,8 @@ echo "$METRICS_OUT" | grep -qE '^ephemera_vm_count [0-9]+$' \
 echo "$METRICS_OUT" | grep -qE '^ephemera_sighup_reload_total [0-9]+$' \
     && ok "sighup_reload counter present" || fail "sighup_reload counter missing"
 
-# ── 62. /vms/{vm_id}/stats (v0.3.5) ──────────────────────────────
-step "62. /vms/{vm_id}/stats returns per-VM snapshot"
+# ── 74. /vms/{vm_id}/stats (v0.3.5) ──────────────────────────────
+step "74. /vms/{vm_id}/stats returns per-VM snapshot"
 STATS_SPAWN=$(curl -s -m 10 -H "Authorization: Bearer e2e-cp-token-v2" \
     -H "Content-Type: application/json" -d '{}' -X POST "$API/vms" 2>/dev/null || echo "{}")
 STATS_VM_ID=$(echo "$STATS_SPAWN" | jq -r '.vm_id // empty' 2>/dev/null)
@@ -1396,8 +1619,8 @@ echo "$STATS_LIST" | jq -e --arg id "$STATS_VM_ID" '[.[] | select(.vm_id==$id) |
 curl -s -o /dev/null -H "Authorization: Bearer e2e-cp-token-v2" -X DELETE "$API/vms/$STATS_VM_ID"
 ok "stats test VM cleaned up"
 
-# ── 60. Shut down rotation daemon ────────────────────────────────
-step "60. Shut down rotation daemon"
+# ── 75. Shut down rotation daemon ────────────────────────────────
+step "75. Shut down rotation daemon"
 kill "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null || true
 
 trap - EXIT
