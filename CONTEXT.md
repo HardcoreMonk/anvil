@@ -32,8 +32,11 @@ IronClaw 실행 계층으로 통합하는 downstream product fork다. 이 저장
 경로와 기존 API/환경 변수에는 `ephemera` 또는 `goose` 이름이 남아 있다. anvil
 통합 릴리즈는 ephemera runtime tag와 충돌하지 않도록 `anvil-v0.1.0`처럼 별도
 prefix를 사용한다. 현재 최신 anvil 공개 integration tag는 `anvil-v0.2.0`이고,
-현재 anvil runtime baseline은 upstream ephemera `v0.3.1` 병합분이다. upstream에는
-`v0.3.2`, `v0.3.3` tag가 추가로 존재하지만 아직 anvil `main`에는 병합되지 않았다.
+현재 sync branch의 anvil runtime baseline은 upstream ephemera `v0.3.6` 병합분이다.
+`main`은 `v0.3.5`까지 병합된 상태였고, `sync/ephemera-v0.3.6`에서
+autonomous webdev demo, in-VM `gtcall`, multi-line-safe `gtwall`, Goose JSON output
+parsing을 추가 채택한다. upstream `main`은 이미 `v0.4.0` PR-A까지 진행되어 있으므로
+`v0.3.6` sync는 `upstream/main`이 아니라 `v0.3.6` tag 기준으로 수행한다.
 문서에서는 anvil과 ephemera를 같은 이름으로 취급하지 않는다.
 
 ## 진실 기준 문서 순서
@@ -54,7 +57,7 @@ prefix를 사용한다. 현재 최신 anvil 공개 integration tag는 `anvil-v0.
 | anvil | IronClaw와 ephemera를 결합하는 새 프로젝트 이름 | project-wide |
 | IronClaw | MCP client/orchestration 계층. anvil VM 실행 기능을 사용하는 상위 시스템 | 외부/상위 통합 |
 | OpenClaw | anvil의 통합 대상이 아님. anvil 문서와 구현은 OpenClaw 운영 계약을 제공하지 않음 | 제외 범위 |
-| ephemera | Firecracker MicroVM 기반 격리 실행 runtime. 현재 anvil baseline은 upstream `v0.3.1` 병합분이고, `v0.3.2`/`v0.3.3`은 upstream sync 후보 | `cmd/goose-daemon`, `internal/*` |
+| ephemera | Firecracker MicroVM 기반 격리 실행 runtime. 현재 sync branch의 anvil baseline은 upstream `v0.3.6` 병합분이고, upstream `v0.4.0` PR-A는 다음 채택 검토 후보 | `cmd/goose-daemon`, `internal/*` |
 | ephemera control plane | VM 생성, 삭제, snapshot, restore, proxy를 담당하는 호스트 daemon | `cmd/goose-daemon` |
 | MicroVM | Firecracker + KVM으로 실행되는 ephemera 격리 실행 환경 | `internal/vm` |
 | goose-agent | VM 안에서 prompt 실행, health, stop API를 제공하는 HTTP agent | `cmd/goose-agent` |
@@ -170,23 +173,26 @@ daemon으로 보내는 outbound Bearer token이다.
   노출된 상태이며, 기존 VM/snapshot tool 계약을 대체하지 않는다.
 - daemon direct `POST /flocks`와 MCP `anvil_spawn_flock`은 blank `task`, empty role,
   path separator가 포함된 role을 VM spawn 전에 거부한다.
-- ephemera upstream `v0.3.1`의 Goosetown watchdog, flock metadata persistence,
-  Town Wall monotonic `seq`, fatal bind startup hardening은 anvil branch에 병합됐다.
-  단, upstream의 `POST /flocks` `agent_tokens` 응답 노출은 anvil 보안 불변 조건에
-  맞춰 채택하지 않는다.
-- `scripts/anvil-mcp-e2e.sh flock`과 전체 KVM `sudo bash e2e_test.sh` 58단계가
-  Goosetown MCP surface와 daemon flock lifecycle 검증 경로에 포함된다.
-- upstream ephemera `v0.3.2`는 live VM cold-restart를 추가하고, `v0.3.3`은
-  watchdog dead-status persistence, per-agent restart endpoint, in-VM control-plane
-  token auto-injection, real-LLM Town Wall round-trip e2e를 추가한다. 두 tag는
-  upstream에서 확인됐지만 아직 anvil `main`에 병합되지 않았으며, 세부 근거와
-  채택 검토 포인트는
-  `docs/analysis/08-v0.3.2-v0.3.3-upstream-change-review.md`에 기록한다.
+- ephemera upstream `v0.3.1`-`v0.3.6` runtime 변경은 anvil branch에 병합됐다.
+  `v0.3.1` Goosetown watchdog, flock metadata persistence, Town Wall monotonic
+  `seq`, fatal bind startup hardening은 채택하되 upstream의 `POST /flocks`
+  `agent_tokens` 응답 노출은 anvil 보안 불변 조건에 맞춰 채택하지 않는다.
+- upstream `v0.3.2`-`v0.3.5`의 live VM cold-restart, watchdog dead persistence,
+  per-agent restart, in-VM CP token injection/rotation, `/metrics`,
+  `/vms/{vm_id}/stats`, `log/slog`, observability demo는 `adapted` runtime
+  baseline으로 채택됐다.
+- upstream `v0.3.6`의 autonomous webdev demo, in-VM `gtcall`, multi-line-safe
+  `gtwall`, Goose JSON output parsing은 `adapted` runtime baseline으로 채택한다.
+  `gtcall`은 peer agent credential을 노출하지 않고 control-plane proxy token
+  injection 경계를 유지한다.
+- `scripts/anvil-mcp-e2e.sh flock`, 전체 KVM `sudo bash e2e_test.sh`, script-only
+  workload runner E2E가 Goosetown MCP surface, daemon flock lifecycle,
+  deterministic workload 검증 경로에 포함된다.
 
 남은 후속 후보:
 
-- upstream ephemera `v0.3.2`/`v0.3.3` sync branch 작성과 anvil 보안/운영 정책에
-  맞춘 `adopted`/`adapted`/`deferred` 분류
+- upstream ephemera `v0.4.0` PR-A storage/recovery 변경의 sync branch 작성과
+  anvil 보안/운영 정책에 맞춘 `adopted`/`adapted`/`deferred` 분류
 - scheduler service의 실제 운영 배포와 host inventory polling daemonization
 - snapshot locality의 cross-host snapshot replication
 - scheduler-aware cross-host flock placement

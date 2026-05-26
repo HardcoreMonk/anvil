@@ -47,13 +47,13 @@ daemon 이름, HTTP API, 일부 환경 변수에는 `ephemera` 또는 `goose` �
 있다. README에서는 `anvil`을 IronClaw 통합 프로젝트로, `ephemera`를 분리된 기반
 runtime으로 구분한다.
 
-버전별 ephemera 소스 snapshot은 Git tag로 공개된다. 현재 anvil `main`의 runtime
-baseline은 upstream ephemera `v0.3.5`까지 병합한 상태다. 이 병합은 MicroVM
+버전별 ephemera 소스 snapshot은 Git tag로 공개된다. 현재 anvil sync branch의 runtime
+baseline은 upstream ephemera `v0.3.6`까지 병합한 상태다. 이 병합은 MicroVM
 lifecycle, flock resilience, token rotation, observability 같은 runtime substrate를
 끌어올린 것이며, anvil의 제품 정체성을 ephemera로 바꾸는 작업이 아니다.
 
 IronClaw 통합 프로젝트 anvil의 최신 공개 tag는 아직 `anvil-v0.2.0`이다. 다음
-anvil product release에서는 ephemera `v0.3.2`-`v0.3.5` runtime baseline과 anvil
+anvil product release에서는 ephemera `v0.3.2`-`v0.3.6` runtime baseline과 anvil
 고유 변경분을 분리해 기록한다. 첫 공개 tag는 `anvil-v0.1.0`이다.
 
 <p align="center">
@@ -92,15 +92,15 @@ anvil은 ephemera를 이름만 바꾼 프로젝트가 아니다. anvil은 IronCl
 
 ### Runtime Baseline
 
-`main`은 upstream ephemera `v0.3.5`를 runtime baseline으로 사용한다.
+`sync/ephemera-v0.3.6`은 upstream ephemera `v0.3.6`을 runtime baseline으로 사용한다.
 
 | 구분 | 현재 기준 | anvil에서의 의미 |
 |---|---|---|
-| ephemera runtime baseline | `v0.3.5` | Firecracker VM lifecycle, cold-restart, flock recovery, token rotation, `/metrics`, `/stats`, `slog` 기반 |
+| ephemera runtime baseline | `v0.3.6` | Firecracker VM lifecycle, cold-restart, flock recovery, token rotation, `/metrics`, `/stats`, `slog`, in-VM `gtcall`, webdev demo 기반 |
 | anvil product surface | `anvil_*` MCP tool, scheduler, tenant/egress, workload runner | IronClaw가 직접 사용하는 공개 실행 계약 |
 | namespace policy | `EPHEMERA_*`, `goose-*`, `ephemera_*` 유지 | upstream runtime 호환성. anvil 이름으로 일괄 rename하지 않는다. |
 
-ephemera `v0.3.2`-`v0.3.5`는 anvil 안에서 runtime baseline으로 채택/적응된 변경이다.
+ephemera `v0.3.2`-`v0.3.6`은 anvil 안에서 runtime baseline으로 채택/적응된 변경이다.
 anvil release note에서는 이 내용을 "upstream runtime baseline"으로 분리해 기록하고,
 MCP/scheduler/workload/tenant/egress 같은 anvil 고유 기능과 섞어 제품명처럼 쓰지
 않는다.
@@ -386,7 +386,7 @@ DELETE /vms/{id}
 
 - **Flock metadata persistence**:
   `flocks/<flock_id>/metadata.json`을 기록하고 daemon restart 뒤 flock registry와
-  Town Wall log를 복구한다. 현재 upstream `v0.3.5` baseline에서는 spawn-path member
+  Town Wall log를 복구한다. 현재 upstream `v0.3.6` baseline에서는 spawn-path member
   VM도 `vms/<vm_id>/state.json` 기반으로 cold-restart된다. memory state와 in-flight
   task는 보존되지 않는다.
 
@@ -415,12 +415,12 @@ Upstream ephemera feature matrix:
 | Feature | Detail |
 |---------|--------|
 | **Self-bootstrapping** | Golden image, kernel, Firecracker downloaded + SHA256-verified on first run; goose-agent / micro-init / golden image are also rebuilt automatically when their sources are newer than the cached artifact (mtime-based staleness check), so editing in-VM Go code or `build_image.sh` does not need a manual `rm artifacts/...` |
-| **Minimal guest OS** | Debian Bookworm minbase — no SSH, no init daemon; `micro-init` (Go binary, PID 1) mounts virtual filesystems and manages goose-agent lifecycle |
+| **Minimal guest OS** | Debian Trixie minbase — no SSH, no init daemon; `micro-init` (Go binary, PID 1) mounts virtual filesystems and manages goose-agent lifecycle |
 | **Graceful guest shutdown** | `micro-init` traps SIGTERM and calls `poweroff(2)` — no kernel panic on VM exit |
 | **Per-VM LLM profiles** | Each VM spawn can specify a named profile (`configs/profiles/{name}/`) with its own provider, model, and API key |
 | **Per-profile vCPU/memory** | Known roles (`researcher`, `worker`, `reviewer`, `orchestrator`, `builder`) map to canonical sizing (e.g. 1 vCPU / 512 MiB for researcher, 4 vCPU / 4096 MiB for builder); unknown profiles fall back to the legacy 2 vCPU / 2048 MiB default |
 | **Multi-agent flocks** | `POST /flocks` spawns a group of role-specialized VMs in one call; `DELETE /flocks/{id}` tears them all down in parallel |
-| **Town Wall log** | Per-flock append-only log with SSE streaming (`/flocks/{id}/wall`) for coordination; `gtwall "..."` CLI inside each VM posts via the in-VM agent |
+| **Town Wall log** | Per-flock append-only log with SSE streaming (`/flocks/{id}/wall`) for coordination; `gtwall "..."` CLI inside each VM posts to it, and `gtcall <agent_id> "..."` (v0.3.6) dispatches a prompt to a peer agent — both hide curl/token/JSON-quoting behind a one-line interface |
 | **Role system prompts** | Each role profile can ship a `system.md` that is injected into the VM and prepended to every `/tasks` prompt |
 | **Optional COW spawn rootfs** | `EPHEMERA_DISK_MODE=cow` provisions new VMs with a dm-snapshot view of the golden image instead of a 700 MiB full copy (default off; safe rollback) |
 | **Runtime config injection** | `goose.yaml` and `goose-secrets.yaml` injected at provision time — no image rebuild required to change provider/model |
@@ -443,6 +443,9 @@ Upstream ephemera feature matrix:
 | **CP token hot rotation** (v0.3.4) | `EPHEMERA_API_TOKENS_FILE=/path/to/tokens` enables true hot rotation: edit the file, send SIGHUP, and the daemon both swaps `cp.clients` and fans the new token out to every running VM over vsock (`SET_CP_TOKEN` command, atomic file rewrite inside the guest). No per-VM restart needed for the in-VM forwarder to pick up the new bearer. |
 | **Env-tunable watchdog** (v0.3.4) | `EPHEMERA_WATCHDOG_INTERVAL_SEC` / `_TIMEOUT_SEC` / `_THRESHOLD` override the 5 s / 1 s / 3-fail defaults at startup. `EPHEMERA_WATCHDOG_AUTO_HEAL=true` opts in to self-healing — a `dead` agent that resumes responding is auto-marked `ready` (default off preserves sticky-dead). |
 | **Observability trio** (v0.3.5) | Prometheus `/metrics` endpoint (zero-dep exposition format, counters + gauges + histograms), per-VM `GET /vms/{vm_id}/stats` snapshot (cpu/mem/net/uptime/agent_busy), and a `log/slog` migration with `EPHEMERA_LOG_FORMAT=json` + `EPHEMERA_LOG_LEVEL=...` controls. See [Observability](#observability-v035). |
+| **Autonomous multi-agent demo** (v0.3.6) | `webdev_demo.sh` stands up an orchestrator + worker + reviewer flock that designs, generates, reviews, and publishes a complete React + Vite site to the Town Wall with zero host authorship. See [Multi-Agent Webdev Demo](#multi-agent-webdev-demo-v036). |
+| **In-VM agent-to-agent dispatch** (v0.3.6) | `gtcall <agent_id> "<prompt>"` sends a task to a peer through the control-plane proxy, which injects the peer's token. Both `gtcall` and `gtwall` build their request bodies with `jq --arg`, so arbitrary multi-line prompts and file bodies (newlines, quotes, backticks) post safely. |
+| **Clean agent task output** (v0.3.6) | goose-agent runs Goose with `--output-format json` and returns the extracted assistant text, so `/tasks` output is no longer interleaved with the startup banner or truncated to an in-VM temp file when fenced code exceeds 50 lines. |
 
 ---
 
@@ -506,7 +509,9 @@ configs/
                       VmRSS, TAP statistics, agent /health probe (v0.3.5)
   goose-agent/        In-VM HTTP agent (baked into golden image)
     main.go           /tasks, /health, /stop, /townwall/post  (Bearer token auth);
-                      prepends role system prompt to /tasks bodies
+                      prepends role system prompt to /tasks bodies;
+                      runs `goose run --output-format json` and extracts the
+                      assistant text via extractGooseJSONText (banner-skip) (v0.3.6)
   micro-init/         PID 1 for each MicroVM (baked into golden image)
     main.go           Mounts virtual filesystems, manages goose-agent,
                       calls poweroff(2) on exit
@@ -550,7 +555,11 @@ configs/
       goose.yaml                 (gitignored; copied from .example)
       goose-secrets.yaml         (gitignored; copied from .example)
       system.md                  Role system prompt prepended to /tasks (optional)
+      system.webdev.md           webdev_demo.sh override prompt, swapped over system.md at demo time (v0.3.6)
+      goose.webdev.yaml          webdev_demo.sh override config (Gemini model per role), swapped over goose.yaml (v0.3.6)
     researcher/  worker/  reviewer/  orchestrator/    ← built-in role profiles
+  webdev-demo/                   Host-side vite-template overlaid onto worker output by webdev_demo.sh (v0.3.6)
+    vite-template/               package.json, vite.config.js, index.html, src/* placeholders
   observability/                 Provisioning bundle for observability_demo.sh (v0.3.5)
     prometheus.yml               Prometheus scrape config (localhost:3000, 5s)
     grafana-datasource.yml       Prometheus datasource provisioning
@@ -585,10 +594,12 @@ snapshots/            Stored snapshot directories (auto-created, gitignored)
 
 e2e_test.sh           End-to-end integration test (62 numbered steps incl. resilience + v0.3.3 / v0.3.4 / v0.3.5 sub-steps; requires /dev/kvm + root)
 observability_demo.sh One-shot live demo: daemon + Prometheus + Grafana, auto workload, browser-driven exploration until Ctrl-C (v0.3.5)
+webdev_demo.sh        One-shot live demo: orchestrator+worker+reviewer flock builds a React+Vite site, harvested from the Town Wall and served via vite preview until Ctrl-C (v0.3.6; manual gate, needs a Gemini key + /dev/kvm)
 
 scripts/
-  build_image.sh      Builds golden image (Debian Bookworm + Goose + goose-agent + micro-init + gtwall)
-  gtwall              In-VM CLI for posting to the flock's Town Wall (installed into the golden image)
+  build_image.sh      Builds golden image (Debian Trixie + curl + jq + Goose + goose-agent + micro-init + gtwall + gtcall)
+  gtwall              In-VM CLI: post a message to the flock's Town Wall (jq-built JSON body; installed into the golden image)
+  gtcall              In-VM CLI: dispatch a prompt to a peer agent via the control-plane proxy (v0.3.6; installed into the golden image)
 
 flocks/               Per-flock workspace (auto-created at first flock spawn, gitignored)
   <flock-id>/
@@ -625,7 +636,7 @@ artifacts/            Auto-populated at runtime (gitignored)
 
 - [RELEASE_NOTES.md](RELEASE_NOTES.md):
   anvil product release note와 upstream ephemera runtime release note를 분리해
-  기록한다. 현재 `v0.3.2`-`v0.3.5`는 anvil `main`에 병합된 runtime baseline이다.
+  기록한다. 현재 `v0.3.2`-`v0.3.6`은 anvil sync branch에 병합된 runtime baseline이다.
 
 - [docs/architecture/runtime-architecture.md](docs/architecture/runtime-architecture.md):
   ephemera daemon, MicroVM, storage, network, guest runtime 구조.
@@ -1458,6 +1469,11 @@ GET  /vms/{vm_id}/health   → proxied to goose-agent /health  (no auth required
 POST /vms/{vm_id}/stop     → proxied to goose-agent /stop
 ```
 
+`POST /vms/{vm_id}/tasks`의 response shape는 `{ "output", "error" }`를 유지한다.
+`v0.3.6` baseline부터 `output`은 Goose `--output-format json` envelope에서 추출한
+assistant text다. agent는 Goose startup banner 앞부분을 건너뛰고 assistant text
+block을 이어 붙이며, envelope parsing에 실패하면 raw stdout으로 fallback한다.
+
 > The agent's `/townwall/post` is **not** proxied. It is an in-VM convenience used by the bundled `gtwall` CLI, which already has the flock context. External callers should `POST /flocks/{id}/post` directly — they already know the flock ID and can pick the `agent_id` themselves.
 
 When `EPHEMERA_PUBLIC_URL` is configured, `agent_url` in VM responses points directly to the proxy base (`{EPHEMERA_PUBLIC_URL}/vms/{vm_id}`), so clients can use it as-is:
@@ -1991,6 +2007,34 @@ Context fields are attached as structured pairs (`vm_id`, `flock_id`, `agent_id`
 | Grafana | http://localhost:3001 | `admin` / `admin`, dashboard "Ephemera Overview" pre-provisioned |
 
 The daemon, Prometheus, and Grafana remain running until you press `Ctrl-C`; the trap then shuts down all three and removes the per-run TSDB / data dir under `/tmp/observability-demo-*`. Targets Prometheus 2.51.x and Grafana 10.4.x (versions + SHA256 are pinned in the script).
+
+---
+
+## Multi-Agent Webdev Demo (v0.3.6)
+
+`webdev_demo.sh` is a one-shot operator demo that exercises the full flock stack: it stands up an **orchestrator + worker + reviewer** flock and has them collaboratively design, build, and publish a small React + Vite portfolio site — entirely from inside the VMs, with the host acting only as a passive harvester.
+
+### What it does
+
+1. Preflight (memory headroom, `/dev/kvm`, vite-template present), then swaps each role's `*.webdev.{md,yaml}` overrides over its `system.md` / `goose.yaml` and starts the daemon.
+2. `POST /flocks` spawns the three agents.
+3. A background SSE subscriber (`GET /flocks/{id}/wall`) harvests `<<<FILE: path>>> … <<<END>>>` sentinels off the Town Wall, writes each file under a working `site/` tree, and exits on `<<<DONE>>>`.
+4. One `POST /vms/{orchestrator}/tasks` kicks off the orchestrator, which drives the whole job in a single Goose session: for each of `src/App.jsx`, `src/main.jsx`, `src/index.css`, `index.html` it runs `gtcall worker-1 '…'` to generate the file, `gtwall` to publish it to the Town Wall, then a best-effort `gtcall reviewer-1 '…'` review note — and finally posts `<<<DONE>>>`.
+5. The host overlays the harvested files onto the vite-template, runs `npm install` + `vite build`, and serves the result with `vite preview` on `:5173` until `Ctrl-C`.
+
+### Run it
+
+```bash
+sudo WEBDEV_MIN_MEM_MIB=5000 bash webdev_demo.sh
+```
+
+Requirements: a Google Gemini API key in `configs/goose-secrets.yaml`, `/dev/kvm` + root, and enough free RAM for three 2 GiB VMs (`WEBDEV_MIN_MEM_MIB` sets the preflight floor; Firecracker allocates guest RAM lazily and host swap cushions the peak). Open `http://localhost:5173` to see the generated site; `GET /flocks/{id}/wall/history` shows the four `<<<FILE:>>>` posts authored by `orchestrator-1`.
+
+### Notes
+
+- **Manual gate, not CI.** Like `observability_demo.sh`, this demo needs an LLM key and `/dev/kvm`, neither of which exists on GitHub Actions runners, so it is an operator-run gate rather than an automated test.
+- **Model choice.** The orchestrator runs `gemini-2.5-flash` — it must drive a ~13-step tool-calling loop without stalling, which `gemini-2.5-flash-lite` could not do reliably (it tended to plan and then stop). Worker and reviewer stay on `gemini-2.5-flash-lite` for single-shot generation/review. On the free tier all models share a 20 RPM cap that multi-turn orchestration exhausts in seconds, so the demo assumes a **paid-tier** key.
+- **No host authorship.** Every published file is authored by an in-VM agent via `gtwall`; the host only harvests and builds. If the orchestrator fails to publish a file, the host keeps that file's vite-template placeholder so `vite build` still succeeds.
 
 ---
 

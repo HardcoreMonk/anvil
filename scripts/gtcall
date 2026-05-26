@@ -1,0 +1,104 @@
+#!/bin/sh
+# gtcall — dispatch a prompt to another agent in this VM's flock.
+#
+# Usage:
+#   gtcall <agent_id> <prompt>
+#
+# Looks up the target agent's vm_id from the control plane, then forwards the
+# prompt via POST /vms/{vm_id}/tasks. The control plane reverse-proxies to the
+# peer's /tasks endpoint and injects that VM's agent token, so the calling
+# agent never has to know peer credentials.
+#
+# Reads:
+#   /root/.ephemera-flock          flock metadata (FLOCK_ID, AGENT_ID)
+#   /root/.ephemera-cp-token       CP bearer (preferred; injected at spawn)
+#   $EPHEMERA_CONTROL_PLANE_TOKEN  CP bearer (fallback for legacy images)
+#   $EPHEMERA_CONTROL_PLANE        CP URL override (default http://10.0.1.1:3000)
+#
+# On success: prints the peer assistant's reply text (TaskResult.output) to
+# stdout, exits 0. On failure: prints a diagnostic to stderr, exits non-zero.
+
+set -eu
+
+if [ "$#" -lt 2 ]; then
+    echo "usage: gtcall <agent_id> <prompt>" >&2
+    exit 1
+fi
+
+AGENT_ID="$1"
+PROMPT="$2"
+
+if [ ! -f /root/.ephemera-flock ]; then
+    echo "gtcall: this VM is not part of a flock" >&2
+    exit 2
+fi
+
+FLOCK_ID="$(awk -F= '/^FLOCK_ID=/{print $2; exit}' /root/.ephemera-flock)"
+if [ -z "$FLOCK_ID" ]; then
+    echo "gtcall: FLOCK_ID missing from /root/.ephemera-flock" >&2
+    exit 2
+fi
+
+CP_URL="${EPHEMERA_CONTROL_PLANE:-http://10.0.1.1:3000}"
+CP_URL="${CP_URL%/}"
+
+CP_TOKEN=""
+if [ -f /root/.ephemera-cp-token ]; then
+    CP_TOKEN="$(cat /root/.ephemera-cp-token)"
+fi
+if [ -z "$CP_TOKEN" ] && [ -n "${EPHEMERA_CONTROL_PLANE_TOKEN:-}" ]; then
+    CP_TOKEN="$EPHEMERA_CONTROL_PLANE_TOKEN"
+fi
+
+# Step 1: resolve agent_id -> vm_id via GET /flocks/{flock_id}. 10s timeout is
+# comfortable for a local control plane on the host bridge.
+if [ -n "$CP_TOKEN" ]; then
+    FLOCK_JSON="$(curl -sf -m 10 \
+        -H "Authorization: Bearer $CP_TOKEN" \
+        "$CP_URL/flocks/$FLOCK_ID")" || {
+        echo "gtcall: failed to query flock $FLOCK_ID at $CP_URL" >&2
+        exit 3
+    }
+else
+    FLOCK_JSON="$(curl -sf -m 10 "$CP_URL/flocks/$FLOCK_ID")" || {
+        echo "gtcall: failed to query flock $FLOCK_ID at $CP_URL" >&2
+        exit 3
+    }
+fi
+
+VM_ID="$(printf '%s' "$FLOCK_JSON" | jq -r --arg id "$AGENT_ID" \
+    '.agents[] | select(.agent_id == $id) | .vm_id')"
+if [ -z "$VM_ID" ] || [ "$VM_ID" = "null" ]; then
+    echo "gtcall: agent '$AGENT_ID' not found in flock $FLOCK_ID" >&2
+    exit 4
+fi
+
+# Step 2: build a JSON-safe request body. jq --arg handles embedded newlines,
+# backticks, double quotes, and backslashes that LLM-authored prompts may carry.
+BODY="$(jq -n --arg p "$PROMPT" '{prompt: $p}')"
+
+# Step 3: dispatch. 300s upper bound matches the LLM response budget observed
+# during webdev_demo runs (Gemini Flash ~30s/call, with headroom for retries
+# inside goose).
+if [ -n "$CP_TOKEN" ]; then
+    RESP="$(curl -sf -m 300 \
+        -H "Authorization: Bearer $CP_TOKEN" \
+        -H 'Content-Type: application/json' \
+        -X POST -d "$BODY" \
+        "$CP_URL/vms/$VM_ID/tasks")" || {
+        echo "gtcall: dispatch to $AGENT_ID ($VM_ID) failed" >&2
+        exit 5
+    }
+else
+    RESP="$(curl -sf -m 300 \
+        -H 'Content-Type: application/json' \
+        -X POST -d "$BODY" \
+        "$CP_URL/vms/$VM_ID/tasks")" || {
+        echo "gtcall: dispatch to $AGENT_ID ($VM_ID) failed" >&2
+        exit 5
+    }
+fi
+
+# Step 4: surface only the assistant's text. .output is populated by the in-VM
+# goose-agent's extractGooseJSONText helper.
+printf '%s\n' "$RESP" | jq -r '.output // empty'

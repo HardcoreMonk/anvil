@@ -1,10 +1,11 @@
-# Unreleased — 다음 운영 확장 후보
+# Unreleased — anvil v0.3.0 release candidate
 
 `anvil-v0.2.0` 이후 다음 runtime/product 변경이 release candidate로 준비됐다.
 
 ## 추가됨
 
-- upstream ephemera `v0.3.2`-`v0.3.5` runtime baseline을 anvil `main`에 병합했다.
+- upstream ephemera `v0.3.2`-`v0.3.6` runtime baseline을 anvil sync branch에
+  병합했다.
   이 변경은 anvil의 제품 정체성을 ephemera로 바꾸지 않고, Firecracker MicroVM
   runtime substrate를 최신 baseline으로 끌어올린다.
   - `v0.3.2`: live VM cold-restart와 `vms/<vm_id>/state.json`.
@@ -13,6 +14,8 @@
   - `v0.3.4`: `EPHEMERA_API_TOKENS_FILE`, SIGHUP CP-token vsock fan-out,
     watchdog tunables/auto-heal, Firecracker SIGHUP forwarding hot-fix.
   - `v0.3.5`: `/metrics`, `/vms/{vm_id}/stats`, `log/slog`, observability demo.
+  - `v0.3.6`: autonomous multi-agent webdev demo, in-VM `gtcall`,
+    multi-line-safe `gtwall`, Goose JSON output parsing.
 - guest `goose-agent`에 authenticated `POST /workloads/run` endpoint를 추가했다.
   이 경로는 `/workspace/workloads/*.sh` script만 실행하며 LLM provider credential과
   `/tasks` prompt 실행에 의존하지 않는다.
@@ -24,6 +27,16 @@
   사용한다.
 - Go HTTP workload는 VM 내부에서 대형 Go toolchain을 설치하지 않고 host에서
   `linux/amd64` static binary를 build한 뒤 gzip artifact로 업로드한다.
+- `webdev_demo.sh`는 orchestrator, worker, reviewer flock이 React + Vite site를
+  VM 내부에서 생성하고 Town Wall을 통해 host가 수확하는 manual operator demo를
+  제공한다. demo는 Gemini API key, `/dev/kvm`, 충분한 host memory가 필요하다.
+- VM golden image에 `gtcall`을 추가했다. flock VM 내부 agent는 peer `agent_token`을
+  알지 않고 control-plane proxy를 통해 다른 agent의 `/tasks`를 호출할 수 있다.
+- `goose-agent`의 `/tasks` 실행은 Goose `--output-format json` envelope에서 assistant
+  text를 추출해 반환한다. Goose startup banner와 streaming-buffer code block
+  truncation 때문에 host가 온전한 긴 source output을 받지 못하던 경로를 완화한다.
+- VM 내부 `gtwall`과 `gtcall`은 JSON body를 `jq -n --arg`로 구성해 newline, quote,
+  backtick이 들어간 multi-line body를 안전하게 전달한다.
 
 ## 보안/운영 hardening
 
@@ -43,16 +56,27 @@
 - `/root/.ephemera-cp-token`, `vms/<vm_id>/state.json` 안의 `agent_token`,
   API bearer token은 runtime secret으로 취급하고 MCP output, audit, metrics, trace,
   replay fixture, release artifact에 노출하지 않는다.
+- `gtcall`은 peer credential을 VM 내부에 직접 노출하지 않고 control-plane proxy가
+  기존 agent token injection 경계를 계속 소유한다.
 
 ## 검증됨
 
 - `go test ./...`
 - `go build -o anvil-daemon ./cmd/goose-daemon/`
+- `go build ./cmd/goose-daemon`
+- `go build ./cmd/anvil-mcp`
+- `go build ./cmd/anvil-scheduler`
+- `bash -n webdev_demo.sh`
+- `bash -n scripts/build_image.sh`
 - `bash -n scripts/workloads/nginx-smoke.sh`
 - `bash -n scripts/workloads/go-http-bench.sh`
 - `bash -n scripts/vm-workload-e2e.sh`
+- 실제 KVM host에서 `sudo -n bash e2e_test.sh`
+  - 전체 단계 통과
+  - real-LLM `/tasks` smoke는 provider key가 없어 skip
+  - `/metrics`, `/vms/{vm_id}/stats`, SIGHUP CP-token rotation 검증 통과
 - 실제 KVM host에서 `sudo -n bash scripts/vm-workload-e2e.sh`
-  - artifact: `/tmp/anvil-workload-e2e-20260521-114816`
+  - artifact: `/tmp/anvil-workload-e2e-20260526-171326`
   - `pass: true`
   - nginx host probe: `200`
   - Go HTTP host probe: `200`
@@ -60,24 +84,29 @@
 - artifact secret scan:
   `GOOGLE_API_KEY|ANTHROPIC_API_KEY|OPENAI_API_KEY|Authorization: Bearer|agent_token`
   패턴 없음.
+- `bash scripts/secret-scan.sh`
+  - tracked tree: `PASS`
+  - git history: `WARN` — 과거 secret-like fixture/history가 있어 rotate 필요
+  - ignored/local files: `WARN` — local `goose-secrets.yaml` 계열 값은 출력하지 않음
 
-다음 후보는 scheduler service production deployment automation, cross-host snapshot
-replication, scheduler-aware cross-host flock placement, L7 egress proxy/SNI
-hardening, snapshot storage quota dashboard다.
+다음 후보는 upstream ephemera `v0.4.0` PR-A storage/recovery 변경의
+adoption review, scheduler service production deployment automation,
+cross-host snapshot replication, scheduler-aware cross-host flock placement,
+L7 egress proxy/SNI hardening, snapshot storage quota dashboard다.
 
 ## 문서화됨
 
 - script-only workload runner의 design/implementation plan, runtime/service
   architecture, runbook, workload E2E design spec을 현재 `/workloads/run` 계약에
   맞춰 갱신했다.
-- upstream ephemera `v0.3.2`-`v0.3.5`를 anvil runtime baseline으로 분류하고,
+- upstream ephemera `v0.3.2`-`v0.3.6`을 anvil runtime baseline으로 분류하고,
   product identity와 runtime namespace 경계를 README, public release boundary,
   ADR index, upstream sync policy, release checklist에 반영했다.
 - upstream ephemera `v0.3.2`와 `v0.3.3`의 병합 전 검토 근거는
   `docs/analysis/08-v0.3.2-v0.3.3-upstream-change-review.md`에 historical analysis로
   보존한다.
 - `PUBLIC_RELEASE_BOUNDARY.md`, `ADR_INDEX.md`, `upstream-sync-policy.md`,
-  `release-checklist.md`에 upstream `v0.3.2`-`v0.3.5`가 `adapted` runtime
+  `release-checklist.md`에 upstream `v0.3.2`-`v0.3.6`이 `adapted` runtime
   baseline임을 반영했다.
 
 # anvil v0.2.0 — Runtime scheduler, Goosetown MCP, observability foundation
@@ -594,9 +623,54 @@ Firecracker MicroVM을 만들고, 그 안에서 Goose task를 실행하는 기�
 - `util-linux`
 - Go 1.25 이상
 
-# Upstream ephemera v0.3.2-v0.3.5 release notes
+# Upstream ephemera v0.3.2-v0.3.6 release notes
 
-Merged from `upstream/main` on 2026-05-22 as part of the fork sync.
+`v0.3.2`-`v0.3.5`는 2026-05-22에 `upstream/main`에서 병합했다.
+`v0.3.6`은 2026-05-26에 `v0.3.6` tag에서 병합했다.
+
+# v0.3.6 — Autonomous Multi-Agent Webdev Demo
+
+**Ephemera** v0.3.6 turns the multi-agent flock from a spawn primitive into a demonstrated autonomous collaboration: `webdev_demo.sh` stands up an orchestrator + worker + reviewer team that designs, generates, reviews, and publishes a complete React + Vite site — every file authored inside the VMs, with the host acting only as a passive Town Wall harvester. Getting there required three pieces of in-VM tooling, all included here. The release is additive — no wire format changed and the `/tasks` response shape is unchanged; the only behavior change to an existing endpoint is that `/tasks` output is now cleaner and no longer truncated.
+
+---
+
+## What's New
+
+### `webdev_demo.sh` — autonomous 3-agent flock
+
+- A one-shot operator demo (manual gate, like `observability_demo.sh`): preflight → swap per-role `*.webdev.{md,yaml}` overrides → spawn an `orchestrator + worker + reviewer` flock → background SSE harvester on the Town Wall → one `POST /vms/{orchestrator}/tasks` that drives the whole job → `npm install` + `vite build` → `vite preview` on `:5173` until `Ctrl-C`.
+- The orchestrator drives a single Goose session through ~13 tool calls: for each of `src/App.jsx`, `src/main.jsx`, `src/index.css`, `index.html` it calls `gtcall worker-1` to generate the file, `gtwall` to publish it to the Town Wall, and a best-effort `gtcall reviewer-1` review note — then posts `<<<DONE>>>`. All four `<<<FILE:>>>` posts are authored by `orchestrator-1`; there is no host authorship.
+- Per-role models: orchestrator `gemini-2.5-flash` (must drive the loop without stalling), worker + reviewer `gemini-2.5-flash-lite` (single-shot). Assumes a paid-tier Gemini key — the free tier's shared 20 RPM cap across all models cannot sustain multi-turn orchestration.
+- See [Multi-Agent Webdev Demo](README.md#multi-agent-webdev-demo-v036) in the README.
+
+### In-VM agent-to-agent dispatch — `gtcall`
+
+- New `gtcall <agent_id> "<prompt>"` CLI baked into the golden image alongside `gtwall`. It resolves the peer's `vm_id` from `GET /flocks/{id}` and posts to the control plane's `POST /vms/{vm_id}/tasks` proxy, which injects the peer's agent token — so a calling agent never needs peer credentials.
+- The request body is built with `jq -n --arg`, so arbitrary multi-line prompts (newlines, quotes, backticks) dispatch safely, replacing the fragile LLM-authored `curl`/quoting that earlier demo attempts choked on.
+
+### goose-agent `--output-format json` — clean, untruncated task output
+
+- `cmd/goose-agent/main.go` now runs `goose run --output-format json` and returns the assistant text extracted from the envelope (`extractGooseJSONText`): it slices from the first `{` to skip Goose's startup banner, concatenates every assistant `text` block, and falls back to raw stdout if the envelope cannot be parsed.
+- This is the only working escape from goose-cli's `streaming_buffer.rs` truncation, which otherwise caps fenced code at 50 lines and spills the overflow into an in-VM `/tmp/goose-*.txt` the host caller cannot reach (neither `--debug` nor `GOOSE_SHOW_FULL_OUTPUT` disables it). The `{ "output": ..., "error": ... }` response shape is unchanged.
+- 4 new unit tests cover the happy path, multi-block concatenation, non-JSON fallback, and banner-prefix skip.
+
+### `gtwall` multi-line fix
+
+- `gtwall` now builds its JSON body with `jq -n --arg b "$1" '{body: $b}'` instead of a hand-rolled `sed` escape. The old escape did not handle newlines, so a multi-line body (a whole source file) became invalid JSON and the in-VM agent rejected it with HTTP 400 (curl `-f` → exit 22). Single-line posts are unaffected; multi-line posts now succeed. Latent for the entire v0.3.x line because gtwall had only ever posted single-line status messages.
+
+### Golden image: `curl` + `jq`
+
+- `scripts/build_image.sh` now installs `curl` and `jq` into the Debian minbase golden image (~6 MiB), which `gtcall`/`gtwall` and any future in-VM scripting rely on. `scripts/gtcall` is added to `EnsureGoldenImage`'s staleness input list so editing it triggers a rebuild.
+
+---
+
+## Compatibility
+
+- **Additive.** No control-plane wire format changed. `/tasks` returns the same `{ "output", "error" }` shape (the value is now cleaner). `gtwall`'s single-line behavior is unchanged.
+- **Golden-image rebuild.** The in-VM changes (`goose-agent`, `build_image.sh`, `gtwall`, new `gtcall`) trigger one automatic golden-image rebuild on the next daemon start via the mtime staleness check.
+- **No new daemon dependency.** `jq` / `curl` are added inside the guest image only; the host already required `jq` since v0.3.5.
+
+---
 
 # v0.3.5 — Observability Trio
 

@@ -81,9 +81,9 @@ control-plane token, agent token을 포함하지 않아야 한다.
 
 ### 현재 upstream runtime baseline
 
-2026-05-22 기준 anvil `main`은 upstream ephemera `v0.3.5`까지 병합된 runtime
-baseline을 사용한다. 새 anvil release 후보가 이 baseline을 포함한다면 release
-본문에는 upstream runtime 변경과 anvil product 변경을 분리해서 적는다.
+2026-05-26 기준 `sync/ephemera-v0.3.6`은 upstream ephemera `v0.3.6`까지 병합된
+runtime baseline을 사용한다. 새 anvil release 후보가 이 baseline을 포함한다면
+release 본문에는 upstream runtime 변경과 anvil product 변경을 분리해서 적는다.
 
 - upstream `v0.3.2`: live VM cold-restart, `vms/<vm_id>/state.json`, orphan cleanup,
   기존 TAP/IP/MAC 재예약, graceful daemon shutdown 시 rootfs/state 보존.
@@ -95,16 +95,21 @@ baseline을 사용한다. 새 anvil release 후보가 이 baseline을 포함한�
 - upstream `v0.3.5`: Prometheus `/metrics`, per-VM `/vms/{vm_id}/stats`,
   `GET /vms?stats=true`, `log/slog`, `EPHEMERA_LOG_FORMAT`, `EPHEMERA_LOG_LEVEL`,
   `EPHEMERA_METRICS_REQUIRE_AUTH`, observability demo/Grafana assets.
+- upstream `v0.3.6`: autonomous webdev demo, in-VM `gtcall`, multi-line-safe
+  `gtwall`, Goose `--output-format json` assistant text extraction, golden image
+  `curl`/`jq` dependency.
 - anvil adaptation: `agent_token`과 control-plane token이 MCP output, audit, metrics,
   trace, replay fixture, release artifact에 노출되지 않도록 수정 또는 검증한 내용.
   `ephemera_*` metric namespace와 `EPHEMERA_*` env는 runtime compatibility로
   설명하고 anvil product rename으로 처리하지 않는다.
 
-v0.3.5 기반 upstream E2E는 `/metrics`와 `/stats` 검증까지 포함한다. provider key가
-있는 환경에서는 real-LLM smoke가 실행될 수 있으므로 `GOOGLE_API_KEY`,
+v0.3.6 기반 upstream E2E는 `/metrics`, `/stats`, real-LLM smoke, in-VM helper 경로를
+포함할 수 있다. provider key가 있는 환경에서는 `GOOGLE_API_KEY`,
 `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` 값이 문서와 fixture에 남지 않았는지 별도로
 확인한다. `/metrics`는 기본 unauthenticated이므로 외부 노출 release 후보에서는
 `EPHEMERA_METRICS_REQUIRE_AUTH=true` 또는 network isolation 정책을 함께 적는다.
+`webdev_demo.sh` 검증은 paid-tier Gemini key와 충분한 host memory가 필요하므로
+release blocker가 아니라 operator demo 검증으로 별도 기록한다.
 
 ## `anvil-v0.2.0` GitHub Release 게시 기록과 본문
 
