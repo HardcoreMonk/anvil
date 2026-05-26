@@ -197,6 +197,79 @@ func TestAnvilSchedulerSmokeFailsHealthWithSummary(t *testing.T) {
 	}
 }
 
+func TestInstallAnvilSchedulerDryRunVerifyPrintsSmokeCommand(t *testing.T) {
+	output, err := commandOutput(t, "bash", "install-anvil-scheduler-systemd.sh", "--dry-run", "--no-build", "--no-enable", "--verify")
+	if err != nil {
+		t.Fatalf("installer dry-run failed: %v\n%s", err, output)
+	}
+	requireOutputContains(t, output, "scripts/anvil-scheduler-smoke.sh")
+	requireOutputContains(t, output, "--base-url http://127.0.0.1:3010")
+}
+
+func TestInstallAnvilSchedulerDryRunCreatesQuotaDirectory(t *testing.T) {
+	cmd := exec.Command("bash", "install-anvil-scheduler-systemd.sh", "--dry-run", "--no-build", "--no-enable")
+	cmd.Dir = scriptsDir(t)
+	cmd.Env = append(os.Environ(),
+		"ANVIL_SCHEDULER_USER=anvil-smoke-user",
+		"ANVIL_SCHEDULER_GROUP=anvil-smoke-group",
+		"ANVIL_SCHEDULER_QUOTA_STORE=/var/lib/anvil/quotas/tenants.json",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("installer dry-run failed: %v\n%s", err, output)
+	}
+	requireOutputContains(t, output, "/var/lib/anvil/quotas")
+}
+
+func TestInstallAnvilSchedulerWarnsForStateOutsideVarLib(t *testing.T) {
+	cmd := exec.Command("bash", "install-anvil-scheduler-systemd.sh", "--dry-run", "--no-build", "--no-enable")
+	cmd.Dir = scriptsDir(t)
+	cmd.Env = append(os.Environ(),
+		"ANVIL_SCHEDULER_USER=anvil-smoke-user",
+		"ANVIL_SCHEDULER_GROUP=anvil-smoke-group",
+		"ANVIL_SCHEDULER_STATE=/tmp/anvil-scheduler/state.json",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("installer dry-run failed: %v\n%s", err, output)
+	}
+	requireOutputContains(t, output, "warning: ANVIL_SCHEDULER_STATE is outside /var/lib/anvil")
+}
+
+func TestInstallAnvilSchedulerWarnsForNormalizedStateOutsideVarLib(t *testing.T) {
+	cmd := exec.Command("bash", "install-anvil-scheduler-systemd.sh", "--dry-run", "--no-build", "--no-enable")
+	cmd.Dir = scriptsDir(t)
+	cmd.Env = append(os.Environ(),
+		"ANVIL_SCHEDULER_USER=anvil-smoke-user",
+		"ANVIL_SCHEDULER_GROUP=anvil-smoke-group",
+		"ANVIL_SCHEDULER_STATE=/var/lib/anvil/../anvil-state/state.json",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("installer dry-run failed: %v\n%s", err, output)
+	}
+	requireOutputContains(t, output, "warning: ANVIL_SCHEDULER_STATE is outside /var/lib/anvil")
+}
+
+func TestInstallAnvilSchedulerRejectsRelativeQuotaStoreBeforeInstallPlan(t *testing.T) {
+	cmd := exec.Command("bash", "install-anvil-scheduler-systemd.sh", "--dry-run", "--no-build", "--no-enable")
+	cmd.Dir = scriptsDir(t)
+	cmd.Env = append(os.Environ(),
+		"ANVIL_SCHEDULER_USER=anvil-smoke-user",
+		"ANVIL_SCHEDULER_GROUP=anvil-smoke-group",
+		"ANVIL_SCHEDULER_QUOTA_STORE=tenants.json",
+	)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("installer dry-run unexpectedly succeeded:\n%s", output)
+	}
+	requireOutputContains(t, output, "ANVIL_SCHEDULER_QUOTA_STORE must be an absolute path")
+	badInstallPlan := "+ install -d -m 0750 -o anvil-smoke-user -g anvil-smoke-group ."
+	if strings.Contains(string(output), badInstallPlan) {
+		t.Fatalf("installer printed unsafe install plan %q:\n%s", badInstallPlan, output)
+	}
+}
+
 func preferredHostsInclude(req map[string]any, hostID string) bool {
 	preferredHosts, ok := req["preferred_hosts"].([]any)
 	if !ok {
