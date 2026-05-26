@@ -178,7 +178,7 @@ cmd/anvil-scheduler/main.go
   -> ANVIL_SCHEDULER_ADDR 읽기, 기본값 127.0.0.1:3010
   -> ANVIL_SCHEDULER_STATE에서 PlacementStore load
   -> ANVIL_SCHEDULER_QUOTA_STORE에서 QuotaStore load
-  -> /health, /hosts, /placements, /reconcile, /schedule/spawn, /schedule/restore 등록
+  -> /health, /hosts, /hosts/{name}, /placements, /reconcile, /schedule/spawn, /schedule/restore 등록
   -> HTTP serve
 ```
 

@@ -83,8 +83,18 @@ scheduler_base_url() {
     http://*|https://*)
       printf '%s\n' "$addr"
       ;;
+    0.0.0.0:*)
+      printf 'http://127.0.0.1%s\n' "${addr#0.0.0.0}"
+      ;;
+    :*)
+      printf 'http://127.0.0.1%s\n' "$addr"
+      ;;
     *)
-      printf 'http://%s\n' "$addr"
+      if [[ "$addr" == "[::]:"* ]]; then
+        printf 'http://127.0.0.1:%s\n' "${addr##*:}"
+      else
+        printf 'http://%s\n' "$addr"
+      fi
       ;;
   esac
 }

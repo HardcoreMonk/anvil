@@ -54,6 +54,9 @@ sudo bash scripts/install-anvil-scheduler-systemd.sh --start --verify
 bash scripts/anvil-scheduler-smoke.sh --base-url http://127.0.0.1:3010
 ```
 
+smoke harness는 검증 중 등록한 fake host를 종료 시 `DELETE /hosts/{name}`로
+정리한다. 본 검증은 cleanup 실패를 성공으로 취급하지 않는다.
+
 설치 후 설정을 바꿔야 하면 `/etc/anvil/anvil-scheduler.env`를 수정한 뒤
 `sudo systemctl restart anvil-scheduler.service`를 실행한다. scheduler service는
 자체 인증 계층을 두지 않으므로 loopback/private network 또는 reverse proxy policy

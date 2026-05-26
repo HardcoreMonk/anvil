@@ -90,10 +90,11 @@
   - ignored/local files: `WARN` — local `goose-secrets.yaml` 계열 값은 출력하지 않음
 
 scheduler service 운영 검증 자동화는 `scripts/anvil-scheduler-smoke.sh`와
-`scripts/install-anvil-scheduler-systemd.sh --verify`로 포함됐다. 다음 후보는 upstream
-ephemera `v0.4.0` PR-A storage/recovery 변경의 adoption review, cross-host snapshot
-replication, scheduler-aware cross-host flock placement, L7 egress proxy/SNI hardening,
-snapshot storage quota dashboard다.
+`scripts/install-anvil-scheduler-systemd.sh --verify`로 포함됐다. smoke harness는
+등록한 fake host를 `DELETE /hosts/{name}`로 정리해 production placement 후보가
+남지 않게 한다. 다음 후보는 upstream ephemera `v0.4.0` PR-A storage/recovery 변경의
+adoption review, cross-host snapshot replication, scheduler-aware cross-host flock
+placement, L7 egress proxy/SNI hardening, snapshot storage quota dashboard다.
 
 ## 문서화됨
 
@@ -124,8 +125,8 @@ Goosetown operational hardening, 운영 관측성 계약을 추가한다.
 ## 추가됨
 
 - `cmd/anvil-scheduler`: persistent host/quota/placement state를 읽어
-  `/health`, `/hosts`, `/placements`, `/reconcile`, `/schedule/spawn`,
-  `/schedule/restore`를 제공하는 얇은 HTTP scheduler service.
+  `/health`, `/hosts`, `/hosts/{name}`, `/placements`, `/reconcile`,
+  `/schedule/spawn`, `/schedule/restore`를 제공하는 얇은 HTTP scheduler service.
 - `internal/anvilmcp` scheduler 확장:
   - persistent `PlacementStore`
   - JSON-backed `QuotaStore`

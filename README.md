@@ -1234,6 +1234,7 @@ Scheduler service API는 operator가 host inventory와 placement 상태를 관�
 |---|---|
 | `GET /health` | scheduler process 상태 확인 |
 | `GET/PUT /hosts` | runtime host inventory 조회/등록 |
+| `DELETE /hosts/{name}` | smoke/운영 정리용 runtime host inventory 제거. 없는 host 삭제는 idempotent success로 처리 |
 | `GET /placements` | host, VM placement, snapshot location state 조회 |
 | `POST /reconcile` | 현재 placement state 반환. router reconciliation은 daemon `GET /vms` 기반 helper가 수행 |
 | `POST /schedule/spawn` | spawn 요청의 host decision 반환 |

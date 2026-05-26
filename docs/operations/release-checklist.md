@@ -89,8 +89,9 @@ sudo bash scripts/install-anvil-scheduler-systemd.sh --start --verify
 ```
 
 `--verify`는 `GET /health`, `PUT/GET /hosts`, `POST /schedule/spawn`,
-`GET /placements`를 확인한다. scheduler는 기본적으로 `127.0.0.1:3010`에 bind하며,
-외부 노출은 private network 또는 TLS 종료 reverse proxy policy 뒤에서만 수행한다.
+`GET /placements`, `DELETE /hosts/{name}` cleanup을 확인한다. scheduler는 기본적으로
+`127.0.0.1:3010`에 bind하며, 외부 노출은 private network 또는 TLS 종료 reverse
+proxy policy 뒤에서만 수행한다.
 
 ### 현재 upstream runtime baseline
 

@@ -18,7 +18,8 @@
   persisted `metadata.json`에 보존한다.
 - scheduler 운영 검증 자동화: `scripts/anvil-scheduler-smoke.sh`와
   `scripts/install-anvil-scheduler-systemd.sh --verify`는 `GET /health`,
-  `PUT/GET /hosts`, `POST /schedule/spawn`, `GET /placements` smoke를 제공한다.
+  `PUT/GET /hosts`, `POST /schedule/spawn`, `GET /placements`,
+  `DELETE /hosts/{name}` cleanup을 제공한다.
 - 비구현 범위: multi-node HA, migration, cross-host snapshot replication,
   scheduler-aware cross-host flock placement, L7 egress proxy, billing, UI.
 
@@ -157,8 +158,8 @@ snapshot location을 JSON으로 보존하고, `ReconcilePlacements`는 daemon `G
 
 별도 process인 `cmd/anvil-scheduler`는 `ANVIL_SCHEDULER_ADDR`,
 `ANVIL_SCHEDULER_STATE`, `ANVIL_SCHEDULER_QUOTA_STORE`를 읽는다. HTTP surface는
-`GET /health`, `GET/PUT /hosts`, `GET /placements`, `POST /reconcile`,
-`POST /schedule/spawn`, `POST /schedule/restore`다.
+`GET /health`, `GET/PUT /hosts`, `DELETE /hosts/{name}`, `GET /placements`,
+`POST /reconcile`, `POST /schedule/spawn`, `POST /schedule/restore`다.
 
 운영 배포 자동화는 `deploy/systemd/anvil-scheduler.service`,
 `deploy/systemd/anvil-scheduler.env.example`,

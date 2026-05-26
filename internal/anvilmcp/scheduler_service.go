@@ -3,6 +3,7 @@ package anvilmcp
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -37,6 +38,7 @@ func (s *SchedulerService) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/hosts", s.handleHosts)
+	mux.HandleFunc("/hosts/", s.handleHostItem)
 	mux.HandleFunc("/placements", s.handlePlacements)
 	mux.HandleFunc("/reconcile", s.handleReconcile)
 	mux.HandleFunc("/schedule/spawn", s.handleSchedule)
@@ -71,6 +73,25 @@ func (s *SchedulerService) handleHosts(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "GET or PUT required", http.StatusMethodNotAllowed)
 	}
+}
+
+func (s *SchedulerService) handleHostItem(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "DELETE required", http.StatusMethodNotAllowed)
+		return
+	}
+	name, err := url.PathUnescape(strings.TrimPrefix(r.URL.EscapedPath(), "/hosts/"))
+	if err != nil || strings.TrimSpace(name) == "" {
+		http.Error(w, "host name must be non-empty", http.StatusBadRequest)
+		return
+	}
+	name = strings.TrimSpace(name)
+	deleted := s.placements.RemoveHost(name)
+	if err := s.placements.Save(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeSchedulerJSON(w, map[string]any{"deleted": deleted, "host": name})
 }
 
 func (s *SchedulerService) handlePlacements(w http.ResponseWriter, r *http.Request) {

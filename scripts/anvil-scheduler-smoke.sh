@@ -25,6 +25,7 @@ HOST_ID="smoke-host-1"
 JSON_OUT=""
 SELECTED_HOST_ID=""
 TMP_DIR=""
+SMOKE_HOST_REGISTERED=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -66,9 +67,27 @@ done
 BASE_URL="${BASE_URL%/}"
 
 cleanup() {
+  local original_status=$?
+  local cleanup_failed=0
+
+  if [[ "$SMOKE_HOST_REGISTERED" == "1" ]]; then
+    if ! cleanup_registered_host; then
+      cleanup_failed=1
+    fi
+  fi
+
   if [[ -n "$TMP_DIR" && -d "$TMP_DIR" ]]; then
     rm -rf "$TMP_DIR"
   fi
+
+  if [[ "$original_status" == "0" && "$cleanup_failed" == "1" ]]; then
+    if ! write_summary "false" "host_cleanup_failed"; then
+      printf 'json_write_failed: could not write summary to %s\n' "$JSON_OUT" >&2
+    fi
+    exit 1
+  fi
+
+  exit "$original_status"
 }
 trap cleanup EXIT
 
@@ -149,6 +168,56 @@ request_json() {
   fi
 
   printf '%s' "$status"
+}
+
+response_body_snippet() {
+  local path="$1"
+
+  python3 - "$path" <<'PY'
+import sys
+
+path = sys.argv[1]
+try:
+    with open(path, "rb") as handle:
+        data = handle.read(500)
+except OSError:
+    data = b""
+text = data.decode("utf-8", errors="replace").replace("\n", "\\n")
+print(text)
+PY
+}
+
+urlencode_path_segment() {
+  local value="$1"
+
+  python3 - "$value" <<'PY'
+import sys
+from urllib.parse import quote
+
+print(quote(sys.argv[1], safe=""))
+PY
+}
+
+cleanup_registered_host() {
+  local encoded_host_id
+  local cleanup_body
+  local cleanup_err
+  local cleanup_status
+
+  encoded_host_id="$(urlencode_path_segment "$HOST_ID")"
+  cleanup_body="$TMP_DIR/host_delete.json"
+  cleanup_err="$TMP_DIR/host_delete.err"
+  if ! cleanup_status="$(request_json DELETE "/hosts/${encoded_host_id}" "" "$cleanup_body" "$cleanup_err")"; then
+    printf 'host_cleanup_failed: DELETE /hosts/%s request failed: %s\n' "$encoded_host_id" "$(<"$cleanup_err")" >&2
+    return 1
+  fi
+  if [[ "$cleanup_status" != "200" ]]; then
+    printf 'host_cleanup_failed: DELETE /hosts/%s returned HTTP %s body=%s\n' "$encoded_host_id" "$cleanup_status" "$(response_body_snippet "$cleanup_body")" >&2
+    return 1
+  fi
+
+  SMOKE_HOST_REGISTERED=0
+  return 0
 }
 
 require_json_status_ok() {
@@ -264,7 +333,7 @@ if ! HEALTH_STATUS="$(request_json GET /health "" "$HEALTH_BODY" "$HEALTH_ERR")"
   fail_step health_failed "GET /health request failed: $(<"$HEALTH_ERR")"
 fi
 if [[ "$HEALTH_STATUS" != "200" ]]; then
-  fail_step health_failed "GET /health returned HTTP $HEALTH_STATUS"
+  fail_step health_failed "GET /health returned HTTP $HEALTH_STATUS body=$(response_body_snippet "$HEALTH_BODY")"
 fi
 if ! require_json_status_ok "$HEALTH_BODY" 2>/dev/null; then
   fail_step health_failed 'GET /health response did not include status ok'
@@ -276,8 +345,9 @@ if ! HOST_PUT_STATUS="$(request_json PUT /hosts "$HOST_BODY" "$HOST_PUT_BODY" "$
   fail_step host_put_failed "PUT /hosts request failed: $(<"$HOST_PUT_ERR")"
 fi
 if [[ "$HOST_PUT_STATUS" != "200" ]]; then
-  fail_step host_put_failed "PUT /hosts returned HTTP $HOST_PUT_STATUS"
+  fail_step host_put_failed "PUT /hosts returned HTTP $HOST_PUT_STATUS body=$(response_body_snippet "$HOST_PUT_BODY")"
 fi
+SMOKE_HOST_REGISTERED=1
 
 HOST_LIST_BODY="$TMP_DIR/host_list.json"
 HOST_LIST_ERR="$TMP_DIR/host_list.err"
@@ -285,7 +355,7 @@ if ! HOST_LIST_STATUS="$(request_json GET /hosts "" "$HOST_LIST_BODY" "$HOST_LIS
   fail_step host_list_failed "GET /hosts request failed: $(<"$HOST_LIST_ERR")"
 fi
 if [[ "$HOST_LIST_STATUS" != "200" ]]; then
-  fail_step host_list_failed "GET /hosts returned HTTP $HOST_LIST_STATUS"
+  fail_step host_list_failed "GET /hosts returned HTTP $HOST_LIST_STATUS body=$(response_body_snippet "$HOST_LIST_BODY")"
 fi
 if ! require_host_in_list "$HOST_LIST_BODY" "$HOST_ID" 2>/dev/null; then
   fail_step host_list_failed "GET /hosts did not include host $HOST_ID"
@@ -297,7 +367,7 @@ if ! SCHEDULE_STATUS="$(request_json POST /schedule/spawn "$SCHEDULE_BODY" "$SCH
   fail_step schedule_spawn_failed "POST /schedule/spawn request failed: $(<"$SCHEDULE_ERR")"
 fi
 if [[ "$SCHEDULE_STATUS" != "200" ]]; then
-  fail_step schedule_spawn_failed "POST /schedule/spawn returned HTTP $SCHEDULE_STATUS"
+  fail_step schedule_spawn_failed "POST /schedule/spawn returned HTTP $SCHEDULE_STATUS body=$(response_body_snippet "$SCHEDULE_BODY_OUT")"
 fi
 if ! SELECTED_HOST_ID="$(selected_host_from_decision "$SCHEDULE_BODY_OUT" 2>/dev/null)"; then
   fail_step schedule_spawn_failed 'POST /schedule/spawn did not return an allowed host decision'
@@ -312,10 +382,20 @@ if ! PLACEMENTS_STATUS="$(request_json GET /placements "" "$PLACEMENTS_BODY" "$P
   fail_step placements_failed "GET /placements request failed: $(<"$PLACEMENTS_ERR")"
 fi
 if [[ "$PLACEMENTS_STATUS" != "200" ]]; then
-  fail_step placements_failed "GET /placements returned HTTP $PLACEMENTS_STATUS"
+  fail_step placements_failed "GET /placements returned HTTP $PLACEMENTS_STATUS body=$(response_body_snippet "$PLACEMENTS_BODY")"
 fi
 if ! require_json_object "$PLACEMENTS_BODY" 2>/dev/null; then
   fail_step placements_failed 'GET /placements did not return a JSON object'
+fi
+
+if [[ "$SMOKE_HOST_REGISTERED" == "1" ]]; then
+  if ! cleanup_registered_host; then
+    SMOKE_HOST_REGISTERED=0
+    if ! write_summary "false" "host_cleanup_failed"; then
+      printf 'json_write_failed: could not write summary to %s\n' "$JSON_OUT" >&2
+    fi
+    exit 1
+  fi
 fi
 
 if ! write_summary "true" ""; then

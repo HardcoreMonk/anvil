@@ -44,6 +44,34 @@ func TestPlacementStorePersistsHostsVMsAndSnapshotLocations(t *testing.T) {
 	}
 }
 
+func TestPlacementStoreRemoveHostPersists(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runtime", "placements.json")
+	store := NewPlacementStore(path)
+	if err := store.SetHost(RuntimeHost{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 1}); err != nil {
+		t.Fatalf("SetHost host-a: %v", err)
+	}
+	if err := store.SetHost(RuntimeHost{Name: "host-b", Endpoint: "http://host-b", Healthy: true, AvailableVMs: 1}); err != nil {
+		t.Fatalf("SetHost host-b: %v", err)
+	}
+
+	deleted := store.RemoveHost("host-a")
+	if !deleted {
+		t.Fatal("RemoveHost(host-a) = false, want true")
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	reloaded := NewPlacementStore(path)
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	hosts := reloaded.ListHosts()
+	if len(hosts) != 1 || hosts[0].Name != "host-b" {
+		t.Fatalf("hosts after remove/reload = %+v, want only host-b", hosts)
+	}
+}
+
 func TestPlacementStoreReplacesVMPlacementsDuringReconciliation(t *testing.T) {
 	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
 	if err := store.SetVMPlacement("stale-vm", "host-a"); err != nil {

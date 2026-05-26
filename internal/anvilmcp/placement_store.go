@@ -121,6 +121,21 @@ func (s *PlacementStore) SetHost(host RuntimeHost) error {
 	return nil
 }
 
+func (s *PlacementStore) RemoveHost(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensureMaps()
+	if _, ok := s.state.Hosts[name]; !ok {
+		return false
+	}
+	delete(s.state.Hosts, name)
+	return true
+}
+
 func (s *PlacementStore) ListHosts() []RuntimeHost {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

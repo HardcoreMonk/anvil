@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,6 +39,27 @@ func TestAnvilSchedulerSmokePassesAgainstFakeScheduler(t *testing.T) {
 	}
 }
 
+func TestAnvilSchedulerSmokeDeletesRegisteredHostAfterSuccess(t *testing.T) {
+	server := newAnvilSchedulerSmokeFakeServer(t, 0)
+	defer server.Close()
+
+	outPath := filepath.Join(t.TempDir(), "summary.json")
+	cmd := exec.Command("bash", "anvil-scheduler-smoke.sh", "--base-url", server.URL, "--host-id", "smoke test host", "--json-out", outPath)
+	cmd.Dir = scriptsDir(t)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("smoke script failed: %v\n%s", err, output)
+	}
+
+	summary := readSmokeSummary(t, outPath)
+	if !summary.OK {
+		t.Fatalf("summary ok = false, output=%s summary=%+v", output, summary)
+	}
+	if server.hasHost("smoke test host") {
+		t.Fatalf("fake scheduler still has smoke host after successful smoke:\n%s", output)
+	}
+}
+
 func TestAnvilSchedulerSmokeFailsSlowHealthWithSummary(t *testing.T) {
 	server := newAnvilSchedulerSmokeFakeServer(t, 1500*time.Millisecond)
 	defer server.Close()
@@ -66,11 +88,24 @@ func TestAnvilSchedulerSmokeFailsSlowHealthWithSummary(t *testing.T) {
 	}
 }
 
-func newAnvilSchedulerSmokeFakeServer(t *testing.T, healthDelay time.Duration) *httptest.Server {
+type anvilSchedulerSmokeFakeServer struct {
+	*httptest.Server
+	mu   sync.Mutex
+	host map[string]any
+}
+
+func (s *anvilSchedulerSmokeFakeServer) hasHost(hostID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.host == nil {
+		return false
+	}
+	return s.host["name"] == hostID
+}
+
+func newAnvilSchedulerSmokeFakeServer(t *testing.T, healthDelay time.Duration) *anvilSchedulerSmokeFakeServer {
 	t.Helper()
 
-	var mu sync.Mutex
-	var host map[string]any
 	otherHost := map[string]any{
 		"name":                     "other-eligible-host",
 		"endpoint":                 "http://other-eligible-host",
@@ -79,6 +114,7 @@ func newAnvilSchedulerSmokeFakeServer(t *testing.T, healthDelay time.Duration) *
 		"available_snapshot_bytes": float64(4096),
 		"egress_policies":          []any{"profile"},
 	}
+	fake := &anvilSchedulerSmokeFakeServer{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/health":
@@ -98,18 +134,18 @@ func newAnvilSchedulerSmokeFakeServer(t *testing.T, healthDelay time.Duration) *
 					http.Error(w, "invalid host body", http.StatusBadRequest)
 					return
 				}
-				if next["name"] != "smoke-test-host" {
+				if strings.TrimSpace(fmt.Sprint(next["name"])) == "" {
 					http.Error(w, "unexpected host name", http.StatusBadRequest)
 					return
 				}
-				mu.Lock()
-				host = next
-				mu.Unlock()
+				fake.mu.Lock()
+				fake.host = next
+				fake.mu.Unlock()
 				writeSmokeTestJSON(t, w, next)
 			case http.MethodGet:
-				mu.Lock()
-				current := host
-				mu.Unlock()
+				fake.mu.Lock()
+				current := fake.host
+				fake.mu.Unlock()
 				if current == nil {
 					writeSmokeTestJSON(t, w, []map[string]any{otherHost})
 					return
@@ -123,9 +159,9 @@ func newAnvilSchedulerSmokeFakeServer(t *testing.T, healthDelay time.Duration) *
 				http.Error(w, "POST required", http.StatusMethodNotAllowed)
 				return
 			}
-			mu.Lock()
-			current := host
-			mu.Unlock()
+			fake.mu.Lock()
+			current := fake.host
+			fake.mu.Unlock()
 			if current == nil {
 				http.Error(w, "host missing", http.StatusBadRequest)
 				return
@@ -136,7 +172,7 @@ func newAnvilSchedulerSmokeFakeServer(t *testing.T, healthDelay time.Duration) *
 				return
 			}
 			selected := otherHost
-			if preferredHostsInclude(scheduleReq, "smoke-test-host") {
+			if preferredHostsInclude(scheduleReq, fmt.Sprint(current["name"])) {
 				selected = current
 			}
 			writeSmokeTestJSON(t, w, map[string]any{
@@ -152,12 +188,12 @@ func newAnvilSchedulerSmokeFakeServer(t *testing.T, healthDelay time.Duration) *
 				http.Error(w, "GET required", http.StatusMethodNotAllowed)
 				return
 			}
-			mu.Lock()
-			current := host
-			mu.Unlock()
+			fake.mu.Lock()
+			current := fake.host
+			fake.mu.Unlock()
 			hosts := map[string]any{}
 			if current != nil {
-				hosts["smoke-test-host"] = current
+				hosts[fmt.Sprint(current["name"])] = current
 			}
 			writeSmokeTestJSON(t, w, map[string]any{
 				"hosts":              hosts,
@@ -165,10 +201,30 @@ func newAnvilSchedulerSmokeFakeServer(t *testing.T, healthDelay time.Duration) *
 				"snapshot_locations": map[string][]string{},
 			})
 		default:
+			if strings.HasPrefix(r.URL.Path, "/hosts/") {
+				if r.Method != http.MethodDelete {
+					http.Error(w, "DELETE required", http.StatusMethodNotAllowed)
+					return
+				}
+				hostID, err := url.PathUnescape(strings.TrimPrefix(r.URL.Path, "/hosts/"))
+				if err != nil || strings.TrimSpace(hostID) == "" {
+					http.Error(w, "invalid host path", http.StatusBadRequest)
+					return
+				}
+				fake.mu.Lock()
+				deleted := fake.host != nil && fake.host["name"] == hostID
+				if deleted {
+					fake.host = nil
+				}
+				fake.mu.Unlock()
+				writeSmokeTestJSON(t, w, map[string]any{"deleted": deleted, "host": hostID})
+				return
+			}
 			http.NotFound(w, r)
 		}
 	}))
-	return server
+	fake.Server = server
+	return fake
 }
 
 func TestAnvilSchedulerSmokeFailsHealthWithSummary(t *testing.T) {
@@ -187,6 +243,9 @@ func TestAnvilSchedulerSmokeFailsHealthWithSummary(t *testing.T) {
 	if !strings.Contains(string(output), "health_failed") {
 		t.Fatalf("output = %s, want health_failed", output)
 	}
+	if !strings.Contains(string(output), "not ready") {
+		t.Fatalf("output = %s, want response body snippet not ready", output)
+	}
 
 	summary := readSmokeSummary(t, outPath)
 	if summary.OK {
@@ -204,6 +263,35 @@ func TestInstallAnvilSchedulerDryRunVerifyPrintsSmokeCommand(t *testing.T) {
 	}
 	requireOutputContains(t, output, "scripts/anvil-scheduler-smoke.sh")
 	requireOutputContains(t, output, "--base-url http://127.0.0.1:3010")
+}
+
+func TestInstallAnvilSchedulerDryRunVerifyMapsWildcardBindAddressesToLoopback(t *testing.T) {
+	cases := []struct {
+		name string
+		addr string
+		want string
+	}{
+		{name: "ipv4 wildcard", addr: "0.0.0.0:3010", want: "--base-url http://127.0.0.1:3010"},
+		{name: "empty host", addr: ":3010", want: "--base-url http://127.0.0.1:3010"},
+		{name: "ipv6 wildcard", addr: "[::]:3010", want: "--base-url http://127.0.0.1:3010"},
+		{name: "https url", addr: "https://scheduler.internal:9443", want: "--base-url https://scheduler.internal:9443"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command("bash", "install-anvil-scheduler-systemd.sh", "--dry-run", "--no-build", "--no-enable", "--verify")
+			cmd.Dir = scriptsDir(t)
+			cmd.Env = append(os.Environ(),
+				"ANVIL_SCHEDULER_USER=anvil-smoke-user",
+				"ANVIL_SCHEDULER_GROUP=anvil-smoke-group",
+				"ANVIL_SCHEDULER_ADDR="+tc.addr,
+			)
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("installer dry-run failed: %v\n%s", err, output)
+			}
+			requireOutputContains(t, output, tc.want)
+		})
+	}
 }
 
 func TestInstallAnvilSchedulerDryRunCreatesQuotaDirectory(t *testing.T) {
