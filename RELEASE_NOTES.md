@@ -1,3 +1,36 @@
+# v0.4.1 — Operational Interfaces (in progress)
+
+**Ephemera** v0.4.1 makes the daemon operable as a service: authenticated **client identity** threaded into request handling, a per-request **access audit log** (`GET /audit`), and **per-token TTL/rotation**. An operator CLI (`ephemera-ctl`) follows in a second PR. Additive — no wire format changed; the only behavior changes are that an expired token is now rejected (401) and the in-VM CP token is the first non-expired client.
+
+---
+
+## What's New
+
+### Client identity in request context (F1)
+
+- `authMiddleware` now surfaces the authenticated caller: the matched client name is threaded to handlers via the request context and to the (outer) audit middleware via a request-scoped holder. Timing-safety is preserved — every token is still compared with no early-exit, and the expiry check runs after the constant-time loop.
+
+### Access audit log — `GET /audit` (F2)
+
+- Every API request is appended as one JSON line to `{workDir}/audit/access.jsonl`: `{ts, client, method, path, status, duration_ms, remote_addr, bytes}`. The record **never contains tokens, the `Authorization` header, request/response bodies, or the query string**. Unauthenticated requests record `client="-"`; `/metrics` is excluded so scrapes don't flood the log.
+- The file is size-rotated (`EPHEMERA_AUDIT_MAX_MIB`, default 100; `EPHEMERA_AUDIT_KEEP`, default 5). On by default; `EPHEMERA_AUDIT_DISABLE=true` turns it off.
+- `GET /audit?limit=&client=&status=&method=` returns recent records as a JSON array (newest first; limit default 100, max 1000), itself authenticated.
+- A new `statusRecorder` ResponseWriter wrapper captures status/bytes and **forwards `http.Flusher`** so the SSE Town Wall stream keeps working; the audit middleware wraps auth (outer) so it also records 401s and the final status.
+
+### Per-token TTL + rotation (F3)
+
+- Token entries gain an optional expiry: `name:token:expires` (RFC3339 or Unix seconds). A two-field `name:token` never expires (backward compatible). Tokens may contain `:` — the expiry is recognized only when the trailing colon-separated field parses as a timestamp.
+- Expiry is enforced per request: an expired-but-matched token returns 401 (same body as an unknown token; distinguished only by the server log and `ephemera_auth_total{outcome="expired"}`). No background reaper.
+- The in-VM control-plane token is now the **first non-expired** client (was blindly `clients[0]`), so an expired primary no longer breaks in-VM `/townwall/post`; if all tokens have expired, an empty (unauthenticated) token is propagated with a warning.
+- New metric `ephemera_auth_total{outcome=ok|denied|expired}`; startup/SIGHUP banners log expired / expiring-24h counts.
+
+### Tests
+
+- Unit: token TTL parsing (2/3-field, colon-in-token ±expiry, RFC3339-with-internal-colons), `parseExpiry`, `firstActiveClient`, `countTokenExpiry`; `authMiddleware` outcomes + metric + no-early-exit; audit rotation / tail-filters / no-secret-leak; `statusRecorder` Flusher forwarding; client-identity context round-trip.
+- e2e steps 78–81: audit records an authenticated request (no token leak), audit captures a 401 (`client=-`), per-token TTL expiry → 401 while the primary still works, and the SSE Town Wall stream still works through the audit wrapper.
+
+---
+
 # v0.4.0 — Storage / Recovery Core
 
 **Ephemera** v0.4.0 hardens the storage and recovery paths. Two headlines: **COW spawn cold-restart** — a VM started with `EPHEMERA_DISK_MODE=cow` now survives a daemon restart with the same identity, closing the v0.3.2 limitation where COW VMs were skipped on recovery — and opt-in **memory auto-snapshot** (`EPHEMERA_AUTOSNAPSHOT=true`), which warm-restores a VM's in-flight memory across a graceful daemon bounce instead of cold-booting. It also adds true rootfs diff snapshots, a disk-space pre-flight, orphan-device reclaim, atomic spawn-failure rollback, and a Firecracker signal-forwarding fix. Additive: no wire format changed.

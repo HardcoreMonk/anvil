@@ -30,6 +30,7 @@ vmlinux*
 /snapshots/
 /flocks/
 /vms/
+/audit/
 /tmp/
 
 # 5. Goose runtime config (contains API keys)

@@ -1777,12 +1777,92 @@ grep -q "vms not cold-restarted" "$LOG" \
 curl -s -o /dev/null -X DELETE "$API/flocks/$DFLOCK_ID" || true
 ok "Disk-missing flock cleaned up"
 
+# ════════════════════════════════════════════════════════════════
+# v0.4.1 PR-A: client identity in context + access audit log + per-token TTL.
+# Runs on a fresh auth-on daemon (relaunch_daemon sets EPHEMERA_API_ADDR=0.0.0.0).
+# ════════════════════════════════════════════════════════════════
+
+# ── 78. Access audit log records an authenticated request ────────
+step "78. Audit log records an authenticated request (client + status, no secrets)"
+kill "$DAEMON_PID" 2>/dev/null || true; wait "$DAEMON_PID" 2>/dev/null || true
+pkill -f "firecracker --api-sock" 2>/dev/null || true
+sleep 2
+OPS_TOKEN="ops-secret-$$"
+relaunch_daemon "EPHEMERA_API_TOKENS=ops:$OPS_TOKEN"
+ok "Auth-on daemon up (client: ops)"
+
+VMS_CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $OPS_TOKEN" "$API/vms")
+check_http "$VMS_CODE" "200" "GET /vms with valid bearer"
+BOGUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer wrong-token" "$API/vms")
+check_http "$BOGUS_CODE" "401" "GET /vms with bogus bearer"
+
+AUDIT=$(curl -s -H "Authorization: Bearer $OPS_TOKEN" "$API/audit?limit=20")
+echo "$AUDIT" | jq -e '[.[] | select(.path=="/vms" and .method=="GET" and .status==200 and .client=="ops")] | length > 0' >/dev/null 2>&1 \
+    && ok "audit recorded GET /vms 200 by client=ops ✓" \
+    || fail "audit missing the GET /vms 200/ops entry (got: $AUDIT)"
+# The audit log must NEVER contain the token or Authorization material.
+if echo "$AUDIT" | grep -qiE "$OPS_TOKEN|bearer|authorization"; then
+    fail "audit log leaked auth material"
+else
+    ok "audit log contains no token/Authorization material ✓"
+fi
+
+# ── 79. Audit captures unauthorized (401) requests as client=- ───
+step "79. Audit captures a 401 as client=-"
+echo "$AUDIT" | jq -e '[.[] | select(.path=="/vms" and .status==401 and .client=="-")] | length > 0' >/dev/null 2>&1 \
+    && ok "audit recorded the 401 with client=- ✓" \
+    || fail "audit missing the 401/client=- entry (got: $AUDIT)"
+
+# ── 80. Per-token TTL: expired token rejected, primary still works ─
+step "80. Per-token TTL: an expired token is rejected; never-expiring primary keeps working"
+kill "$DAEMON_PID" 2>/dev/null || true; wait "$DAEMON_PID" 2>/dev/null || true
+pkill -f "firecracker --api-sock" 2>/dev/null || true
+sleep 2
+TOKENS_FILE=$(mktemp /tmp/ephemera-ttl-XXXXXX.tokens)
+TEMP_EXPIRY=$(date -u -d '+10 seconds' +%Y-%m-%dT%H:%M:%SZ)
+printf 'ops:%s\ntemp:temp-secret:%s\n' "$OPS_TOKEN" "$TEMP_EXPIRY" > "$TOKENS_FILE"
+relaunch_daemon "EPHEMERA_API_TOKENS_FILE=$TOKENS_FILE"
+ok "Auth-on daemon up with a short-TTL token (temp expires $TEMP_EXPIRY)"
+
+TTL_CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer temp-secret" "$API/vms")
+check_http "$TTL_CODE" "200" "short-TTL token accepted before expiry"
+sleep 11
+TTL_CODE2=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer temp-secret" "$API/vms")
+check_http "$TTL_CODE2" "401" "short-TTL token rejected after expiry"
+PRIMARY_CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $OPS_TOKEN" "$API/vms")
+check_http "$PRIMARY_CODE" "200" "never-expiring primary token still accepted"
+grep -q "token expired" "$LOG" \
+    && ok "daemon logged token expiry ✓" \
+    || fail "no 'token expired' log line in daemon output"
+curl -s -H "Authorization: Bearer $OPS_TOKEN" "$API/metrics" | grep -qE 'ephemera_auth_total\{outcome="expired"\} [1-9]' \
+    && ok "metric ephemera_auth_total{outcome=expired} present ✓" \
+    || fail "expired auth metric missing from /metrics"
+
+# ── 81. SSE Town Wall stream survives the audit ResponseWriter wrap ─
+step "81. SSE /flocks/{id}/wall streams through the audit statusRecorder (Flusher preserved)"
+SSE_FLOCK=$(curl -s -X POST "$API/flocks" -H "Authorization: Bearer $OPS_TOKEN" \
+    -H "Content-Type: application/json" -d '{"task":"sse guard","roles":["worker"]}')
+SSE_FLOCK_ID=$(echo "$SSE_FLOCK" | jq -r '.flock_id // empty')
+if [ -n "$SSE_FLOCK_ID" ]; then
+    ok "SSE guard flock: $SSE_FLOCK_ID"
+    # A broken statusRecorder (no Flush forwarding) makes streamTownWall return
+    # 500 "streaming unsupported"; 200 (stream opened, then closed by -m) is the pass.
+    SSE_CODE=$(curl -s -N -o /dev/null -w "%{http_code}" -m 3 -H "Authorization: Bearer $OPS_TOKEN" "$API/flocks/$SSE_FLOCK_ID/wall" || true)
+    [ "$SSE_CODE" = "200" ] \
+        && ok "GET /flocks/{id}/wall streamed (200; Flusher preserved through audit wrapper) ✓" \
+        || fail "SSE wall returned '$SSE_CODE' (expected 200; statusRecorder may not forward Flusher)"
+    curl -s -o /dev/null -X DELETE "$API/flocks/$SSE_FLOCK_ID" -H "Authorization: Bearer $OPS_TOKEN" || true
+else
+    fail "could not spawn SSE guard flock (resp: $SSE_FLOCK)"
+fi
+rm -f "$TOKENS_FILE" || true
+
 # ── Shut down the last test daemon ───────────────────────────────
 kill "$DAEMON_PID" 2>/dev/null || true; wait "$DAEMON_PID" 2>/dev/null || true
 pkill -f "firecracker --api-sock" 2>/dev/null || true
 
 trap - EXIT
-ok "PR-B test daemon stopped"
+ok "v0.4.1 PR-A test daemon stopped"
 
 # ── Result ───────────────────────────────────────────────────────
 echo
