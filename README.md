@@ -431,6 +431,10 @@ sudo bash e2e_test.sh
 | 75 | Rotation daemon shutdown |
 | 76 | **Memory auto-snapshot warm restore** (v0.4.0) — spawn a VM under `EPHEMERA_AUTOSNAPSHOT=true`; graceful SIGTERM bounce writes `vms/{id}/auto/{memory,state}.bin`; the next start warm-restores it (same `vm_id`, `/health` 200, daemon logs `vm warm-restored` rather than `vm back up`) and deletes the one-shot snapshot. Also gates the `forwardSignals` SIGTERM fix — a forwarded SIGTERM would kill Firecracker mid-snapshot. |
 | 77 | **Recovery disk-missing clean drop** (v0.4.0) — spawn a 1-agent flock, SIGKILL the daemon (host TAP lingers), delete the worker's rootfs, restart: `state.json` dropped, VM absent from `/vms`, stale TAP released, flock agent marked `dead` in `metadata.json`, and surfaced via the `vms not cold-restarted` log (not a silent drop). |
+| 78 | **Audit log records an authenticated request** (v0.4.1) — auth-on daemon; a valid `GET /vms` (200) appears in `GET /audit` with `client=ops`, and the audit body contains no token/Authorization material. |
+| 79 | **Audit captures a 401** (v0.4.1) — a bogus-bearer `GET /vms` is recorded in `/audit` with `status=401`, `client=-`. |
+| 80 | **Per-token TTL** (v0.4.1) — `EPHEMERA_API_TOKENS_FILE` with a short-TTL `name:token:expires` token: accepted before expiry (200), rejected after (401) while the never-expiring primary still works; daemon logs `token expired` and `/metrics` shows `ephemera_auth_total{outcome="expired"}`. |
+| 81 | **SSE stream survives the audit wrapper** (v0.4.1) — `GET /flocks/{id}/wall` still streams (200) through the audit `statusRecorder`, proving `http.Flusher` is preserved. |
 
 **Example output (passing, flock steps 52–75):**
 
@@ -579,8 +583,8 @@ All settings are read from environment variables at startup.
 |----------|---------|-------------|
 | `EPHEMERA_API_ADDR` | `127.0.0.1:3000` | Control plane bind address. Set to `0.0.0.0:3000` when behind a reverse proxy, or when using flocks: the in-VM `gtwall` / `/townwall/post` forwarder targets `http://10.0.1.1:3000` (the bridge gateway), which is unreachable with the loopback-only default. |
 | `EPHEMERA_API_PORT` | `3000` | Port only (used when `EPHEMERA_API_ADDR` is not set). |
-| `EPHEMERA_API_TOKENS_FILE` | *(unset)* | Path to a file containing `name:token` entries (comma- or newline-separated). When set, **takes precedence over `EPHEMERA_API_TOKENS`** and is re-read on every `loadAPIClients()` call — which is what enables SIGHUP-driven hot rotation since env values are fixed at exec (v0.3.4). |
-| `EPHEMERA_API_TOKENS` | *(unset)* | Per-client Bearer tokens: `alice:token1,bob:token2`. The first token (`apiClients[0]`) is also auto-injected into every flock VM at `/root/.ephemera-cp-token` so the in-VM `/townwall/post` forwarder can call back to the control plane without manual setup (v0.3.3). v0.3.4 SIGHUP fan-out propagates rotations to running VMs — see `_TOKENS_FILE` for true hot rotation. |
+| `EPHEMERA_API_TOKENS_FILE` | *(unset)* | Path to a file containing `name:token[:expires]` entries (comma- or newline-separated). When set, **takes precedence over `EPHEMERA_API_TOKENS`** and is re-read on every `loadAPIClients()` call — which is what enables SIGHUP-driven hot rotation since env values are fixed at exec (v0.3.4). The optional `:expires` (RFC3339 or Unix seconds) enforces a per-token TTL (v0.4.1). |
+| `EPHEMERA_API_TOKENS` | *(unset)* | Per-client Bearer tokens: `alice:token1,bob:token2` (each entry may carry an optional `:expires`, see `_TOKENS_FILE` and the Token TTL docs — v0.4.1). The first **non-expired** token is also auto-injected into every flock VM at `/root/.ephemera-cp-token` so the in-VM `/townwall/post` forwarder can call back to the control plane without manual setup (v0.3.3; first-non-expired since v0.4.1). v0.3.4 SIGHUP fan-out propagates rotations to running VMs — see `_TOKENS_FILE` for true hot rotation. |
 | `EPHEMERA_API_TOKEN` | *(unset)* | Single Bearer token (backward-compatible fallback). |
 | `EPHEMERA_AGENT_PORT` | `8080` | Port goose-agent listens on inside each VM. |
 | `EPHEMERA_PUBLIC_URL` | *(unset)* | Externally-reachable base URL of the control plane (no trailing slash). When set, `agent_url` in VM responses uses the proxy path `{EPHEMERA_PUBLIC_URL}/vms/{vm_id}` instead of the VM's private IP. Example: `https://api.example.com`. |
@@ -594,8 +598,11 @@ All settings are read from environment variables at startup.
 | `EPHEMERA_METRICS_REQUIRE_AUTH` | `false` | When `true`, `GET /metrics` requires a valid Bearer token like every other endpoint (v0.3.5). Default off matches the standard Prometheus scrape pattern; flip on when the metrics endpoint is exposed beyond a trusted network. |
 | `EPHEMERA_LOG_FORMAT` | `text` | `text` (default) emits `key=value` lines from `log/slog`'s TextHandler; `json` switches to JSONHandler for log-aggregation pipelines (v0.3.5). |
 | `EPHEMERA_LOG_LEVEL` | `warn` | Minimum slog level: `debug`, `info`, `warn`, or `error` (v0.3.5). Default `warn` preserves the previous `log.Printf` tone — every lifecycle event in the daemon is emitted at warn-or-higher so operators see it without configuration. |
+| `EPHEMERA_AUDIT_DISABLE` | `false` | Set to `true` to turn off the access audit log (v0.4.1). When enabled (the default), every API request is appended as one JSON line to `{workDir}/audit/access.jsonl` (method, path, client name, status, latency — never tokens or bodies) and is queryable via `GET /audit`. |
+| `EPHEMERA_AUDIT_MAX_MIB` | `100` | Active audit file size (MiB) that triggers rotation to `access.jsonl.1` (v0.4.1). |
+| `EPHEMERA_AUDIT_KEEP` | `5` | Number of rotated audit files to retain; older ones are deleted (v0.4.1). Disk ceiling ≈ `MAX_MIB × (KEEP + 1)`. |
 
-`EPHEMERA_API_ADDR` takes precedence over `EPHEMERA_API_PORT`. Most variables are read at startup; use SIGHUP to reload tokens. With `EPHEMERA_API_TOKENS_FILE` SIGHUP also propagates the new `apiClients[0].Token` to running VMs via vsock (v0.3.4).
+`EPHEMERA_API_ADDR` takes precedence over `EPHEMERA_API_PORT`. Most variables are read at startup; use SIGHUP to reload tokens. With `EPHEMERA_API_TOKENS_FILE` SIGHUP also propagates the first non-expired client's token to running VMs via vsock (v0.3.4; first-non-expired since v0.4.1).
 
 ---
 
@@ -793,6 +800,7 @@ Exposed series (additive — never breaks the wire format on minor bumps):
 | `ephemera_snapshot_restore_total` | counter | `outcome` | dm-snapshot and bind-mount fallback both contribute |
 | `ephemera_auto_snapshot_total` | counter | `outcome=ok\|fail` | graceful-shutdown memory auto-snapshot (`EPHEMERA_AUTOSNAPSHOT`, v0.4.0) |
 | `ephemera_auto_restore_total` | counter | `outcome=ok\|fail` | recovery warm-restore attempt (v0.4.0) |
+| `ephemera_auth_total` | counter | `outcome=ok\|denied\|expired` | per-request API auth decision (v0.4.1) |
 | `ephemera_flock_spawn_total` / `_destroy_total` | counter | — | success path of `createFlock` / `deleteFlock` |
 | `ephemera_watchdog_dead_total` / `_heal_total` | counter | — | dyingThreshold and autoHeal transitions |
 | `ephemera_sighup_reload_total` | counter | — | after `ReloadClients` completes |
@@ -1245,14 +1253,59 @@ echo "alice:$NEW_ALICE,carol:$CAROL_TOKEN" > /etc/ephemera/tokens
 kill -HUP $(pgrep ephemera-daemon)
 ```
 
-`ReloadClients` re-reads the file, swaps the in-memory client list under `clientsMu`, **and (v0.3.4) fans the new `apiClients[0].Token` out to every running flock VM over vsock** (`SET_CP_TOKEN` command, atomic rewrite of `/root/.ephemera-cp-token`). The in-VM `/townwall/post` forwarder picks up the rotated bearer on the next request without any VM restart. See [CP token rotation via vsock](#cp-token-rotation-via-vsock-v034).
+`ReloadClients` re-reads the file, swaps the in-memory client list under `clientsMu`, **and (v0.3.4) fans the first non-expired client's token out to every running flock VM over vsock** (`SET_CP_TOKEN` command, atomic rewrite of `/root/.ephemera-cp-token`). The in-VM `/townwall/post` forwarder picks up the rotated bearer on the next request without any VM restart. See [CP token rotation via vsock](#cp-token-rotation-via-vsock-v034).
 
 | Scenario | Action |
 |----------|--------|
 | Adding a new client | Edit `EPHEMERA_API_TOKENS_FILE` → SIGHUP |
-| Rotating `apiClients[0]` (the CP token VMs use) | Edit file → SIGHUP; in-VM `/root/.ephemera-cp-token` is updated automatically (v0.3.4+) |
+| Rotating the primary CP token (the one VMs use) | Edit file → SIGHUP; in-VM `/root/.ephemera-cp-token` is updated automatically (v0.3.4+) |
 | Emergency revocation | Edit file → SIGHUP — **no VM interruption** |
 | Legacy `EPHEMERA_API_TOKENS` env (no file) | Still works for the `cp.clients` swap, but does not see env-value changes without daemon restart. Use `_TOKENS_FILE` for live rotation. |
+
+#### Token TTL & rotation (v0.4.1)
+
+A client entry may carry an optional expiry as a third colon-separated field —
+`name:token:expires` — where `expires` is **RFC3339** (e.g. `2026-06-01T00:00:00Z`)
+or **Unix seconds**. A two-field `name:token` never expires (backward compatible).
+
+```bash
+# A short-lived CI token plus a never-expiring operator token.
+printf 'ops:%s\nci:%s:2026-06-01T00:00:00Z\n' "$OPS_TOKEN" "$CI_TOKEN" > /etc/ephemera/tokens
+```
+
+- Expiry is enforced **per request**: a matched-but-expired token returns `401`
+  (identical body to an unknown token; only the server-side log + the
+  `ephemera_auth_total{outcome="expired"}` metric distinguish it). No background
+  reaper — checking at request time is sufficient.
+- Tokens may themselves contain `:`; the expiry is recognized only when the
+  trailing colon-separated field parses as a timestamp, so an existing
+  colon-bearing token keeps working.
+- **Primary (CP) token selection:** the token injected into flock VMs is the
+  **first non-expired** client (not blindly the first), so letting a primary
+  token expire does not break in-VM `/townwall/post`. If every token has expired,
+  an empty token is propagated (the forwarder then calls unauthenticated) and a
+  warning is logged. Keep at least one never-expiring client for VM callbacks.
+
+### Access audit log (v0.4.1)
+
+Every API request is appended as one JSON line to `{workDir}/audit/access.jsonl`
+(on by default; set `EPHEMERA_AUDIT_DISABLE=true` to turn off). Each record is
+`{ts, client, method, path, status, duration_ms, remote_addr, bytes}` — it
+**never contains tokens, the `Authorization` header, request/response bodies, or
+the query string**. Unauthenticated requests record `client="-"`. `/metrics` is
+not audited (to avoid flooding the log with scrapes).
+
+The file is size-rotated (`EPHEMERA_AUDIT_MAX_MIB`, default 100) keeping
+`EPHEMERA_AUDIT_KEEP` (default 5) generations. Query recent entries:
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+    "http://127.0.0.1:3000/audit?limit=100&client=alice&status=200&method=GET"
+# → JSON array, newest first
+```
+
+`GET /audit` is itself authenticated (and audited). Filters `client`, `status`,
+`method` are optional; `limit` defaults to 100, capped at 1000.
 
 ---
 
