@@ -314,6 +314,7 @@ Firecracker, the Linux kernel, and the golden image are **downloaded and built a
 git clone https://github.com/steve-seungeui/ephemera.git
 cd ephemera
 go build -o ephemera-daemon ./cmd/goose-daemon/
+go build -o ephemera-ctl ./cmd/ephemera-ctl/   # operator CLI (v0.4.1)
 ```
 
 ### 2. Configure the default LLM
@@ -435,6 +436,8 @@ sudo bash e2e_test.sh
 | 79 | **Audit captures a 401** (v0.4.1) — a bogus-bearer `GET /vms` is recorded in `/audit` with `status=401`, `client=-`. |
 | 80 | **Per-token TTL** (v0.4.1) — `EPHEMERA_API_TOKENS_FILE` with a short-TTL `name:token:expires` token: accepted before expiry (200), rejected after (401) while the never-expiring primary still works; daemon logs `token expired` and `/metrics` shows `ephemera_auth_total{outcome="expired"}`. |
 | 81 | **SSE stream survives the audit wrapper** (v0.4.1) — `GET /flocks/{id}/wall` still streams (200) through the audit `statusRecorder`, proving `http.Flusher` is preserved. |
+| 82 | **`ephemera-ctl` drives the daemon** (v0.4.1) — `ephemera-ctl vm spawn` / `ls` / `rm` against the live daemon (spawned VM appears then disappears); a bogus `--token` exits non-zero. |
+| 83 | **`ephemera-ctl audit`** (v0.4.1) — `ephemera-ctl audit --method GET` returns the access-log entries for the calls just made. |
 
 **Example output (passing, flock steps 52–75):**
 
@@ -601,8 +604,42 @@ All settings are read from environment variables at startup.
 | `EPHEMERA_AUDIT_DISABLE` | `false` | Set to `true` to turn off the access audit log (v0.4.1). When enabled (the default), every API request is appended as one JSON line to `{workDir}/audit/access.jsonl` (method, path, client name, status, latency — never tokens or bodies) and is queryable via `GET /audit`. |
 | `EPHEMERA_AUDIT_MAX_MIB` | `100` | Active audit file size (MiB) that triggers rotation to `access.jsonl.1` (v0.4.1). |
 | `EPHEMERA_AUDIT_KEEP` | `5` | Number of rotated audit files to retain; older ones are deleted (v0.4.1). Disk ceiling ≈ `MAX_MIB × (KEEP + 1)`. |
+| `EPHEMERA_CTL_URL` | `http://127.0.0.1:3000` | Base URL the `ephemera-ctl` operator CLI dials (v0.4.1). Not derived from `EPHEMERA_API_ADDR` — that is a bind address and `0.0.0.0` is not dialable. |
+| `EPHEMERA_CTL_TOKEN` | *(unset)* | Bearer token for `ephemera-ctl`; falls back to `EPHEMERA_API_TOKEN`. A `--token` flag overrides both (v0.4.1). |
 
 `EPHEMERA_API_ADDR` takes precedence over `EPHEMERA_API_PORT`. Most variables are read at startup; use SIGHUP to reload tokens. With `EPHEMERA_API_TOKENS_FILE` SIGHUP also propagates the first non-expired client's token to running VMs via vsock (v0.3.4; first-non-expired since v0.4.1).
+
+---
+
+## Operator CLI (`ephemera-ctl`) (v0.4.1)
+
+`ephemera-ctl` is a dependency-free (stdlib) HTTP wrapper over the control-plane
+API for day-to-day operations. Build it with `go build -o ephemera-ctl ./cmd/ephemera-ctl/`.
+It reads `EPHEMERA_CTL_URL` (default `http://127.0.0.1:3000`) and a bearer token
+from `--token` / `EPHEMERA_CTL_TOKEN` / `EPHEMERA_API_TOKEN`. Add `--json` to any
+command for raw JSON (default output is a human-readable table).
+
+```bash
+export EPHEMERA_CTL_TOKEN=$OPS_TOKEN          # if the daemon has auth enabled
+
+ephemera-ctl vm spawn [--profile NAME]        # → vm_id, guest_ip, agent_url, agent_token
+ephemera-ctl vm ls [--stats]                  # vm rm|health|stop|stats <id>; vm task <id> "<prompt>"
+ephemera-ctl vm snapshot <id> [--stop-after] [--type full|diff]
+
+ephemera-ctl flock create --task "build X" --roles orchestrator,worker,reviewer
+ephemera-ctl flock ls | get <id> | rm <id>
+ephemera-ctl flock post <id> --agent worker-1 --body "msg"
+ephemera-ctl flock wall <id> [--history]      # stream Town Wall SSE, or print history
+ephemera-ctl flock restart <id> <agent_id>
+
+ephemera-ctl snapshot ls | restore <id> | rm <id>
+ephemera-ctl audit [--limit N] [--client C] [--status S] [--method M]
+ephemera-ctl metrics                          # raw Prometheus exposition
+```
+
+Non-2xx responses print the server's JSON error to stderr and exit non-zero, so
+the CLI composes in scripts. Global flags (`--json`, `--token`) may appear
+anywhere; command-specific flags precede positional arguments.
 
 ---
 

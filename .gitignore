@@ -4,6 +4,7 @@
 
 # 1. Compiled Go binaries
 /ephemera-daemon
+/ephemera-ctl
 /goose-daemon
 /cmd/goose-daemon/goose-daemon
 *.exe
