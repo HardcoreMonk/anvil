@@ -25,8 +25,10 @@ const (
 // previously-running VM back after a daemon restart (graceful or crash).
 // Persisted per-VM at workDir/vms/<vm_id>/state.json.
 //
-// Memory state is NOT preserved; cold-restart boots the VM from its rootfs clone
-// and re-attaches the same network identity and agent token.
+// Memory state is NOT preserved in state.json; cold-restart boots the VM from
+// its rootfs clone and re-attaches the same network identity and agent token.
+// (Opt-in EPHEMERA_AUTOSNAPSHOT additionally writes a separate memory snapshot
+// under auto/ for warm restore — see AutoSnapshotDir.)
 type VMState struct {
 	SchemaVersion int       `json:"schema_version"`
 	VMID          string    `json:"vm_id"`
@@ -50,6 +52,37 @@ type VMState struct {
 // vmStatePath returns the per-VM state.json location under workDir.
 func vmStatePath(workDir, vmID string) string {
 	return filepath.Join(workDir, "vms", vmID, "state.json")
+}
+
+// AutoSnapshotDir returns the per-VM memory auto-snapshot directory under
+// workDir — a subdirectory of the VM's state directory (v0.4.0). When
+// EPHEMERA_AUTOSNAPSHOT is enabled, the graceful-shutdown path writes a
+// memory+state snapshot here and RecoverVMs warm-restores from it.
+func AutoSnapshotDir(workDir, vmID string) string {
+	return filepath.Join(workDir, "vms", vmID, "auto")
+}
+
+// AutoSnapshotPaths returns the memory and state file paths inside a VM's
+// auto-snapshot directory.
+func AutoSnapshotPaths(workDir, vmID string) (memPath, statPath string) {
+	dir := AutoSnapshotDir(workDir, vmID)
+	return filepath.Join(dir, "memory.bin"), filepath.Join(dir, "state.bin")
+}
+
+// AutoSnapshotExists reports whether a usable memory auto-snapshot is present
+// for vmID (the memory file is the load-bearing artifact for a warm restore).
+func AutoSnapshotExists(workDir, vmID string) bool {
+	memPath, _ := AutoSnapshotPaths(workDir, vmID)
+	_, err := os.Stat(memPath)
+	return err == nil
+}
+
+// RemoveAutoSnapshot deletes a VM's auto-snapshot directory (best-effort).
+// Auto-snapshots are one-shot: consumed on a restore attempt and rewritten by
+// the next graceful shutdown, so a stale image is never reused. Call this
+// whenever a VM's state.json is dropped so an orphaned auto/ does not linger.
+func RemoveAutoSnapshot(workDir, vmID string) {
+	os.RemoveAll(AutoSnapshotDir(workDir, vmID))
 }
 
 // SaveVMState writes state atomically (tmp + rename). Not safe for concurrent

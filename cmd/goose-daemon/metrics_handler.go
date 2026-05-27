@@ -20,6 +20,8 @@ type daemonMetrics struct {
 	vmDestroyTotal    *metrics.CounterVec // outcome=ok|fail
 	snapshotCreate    *metrics.CounterVec // type=full|diff
 	snapshotRestore   *metrics.CounterVec // outcome=ok|fail
+	autoSnapshot      *metrics.CounterVec // outcome=ok|fail (graceful-shutdown memory snapshot)
+	autoRestore       *metrics.CounterVec // outcome=ok|fail (recovery warm-restore)
 	flockSpawn        *metrics.Counter
 	flockDestroy      *metrics.Counter
 	watchdogDead      *metrics.Counter
@@ -58,6 +60,16 @@ func newDaemonMetrics(cp *ControlPlane) *daemonMetrics {
 		snapshotRestore: r.NewCounterVec(
 			"ephemera_snapshot_restore_total",
 			"Total snapshot restore attempts by outcome.",
+			"outcome",
+		),
+		autoSnapshot: r.NewCounterVec(
+			"ephemera_auto_snapshot_total",
+			"Total graceful-shutdown memory auto-snapshot attempts by outcome.",
+			"outcome",
+		),
+		autoRestore: r.NewCounterVec(
+			"ephemera_auto_restore_total",
+			"Total recovery warm-restore attempts by outcome.",
 			"outcome",
 		),
 		flockSpawn:   r.NewCounter("ephemera_flock_spawn_total", "Total flock create attempts."),

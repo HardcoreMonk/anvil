@@ -43,6 +43,14 @@ var (
 	// below this margin (v0.4.0). Default 1024 MiB.
 	diskMinFreeMiB = envInt("EPHEMERA_DISK_MIN_FREE_MIB", 1024)
 
+	// enableAutoSnapshot opts into memory auto-snapshot (v0.4.0): on graceful
+	// shutdown the daemon snapshots each recoverable VM's memory+state into
+	// vms/<id>/auto/ so RecoverVMs can warm-restore (memory preserved) instead
+	// of cold-booting. One-shot per shutdown; falls back to cold boot on any
+	// restore failure or a SIGKILL (no graceful teardown runs). Default off
+	// (a 5-agent flock snapshot is ~10 GB).
+	enableAutoSnapshot = envBool("EPHEMERA_AUTOSNAPSHOT", false)
+
 	// apiAddr is the address the control plane API binds to.
 	// Default 127.0.0.1:3000 makes the API reachable only on localhost,
 	// requiring a reverse proxy for external access.

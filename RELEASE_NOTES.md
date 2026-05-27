@@ -1,6 +1,6 @@
-# v0.4.0 — Storage / Recovery Core (in progress)
+# v0.4.0 — Storage / Recovery Core
 
-**Ephemera** v0.4.0 hardens the storage and cold-restart paths. The headline is **COW spawn cold-restart**: a VM started with `EPHEMERA_DISK_MODE=cow` now survives a daemon restart with the same identity, just like a plain-rootfs VM — closing the v0.3.2 limitation where COW VMs were skipped on recovery. This entry grows as the remaining v0.4.0 storage items land. Additive: no wire format changed.
+**Ephemera** v0.4.0 hardens the storage and recovery paths. Two headlines: **COW spawn cold-restart** — a VM started with `EPHEMERA_DISK_MODE=cow` now survives a daemon restart with the same identity, closing the v0.3.2 limitation where COW VMs were skipped on recovery — and opt-in **memory auto-snapshot** (`EPHEMERA_AUTOSNAPSHOT=true`), which warm-restores a VM's in-flight memory across a graceful daemon bounce instead of cold-booting. It also adds true rootfs diff snapshots, a disk-space pre-flight, orphan-device reclaim, atomic spawn-failure rollback, and a Firecracker signal-forwarding fix. Additive: no wire format changed.
 
 ---
 
@@ -24,10 +24,27 @@
 - **Disk-space pre-flight** — clone/snapshot operations check free space against `EPHEMERA_DISK_MIN_FREE_MIB` (default 1024) and return `507 Insufficient Storage` instead of failing mid-write.
 - **Orphan COW inventory** — `RemoveOrphanCOWDevices` runs in the recovery preamble and reclaims dm-snapshot/loop devices + exception stores left by a crashed run whose `state.json` did not survive.
 
+### Memory auto-snapshot (item B)
+
+- New opt-in `EPHEMERA_AUTOSNAPSHOT=true`: on **graceful** shutdown, `DestroyAll` snapshots each recoverable VM's live memory+state into `vms/<id>/auto/{memory.bin,state.bin}` (via the extracted `snapshotVMMemory` helper — `PauseVM` + `CreateSnapshot`) *before* `StopVMM`. On the next start, `RecoverVMs` **warm-restores** from that snapshot with `vm.RestoreMachine` (memory preserved) instead of cold-booting, reusing the **same** `vm_id`/IP/TAP/MAC/token so the guest network state baked into the snapshot stays valid (no `ReconfigureGuestIP`).
+- The snapshot is **one-shot**: deleted after every restore attempt so a later bounce never rolls the VM back to a stale image; the next graceful shutdown writes a fresh one. It is **best-effort**: a failed snapshot, restore, or post-restore agent handshake logs and falls back to the existing cold boot (plain rootfs clone or COW store re-layer), so warm restore is strictly additive. A COW VM's dm-snapshot is set up once and shared by both paths, so a warm-restore failure falls through to cold boot without a `dmsetup` collision.
+- **Limits (documented):** warm restore requires a graceful shutdown — a SIGKILL/crash runs no `DestroyAll`, so the VM cold-boots as before. Auto-snapshot has no disk pre-flight (best-effort); a full memory image is ~VM RAM per recoverable VM (a 5-agent flock ≈ 10 GB), hence opt-in. New metrics `ephemera_auto_snapshot_total{outcome}` and `ephemera_auto_restore_total{outcome}`.
+
+### Partial spawn / recovery failure rollback (item D)
+
+- **Spawn rollback** — `spawnVMInternal` now unwinds partial allocations through a single deferred LIFO cleanup stack, armed as each resource (network, then disk) is acquired, replacing four duplicated inline rollback blocks. It disarms (`committed = true`) the instant the VM is registered in `cp.vms`, after which `destroyVM` owns cleanup — so a future early-return added mid-spawn can no longer leak a TAP/IP or disk clone.
+- **Recovery artifacts-missing** — when a VM's `state.json` is present but its rootfs has vanished, `RecoverVMs` now releases the stale host TAP the prior run left, drops the state + any orphaned `auto/` snapshot, marks the flock agent `dead`, and surfaces the VM in the `failed` list — instead of silently dropping it. `destroyVM` also clears `auto/` so an explicit delete leaves no orphaned memory image.
+
+### Firecracker signal-forwarding fix
+
+- `internal/vm/machine.go`'s `forwardSignals` now omits `SIGINT` and `SIGTERM` (in addition to the v0.3.4 `SIGHUP` omission), forwarding only `SIGQUIT`/`SIGABRT` to Firecracker children. The daemon already traps `SIGINT`/`SIGTERM` and stops each child explicitly via `StopVMM`, so forwarding was redundant — and it would race the item B auto-snapshot, killing a child mid-`CreateSnapshot`. `SIGQUIT`/`SIGABRT` stay forwarded because the daemon does not trap them (forwarding then prevents orphaned children on an abnormal exit).
+
 ### Tests
 
 - e2e steps **40–46** exercise COW graceful cold-restart (store preserved, dm device re-created, same `vm_id`, `/health` 200), a SIGKILL crash that reclaims an orphaned COW device while cold-restarting the survivor, and restoration of plain disk mode.
 - e2e step **26b** asserts a diff snapshot's `rootfs.diff` is a sparse delta far smaller than the full rootfs; diff-restore steps (28–29) exercise the rootfs merge end-to-end. New `internal/storage` unit tests cover the `WriteRootfsDiff`/`MergeRootfsDiff` round-trip (byte-exact, sparse, size-mismatch guard).
+- e2e step **76** exercises memory auto-snapshot: a graceful bounce under `EPHEMERA_AUTOSNAPSHOT=true` writes `auto/{memory,state}.bin`, the next start warm-restores (same `vm_id`, `/health` 200, `vm warm-restored` log), and the one-shot snapshot is deleted — also gating the signal fix (a forwarded SIGTERM would kill Firecracker mid-snapshot). e2e step **77** SIGKILLs the daemon, deletes a flock member's rootfs, and asserts the disk-missing recovery drops state, releases the stale TAP, marks the agent `dead`, and surfaces it via `vms not cold-restarted`.
+- New unit tests: `AutoSnapshotDir/Paths/Exists` + `RemoveAutoSnapshot` (storage), `Manager.Release` idempotent on a never-allocated TAP (network), and the `EPHEMERA_AUTOSNAPSHOT` `envBool` mapping (daemon).
 
 ---
 
