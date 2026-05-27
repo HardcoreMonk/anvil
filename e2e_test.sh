@@ -30,6 +30,17 @@ if find cmd internal -name '*.go' -newer ./ephemera-daemon 2>/dev/null | grep -q
     echo "    go build -o ephemera-daemon ./cmd/goose-daemon/"
     exit 1
 fi
+# ephemera-ctl is exercised by steps 82-83 (v0.4.1 PR-B); it also runs pre-built.
+if [ ! -x ./ephemera-ctl ]; then
+    echo "✗ ./ephemera-ctl not found — build it first:"
+    echo "    go build -o ephemera-ctl ./cmd/ephemera-ctl/"
+    exit 1
+fi
+if find cmd/ephemera-ctl -name '*.go' -newer ./ephemera-ctl 2>/dev/null | grep -q .; then
+    echo "✗ ./ephemera-ctl is older than its Go source — rebuild before running e2e:"
+    echo "    go build -o ephemera-ctl ./cmd/ephemera-ctl/"
+    exit 1
+fi
 
 # ── Pre-flight: clean up any leftover files from previous test runs ──
 # First release stale COW kernel objects from an interrupted prior run: a leftover
@@ -1855,6 +1866,40 @@ if [ -n "$SSE_FLOCK_ID" ]; then
 else
     fail "could not spawn SSE guard flock (resp: $SSE_FLOCK)"
 fi
+
+# ════════════════════════════════════════════════════════════════
+# v0.4.1 PR-B: ephemera-ctl operator CLI, driven against the live (auth-on)
+# daemon still running from steps 80-81 (in-memory ops token = $OPS_TOKEN).
+# ════════════════════════════════════════════════════════════════
+
+# ── 82. ephemera-ctl drives the daemon (spawn → ls → rm) ─────────
+step "82. ephemera-ctl spawn/ls/rm against the live daemon"
+export EPHEMERA_CTL_URL="$API"
+export EPHEMERA_CTL_TOKEN="$OPS_TOKEN"
+CTL_VM=$(./ephemera-ctl vm spawn --json 2>/dev/null | jq -r '.vm_id // empty' || true)
+[ -n "$CTL_VM" ] && ok "ctl vm spawn → $CTL_VM ✓" || fail "ctl vm spawn produced no vm_id"
+./ephemera-ctl vm ls --json 2>/dev/null | jq -e --arg id "$CTL_VM" 'any(.[]; .vm_id==$id)' >/dev/null 2>&1 \
+    && ok "ctl vm ls shows $CTL_VM ✓" || fail "ctl vm ls did not list $CTL_VM"
+if ./ephemera-ctl vm rm "$CTL_VM" >/dev/null 2>&1; then
+    ok "ctl vm rm $CTL_VM ✓"
+else
+    fail "ctl vm rm failed"
+fi
+./ephemera-ctl vm ls --json 2>/dev/null | jq -e --arg id "$CTL_VM" 'all(.[]; .vm_id!=$id)' >/dev/null 2>&1 \
+    && ok "ctl vm rm removed $CTL_VM from ls ✓" || fail "VM still listed after ctl rm"
+# A bogus token must make the CLI exit non-zero (server 401 → exit 1).
+if EPHEMERA_CTL_TOKEN="wrong-token" ./ephemera-ctl vm ls >/dev/null 2>&1; then
+    fail "ctl with a bogus token should exit non-zero"
+else
+    ok "ctl bogus token → non-zero exit ✓"
+fi
+
+# ── 83. ephemera-ctl audit reads the access log ──────────────────
+step "83. ephemera-ctl audit reads the access log"
+./ephemera-ctl audit --limit 30 --method GET --json 2>/dev/null | jq -e 'any(.[]; .path=="/vms" and .method=="GET")' >/dev/null 2>&1 \
+    && ok "ctl audit shows recent GET /vms ✓" || fail "ctl audit did not return the GET /vms entries"
+unset EPHEMERA_CTL_URL EPHEMERA_CTL_TOKEN
+
 rm -f "$TOKENS_FILE" || true
 
 # ── Shut down the last test daemon ───────────────────────────────
