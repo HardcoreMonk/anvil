@@ -16,15 +16,26 @@ import (
 )
 
 // forwardSignals is the explicit signal list the firecracker-go-sdk forwards
-// to each Firecracker child process. SIGHUP is DELIBERATELY omitted: the
-// daemon uses SIGHUP for its own token-reload + vsock fan-out flow, and
-// Firecracker has no SIGHUP handler — forwarding it would kill every running
-// VM mid-rotation. Leaving ForwardSignals at the SDK default would silently
-// re-introduce the bug.
+// to each Firecracker child process. It is deliberately narrower than the SDK
+// default ([SIGINT, SIGQUIT, SIGTERM, SIGHUP, SIGABRT]):
+//
+//   - SIGHUP is omitted: the daemon uses SIGHUP for its own token-reload +
+//     vsock fan-out flow, and Firecracker has no SIGHUP handler — forwarding it
+//     would kill every running VM mid-rotation.
+//   - SIGINT and SIGTERM are omitted: the daemon traps them itself (main.go)
+//     and runs a graceful teardown that explicitly StopVMM's each child (which
+//     sends its own SIGTERM), so forwarding is redundant. It is also harmful —
+//     v0.4.0 auto-snapshot runs a Pause+CreateSnapshot on each VM inside that
+//     teardown window (DestroyAll), and a forwarded SIGTERM would race it and
+//     kill the child mid-snapshot.
+//
+// SIGQUIT and SIGABRT stay forwarded precisely because the daemon does NOT trap
+// them: on such an abnormal exit the deferred teardown never runs, so forwarding
+// is what prevents orphaned Firecracker children. Leaving ForwardSignals at the
+// SDK default would silently re-introduce the SIGHUP/SIGTERM bugs; never add
+// SIGHUP, SIGINT, or SIGTERM back while the daemon owns reload + graceful exit.
 var forwardSignals = []os.Signal{
-	os.Interrupt,
 	syscall.SIGQUIT,
-	syscall.SIGTERM,
 	syscall.SIGABRT,
 }
 

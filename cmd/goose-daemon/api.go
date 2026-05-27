@@ -213,10 +213,18 @@ func NewControlPlane(
 		}
 	}
 
+	// Register all Prometheus collectors BEFORE RecoverVMs: warm-restore (v0.4.0)
+	// records ephemera_auto_restore_total during recovery, so cp.metrics must be
+	// live by then or that path nil-derefs. GaugeFunc closures read
+	// cp.vms/snapshots/flockMgr (already allocated above) only at scrape time, so
+	// registering here is safe. Do not move this back below RecoverVMs.
+	cp.metrics = newDaemonMetrics(cp)
+
 	// Cold-restart any VMs that were running when the previous daemon stopped.
-	// Memory is not preserved; the same rootfs clone is booted with the same
-	// network identity (TAP/IP/MAC) and agent token, so external callers and
-	// flock associations stay stable across the restart.
+	// Booted from the same rootfs clone with the same network identity (TAP/IP/
+	// MAC) and agent token; memory is preserved only when EPHEMERA_AUTOSNAPSHOT
+	// warm-restore succeeds (else a fresh boot). External callers and flock
+	// associations stay stable across the restart either way.
 	if recovered, failed, err := cp.RecoverVMs(); err != nil {
 		slog.Warn("scan vm state for recovery failed", "err", err)
 	} else {
@@ -227,10 +235,6 @@ func NewControlPlane(
 			slog.Warn("vms not cold-restarted", "count", len(failed), "failed", failed)
 		}
 	}
-
-	// Register all Prometheus collectors. Done after vms/snapshots/flockMgr are
-	// allocated so GaugeFunc closures observe non-nil source fields.
-	cp.metrics = newDaemonMetrics(cp)
 
 	cp.watchdog = orchestrator.NewWatchdog(cp.flockMgr, cp.locateFlockAgent, cp.listVMRefs, agentPort)
 	cp.watchdog.Configure(
@@ -669,10 +673,27 @@ func (cp *ControlPlane) spawnVMInternal(opts spawnVMOptions) (*VMInfo, string, e
 		}
 	}
 
+	// Atomic spawn rollback: each successfully-allocated resource pushes its
+	// cleanup onto rollback; the deferred closure unwinds them LIFO unless the
+	// VM is committed (registered in cp.vms, after which destroyVM owns cleanup).
+	// This makes a mid-spawn failure leak-free and stops a future early-return
+	// added between allocation and commit from silently leaking a resource.
+	committed := false
+	var rollback []func()
+	defer func() {
+		if committed {
+			return
+		}
+		for i := len(rollback) - 1; i >= 0; i-- {
+			rollback[i]()
+		}
+	}()
+
 	tapDevice, guestIP, macAddr, err := cp.netManager.Allocate()
 	if err != nil {
 		return nil, "", fmt.Errorf("network allocation: %w", err)
 	}
+	rollback = append(rollback, func() { cp.netManager.Release(tapDevice, guestIP) })
 
 	// Disk provisioning: full clone (default) vs dm-snapshot COW (env-gated).
 	// COW mode trades per-VM ~700 MiB of writes for a sparse exception store
@@ -685,15 +706,15 @@ func (cp *ControlPlane) spawnVMInternal(opts spawnVMOptions) (*VMInfo, string, e
 		diskPath, cowStore, dmInfo, err = cp.provisioner.CloneDiskCOW(vmID)
 		_ = cowStore // tracked via dmInfo.ExceptionStore for cleanup
 		if err != nil {
-			cp.netManager.Release(tapDevice, guestIP)
 			return nil, "", fmt.Errorf("disk provisioning (cow): %w", err)
 		}
+		rollback = append(rollback, func() { storage.TeardownDMSnapshot(dmInfo) })
 	} else {
 		diskPath, err = cp.provisioner.CloneDisk(vmID)
 		if err != nil {
-			cp.netManager.Release(tapDevice, guestIP)
 			return nil, "", fmt.Errorf("disk provisioning: %w", err)
 		}
+		rollback = append(rollback, func() { cp.provisioner.CleanupDisk(vmID) })
 	}
 
 	if err := cp.provisioner.PrepareVM(vmID, storage.VMPrepareOptions{
@@ -705,12 +726,6 @@ func (cp *ControlPlane) spawnVMInternal(opts spawnVMOptions) (*VMInfo, string, e
 		SystemPrompt:      opts.SystemPrompt,
 		ControlPlaneToken: opts.ControlPlaneToken,
 	}); err != nil {
-		if dmInfo != nil {
-			storage.TeardownDMSnapshot(dmInfo)
-		} else {
-			cp.provisioner.CleanupDisk(vmID)
-		}
-		cp.netManager.Release(tapDevice, guestIP)
 		return nil, "", fmt.Errorf("VM preparation: %w", err)
 	}
 
@@ -733,12 +748,6 @@ func (cp *ControlPlane) spawnVMInternal(opts spawnVMOptions) (*VMInfo, string, e
 		MemSizeMib:     opts.MemSizeMib,
 	})
 	if err != nil {
-		if dmInfo != nil {
-			storage.TeardownDMSnapshot(dmInfo)
-		} else {
-			cp.provisioner.CleanupDisk(vmID)
-		}
-		cp.netManager.Release(tapDevice, guestIP)
 		return nil, "", fmt.Errorf("VM start: %w", err)
 	}
 
@@ -770,6 +779,10 @@ func (cp *ControlPlane) spawnVMInternal(opts spawnVMOptions) (*VMInfo, string, e
 		spawnedAt:  spawnedAt,
 	}
 	cp.mu.Unlock()
+	// The VM is now registered in cp.vms and owned by the daemon; from here
+	// cleanup is destroyVM's job (e.g. the waitForAgent failure path below), so
+	// disarm the spawn-rollback stack to avoid a double free.
+	committed = true
 
 	// Persist VM state for cold-restart recovery after daemon restart. Both plain
 	// and COW VMs are recovered: DiskMode tells RecoverVMs whether to boot the full
@@ -943,6 +956,9 @@ func (cp *ControlPlane) destroyVM(vmID string) {
 	if err := storage.DeleteVMState(cp.workDir, vmID); err != nil {
 		slog.Warn("delete vm state failed", "vm_id", vmID, "err", err)
 	}
+	// Clear any auto-snapshot so an explicit destroy leaves no orphaned memory
+	// image behind (DeleteVMState only removes an empty state dir).
+	storage.RemoveAutoSnapshot(cp.workDir, vmID)
 	// StopVMM sends SIGTERM and waits for Firecracker to exit.
 	v.machine.StopVMM()
 	os.Remove(v.socketPath)
@@ -986,6 +1002,28 @@ func (cp *ControlPlane) DestroyAll() {
 	}
 	cp.mu.RUnlock()
 	for _, v := range snapshot {
+		// Memory auto-snapshot (v0.4.0, opt-in). This MUST run before StopVMM — a
+		// stopped VM cannot be snapshotted. Only recoverable VMs (those with a
+		// state.json: plain or COW spawn, never restored VMs) are eligible — the
+		// same predicate the COW keep-store branch below uses. A failure is
+		// non-fatal: it is logged, the partial snapshot removed, and the VM falls
+		// through to the normal stop + cold-restart preservation below, so the
+		// next start cold-boots it. Auto-snapshot is strictly additive.
+		if enableAutoSnapshot && storage.VMStateExists(cp.workDir, v.VMID) {
+			autoDir := storage.AutoSnapshotDir(cp.workDir, v.VMID)
+			memPath, statPath := storage.AutoSnapshotPaths(cp.workDir, v.VMID)
+			if mkErr := os.MkdirAll(autoDir, 0755); mkErr != nil {
+				slog.Warn("auto-snapshot dir failed, will cold-boot on next start", "vm_id", v.VMID, "err", mkErr)
+				cp.metrics.autoSnapshot.WithLabelValues("fail").Inc()
+			} else if snapErr := cp.snapshotVMMemory(v, memPath, statPath); snapErr != nil {
+				slog.Warn("auto-snapshot failed, will cold-boot on next start", "vm_id", v.VMID, "err", snapErr)
+				cp.metrics.autoSnapshot.WithLabelValues("fail").Inc()
+				storage.RemoveAutoSnapshot(cp.workDir, v.VMID)
+			} else {
+				slog.Warn("auto-snapshot written", "vm_id", v.VMID)
+				cp.metrics.autoSnapshot.WithLabelValues("ok").Inc()
+			}
+		}
 		v.machine.StopVMM()
 		os.Remove(v.socketPath)
 		os.Remove(fmt.Sprintf("/tmp/fc-%s-log.fifo", v.VMID))
@@ -1148,6 +1186,21 @@ func (cp *ControlPlane) latestFullSnapshot(vmID string) *storage.SnapshotMetadat
 	return latest
 }
 
+// snapshotVMMemory pauses the VM and writes a memory+state snapshot to
+// memPath/statPath. It does NOT resume or destroy the VM — the caller decides
+// (createSnapshot resumes or destroys per its request; DestroyAll proceeds to
+// StopVMM). With no opts the snapshot is FULL (the SDK default); createSnapshot
+// passes a Diff opt for incremental snapshots. On success the VM is left paused.
+func (cp *ControlPlane) snapshotVMMemory(v *runningVM, memPath, statPath string, opts ...firecracker.CreateSnapshotOpt) error {
+	if err := v.machine.PauseVM(context.Background()); err != nil {
+		return fmt.Errorf("pause vm: %w", err)
+	}
+	if err := v.machine.CreateSnapshot(context.Background(), memPath, statPath, opts...); err != nil {
+		return fmt.Errorf("create snapshot: %w", err)
+	}
+	return nil
+}
+
 // POST /vms/{vm_id}/snapshot
 func (cp *ControlPlane) createSnapshot(w http.ResponseWriter, r *http.Request, vmID string) {
 	var req SnapshotRequest
@@ -1206,12 +1259,6 @@ func (cp *ControlPlane) createSnapshot(w http.ResponseWriter, r *http.Request, v
 	statPath := filepath.Join(snapDir, "state.bin")
 
 	slog.Warn("snapshot: pausing vm", "snapshot_id", snapID, "type", snapType, "vm_id", vmID)
-	if err := v.machine.PauseVM(context.Background()); err != nil {
-		os.RemoveAll(snapDir)
-		http.Error(w, fmt.Sprintf(`{"error":"failed to pause VM: %v"}`, err), http.StatusInternalServerError)
-		return
-	}
-
 	// Build SDK opts: Diff snapshots pass SnapshotType="Diff" to Firecracker.
 	var snapOpts []firecracker.CreateSnapshotOpt
 	if snapType == "diff" {
@@ -1223,10 +1270,12 @@ func (cp *ControlPlane) createSnapshot(w http.ResponseWriter, r *http.Request, v
 		slog.Warn("snapshot: creating full", "snapshot_id", snapID)
 	}
 
-	if err := v.machine.CreateSnapshot(context.Background(), memPath, statPath, snapOpts...); err != nil {
+	if err := cp.snapshotVMMemory(v, memPath, statPath, snapOpts...); err != nil {
+		// Best-effort resume: a no-op if the pause itself failed, or brings the
+		// VM back if the snapshot failed after pausing.
 		v.machine.ResumeVM(context.Background())
 		os.RemoveAll(snapDir)
-		http.Error(w, fmt.Sprintf(`{"error":"failed to create snapshot: %v"}`, err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf(`{"error":"snapshot failed: %v"}`, err), http.StatusInternalServerError)
 		return
 	}
 
