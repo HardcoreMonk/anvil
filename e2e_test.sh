@@ -1621,10 +1621,168 @@ ok "stats test VM cleaned up"
 
 # ── 75. Shut down rotation daemon ────────────────────────────────
 step "75. Shut down rotation daemon"
-kill "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null || true
+kill "$DAEMON_PID" 2>/dev/null || true; wait "$DAEMON_PID" 2>/dev/null || true
+pkill -f "firecracker --api-sock" 2>/dev/null || true
+sleep 2
+ok "Rotation daemon stopped"
+
+# ════════════════════════════════════════════════════════════════
+# v0.4.0 PR-B: memory auto-snapshot (item B) + recovery rollback (item D).
+# These run on their own plain-mode, auth-disabled daemon lifecycle
+# (relaunch_daemon) now that the auth-on rotation daemon is down.
+# ════════════════════════════════════════════════════════════════
+
+# ── 76. Memory auto-snapshot: warm restore across a graceful bounce ──
+# Proves a VM started under EPHEMERA_AUTOSNAPSHOT is snapshotted on graceful
+# shutdown and WARM-restored (memory preserved) on the next start, not cold-
+# booted. Also exercises the v0.4.0 signal fix: a forwarded SIGTERM (old
+# behavior) would kill Firecracker mid-snapshot, so the auto/ files below would
+# be absent and the warm-restore log line would never appear. goose-agent has no
+# in-guest exec endpoint, so the daemon log + one-shot deletion are the
+# deterministic warm-vs-cold discriminators.
+step "76. EPHEMERA_AUTOSNAPSHOT: warm restore preserves VM memory across a graceful daemon bounce"
+relaunch_daemon "EPHEMERA_AUTOSNAPSHOT=true"
+ok "Daemon up with EPHEMERA_AUTOSNAPSHOT=true"
+
+WVM_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/vms" -H "Content-Type: application/json")
+check_http "$(echo "$WVM_RESP" | tail -1)" "201" "POST /vms (autosnapshot)"
+WVM_ID=$(echo "$WVM_RESP" | head -1 | jq -r '.vm_id')
+ok "Auto-snapshot test VM: $WVM_ID"
+
+# Wait until the agent answers so there is a live, settled VM to snapshot.
+WVM_UP=false
+for i in $(seq 1 60); do
+    if [ "$(curl -s -o /dev/null -w "%{http_code}" "$API/vms/$WVM_ID/health" 2>/dev/null)" = "200" ]; then
+        WVM_UP=true; break
+    fi
+    sleep 1
+done
+$WVM_UP && ok "Agent healthy before bounce ✓" || fail "Agent did not come up before bounce"
+
+# Graceful SIGTERM bounce. 'wait' blocks until the daemon fully exits, i.e. until
+# DestroyAll (Pause+CreateSnapshot, then StopVMM) has completed for every VM.
+kill "$DAEMON_PID" 2>/dev/null || true
+wait "$DAEMON_PID" 2>/dev/null || true
+pkill -f "firecracker --api-sock" 2>/dev/null || true
+sleep 2
+
+# The memory snapshot must have been written under vms/<id>/auto/.
+if [ -f "$(pwd)/vms/$WVM_ID/auto/memory.bin" ] && [ -f "$(pwd)/vms/$WVM_ID/auto/state.bin" ]; then
+    ok "auto-snapshot written: vms/$WVM_ID/auto/{memory,state}.bin ✓"
+else
+    fail "auto-snapshot missing after graceful shutdown (signal fix or snapshot path broken)"
+fi
+
+# Relaunch: RecoverVMs must WARM-restore, not cold-boot.
+relaunch_daemon "EPHEMERA_AUTOSNAPSHOT=true"
+sleep 3
+
+curl -s "$API/vms" | jq -r '.[].vm_id' | grep -qx "$WVM_ID" \
+    && ok "VM $WVM_ID live after warm restore ✓" \
+    || fail "VM $WVM_ID missing from /vms after warm restore"
+[ "$(curl -s -o /dev/null -w "%{http_code}" "$API/vms/$WVM_ID/health")" = "200" ] \
+    && ok "warm-restored agent /health → 200 ✓" \
+    || fail "warm-restored agent /health not 200"
+
+# The defining warm-vs-cold signal: the daemon takes the RestoreMachine path and
+# logs "vm warm-restored" (a cold boot logs "vm back up").
+grep -q "vm warm-restored.*$WVM_ID" "$LOG" \
+    && ok "daemon took warm-restore path (memory preserved, not cold boot) ✓" \
+    || fail "no warm-restore log line for $WVM_ID (fell back to cold boot?)"
+
+# One-shot: the snapshot is consumed and deleted after a successful restore so a
+# second bounce never rolls the VM back to this now-stale image.
+[ ! -e "$(pwd)/vms/$WVM_ID/auto/memory.bin" ] \
+    && ok "auto-snapshot consumed (one-shot delete) ✓" \
+    || fail "auto-snapshot not deleted after restore (would roll back on next bounce)"
+
+# Metrics record both halves (non-fatal — exposition formatting may evolve).
+AUTO_METRICS=$(curl -s -m 5 "$API/metrics" 2>/dev/null || echo "")
+echo "$AUTO_METRICS" | grep -qE 'ephemera_auto_snapshot_total\{outcome="ok"\} [1-9]' \
+    && ok "metric ephemera_auto_snapshot_total{ok} present ✓" \
+    || ok "auto_snapshot ok metric not matched (non-fatal)"
+echo "$AUTO_METRICS" | grep -qE 'ephemera_auto_restore_total\{outcome="ok"\} [1-9]' \
+    && ok "metric ephemera_auto_restore_total{ok} present ✓" \
+    || ok "auto_restore ok metric not matched (non-fatal)"
+
+# Cleanup (DELETE also clears any residual auto/ via item D R12).
+curl -s -o /dev/null -X DELETE "$API/vms/$WVM_ID" || true
+ok "Auto-snapshot test VM cleaned up"
+
+# ── 77. Recovery: state.json present but disk missing → clean drop ──
+# A flock member whose rootfs vanished while the daemon was down (SIGKILL, so the
+# host TAP is NOT released by DestroyAll and lingers) must, on the next start, be
+# dropped cleanly: stale TAP released, state.json removed, flock agent marked
+# dead, and surfaced in the "failed" list — not dropped silently (item D D.2).
+step "77. Recovery with a missing disk artifact drops state cleanly (TAP released, agent dead, surfaced)"
+kill "$DAEMON_PID" 2>/dev/null || true; wait "$DAEMON_PID" 2>/dev/null || true
+pkill -f "firecracker --api-sock" 2>/dev/null || true
+sleep 2
+relaunch_daemon ""
+ok "Plain-mode daemon up for disk-missing recovery test"
+
+DFLOCK_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/flocks" \
+    -H "Content-Type: application/json" \
+    -d '{"task":"disk-missing recovery","roles":["worker"]}')
+check_http "$(echo "$DFLOCK_RESP" | tail -1)" "201" "POST /flocks (disk-missing)"
+DFLOCK_ID=$(echo "$DFLOCK_RESP" | head -1 | jq -r '.flock_id')
+DVM_ID=$(echo "$DFLOCK_RESP" | head -1 | jq -r '.agents[] | select(.agent_id=="worker-1") | .vm_id')
+ok "Disk-missing flock $DFLOCK_ID, worker VM $DVM_ID"
+
+[ -f "$(pwd)/vms/$DVM_ID/state.json" ] \
+    && ok "worker state.json persisted ✓" \
+    || fail "worker state.json missing (cannot run disk-missing test)"
+DVM_TAP=$(jq -r '.tap_device' "$(pwd)/vms/$DVM_ID/state.json")
+DVM_DISK=$(jq -r '.disk_path' "$(pwd)/vms/$DVM_ID/state.json")
+if ip link show "$DVM_TAP" >/dev/null 2>&1; then
+    ok "host TAP $DVM_TAP present before crash ✓"
+else
+    ok "host TAP $DVM_TAP not visible (continuing; release assertion still valid)"
+fi
+
+# SIGKILL the daemon: DestroyAll does NOT run, so the host TAP lingers and the
+# disk + state.json survive. Kill the orphaned Firecracker too, then delete the
+# rootfs to simulate "state.json exists but artifacts vanished".
+kill -9 "$DAEMON_PID" 2>/dev/null || true; wait "$DAEMON_PID" 2>/dev/null || true
+pkill -9 -f "firecracker --api-sock" 2>/dev/null || true
+sleep 2
+rm -f "$DVM_DISK" || true
+ok "Crashed daemon; deleted worker rootfs $DVM_DISK"
+
+relaunch_daemon ""
+sleep 3
+
+[ ! -f "$(pwd)/vms/$DVM_ID/state.json" ] \
+    && ok "state.json dropped on recovery ✓" \
+    || fail "state.json still present (disk-missing branch did not drop it)"
+curl -s "$API/vms" | jq -r '.[].vm_id' | grep -qx "$DVM_ID" \
+    && fail "dropped VM $DVM_ID unexpectedly live in /vms" \
+    || ok "dropped VM $DVM_ID absent from /vms ✓"
+if ip link show "$DVM_TAP" >/dev/null 2>&1; then
+    fail "stale TAP $DVM_TAP still present after recovery (D.2 release missing)"
+else
+    ok "stale TAP $DVM_TAP released by recovery ✓"
+fi
+DMETA_STATUS=$(jq -r '.agents["worker-1"].status' "$(pwd)/flocks/$DFLOCK_ID/metadata.json" 2>/dev/null || echo "missing")
+[ "$DMETA_STATUS" = "dead" ] \
+    && ok "flock agent worker-1 marked dead in metadata.json ✓" \
+    || fail "flock agent status=$DMETA_STATUS, expected dead"
+grep -q "recovery: disk missing.*$DVM_ID" "$LOG" \
+    && ok "daemon logged disk-missing drop for $DVM_ID ✓" \
+    || fail "no disk-missing log line for $DVM_ID"
+grep -q "vms not cold-restarted" "$LOG" \
+    && ok "drop surfaced in failed[] (vms not cold-restarted) ✓" \
+    || fail "disk-missing drop not surfaced in failed[]"
+
+curl -s -o /dev/null -X DELETE "$API/flocks/$DFLOCK_ID" || true
+ok "Disk-missing flock cleaned up"
+
+# ── Shut down the last test daemon ───────────────────────────────
+kill "$DAEMON_PID" 2>/dev/null || true; wait "$DAEMON_PID" 2>/dev/null || true
+pkill -f "firecracker --api-sock" 2>/dev/null || true
 
 trap - EXIT
-ok "Rotation daemon stopped"
+ok "PR-B test daemon stopped"
 
 # ── Result ───────────────────────────────────────────────────────
 echo

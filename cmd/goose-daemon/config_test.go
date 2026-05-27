@@ -89,3 +89,39 @@ func TestResolveAPIAddr_FromPort(t *testing.T) {
 		t.Errorf("expected 127.0.0.1:9090, got %q", got)
 	}
 }
+
+// TestEnvBool_Autosnapshot documents the EPHEMERA_AUTOSNAPSHOT (v0.4.0) mapping.
+// It exercises envBool directly rather than the enableAutoSnapshot package var,
+// which is captured once at init and would not reflect env changes made here.
+func TestEnvBool_Autosnapshot(t *testing.T) {
+	const key = "EPHEMERA_AUTOSNAPSHOT"
+	cases := []struct {
+		name string
+		val  string
+		set  bool
+		want bool
+	}{
+		{name: "unset defaults off", set: false, want: false},
+		{name: "empty defaults off", val: "", set: true, want: false},
+		{name: "true", val: "true", set: true, want: true},
+		{name: "1", val: "1", set: true, want: true},
+		{name: "yes", val: "yes", set: true, want: true},
+		{name: "on", val: "on", set: true, want: true},
+		{name: "false", val: "false", set: true, want: false},
+		{name: "off", val: "off", set: true, want: false},
+		{name: "garbage defaults off", val: "garbage", set: true, want: false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if c.set {
+				os.Setenv(key, c.val)
+				defer os.Unsetenv(key)
+			} else {
+				os.Unsetenv(key)
+			}
+			if got := envBool(key, false); got != c.want {
+				t.Errorf("envBool(%q=%q) = %v, want %v", key, c.val, got, c.want)
+			}
+		})
+	}
+}
