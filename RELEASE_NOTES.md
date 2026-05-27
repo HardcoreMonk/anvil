@@ -1,6 +1,6 @@
-# v0.4.1 — Operational Interfaces (in progress)
+# v0.4.1 — Operational Interfaces
 
-**Ephemera** v0.4.1 makes the daemon operable as a service: authenticated **client identity** threaded into request handling, a per-request **access audit log** (`GET /audit`), and **per-token TTL/rotation**. An operator CLI (`ephemera-ctl`) follows in a second PR. Additive — no wire format changed; the only behavior changes are that an expired token is now rejected (401) and the in-VM CP token is the first non-expired client.
+**Ephemera** v0.4.1 makes the daemon operable as a service: authenticated **client identity** threaded into request handling, a per-request **access audit log** (`GET /audit`), **per-token TTL/rotation**, and a dependency-free **operator CLI** (`ephemera-ctl`). Additive — no wire format changed; the only behavior changes are that an expired token is now rejected (401) and the in-VM CP token is the first non-expired client.
 
 ---
 
@@ -24,10 +24,15 @@
 - The in-VM control-plane token is now the **first non-expired** client (was blindly `clients[0]`), so an expired primary no longer breaks in-VM `/townwall/post`; if all tokens have expired, an empty (unauthenticated) token is propagated with a warning.
 - New metric `ephemera_auth_total{outcome=ok|denied|expired}`; startup/SIGHUP banners log expired / expiring-24h counts.
 
+### Operator CLI — `ephemera-ctl` (F4)
+
+- New `cmd/ephemera-ctl`, a stdlib-only HTTP wrapper over the control-plane API: `vm spawn/ls/rm/health/stop/task/stats/snapshot`, `flock create/ls/get/rm/post/wall/restart`, `snapshot ls/restore/rm`, `audit`, and `metrics`. Built with `go build -o ephemera-ctl ./cmd/ephemera-ctl/`.
+- Reads `EPHEMERA_CTL_URL` (default `http://127.0.0.1:3000`, never derived from the `0.0.0.0` bind addr) and a bearer from `--token` / `EPHEMERA_CTL_TOKEN` / `EPHEMERA_API_TOKEN`. Human-readable tables by default; `--json` for raw output. Non-2xx → server error to stderr + non-zero exit, so it composes in scripts.
+
 ### Tests
 
-- Unit: token TTL parsing (2/3-field, colon-in-token ±expiry, RFC3339-with-internal-colons), `parseExpiry`, `firstActiveClient`, `countTokenExpiry`; `authMiddleware` outcomes + metric + no-early-exit; audit rotation / tail-filters / no-secret-leak; `statusRecorder` Flusher forwarding; client-identity context round-trip.
-- e2e steps 78–81: audit records an authenticated request (no token leak), audit captures a 401 (`client=-`), per-token TTL expiry → 401 while the primary still works, and the SSE Town Wall stream still works through the audit wrapper.
+- Unit: token TTL parsing (2/3-field, colon-in-token ±expiry, RFC3339-with-internal-colons), `parseExpiry`, `firstActiveClient`, `countTokenExpiry`; `authMiddleware` outcomes + metric + no-early-exit; audit rotation / tail-filters / no-secret-leak; `statusRecorder` Flusher forwarding; client-identity context round-trip; CLI client round-trip (Bearer present/absent, non-2xx error, body encoding) + URL/token resolution + flag parsing.
+- e2e steps 78–83: audit records an authenticated request (no token leak), audit captures a 401 (`client=-`), per-token TTL expiry → 401 while the primary still works, the SSE Town Wall stream survives the audit wrapper, and `ephemera-ctl` drives spawn/ls/rm + audit against the live daemon (bogus token → non-zero exit).
 
 ---
 
