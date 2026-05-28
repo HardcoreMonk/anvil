@@ -78,7 +78,7 @@ curl -H "Authorization: Bearer $TOKEN" \
 Town Wall SSE stream은 실시간 관찰에 사용할 수 있지만 MCP smoke에서는 history
 endpoint를 사용한다.
 
-현재 runtime baseline은 upstream ephemera `v0.3.5`이며, `v0.3.2` 이후 spawn-path
+현재 runtime baseline은 upstream ephemera `v0.3.6`이며, `v0.3.2` 이후 spawn-path
 VM은 `vms/<vm_id>/state.json`을 기반으로 daemon restart 뒤 cold-restart된다. 이때
 VM ID, IP, TAP, MAC, agent token, agent URL은 유지되지만 memory state와 진행 중인
 task는 보존되지 않는다.

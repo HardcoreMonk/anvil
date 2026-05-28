@@ -61,6 +61,7 @@ go build ./cmd/anvil-mcp
 go build ./cmd/anvil-scheduler
 bash -n e2e_test.sh
 bash -n scripts/anvil-mcp-e2e.sh
+bash -n scripts/anvil-scheduler-smoke.sh
 bash -n scripts/vm-workload-e2e.sh
 ```
 
@@ -79,11 +80,26 @@ Go HTTP server 기동, VM 내부 benchmark, host-to-VM probe를 확인한다. �
 `bench.txt`, `host-bench.txt`를 포함해야 하며 provider token, API key,
 control-plane token, agent token을 포함하지 않아야 한다.
 
+scheduler production automation을 포함하는 release candidate에서는 systemd host에서
+다음 검증을 수행한다. `--verify`는 host에 `curl`, `python3`가 있어야 실행된다.
+
+```bash
+bash scripts/install-anvil-scheduler-systemd.sh --dry-run --verify
+sudo bash scripts/install-anvil-scheduler-systemd.sh --start --verify
+```
+
+`--verify`는 `GET /health`, `PUT/GET /hosts`, `POST /schedule/spawn`,
+`GET /placements`, `DELETE /hosts/{name}` cleanup을 확인한다. smoke host는
+`smoke_only: true`로 등록되어 `PreferredHosts`에 명시된 smoke 요청에서만 선택되고,
+`PreferredHosts` 없는 추가 `/schedule/spawn`에서는 제외되는지 검증된다. scheduler는
+기본적으로 `127.0.0.1:3010`에 bind하며, 외부 노출은 private network 또는 TLS 종료
+reverse proxy policy 뒤에서만 수행한다.
+
 ### 현재 upstream runtime baseline
 
-2026-05-22 기준 anvil `main`은 upstream ephemera `v0.3.5`까지 병합된 runtime
-baseline을 사용한다. 새 anvil release 후보가 이 baseline을 포함한다면 release
-본문에는 upstream runtime 변경과 anvil product 변경을 분리해서 적는다.
+2026-05-26 기준 `sync/ephemera-v0.3.6`은 upstream ephemera `v0.3.6`까지 병합된
+runtime baseline을 사용한다. 새 anvil release 후보가 이 baseline을 포함한다면
+release 본문에는 upstream runtime 변경과 anvil product 변경을 분리해서 적는다.
 
 - upstream `v0.3.2`: live VM cold-restart, `vms/<vm_id>/state.json`, orphan cleanup,
   기존 TAP/IP/MAC 재예약, graceful daemon shutdown 시 rootfs/state 보존.
@@ -95,16 +111,112 @@ baseline을 사용한다. 새 anvil release 후보가 이 baseline을 포함한�
 - upstream `v0.3.5`: Prometheus `/metrics`, per-VM `/vms/{vm_id}/stats`,
   `GET /vms?stats=true`, `log/slog`, `EPHEMERA_LOG_FORMAT`, `EPHEMERA_LOG_LEVEL`,
   `EPHEMERA_METRICS_REQUIRE_AUTH`, observability demo/Grafana assets.
+- upstream `v0.3.6`: autonomous webdev demo, in-VM `gtcall`, multi-line-safe
+  `gtwall`, Goose `--output-format json` assistant text extraction, golden image
+  `curl`/`jq` dependency.
 - anvil adaptation: `agent_token`과 control-plane token이 MCP output, audit, metrics,
   trace, replay fixture, release artifact에 노출되지 않도록 수정 또는 검증한 내용.
   `ephemera_*` metric namespace와 `EPHEMERA_*` env는 runtime compatibility로
   설명하고 anvil product rename으로 처리하지 않는다.
 
-v0.3.5 기반 upstream E2E는 `/metrics`와 `/stats` 검증까지 포함한다. provider key가
-있는 환경에서는 real-LLM smoke가 실행될 수 있으므로 `GOOGLE_API_KEY`,
+v0.3.6 기반 upstream E2E는 `/metrics`, `/stats`, real-LLM smoke, in-VM helper 경로를
+포함할 수 있다. provider key가 있는 환경에서는 `GOOGLE_API_KEY`,
 `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` 값이 문서와 fixture에 남지 않았는지 별도로
 확인한다. `/metrics`는 기본 unauthenticated이므로 외부 노출 release 후보에서는
 `EPHEMERA_METRICS_REQUIRE_AUTH=true` 또는 network isolation 정책을 함께 적는다.
+`webdev_demo.sh` 검증은 paid-tier Gemini key와 충분한 host memory가 필요하므로
+release blocker가 아니라 operator demo 검증으로 별도 기록한다.
+
+## `anvil-v0.3.0` GitHub Release 게시 예정 본문
+
+- Tag: `anvil-v0.3.0`
+- Target commit: release 승인 시 최종 `main` merge commit
+- Release source: ephemera `v0.3.6` runtime baseline + anvil workload/scheduler
+  automation
+
+```markdown
+# anvil-v0.3.0 - ephemera v0.3.6 runtime baseline and workload automation
+
+`anvil-v0.3.0`은 `anvil-v0.2.0` 이후 ephemera `v0.3.2`-`v0.3.6` runtime
+baseline을 anvil downstream에 통합하고, IronClaw 운영자가 deterministic workload와
+scheduler service를 더 재현 가능하게 검증할 수 있게 만든 release다.
+
+이 release는 anvil의 제품 정체성을 ephemera로 바꾸지 않는다. `EPHEMERA_*`,
+`goose-*`, `ephemera_*` namespace는 기반 Firecracker runtime compatibility surface로
+유지하고, anvil 공개 product surface는 `anvil_*` MCP tools, scheduler, tenant/egress,
+workload automation으로 설명한다.
+
+## 포함 내용
+
+- upstream ephemera `v0.3.2`-`v0.3.6` runtime baseline:
+  - live VM cold-restart와 `vms/<vm_id>/state.json`
+  - watchdog dead persistence, per-agent restart, in-VM control-plane token injection
+  - `EPHEMERA_API_TOKENS_FILE`, SIGHUP token rotation fan-out
+  - Prometheus `/metrics`, `/vms/{vm_id}/stats`, `log/slog`, observability demo
+  - autonomous webdev demo, in-VM `gtcall`, multi-line-safe `gtwall`
+  - Goose `--output-format json` assistant text extraction
+- script-only workload runner:
+  - guest `POST /workloads/run`
+  - daemon `POST /vms/{vm_id}/workloads/run` proxy
+  - deterministic nginx and Go HTTP workload E2E
+  - workload stdout/stderr cap, timeout process-group cleanup, symlink/path hardening
+- Goosetown/webdev operator tooling:
+  - `webdev_demo.sh`
+  - orchestrator/worker/reviewer webdev profiles
+  - Vite template assets harvested through Town Wall
+- scheduler production automation:
+  - `scripts/anvil-scheduler-smoke.sh`
+  - `scripts/install-anvil-scheduler-systemd.sh --verify`
+  - smoke host isolation with `smoke_only: true`
+  - host inventory collision check before `PUT /hosts`
+  - cleanup verification through `DELETE /hosts/{name}`
+- release/operations documentation:
+  - v0.3.0 release candidate handoff
+  - scheduler runbook and release checklist gates
+  - upstream `v0.3.6` adoption review
+
+## 보안/운영 주의
+
+- `agent_token`은 계속 `POST /vms` 응답 외에는 노출하지 않는다.
+- `gtcall`은 peer credential을 VM 내부에 직접 노출하지 않고 daemon proxy token
+  injection 경계를 유지한다.
+- `/metrics`는 upstream 기본값상 unauthenticated이다. 외부 노출 환경에서는
+  `EPHEMERA_METRICS_REQUIRE_AUTH=true` 또는 network isolation을 사용한다.
+- workload runner는 `/workspace/workloads/*.sh` regular file만 실행하며 final file,
+  workload root, nested parent symlink를 거부한다.
+- local `configs/goose-secrets.yaml`과 profile별 secrets는 release artifact에 포함하지
+  않는다.
+
+## 검증
+
+- `go test ./...`
+- `go build ./cmd/goose-daemon`
+- `go build ./cmd/anvil-mcp`
+- `go build ./cmd/anvil-scheduler`
+- `bash -n webdev_demo.sh`
+- `bash -n scripts/build_image.sh`
+- `bash -n scripts/anvil-scheduler-smoke.sh`
+- `bash -n scripts/install-anvil-scheduler-systemd.sh`
+- `bash -n scripts/vm-workload-e2e.sh`
+- `bash scripts/install-anvil-scheduler-systemd.sh --dry-run --no-build --no-enable --verify`
+- local scheduler binary smoke:
+  `bash scripts/anvil-scheduler-smoke.sh --base-url http://127.0.0.1:3010`
+- `bash scripts/secret-scan.sh`
+  - tracked tree: `PASS`
+  - git history: `WARN` for historical secret-like fixture/history
+  - ignored/local files: `WARN` for local `goose-secrets.yaml` files, values not printed
+- KVM host:
+  - `sudo -n bash e2e_test.sh`
+  - `sudo -n bash scripts/vm-workload-e2e.sh`
+
+## 다음 후보
+
+- upstream ephemera `v0.4.0` PR-A storage/recovery adoption review
+- cross-host snapshot replication
+- scheduler-aware cross-host flock placement
+- L7 egress proxy/SNI hardening
+- snapshot storage quota dashboard
+```
 
 ## `anvil-v0.2.0` GitHub Release 게시 기록과 본문
 

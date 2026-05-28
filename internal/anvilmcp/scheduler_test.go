@@ -1,6 +1,9 @@
 package anvilmcp
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestSchedulerRejectsQuotaBeforeHostSelection(t *testing.T) {
 	scheduler := NewScheduler(
@@ -145,6 +148,57 @@ func TestSchedulerPrefersSnapshotLocalityHost(t *testing.T) {
 	}
 }
 
+func TestSchedulerIgnoresSmokeOnlyHostsForFallback(t *testing.T) {
+	scheduler := NewScheduler(
+		[]RuntimeHost{
+			runtimeHostFromJSON(t, `{"name":"smoke-host","endpoint":"http://smoke-host","healthy":true,"available_vms":1,"available_snapshot_bytes":1048576,"egress_policies":["profile"],"smoke_only":true}`),
+			{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 1, AvailableSnapshotBytes: 1 << 20, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+		},
+		nil,
+		nil,
+	)
+
+	decision, err := scheduler.Schedule(ScheduleRequest{
+		TenantID:     "tenant-1",
+		EgressPolicy: EgressPolicyProfile,
+	}, TenantUsage{ActiveVMs: 1})
+	if err != nil {
+		t.Fatalf("Schedule() error = %v", err)
+	}
+	if !decision.Allowed {
+		t.Fatalf("Schedule() denied: %+v", decision)
+	}
+	if decision.Host.Name != "host-a" {
+		t.Fatalf("selected host = %q, want non-smoke host-a", decision.Host.Name)
+	}
+}
+
+func TestSchedulerSelectsSmokeOnlyHostWhenExplicitlyPreferred(t *testing.T) {
+	scheduler := NewScheduler(
+		[]RuntimeHost{
+			runtimeHostFromJSON(t, `{"name":"smoke-host","endpoint":"http://smoke-host","healthy":true,"available_vms":1,"available_snapshot_bytes":1048576,"egress_policies":["profile"],"smoke_only":true}`),
+			{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 1, AvailableSnapshotBytes: 1 << 20, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+		},
+		nil,
+		nil,
+	)
+
+	decision, err := scheduler.Schedule(ScheduleRequest{
+		TenantID:       "tenant-1",
+		EgressPolicy:   EgressPolicyProfile,
+		PreferredHosts: []string{"smoke-host"},
+	}, TenantUsage{ActiveVMs: 1})
+	if err != nil {
+		t.Fatalf("Schedule() error = %v", err)
+	}
+	if !decision.Allowed {
+		t.Fatalf("Schedule() denied: %+v", decision)
+	}
+	if decision.Host.Name != "smoke-host" {
+		t.Fatalf("selected host = %q, want explicitly preferred smoke-host", decision.Host.Name)
+	}
+}
+
 func TestSchedulerSkipsExcludedHostsForFailover(t *testing.T) {
 	scheduler := NewScheduler(
 		[]RuntimeHost{
@@ -166,4 +220,13 @@ func TestSchedulerSkipsExcludedHostsForFailover(t *testing.T) {
 	if !decision.Allowed || decision.Host.Name != "host-b" {
 		t.Fatalf("decision = %+v, want host-b after excluding host-a", decision)
 	}
+}
+
+func runtimeHostFromJSON(t *testing.T, body string) RuntimeHost {
+	t.Helper()
+	var host RuntimeHost
+	if err := json.Unmarshal([]byte(body), &host); err != nil {
+		t.Fatalf("decode runtime host JSON: %v", err)
+	}
+	return host
 }

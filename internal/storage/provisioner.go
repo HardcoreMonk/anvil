@@ -51,7 +51,8 @@ func NewProvisioner(goldenImagePath, workspaceDir, buildScriptPath string) (*Pro
 // its build inputs (build script + bundled in-VM binaries + bundled scripts).
 // If any input is newer than the image, the existing image is removed and
 // rebuilt. This prevents the trap where editing goose-agent / micro-init /
-// build_image.sh / scripts/gtwall leaves a stale image baked with old contents.
+// build_image.sh / scripts/gtwall / scripts/gtcall leaves a stale image
+// baked with old contents.
 //
 // Build-input paths are derived from the conventional project layout
 // (artifacts/ next to the image, scripts/ next to the build script). Missing
@@ -66,6 +67,7 @@ func (p *Provisioner) EnsureGoldenImage() error {
 			filepath.Join(artifactsDir, "goose-agent"),
 			filepath.Join(artifactsDir, "micro-init"),
 			filepath.Join(scriptDir, "gtwall"),
+			filepath.Join(scriptDir, "gtcall"),
 		}
 		if !pathsNewerThan(stat.ModTime(), inputs...) {
 			slog.Warn("golden image up to date", "path", p.GoldenImagePath)

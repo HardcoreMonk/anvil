@@ -608,13 +608,31 @@ func handleTask(w http.ResponseWriter, r *http.Request) {
 		finalPrompt = "[SYSTEM INSTRUCTIONS]\n" + sysPrompt + "\n\n[USER TASK]\n" + req.Prompt
 	}
 
-	cmd := exec.CommandContext(r.Context(), "/usr/local/bin/goose", "run", "-i", "-")
+	// --output-format json bypasses goose-cli's streaming markdown buffer, whose
+	// truncate_code_blocks() unconditionally caps fenced code at 50 lines and
+	// spills the overflow into /tmp/goose-*.txt — a path the host caller cannot
+	// reach across the HTTP boundary. Neither --debug nor GOOSE_SHOW_FULL_OUTPUT
+	// disables that cap; the JSON path is the only code-level escape because
+	// session/mod.rs gates the markdown buffer flush behind !is_json_mode.
+	cmd := exec.CommandContext(r.Context(), "/usr/local/bin/goose", "run", "--output-format", "json", "-i", "-")
 	cmd.Stdin = strings.NewReader(finalPrompt)
-	out, err := cmd.CombinedOutput()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdout, err := cmd.Output()
 
-	res := TaskResult{Output: string(out)}
+	res := TaskResult{Output: extractGooseJSONText(stdout)}
+	if res.Output == "" && len(stdout) > 0 {
+		// goose printed something that wasn't the expected JSON envelope (e.g.
+		// crashed before producing output). Surface the raw bytes so the
+		// caller can still inspect what happened.
+		res.Output = string(stdout)
+	}
 	if err != nil {
-		res.Error = err.Error()
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			res.Error = msg
+		} else {
+			res.Error = err.Error()
+		}
 		w.WriteHeader(http.StatusInternalServerError)
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -737,6 +755,55 @@ func workloadEnvironment() []string {
 		"SHELL=/bin/bash",
 		"USER=root",
 	}
+}
+
+// extractGooseJSONText parses the envelope produced by `goose run --output-format json`
+// and returns the concatenated text of every assistant content block. Returns ""
+// when stdout is not the expected shape so callers can fall back to raw bytes.
+//
+// Goose prints a startup banner to stdout BEFORE the JSON envelope even in
+// --output-format json mode (e.g. "    __( O)> ● new session ... goose is ready"),
+// so we slice from the first '{' to the last '}' before unmarshaling.
+//
+// Envelope shape (goose-cli session/mod.rs JsonOutput, camelCase via serde):
+//
+//	{ "messages": [ {"role":"assistant",
+//	                  "content":[ {"type":"text","text":"..."}, ... ]} ],
+//	  "metadata": {...} }
+func extractGooseJSONText(stdout []byte) string {
+	var env struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"messages"`
+	}
+	start := bytes.IndexByte(stdout, '{')
+	end := bytes.LastIndexByte(stdout, '}')
+	if start < 0 || end < start {
+		return ""
+	}
+	if err := json.Unmarshal(stdout[start:end+1], &env); err != nil {
+		return ""
+	}
+	var sb strings.Builder
+	for _, m := range env.Messages {
+		if m.Role != "assistant" {
+			continue
+		}
+		for _, c := range m.Content {
+			if c.Type != "text" {
+				continue
+			}
+			if sb.Len() > 0 {
+				sb.WriteByte('\n')
+			}
+			sb.WriteString(c.Text)
+		}
+	}
+	return sb.String()
 }
 
 // TownWallPostBody is the JSON body accepted by /townwall/post inside the VM.

@@ -81,8 +81,9 @@ upstream 변경 자체와 anvil에서 해결한 conflict/적응 작업을 review
 
 ## 현재 runtime baseline
 
-2026-05-22 기준 anvil `main`은 upstream ephemera `v0.3.5`까지 병합한 runtime
-baseline을 사용한다. 병합 commit은 `1ebe201 Merge upstream/main`이다.
+2026-05-26 기준 `sync/ephemera-v0.3.6`은 upstream ephemera `v0.3.6` tag까지
+병합한 runtime baseline을 사용한다. `v0.3.2`-`v0.3.5` 병합 commit은
+`1ebe201 Merge upstream/main`이고, `v0.3.6`은 `v0.3.6` tag commit을 merge한다.
 
 | tag | peeled commit | 요약 | anvil 현재 상태 |
 |---|---|---|---|
@@ -90,6 +91,7 @@ baseline을 사용한다. 병합 commit은 `1ebe201 Merge upstream/main`이다.
 | `v0.3.3` | `3c24e6086e8b16380c94cf16d4d19dec960c9675` | watchdog dead-status persistence, per-agent restart, in-VM CP token auto-injection, real-LLM e2e | 병합됨, `adapted` |
 | `v0.3.4` | `5580482c7911d184bcd950347f050642535c431a` | `EPHEMERA_API_TOKENS_FILE`, SIGHUP CP-token fan-out, watchdog tunables/auto-heal, Firecracker SIGHUP hot-fix | 병합됨, `adapted` |
 | `v0.3.5` | `7a6d42dd56361719bc4fb592e75e0c8d8d9cf211` | `/metrics`, `/vms/{vm_id}/stats`, `log/slog`, observability demo | 병합됨, `adapted` |
+| `v0.3.6` | `4bd5e8c3d94fbfb862de116caa7417f7b640b325` | autonomous webdev demo, in-VM `gtcall`, multi-line-safe `gtwall`, Goose JSON output parsing | sync branch에서 병합, `adapted` |
 
 `v0.3.2`/`v0.3.3`의 세부 변경 근거와 anvil 채택 검토 포인트는
 [`docs/analysis/08-v0.3.2-v0.3.3-upstream-change-review.md`](../analysis/08-v0.3.2-v0.3.3-upstream-change-review.md)를

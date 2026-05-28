@@ -16,9 +16,12 @@
   profile allowlist/DNS egress rule을 제공한다. Goosetown flock spawn도
   `tenant_id`와 `egress_policy`를 VM 생성 경로에 전달하고 flock metadata와
   persisted `metadata.json`에 보존한다.
-- 비구현 범위: scheduler service의 production deployment automation, cross-host
-  snapshot replication, scheduler-aware cross-host flock placement, L7 egress proxy,
-  billing, UI.
+- scheduler 운영 검증 자동화: `scripts/anvil-scheduler-smoke.sh`와
+  `scripts/install-anvil-scheduler-systemd.sh --verify`는 `GET /health`,
+  `PUT/GET /hosts`, `POST /schedule/spawn`, `GET /placements`,
+  `DELETE /hosts/{name}` cleanup을 제공한다.
+- 비구현 범위: multi-node HA, migration, cross-host snapshot replication,
+  scheduler-aware cross-host flock placement, L7 egress proxy, billing, UI.
 
 이 문서는 anvil이 IronClaw와 ephemera runtime을 multi-tenant 실행 기반으로
 확장할 때 필요한 경계를 정리한다. 현재 ephemera daemon의 단일 호스트 VM
@@ -43,6 +46,8 @@ daemon 계약 확장을 필요로 한다.
 - `PlacementStore`: runtime host, VM placement, snapshot location JSON persistence
 - `cmd/anvil-scheduler`: persistent host/quota state로 schedule decision을 반환하는
   얇은 HTTP scheduler service
+- `scripts/anvil-scheduler-smoke.sh`, `scripts/install-anvil-scheduler-systemd.sh --verify`:
+  scheduler service 운영 검증 자동화
 - `QuotaStore`: tenant quota/usage JSON persistence와 scheduler input 제공
 - `NormalizeEgressPolicy`: `deny_all`, `profile`, `allow_all` policy normalization
 - `AppendRuntimeAudit`, `ReadRuntimeAudit`, `PruneRuntimeAudit`: symlink를 거부하는
@@ -73,8 +78,10 @@ Multi-tenant runtime의 설계 범위는 다음이다.
 
 이 문서는 위 구성 요소의 책임 경계를 정의한다. 현재 구현은 in-process scheduler
 decision helper, host inventory polling, runtime router, scheduler service binary,
-tenant API, `deny_all`/`profile` host enforcement까지 포함한다. scheduler service의
-production deployment automation과 cross-host snapshot replication은 포함하지 않는다.
+tenant API, `deny_all`/`profile` host enforcement, scheduler smoke harness,
+systemd installer `--verify`까지 포함한다. multi-node HA, migration,
+cross-host snapshot replication, scheduler-aware cross-host flock placement는 포함하지
+않는다.
 
 ## Tenant 식별자
 
@@ -143,16 +150,18 @@ TAP, IP, dm-snapshot, loop device, bind mount, sparse COW file 같은 host-local
 
 현재 `Scheduler.Schedule`은 host 목록 중 healthy, capacity, requested snapshot
 bytes, egress policy 조건을 만족하는 host를 고르며, `PreferredHosts`와
-`ExcludedHosts`로 snapshot locality와 failover를 반영한다. `HostInventory`는 daemon
-`/health` polling으로 host 상태를 갱신하고, `RuntimeRouter`는 선택된 host의 daemon
-client로 spawn/restore와 VM 후속 호출을 라우팅한다. `PlacementStore`는 VM placement와
-snapshot location을 JSON으로 보존하고, `ReconcilePlacements`는 daemon `GET /vms`
-결과로 stale placement를 교체한다.
+`ExcludedHosts`로 snapshot locality와 failover를 반영한다. `RuntimeHost`가
+`smoke_only: true`이면 해당 host id가 `PreferredHosts`에 명시된 요청에서만 선택되고,
+일반 fallback scheduling에서는 제외된다. `HostInventory`는 daemon `/health`
+polling으로 host 상태를 갱신하고, `RuntimeRouter`는 선택된 host의 daemon client로
+spawn/restore와 VM 후속 호출을 라우팅한다. `PlacementStore`는 VM placement와 snapshot
+location을 JSON으로 보존하고, `ReconcilePlacements`는 daemon `GET /vms` 결과로 stale
+placement를 교체한다.
 
 별도 process인 `cmd/anvil-scheduler`는 `ANVIL_SCHEDULER_ADDR`,
 `ANVIL_SCHEDULER_STATE`, `ANVIL_SCHEDULER_QUOTA_STORE`를 읽는다. HTTP surface는
-`GET /health`, `GET/PUT /hosts`, `GET /placements`, `POST /reconcile`,
-`POST /schedule/spawn`, `POST /schedule/restore`다.
+`GET /health`, `GET/PUT /hosts`, `DELETE /hosts/{name}`, `GET /placements`,
+`POST /reconcile`, `POST /schedule/spawn`, `POST /schedule/restore`다.
 
 운영 배포 자동화는 `deploy/systemd/anvil-scheduler.service`,
 `deploy/systemd/anvil-scheduler.env.example`,
