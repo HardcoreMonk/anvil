@@ -3,6 +3,7 @@ package anvilmcp
 import (
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestPlacementStorePersistsHostsVMsAndSnapshotLocations(t *testing.T) {
@@ -138,5 +139,79 @@ func TestPlacementStoreRemoveHostAndSaveRollsBackOnFailure(t *testing.T) {
 	}
 	if deleted {
 		t.Fatal("deleted = true, want false for missing host")
+	}
+}
+
+func TestPlacementStorePersistsControlLoopState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runtime", "placements.json")
+	store := NewPlacementStore(path)
+	if err := store.SetHost(RuntimeHost{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 1}); err != nil {
+		t.Fatalf("SetHost host-a: %v", err)
+	}
+	if err := store.MarkConfigManagedHost("host-a", true); err != nil {
+		t.Fatalf("MarkConfigManagedHost: %v", err)
+	}
+	now := time.Date(2026, 5, 28, 1, 2, 3, 0, time.UTC)
+	if err := store.SetHostObservation("host-a", HostObservation{
+		Status:                 HostStatusDegraded,
+		AvailableVMs:           2,
+		AvailableSnapshotBytes: 4096,
+		FailureCount:           1,
+		LastFailureAt:          now,
+		LastError:              "health returned 503",
+	}); err != nil {
+		t.Fatalf("SetHostObservation: %v", err)
+	}
+	if err := store.SetVMPlacement("vm-1", "host-a"); err != nil {
+		t.Fatalf("SetVMPlacement: %v", err)
+	}
+	if err := store.MarkHostPlacementsSuspect("host-a", "host_degraded"); err != nil {
+		t.Fatalf("MarkHostPlacementsSuspect: %v", err)
+	}
+	statusHosts := map[string]HostObservation{
+		"host-a": {
+			Status:       HostStatusDegraded,
+			FailureCount: 1,
+			LastError:    "health returned 503",
+		},
+	}
+	if err := store.SetControlLoopStatus(ControlLoopStatus{
+		Running:                  true,
+		PollIntervalSeconds:      10,
+		ReconcileIntervalSeconds: 30,
+		FailureThreshold:         3,
+		PersistenceDegraded:      true,
+		LastError:                "replace placement store: permission denied",
+		Hosts:                    statusHosts,
+	}); err != nil {
+		t.Fatalf("SetControlLoopStatus: %v", err)
+	}
+	statusHosts["host-a"] = HostObservation{Status: HostStatusHealthy}
+	if err := store.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	reloaded := NewPlacementStore(path)
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	state := reloaded.State()
+	if !state.ConfigManagedHosts["host-a"] {
+		t.Fatalf("ConfigManagedHosts = %+v, want host-a=true", state.ConfigManagedHosts)
+	}
+	obs := state.HostObservations["host-a"]
+	if obs.Status != HostStatusDegraded || obs.FailureCount != 1 || obs.LastError != "health returned 503" {
+		t.Fatalf("HostObservations[host-a] = %+v", obs)
+	}
+	suspect := state.SuspectVMPlacements["vm-1"]
+	if suspect.Host != "host-a" || suspect.Reason != "host_degraded" {
+		t.Fatalf("SuspectVMPlacements[vm-1] = %+v", suspect)
+	}
+	if !state.ControlLoopStatus.Running || !state.ControlLoopStatus.PersistenceDegraded {
+		t.Fatalf("ControlLoopStatus = %+v", state.ControlLoopStatus)
+	}
+	statusObs := state.ControlLoopStatus.Hosts["host-a"]
+	if statusObs.Status != HostStatusDegraded || statusObs.FailureCount != 1 || statusObs.LastError != "health returned 503" {
+		t.Fatalf("ControlLoopStatus.Hosts[host-a] = %+v, want cloned degraded observation", statusObs)
 	}
 }

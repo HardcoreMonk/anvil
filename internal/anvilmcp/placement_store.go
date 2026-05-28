@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 type VMInfo struct {
@@ -19,10 +20,51 @@ type VMInfo struct {
 	EgressPolicy string `json:"egress_policy,omitempty"`
 }
 
+type HostStatus string
+
+const (
+	HostStatusHealthy   HostStatus = "healthy"
+	HostStatusDegraded  HostStatus = "degraded"
+	HostStatusUnhealthy HostStatus = "unhealthy"
+)
+
+type HostObservation struct {
+	Status                 HostStatus `json:"status"`
+	AvailableVMs           int64      `json:"available_vms"`
+	AvailableSnapshotBytes int64      `json:"available_snapshot_bytes"`
+	FailureCount           int        `json:"failure_count"`
+	LastSuccessAt          time.Time  `json:"last_success_at,omitempty"`
+	LastFailureAt          time.Time  `json:"last_failure_at,omitempty"`
+	LastError              string     `json:"last_error,omitempty"`
+}
+
+type SuspectVMPlacement struct {
+	Host   string `json:"host"`
+	Reason string `json:"reason"`
+}
+
+type ControlLoopStatus struct {
+	Running                  bool                       `json:"running"`
+	PollIntervalSeconds      int64                      `json:"poll_interval_seconds"`
+	ReconcileIntervalSeconds int64                      `json:"reconcile_interval_seconds"`
+	FailureThreshold         int                        `json:"failure_threshold"`
+	PersistenceDegraded      bool                       `json:"persistence_degraded"`
+	LastPollStartedAt        time.Time                  `json:"last_poll_started_at,omitempty"`
+	LastPollCompletedAt      time.Time                  `json:"last_poll_completed_at,omitempty"`
+	LastReconcileStartedAt   time.Time                  `json:"last_reconcile_started_at,omitempty"`
+	LastReconcileCompletedAt time.Time                  `json:"last_reconcile_completed_at,omitempty"`
+	LastError                string                     `json:"last_error,omitempty"`
+	Hosts                    map[string]HostObservation `json:"hosts,omitempty"`
+}
+
 type PlacementStoreState struct {
-	Hosts             map[string]RuntimeHost `json:"hosts"`
-	VMPlacements      map[string]string      `json:"vm_placements"`
-	SnapshotLocations map[string][]string    `json:"snapshot_locations"`
+	Hosts               map[string]RuntimeHost        `json:"hosts"`
+	VMPlacements        map[string]string             `json:"vm_placements"`
+	SnapshotLocations   map[string][]string           `json:"snapshot_locations"`
+	ConfigManagedHosts  map[string]bool               `json:"config_managed_hosts,omitempty"`
+	HostObservations    map[string]HostObservation    `json:"host_observations,omitempty"`
+	SuspectVMPlacements map[string]SuspectVMPlacement `json:"suspect_vm_placements,omitempty"`
+	ControlLoopStatus   ControlLoopStatus             `json:"control_loop_status,omitempty"`
 }
 
 type PlacementStore struct {
@@ -35,9 +77,15 @@ func NewPlacementStore(path string) *PlacementStore {
 	return &PlacementStore{
 		path: path,
 		state: PlacementStoreState{
-			Hosts:             make(map[string]RuntimeHost),
-			VMPlacements:      make(map[string]string),
-			SnapshotLocations: make(map[string][]string),
+			Hosts:               make(map[string]RuntimeHost),
+			VMPlacements:        make(map[string]string),
+			SnapshotLocations:   make(map[string][]string),
+			ConfigManagedHosts:  make(map[string]bool),
+			HostObservations:    make(map[string]HostObservation),
+			SuspectVMPlacements: make(map[string]SuspectVMPlacement),
+			ControlLoopStatus: ControlLoopStatus{
+				Hosts: make(map[string]HostObservation),
+			},
 		},
 	}
 }
@@ -156,6 +204,29 @@ func (s *PlacementStore) SetHostAndSave(host RuntimeHost) error {
 	return nil
 }
 
+func (s *PlacementStore) MarkConfigManagedHost(name string, managed bool) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("host name must be non-empty")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensureMaps()
+	if managed {
+		s.state.ConfigManagedHosts[name] = true
+	} else {
+		delete(s.state.ConfigManagedHosts, name)
+	}
+	return nil
+}
+
+func (s *PlacementStore) IsConfigManagedHost(name string) bool {
+	name = strings.TrimSpace(name)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.state.ConfigManagedHosts[name]
+}
+
 func (s *PlacementStore) RemoveHost(name string) bool {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -246,6 +317,31 @@ func (s *PlacementStore) RemoveVMPlacement(vmID string) {
 	s.mu.Unlock()
 }
 
+func (s *PlacementStore) SetHostObservation(name string, obs HostObservation) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("host name must be non-empty")
+	}
+	if obs.Status == "" {
+		obs.Status = HostStatusUnhealthy
+	}
+	obs.LastError = strings.TrimSpace(obs.LastError)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensureMaps()
+	s.state.HostObservations[name] = obs
+	s.state.ControlLoopStatus.Hosts[name] = obs
+	return nil
+}
+
+func (s *PlacementStore) HostObservation(name string) (HostObservation, bool) {
+	name = strings.TrimSpace(name)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	obs, ok := s.state.HostObservations[name]
+	return obs, ok
+}
+
 func (s *PlacementStore) ReplaceVMPlacements(placements map[string]string) error {
 	next := make(map[string]string, len(placements))
 	for vmID, hostName := range placements {
@@ -261,6 +357,37 @@ func (s *PlacementStore) ReplaceVMPlacements(placements map[string]string) error
 	s.ensureMaps()
 	s.state.VMPlacements = next
 	return nil
+}
+
+func (s *PlacementStore) MarkHostPlacementsSuspect(hostName, reason string) error {
+	hostName = strings.TrimSpace(hostName)
+	reason = strings.TrimSpace(reason)
+	if hostName == "" {
+		return fmt.Errorf("host name must be non-empty")
+	}
+	if reason == "" {
+		return fmt.Errorf("suspect reason must be non-empty")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensureMaps()
+	for vmID, placedHost := range s.state.VMPlacements {
+		if placedHost == hostName {
+			s.state.SuspectVMPlacements[vmID] = SuspectVMPlacement{Host: hostName, Reason: reason}
+		}
+	}
+	return nil
+}
+
+func (s *PlacementStore) ClearHostSuspectPlacements(hostName string) {
+	hostName = strings.TrimSpace(hostName)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for vmID, suspect := range s.state.SuspectVMPlacements {
+		if suspect.Host == hostName {
+			delete(s.state.SuspectVMPlacements, vmID)
+		}
+	}
 }
 
 func (s *PlacementStore) SetSnapshotLocation(snapshotID, hostName string) error {
@@ -301,24 +428,24 @@ func (s *PlacementStore) SnapshotHosts(snapshotID string) []string {
 	return locations
 }
 
+func (s *PlacementStore) SetControlLoopStatus(status ControlLoopStatus) error {
+	status.LastError = strings.TrimSpace(status.LastError)
+	hosts := make(map[string]HostObservation, len(status.Hosts))
+	for host, obs := range status.Hosts {
+		hosts[host] = obs
+	}
+	status.Hosts = hosts
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensureMaps()
+	s.state.ControlLoopStatus = status
+	return nil
+}
+
 func (s *PlacementStore) State() PlacementStoreState {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	state := PlacementStoreState{
-		Hosts:             make(map[string]RuntimeHost, len(s.state.Hosts)),
-		VMPlacements:      make(map[string]string, len(s.state.VMPlacements)),
-		SnapshotLocations: make(map[string][]string, len(s.state.SnapshotLocations)),
-	}
-	for name, host := range s.state.Hosts {
-		state.Hosts[name] = host
-	}
-	for vmID, hostName := range s.state.VMPlacements {
-		state.VMPlacements[vmID] = hostName
-	}
-	for snapshotID, locations := range s.state.SnapshotLocations {
-		state.SnapshotLocations[snapshotID] = append([]string(nil), locations...)
-	}
-	return state
+	return clonePlacementStoreState(s.state)
 }
 
 func (s *PlacementStore) ensureMaps() {
@@ -335,13 +462,28 @@ func normalizePlacementStoreState(state *PlacementStoreState) {
 	if state.SnapshotLocations == nil {
 		state.SnapshotLocations = make(map[string][]string)
 	}
+	if state.ConfigManagedHosts == nil {
+		state.ConfigManagedHosts = make(map[string]bool)
+	}
+	if state.HostObservations == nil {
+		state.HostObservations = make(map[string]HostObservation)
+	}
+	if state.SuspectVMPlacements == nil {
+		state.SuspectVMPlacements = make(map[string]SuspectVMPlacement)
+	}
+	if state.ControlLoopStatus.Hosts == nil {
+		state.ControlLoopStatus.Hosts = make(map[string]HostObservation)
+	}
 }
 
 func clonePlacementStoreState(state PlacementStoreState) PlacementStoreState {
 	out := PlacementStoreState{
-		Hosts:             make(map[string]RuntimeHost, len(state.Hosts)),
-		VMPlacements:      make(map[string]string, len(state.VMPlacements)),
-		SnapshotLocations: make(map[string][]string, len(state.SnapshotLocations)),
+		Hosts:               make(map[string]RuntimeHost, len(state.Hosts)),
+		VMPlacements:        make(map[string]string, len(state.VMPlacements)),
+		SnapshotLocations:   make(map[string][]string, len(state.SnapshotLocations)),
+		ConfigManagedHosts:  make(map[string]bool, len(state.ConfigManagedHosts)),
+		HostObservations:    make(map[string]HostObservation, len(state.HostObservations)),
+		SuspectVMPlacements: make(map[string]SuspectVMPlacement, len(state.SuspectVMPlacements)),
 	}
 	for name, host := range state.Hosts {
 		out.Hosts[name] = host
@@ -351,6 +493,20 @@ func clonePlacementStoreState(state PlacementStoreState) PlacementStoreState {
 	}
 	for snapshotID, locations := range state.SnapshotLocations {
 		out.SnapshotLocations[snapshotID] = append([]string(nil), locations...)
+	}
+	for host, managed := range state.ConfigManagedHosts {
+		out.ConfigManagedHosts[host] = managed
+	}
+	for host, obs := range state.HostObservations {
+		out.HostObservations[host] = obs
+	}
+	for vmID, suspect := range state.SuspectVMPlacements {
+		out.SuspectVMPlacements[vmID] = suspect
+	}
+	out.ControlLoopStatus = state.ControlLoopStatus
+	out.ControlLoopStatus.Hosts = make(map[string]HostObservation, len(state.ControlLoopStatus.Hosts))
+	for host, obs := range state.ControlLoopStatus.Hosts {
+		out.ControlLoopStatus.Hosts[host] = obs
 	}
 	return out
 }
