@@ -161,3 +161,32 @@ func TestFlock_ChangeAgentRole(t *testing.T) {
 	}
 	f.ChangeAgentRole("nonexistent", "x") // no-op, must not panic
 }
+
+func TestFlock_PausedAndAgentStatus(t *testing.T) {
+	tmp := t.TempDir()
+	fm := NewFlockManager(tmp)
+	f, err := fm.Create("flock-p", "task", filepath.Join(tmp, "flock-p", "wall.log"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	f.AddAgent(&AgentInfo{AgentID: "worker-1", Role: "worker", Status: AgentStatusReady})
+
+	if f.Paused {
+		t.Error("new flock should not be paused")
+	}
+	f.SetPaused(true)
+	if !f.Paused {
+		t.Error("SetPaused(true) had no effect")
+	}
+	f.UpdateAgentStatus("worker-1", AgentStatusPaused)
+	if got := f.AgentStatus("worker-1"); got != AgentStatusPaused {
+		t.Errorf("AgentStatus = %q, want %q", got, AgentStatusPaused)
+	}
+	if got := f.AgentStatus("nobody"); got != "" {
+		t.Errorf("AgentStatus(unknown) = %q, want empty", got)
+	}
+	f.SetPaused(false)
+	if f.Paused {
+		t.Error("SetPaused(false) had no effect")
+	}
+}

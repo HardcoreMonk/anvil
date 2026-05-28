@@ -1,6 +1,6 @@
 # v0.4.3 — Flock Lifecycle (in progress)
 
-**Ephemera** v0.4.3 makes flocks adjustable at runtime. **PR-A** adds dynamic agent membership — add, remove, and role-change endpoints alongside the existing per-agent restart. Additive — no wire format changed.
+**Ephemera** v0.4.3 makes flocks adjustable at runtime. **PR-A** adds dynamic agent membership (add/remove/role-change); **PR-B** adds flock pause/resume and a per-flock agent cap. Additive — no wire format changed.
 
 ---
 
@@ -13,6 +13,13 @@
 - `PATCH /flocks/{id}/agents/{agent_id}` `{"role":"reviewer"}` — change an agent's role. Because role binds VM sizing + system prompt at spawn time, the VM is recreated under the new role (`agent_id` and `agent_token` preserved, like restart).
 - `ephemera-ctl flock add-agent`/`rm-agent`/`set-role` wrap the three endpoints.
 - Each membership change is posted to the Town Wall; the watchdog auto-discovers added VMs and forgets removed ones.
+
+### Flock pause/resume + per-flock max_agents (PR-B)
+
+- `POST /flocks/{id}/pause` / `POST /flocks/{id}/resume` — pause/resume **all** member VMs via Firecracker PauseVM/ResumeVM. **Runtime-only**: agent status flips to `paused`/`ready` and `Flock.Paused` toggles, but nothing is persisted (a daemon restart brings members back running). A partial pause failure rolls back (resumes already-paused members).
+- The health watchdog **skips dead-marking `paused` agents** — a paused VM intentionally doesn't answer `/health`, so it must not be marked dead.
+- `POST /flocks` accepts `max_agents` — a per-flock agent cap (default 20), enforced on create **and** on `POST /flocks/{id}/agents`. Persisted in metadata (backward-compatible; an absent/0 value falls back to the default).
+- `ephemera-ctl flock pause`/`resume`; `flock create --max-agents N`.
 
 ---
 

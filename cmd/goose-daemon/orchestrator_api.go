@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -15,14 +16,24 @@ import (
 	"ephemera/internal/orchestrator"
 )
 
-// Maximum number of agents a single POST /flocks request may spawn.
-// Limits IP pool / TAP exhaustion from a runaway caller.
-const maxAgentsPerFlock = 20
+// defaultMaxAgentsPerFlock is the per-flock agent cap when a flock does not set
+// its own max_agents (v0.4.3). Limits IP pool / TAP exhaustion from a runaway caller.
+const defaultMaxAgentsPerFlock = 20
+
+// flockMax returns a flock's effective agent cap: its own MaxAgents, or the
+// default when unset (0). Recovered flocks with no stored cap also fall back here.
+func flockMax(f *orchestrator.Flock) int {
+	if f.MaxAgents > 0 {
+		return f.MaxAgents
+	}
+	return defaultMaxAgentsPerFlock
+}
 
 // FlockCreateRequest is the POST /flocks body. roles[i] becomes one VM.
 type FlockCreateRequest struct {
-	Task  string   `json:"task"`
-	Roles []string `json:"roles"`
+	Task      string   `json:"task"`
+	Roles     []string `json:"roles"`
+	MaxAgents *int     `json:"max_agents,omitempty"` // per-flock cap (v0.4.3); nil → default
 }
 
 // FlockCreateResponse is returned by POST /flocks.
@@ -87,6 +98,10 @@ func (cp *ControlPlane) handleFlockItem(w http.ResponseWriter, r *http.Request) 
 		cp.townWallHistory(w, flockID)
 	case sub == "post" && r.Method == http.MethodPost:
 		cp.postToTownWall(w, r, flockID)
+	case sub == "pause" && r.Method == http.MethodPost:
+		cp.pauseFlock(w, flockID)
+	case sub == "resume" && r.Method == http.MethodPost:
+		cp.resumeFlock(w, flockID)
 	case sub == "agents" || strings.HasPrefix(sub, "agents/"):
 		rest := strings.TrimPrefix(strings.TrimPrefix(sub, "agents"), "/")
 		agentID, action, _ := strings.Cut(rest, "/")
@@ -119,8 +134,16 @@ func (cp *ControlPlane) createFlock(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("roles required"))
 		return
 	}
-	if len(req.Roles) > maxAgentsPerFlock {
-		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("max %d agents per flock", maxAgentsPerFlock))
+	maxAgents := defaultMaxAgentsPerFlock
+	if req.MaxAgents != nil {
+		maxAgents = *req.MaxAgents
+	}
+	if maxAgents < 1 {
+		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("max_agents must be >= 1"))
+		return
+	}
+	if len(req.Roles) > maxAgents {
+		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("roles exceed max_agents (%d > %d)", len(req.Roles), maxAgents))
 		return
 	}
 
@@ -135,6 +158,7 @@ func (cp *ControlPlane) createFlock(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err)
 		return
 	}
+	flock.MaxAgents = maxAgents
 
 	// Spawn each VM sequentially. On failure, tear everything down so we don't
 	// leak resources or leave an unusable flock registered.
@@ -445,8 +469,8 @@ func (cp *ControlPlane) addFlockAgent(w http.ResponseWriter, r *http.Request, fl
 		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("role required"))
 		return
 	}
-	if len(f.Snapshot())+1 > maxAgentsPerFlock {
-		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("max %d agents per flock", maxAgentsPerFlock))
+	if len(f.Snapshot())+1 > flockMax(f) {
+		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("flock at max_agents (%d)", flockMax(f)))
 		return
 	}
 
@@ -601,6 +625,83 @@ func (cp *ControlPlane) changeFlockAgentRole(w http.ResponseWriter, r *http.Requ
 	}
 	slog.Warn("flock: agent role changed", "flock_id", flockID, "agent_id", agentID, "old_role", curRole, "new_role", req.Role, "old_vm_id", oldVMID, "new_vm_id", info.VMID)
 	writeJSON(w, http.StatusOK, info)
+}
+
+// pauseFlock pauses every member VM via Firecracker PauseVM. Runtime-only: agent
+// status flips to "paused" and Flock.Paused is set, but nothing is persisted (a
+// daemon restart brings members back running). On a partial failure the already-
+// paused members are resumed (rollback). POST /flocks/{id}/pause.
+func (cp *ControlPlane) pauseFlock(w http.ResponseWriter, flockID string) {
+	f, ok := cp.flockMgr.Get(flockID)
+	if !ok {
+		writeJSONError(w, http.StatusNotFound, fmt.Errorf("flock not found"))
+		return
+	}
+	var paused []string
+	rollback := func() {
+		for i := len(paused) - 1; i >= 0; i-- {
+			cp.mu.RLock()
+			v, ok := cp.vms[paused[i]]
+			cp.mu.RUnlock()
+			if ok {
+				_ = v.machine.ResumeVM(context.Background())
+			}
+		}
+	}
+	for _, a := range f.Snapshot() {
+		cp.mu.RLock()
+		v, ok := cp.vms[a.VMID]
+		cp.mu.RUnlock()
+		if !ok {
+			slog.Warn("flock pause: vm not found, skipping", "flock_id", flockID, "agent_id", a.AgentID, "vm_id", a.VMID)
+			continue
+		}
+		if err := v.machine.PauseVM(context.Background()); err != nil {
+			rollback()
+			writeJSONError(w, http.StatusInternalServerError, fmt.Errorf("pause %s: %w", a.AgentID, err))
+			return
+		}
+		paused = append(paused, a.VMID)
+		f.UpdateAgentStatus(a.AgentID, orchestrator.AgentStatusPaused)
+	}
+	f.SetPaused(true)
+	if _, err := f.TownWall.Post("orchestrator", fmt.Sprintf("Flock paused (%d agents)", len(paused))); err != nil {
+		slog.Warn("flock pause: town wall post failed", "flock_id", flockID, "err", err)
+	}
+	slog.Warn("flock: paused", "flock_id", flockID, "agents", len(paused))
+	writeJSON(w, http.StatusOK, map[string]any{"flock_id": flockID, "status": "paused", "agents": len(paused)})
+}
+
+// resumeFlock resumes every member VM of a paused flock (best-effort per member).
+// POST /flocks/{id}/resume.
+func (cp *ControlPlane) resumeFlock(w http.ResponseWriter, flockID string) {
+	f, ok := cp.flockMgr.Get(flockID)
+	if !ok {
+		writeJSONError(w, http.StatusNotFound, fmt.Errorf("flock not found"))
+		return
+	}
+	resumed := 0
+	for _, a := range f.Snapshot() {
+		cp.mu.RLock()
+		v, ok := cp.vms[a.VMID]
+		cp.mu.RUnlock()
+		if !ok {
+			slog.Warn("flock resume: vm not found, skipping", "flock_id", flockID, "agent_id", a.AgentID, "vm_id", a.VMID)
+			continue
+		}
+		if err := v.machine.ResumeVM(context.Background()); err != nil {
+			slog.Warn("flock resume: ResumeVM failed", "flock_id", flockID, "agent_id", a.AgentID, "err", err)
+			continue
+		}
+		resumed++
+		f.UpdateAgentStatus(a.AgentID, orchestrator.AgentStatusReady)
+	}
+	f.SetPaused(false)
+	if _, err := f.TownWall.Post("orchestrator", fmt.Sprintf("Flock resumed (%d agents)", resumed)); err != nil {
+		slog.Warn("flock resume: town wall post failed", "flock_id", flockID, "err", err)
+	}
+	slog.Warn("flock: resumed", "flock_id", flockID, "agents", resumed)
+	writeJSON(w, http.StatusOK, map[string]any{"flock_id": flockID, "status": "resumed", "agents": resumed})
 }
 
 // spawnVMForFlock spawns one VM as a flock member. role is mapped through
