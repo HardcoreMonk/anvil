@@ -1078,6 +1078,49 @@ FLOCK_LIST_COUNT=$(curl -s "$API/flocks" | jq 'length')
 [ "$FLOCK_LIST_COUNT" -ge "1" ] && ok "GET /flocks returns $FLOCK_LIST_COUNT entry(ies)" \
                                 || fail "Expected ≥1 flock listed"
 
+# ── 57a-c. Dynamic flock agent management (v0.4.3) ───────────────
+step "57a. Add an agent to the flock (POST /flocks/{id}/agents)"
+ADD_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/flocks/$FLOCK_ID/agents" \
+            -H "Content-Type: application/json" -d '{"role":"worker"}')
+check_http "$(echo "$ADD_RESP" | tail -1)" "201" "POST /flocks/$FLOCK_ID/agents (add worker)"
+ADD_BODY=$(echo "$ADD_RESP" | head -1)
+NEW_AGENT_ID=$(echo "$ADD_BODY" | jq -r '.agent_id')
+NEW_VM_ID=$(echo   "$ADD_BODY" | jq -r '.vm_id')
+# flock created one worker (worker-1), so the added one is worker-2
+[ "$NEW_AGENT_ID" = "worker-2" ] \
+    && ok "agent_id follows role-N indexing: $NEW_AGENT_ID ✓" \
+    || fail "expected worker-2, got $NEW_AGENT_ID"
+AGENT_COUNT=$(curl -s "$API/flocks/$FLOCK_ID" | jq '.agents | length')
+[ "$AGENT_COUNT" = "6" ] && ok "Flock grew to 6 agents ✓" \
+                         || fail "expected 6 agents, got $AGENT_COUNT"
+check_http "$(curl -s -o /dev/null -w "%{http_code}" "$API/vms/$NEW_VM_ID/health")" \
+    "200" "added agent /health → 200"
+
+step "57b. Change the agent's role (PATCH → reviewer; VM recreated)"
+PATCH_RESP=$(curl -s -w "\n%{http_code}" -X PATCH "$API/flocks/$FLOCK_ID/agents/$NEW_AGENT_ID" \
+            -H "Content-Type: application/json" -d '{"role":"reviewer"}')
+check_http "$(echo "$PATCH_RESP" | tail -1)" "200" "PATCH /flocks/$FLOCK_ID/agents/$NEW_AGENT_ID"
+PATCH_VM_ID=$(echo "$PATCH_RESP" | head -1 | jq -r '.vm_id')
+[ "$PATCH_VM_ID" != "$NEW_VM_ID" ] && [ "$PATCH_VM_ID" != "null" ] \
+    && ok "VM recreated on role change ($NEW_VM_ID → $PATCH_VM_ID) ✓" \
+    || fail "vm_id not swapped on role change (got $PATCH_VM_ID)"
+PATCH_ROLE=$(curl -s "$API/flocks/$FLOCK_ID" | jq -r ".agents[\"$NEW_AGENT_ID\"].role")
+[ "$PATCH_ROLE" = "reviewer" ] && ok "agent role updated to reviewer ✓" \
+                               || fail "role not updated (got $PATCH_ROLE)"
+check_http "$(curl -s -o /dev/null -w "%{http_code}" "$API/vms/$PATCH_VM_ID/health")" \
+    "200" "recreated agent /health → 200"
+
+step "57c. Remove the agent (DELETE /flocks/{id}/agents/{agent_id})"
+check_http "$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/flocks/$FLOCK_ID/agents/$NEW_AGENT_ID")" \
+    "200" "DELETE /flocks/$FLOCK_ID/agents/$NEW_AGENT_ID"
+AGENT_COUNT2=$(curl -s "$API/flocks/$FLOCK_ID" | jq '.agents | length')
+[ "$AGENT_COUNT2" = "5" ] && ok "Flock back to 5 agents after remove ✓" \
+                          || fail "expected 5 agents, got $AGENT_COUNT2"
+sleep 2
+curl -s "$API/vms" | jq -r '.[].vm_id' | grep -q "$PATCH_VM_ID" \
+    && fail "removed agent VM $PATCH_VM_ID still present" \
+    || ok "removed agent VM torn down ✓"
+
 # ── 58. Delete flock and verify cleanup ──────────────────────────
 step "58. Delete flock and verify all member VMs are torn down"
 DEL_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/flocks/$FLOCK_ID")

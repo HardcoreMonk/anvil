@@ -234,7 +234,7 @@ func vmSnapshot(args []string) {
 
 func flockCmd(args []string) {
 	if len(args) == 0 {
-		die(fmt.Errorf("flock: missing verb (create|ls|get|rm|post|wall|restart)"))
+		die(fmt.Errorf("flock: missing verb (create|ls|get|rm|post|wall|restart|add-agent|rm-agent|set-role)"))
 	}
 	verb, rest := args[0], args[1:]
 	switch verb {
@@ -252,6 +252,12 @@ func flockCmd(args []string) {
 		flockWall(rest)
 	case "restart":
 		flockRestart(rest)
+	case "add-agent":
+		flockAddAgent(rest)
+	case "rm-agent":
+		flockRmAgent(rest)
+	case "set-role":
+		flockSetRole(rest)
 	default:
 		die(fmt.Errorf("flock: unknown verb %q", verb))
 	}
@@ -391,6 +397,70 @@ func flockRestart(args []string) {
 		die(err)
 	}
 	fmt.Printf("agent %s restarted → new vm_id %s\n", agentID, r.VMID)
+}
+
+// flock add-agent <flock_id> <role> — POST /flocks/{id}/agents (v0.4.3).
+func flockAddAgent(args []string) {
+	jsonOut, tok, rest := extractCommon(args)
+	if len(rest) < 2 {
+		die(fmt.Errorf("usage: flock add-agent <flock_id> <role>"))
+	}
+	flockID, role := rest[0], rest[1]
+	data, err := mkClient(tok).do("POST", "/flocks/"+flockID+"/agents", map[string]string{"role": role})
+	if err != nil {
+		die(err)
+	}
+	if jsonOut {
+		printJSON(data)
+		return
+	}
+	var r struct {
+		AgentID    string `json:"agent_id"`
+		Role       string `json:"role"`
+		VMID       string `json:"vm_id"`
+		AgentToken string `json:"agent_token"`
+	}
+	if err := json.Unmarshal(data, &r); err != nil {
+		die(err)
+	}
+	fmt.Printf("agent_id:    %s\nrole:        %s\nvm_id:       %s\nagent_token: %s\n", r.AgentID, r.Role, r.VMID, r.AgentToken)
+}
+
+// flock rm-agent <flock_id> <agent_id> — DELETE /flocks/{id}/agents/{agent_id} (v0.4.3).
+func flockRmAgent(args []string) {
+	jsonOut, tok, rest := extractCommon(args)
+	if len(rest) < 2 {
+		die(fmt.Errorf("usage: flock rm-agent <flock_id> <agent_id>"))
+	}
+	flockID, agentID := rest[0], rest[1]
+	data, err := mkClient(tok).do("DELETE", "/flocks/"+flockID+"/agents/"+agentID, nil)
+	if err != nil {
+		die(err)
+	}
+	confirm(jsonOut, data, fmt.Sprintf("agent %s removed from flock %s", agentID, flockID))
+}
+
+// flock set-role <flock_id> <agent_id> <role> — PATCH /flocks/{id}/agents/{agent_id} (v0.4.3).
+// Recreates the agent's VM under the new role (agent_id + token preserved).
+func flockSetRole(args []string) {
+	jsonOut, tok, rest := extractCommon(args)
+	if len(rest) < 3 {
+		die(fmt.Errorf("usage: flock set-role <flock_id> <agent_id> <role>"))
+	}
+	flockID, agentID, role := rest[0], rest[1], rest[2]
+	data, err := mkClient(tok).do("PATCH", "/flocks/"+flockID+"/agents/"+agentID, map[string]string{"role": role})
+	if err != nil {
+		die(err)
+	}
+	if jsonOut {
+		printJSON(data)
+		return
+	}
+	var r vmInfo
+	if err := json.Unmarshal(data, &r); err != nil {
+		die(err)
+	}
+	fmt.Printf("agent %s role → %s, new vm_id %s\n", agentID, role, r.VMID)
 }
 
 func flockWall(args []string) {

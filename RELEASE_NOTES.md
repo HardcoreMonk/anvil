@@ -1,3 +1,21 @@
+# v0.4.3 — Flock Lifecycle (in progress)
+
+**Ephemera** v0.4.3 makes flocks adjustable at runtime. **PR-A** adds dynamic agent membership — add, remove, and role-change endpoints alongside the existing per-agent restart. Additive — no wire format changed.
+
+---
+
+## What's New
+
+### Dynamic flock agent management (PR-A)
+
+- `POST /flocks/{id}/agents` `{"role":"worker"}` — spawn and attach a new agent. The `agent_id` follows the per-role `role-N` rule (max existing N + 1) and the one-time `agent_token` is returned. The 20-agent-per-flock cap is enforced.
+- `DELETE /flocks/{id}/agents/{agent_id}` — tear down the agent's VM and remove it from the flock. Removing the last agent leaves an empty flock (recoverable via add; use `DELETE /flocks/{id}` for the whole flock).
+- `PATCH /flocks/{id}/agents/{agent_id}` `{"role":"reviewer"}` — change an agent's role. Because role binds VM sizing + system prompt at spawn time, the VM is recreated under the new role (`agent_id` and `agent_token` preserved, like restart).
+- `ephemera-ctl flock add-agent`/`rm-agent`/`set-role` wrap the three endpoints.
+- Each membership change is posted to the Town Wall; the watchdog auto-discovers added VMs and forgets removed ones.
+
+---
+
 # v0.4.2 — COW Spawn by Default
 
 **Ephemera** v0.4.2 promotes copy-on-write spawn disks to the default. New VMs now get a dm-snapshot view of the golden image instead of a 700 MiB full `io.Copy` clone — measured ~43% faster spawn (1.96s → 1.12s warm) with ~0 MiB initial per-VM disk. The daemon probes dm-snapshot support at startup and **auto-falls back to a full clone** when `losetup`/`dmsetup`/`dm_snapshot` are unavailable, so hosts without device-mapper keep working. Opt out explicitly with `EPHEMERA_DISK_MODE=plain` (or `full`). Additive — no wire format changed.
