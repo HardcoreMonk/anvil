@@ -15,6 +15,7 @@ import (
 type FlockMetadata struct {
 	FlockID       string                `json:"flock_id"`
 	Task          string                `json:"task"`
+	MaxAgents     int                   `json:"max_agents"` // per-flock agent cap (v0.4.3); 0 = use default
 	Agents        map[string]*AgentInfo `json:"agents"`
 	CreatedAt     time.Time             `json:"created_at"`
 	SchemaVersion int                   `json:"schema_version"`

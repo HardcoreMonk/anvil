@@ -26,3 +26,16 @@ func TestNextAgentID(t *testing.T) {
 		}
 	}
 }
+
+// TestFlockMax covers the per-flock cap fallback (v0.4.3): 0/unset → default,
+// otherwise the flock's own MaxAgents.
+func TestFlockMax(t *testing.T) {
+	f := &orchestrator.Flock{}
+	if got := flockMax(f); got != defaultMaxAgentsPerFlock {
+		t.Errorf("flockMax(unset) = %d, want %d", got, defaultMaxAgentsPerFlock)
+	}
+	f.MaxAgents = 5
+	if got := flockMax(f); got != 5 {
+		t.Errorf("flockMax(5) = %d, want 5", got)
+	}
+}

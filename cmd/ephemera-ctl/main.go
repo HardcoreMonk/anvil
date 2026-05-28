@@ -61,6 +61,7 @@ Usage: ephemera-ctl <noun> <verb> [args] [--json] [--token T]
                                    flock add-agent <id> <role>
                                    flock rm-agent <id> <agent_id>
                                    flock set-role <id> <agent_id> <role>
+                                   flock pause <id> | resume <id>
 
   snapshot ls | restore <id> | rm <id>
   audit [--limit N] [--client C] [--status S] [--method M]

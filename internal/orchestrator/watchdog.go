@@ -250,6 +250,11 @@ func (wd *Watchdog) onFailure(v VMRef) {
 		// Flock was deleted between the lister snapshot and now. Race-tolerant.
 		return
 	}
+	if flock.AgentStatus(agentID) == AgentStatusPaused {
+		// A paused flock member intentionally doesn't answer /health (v0.4.3);
+		// don't mark it dead. resume restores ready + clears the fail counter.
+		return
+	}
 	flock.UpdateAgentStatus(agentID, AgentStatusDead)
 	if err := flock.Persist(wd.flockMgr.WorkDir()); err != nil {
 		// The in-memory mark already took effect; a missed disk write means

@@ -1121,6 +1121,35 @@ curl -s "$API/vms" | jq -r '.[].vm_id' | grep -q "$PATCH_VM_ID" \
     && fail "removed agent VM $PATCH_VM_ID still present" \
     || ok "removed agent VM torn down ✓"
 
+# ── 57d-f. Flock pause/resume + per-flock max_agents (v0.4.3 PR-B) ─
+step "57d. Pause the flock (POST /flocks/{id}/pause)"
+check_http "$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/flocks/$FLOCK_ID/pause")" \
+    "200" "POST /flocks/$FLOCK_ID/pause"
+PAUSED_FLAG=$(curl -s "$API/flocks/$FLOCK_ID" | jq -r '.paused')
+[ "$PAUSED_FLAG" = "true" ] && ok "flock.paused = true ✓" || fail "paused flag not set (got $PAUSED_FLAG)"
+PAUSED_STATUS=$(curl -s "$API/flocks/$FLOCK_ID" | jq -r '[.agents[].status] | unique | .[0]')
+[ "$PAUSED_STATUS" = "paused" ] && ok "all members status = paused ✓" || fail "members not all paused (got $PAUSED_STATUS)"
+# Watchdog must NOT mark a paused member dead (wait past threshold ~15s).
+sleep 18
+WD_STATUS=$(curl -s "$API/flocks/$FLOCK_ID" | jq -r '[.agents[].status] | unique | join(",")')
+[ "$WD_STATUS" = "paused" ] && ok "watchdog left paused members alone (not dead) ✓" \
+                            || fail "paused members changed to '$WD_STATUS' (watchdog should skip)"
+
+step "57e. Resume the flock (POST /flocks/{id}/resume)"
+check_http "$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/flocks/$FLOCK_ID/resume")" \
+    "200" "POST /flocks/$FLOCK_ID/resume"
+RESUMED_FLAG=$(curl -s "$API/flocks/$FLOCK_ID" | jq -r '.paused')
+[ "$RESUMED_FLAG" = "false" ] && ok "flock.paused = false after resume ✓" || fail "paused still set (got $RESUMED_FLAG)"
+RVM=$(curl -s "$API/flocks/$FLOCK_ID" | jq -r '[.agents[].vm_id][0]')
+check_http "$(curl -s -o /dev/null -w "%{http_code}" "$API/vms/$RVM/health")" \
+    "200" "resumed member /health → 200"
+
+step "57f. Per-flock max_agents enforced (POST /flocks max_agents)"
+OVER_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/flocks" \
+    -H "Content-Type: application/json" \
+    -d '{"task":"cap test","roles":["worker","worker","worker"],"max_agents":2}')
+[ "$OVER_CODE" = "400" ] && ok "roles > max_agents rejected (400) ✓" || fail "expected 400, got $OVER_CODE"
+
 # ── 58. Delete flock and verify cleanup ──────────────────────────
 step "58. Delete flock and verify all member VMs are torn down"
 DEL_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/flocks/$FLOCK_ID")

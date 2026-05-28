@@ -150,6 +150,7 @@ DELETE /vms/{id}
 | **Watchdog dead-status persistence** (v0.3.3) | When the watchdog marks an agent `dead`, the new status is written to `flocks/<id>/metadata.json` (via `Flock.Persist`, serialized by a per-flock `writeMu`). Daemon restart and cold-restart both preserve the marking, so a once-dead agent stays dead until explicitly restarted. |
 | **Per-agent restart** (v0.3.3) | `POST /flocks/{id}/agents/{agent_id}/restart` tears down one flock member's VM and respawns it with the same `agent_id`, role, and `agent_token` (callers' cached tokens keep working). The new VM gets a fresh `vm_id` / `guest_ip`; the agent's status resets to `ready`. |
 | **Dynamic flock membership** (v0.4.3) | `POST /flocks/{id}/agents` adds an agent (per-role `role-N` id, returns `agent_token`, 20-agent cap); `DELETE /flocks/{id}/agents/{agent_id}` removes one (empty flock allowed); `PATCH …/agents/{agent_id}` changes role by recreating the VM under the new sizing/prompt (`agent_id` + token preserved). CLI: `ephemera-ctl flock add-agent`/`rm-agent`/`set-role`. |
+| **Flock pause/resume + max_agents** (v0.4.3) | `POST /flocks/{id}/pause` · `/resume` pause/resume **all** member VMs via Firecracker (runtime-only — not persisted; the watchdog skips dead-marking paused agents). `POST /flocks` accepts `max_agents` for a per-flock cap (default 20), enforced on create and add. CLI: `ephemera-ctl flock pause`/`resume`, `create --max-agents`. |
 | **Auto-injected control-plane token** (v0.3.3) | When `EPHEMERA_API_TOKENS` is set, the host writes the first non-expired client's token (`apiClients[0]` until v0.4.1's per-token TTL) into each flock VM at `/root/.ephemera-cp-token` (mode 0600); the in-VM `/townwall/post` forwarder reads it automatically. No more manual `EPHEMERA_CONTROL_PLANE_TOKEN` env inside every VM. |
 | **CP token hot rotation** (v0.3.4) | `EPHEMERA_API_TOKENS_FILE=/path/to/tokens` enables true hot rotation: edit the file, send SIGHUP, and the daemon both swaps `cp.clients` and fans the new token out to every running VM over vsock (`SET_CP_TOKEN` command, atomic file rewrite inside the guest). No per-VM restart needed for the in-VM forwarder to pick up the new bearer. |
 | **Env-tunable watchdog** (v0.3.4) | `EPHEMERA_WATCHDOG_INTERVAL_SEC` / `_TIMEOUT_SEC` / `_THRESHOLD` override the 5 s / 1 s / 3-fail defaults at startup. `EPHEMERA_WATCHDOG_AUTO_HEAL=true` opts in to self-healing — a `dead` agent that resumes responding is auto-marked `ready` (default off preserves sticky-dead). |
@@ -425,6 +426,7 @@ sudo bash e2e_test.sh
 | 56 | `GET /flocks/{id}/wall/history` returns ≥ 3 entries (orchestrator init + step 55 + step 55a) and the 55a body (escaped quote + backslash) matches verbatim |
 | 57 | `GET /flocks` lists the new flock |
 | 57a–c | **Dynamic agent membership** (v0.4.3) — `POST /flocks/{id}/agents` adds `worker-2` (count→6, `/health` 200); `PATCH …/agents/worker-2` `{role:reviewer}` recreates the VM (vm_id swap, role updated); `DELETE …/agents/worker-2` (count→5, VM torn down) |
+| 57d–f | **Pause/resume + max_agents** (v0.4.3) — `POST /flocks/{id}/pause` (members → `paused`; watchdog leaves them alone past its threshold), `/resume` (→ `ready`, `/health` 200); `POST /flocks {roles:3, max_agents:2}` → 400 |
 | 58 | **Flock teardown** — `DELETE /flocks/{id}` returns 200; all 5 VMs and the flock registry entry are gone |
 | 59 | Create a separate resilience flock (3 agents) |
 | 60 | **SSE seq monotonicity** — successive `POST /flocks/{id}/post` responses carry strictly increasing `seq` |
@@ -647,6 +649,7 @@ ephemera-ctl flock restart <id> <agent_id>
 ephemera-ctl flock add-agent <id> <role>      # v0.4.3: add / remove / role-change
 ephemera-ctl flock rm-agent <id> <agent_id>
 ephemera-ctl flock set-role <id> <agent_id> <role>
+ephemera-ctl flock pause <id> | resume <id>   # v0.4.3: pause/resume all members
 
 ephemera-ctl snapshot ls | restore <id> | rm <id>
 ephemera-ctl audit [--limit N] [--client C] [--status S] [--method M]
@@ -1046,6 +1049,17 @@ curl -X PATCH http://localhost:3000/flocks/$FLOCK_ID/agents/worker-2 \
 curl -X DELETE http://localhost:3000/flocks/$FLOCK_ID/agents/worker-2 \
   -H "Authorization: Bearer $TOKEN"
 ```
+
+#### Pause or resume a flock (v0.4.3)
+
+```bash
+# Pause all members (runtime-only — a daemon restart brings them back running)
+curl -X POST http://localhost:3000/flocks/$FLOCK_ID/pause -H "Authorization: Bearer $TOKEN"
+# Resume all members
+curl -X POST http://localhost:3000/flocks/$FLOCK_ID/resume -H "Authorization: Bearer $TOKEN"
+```
+
+> A per-flock agent cap is set at creation: `POST /flocks {"…", "max_agents": N}` (default 20), enforced on create and on add.
 
 #### Tear down a flock
 

@@ -234,7 +234,7 @@ func vmSnapshot(args []string) {
 
 func flockCmd(args []string) {
 	if len(args) == 0 {
-		die(fmt.Errorf("flock: missing verb (create|ls|get|rm|post|wall|restart|add-agent|rm-agent|set-role)"))
+		die(fmt.Errorf("flock: missing verb (create|ls|get|rm|post|wall|restart|add-agent|rm-agent|set-role|pause|resume)"))
 	}
 	verb, rest := args[0], args[1:]
 	switch verb {
@@ -258,6 +258,10 @@ func flockCmd(args []string) {
 		flockRmAgent(rest)
 	case "set-role":
 		flockSetRole(rest)
+	case "pause":
+		flockPause(rest)
+	case "resume":
+		flockResume(rest)
 	default:
 		die(fmt.Errorf("flock: unknown verb %q", verb))
 	}
@@ -268,11 +272,15 @@ func flockCreate(args []string) {
 	fs := flag.NewFlagSet("flock create", flag.ExitOnError)
 	task := fs.String("task", "", "task description (required)")
 	roles := fs.String("roles", "", "comma-separated roles, e.g. orchestrator,worker,reviewer (required)")
+	maxAgents := fs.Int("max-agents", 0, "per-flock agent cap (0 = server default 20)")
 	fs.Parse(rest)
 	if *task == "" || *roles == "" {
 		die(fmt.Errorf("flock create requires --task and --roles"))
 	}
 	body := map[string]any{"task": *task, "roles": strings.Split(*roles, ",")}
+	if *maxAgents > 0 {
+		body["max_agents"] = *maxAgents
+	}
 	data, err := mkClient(tok).do("POST", "/flocks", body)
 	if err != nil {
 		die(err)
@@ -461,6 +469,34 @@ func flockSetRole(args []string) {
 		die(err)
 	}
 	fmt.Printf("agent %s role → %s, new vm_id %s\n", agentID, role, r.VMID)
+}
+
+// flock pause <flock_id> — POST /flocks/{id}/pause (v0.4.3).
+func flockPause(args []string) {
+	jsonOut, tok, rest := extractCommon(args)
+	if len(rest) < 1 {
+		die(fmt.Errorf("usage: flock pause <flock_id>"))
+	}
+	flockID := rest[0]
+	data, err := mkClient(tok).do("POST", "/flocks/"+flockID+"/pause", nil)
+	if err != nil {
+		die(err)
+	}
+	confirm(jsonOut, data, fmt.Sprintf("flock %s paused", flockID))
+}
+
+// flock resume <flock_id> — POST /flocks/{id}/resume (v0.4.3).
+func flockResume(args []string) {
+	jsonOut, tok, rest := extractCommon(args)
+	if len(rest) < 1 {
+		die(fmt.Errorf("usage: flock resume <flock_id>"))
+	}
+	flockID := rest[0]
+	data, err := mkClient(tok).do("POST", "/flocks/"+flockID+"/resume", nil)
+	if err != nil {
+		die(err)
+	}
+	confirm(jsonOut, data, fmt.Sprintf("flock %s resumed", flockID))
 }
 
 func flockWall(args []string) {

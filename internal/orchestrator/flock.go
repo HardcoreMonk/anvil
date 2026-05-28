@@ -13,7 +13,8 @@ const (
 	AgentStatusReady    = "ready"
 	AgentStatusBusy     = "busy"
 	AgentStatusDone     = "done"
-	AgentStatusDead     = "dead" // assigned by the health watchdog after consecutive probe failures
+	AgentStatusDead     = "dead"   // assigned by the health watchdog after consecutive probe failures
+	AgentStatusPaused   = "paused" // set by flock pause; the watchdog skips dead-marking these (v0.4.3)
 )
 
 // AgentInfo is the per-agent record exposed via flock APIs.
@@ -35,9 +36,14 @@ type Flock struct {
 	writeMu   sync.Mutex
 	ID        string                `json:"flock_id"`
 	Task      string                `json:"task"`
+	MaxAgents int                   `json:"max_agents"` // per-flock agent cap (v0.4.3); 0 means use the default
 	Agents    map[string]*AgentInfo `json:"agents"`
 	TownWall  *TownWall             `json:"-"`
 	CreatedAt time.Time             `json:"created_at"`
+	// Paused is a runtime-only flag set by flock pause/resume (v0.4.3). It is
+	// deliberately NOT persisted (Firecracker pause is a runtime state); a daemon
+	// restart brings members back running. Exposed via MarshalJSON, not ToMetadata.
+	Paused bool `json:"-"`
 }
 
 // AddAgent inserts or replaces an agent record under lock.
@@ -93,6 +99,24 @@ func (f *Flock) ChangeAgentRole(agentID, newRole string) {
 	}
 }
 
+// SetPaused sets the runtime-only paused flag under lock (v0.4.3).
+func (f *Flock) SetPaused(paused bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Paused = paused
+}
+
+// AgentStatus returns an agent's current status under a read lock, or "" when
+// the agent is unknown. Used by the watchdog to skip dead-marking paused agents.
+func (f *Flock) AgentStatus(agentID string) string {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if a, ok := f.Agents[agentID]; ok {
+		return a.Status
+	}
+	return ""
+}
+
 // Persist atomically writes the flock's current metadata to disk. Holds
 // writeMu so concurrent callers (createFlock, watchdog, recovery) cannot
 // race the tmp+rename inside SaveFlockMetadata. All flock metadata writers
@@ -131,6 +155,7 @@ func (f *Flock) ToMetadata() FlockMetadata {
 	return FlockMetadata{
 		FlockID:       f.ID,
 		Task:          f.Task,
+		MaxAgents:     f.MaxAgents,
 		Agents:        agents,
 		CreatedAt:     f.CreatedAt,
 		SchemaVersion: currentSchemaVersion,
@@ -146,12 +171,16 @@ func (f *Flock) MarshalJSON() ([]byte, error) {
 	type flockJSON struct {
 		ID        string                `json:"flock_id"`
 		Task      string                `json:"task"`
+		MaxAgents int                   `json:"max_agents"`
+		Paused    bool                  `json:"paused"`
 		Agents    map[string]*AgentInfo `json:"agents"`
 		CreatedAt time.Time             `json:"created_at"`
 	}
 	return json.Marshal(flockJSON{
 		ID:        f.ID,
 		Task:      f.Task,
+		MaxAgents: f.MaxAgents,
+		Paused:    f.Paused,
 		Agents:    f.Agents,
 		CreatedAt: f.CreatedAt,
 	})
@@ -250,6 +279,7 @@ func (fm *FlockManager) LoadFromDisk() (recovered int, failed []string, err erro
 		f := &Flock{
 			ID:        meta.FlockID,
 			Task:      meta.Task,
+			MaxAgents: meta.MaxAgents,
 			Agents:    meta.Agents,
 			TownWall:  tw,
 			CreatedAt: meta.CreatedAt,
