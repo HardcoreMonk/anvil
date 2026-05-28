@@ -39,3 +39,27 @@ func TestFlockMax(t *testing.T) {
 		t.Errorf("flockMax(5) = %d, want 5", got)
 	}
 }
+
+// TestFilterTownWall covers the v0.4.3 wall/history query filters.
+func TestFilterTownWall(t *testing.T) {
+	msgs := []orchestrator.Message{
+		{AgentID: "worker-1", Timestamp: "2026-05-28T10:00:00Z", Body: "hello world"},
+		{AgentID: "worker-2", Timestamp: "2026-05-28T11:00:00Z", Body: "goodbye"},
+		{AgentID: "worker-1", Timestamp: "2026-05-28T12:00:00Z", Body: "world again"},
+	}
+	if got := filterTownWall(msgs, "", "", "", ""); len(got) != 3 {
+		t.Errorf("no filter: got %d, want 3", len(got))
+	}
+	if got := filterTownWall(msgs, "worker-1", "", "", ""); len(got) != 2 {
+		t.Errorf("agent_id: got %d, want 2", len(got))
+	}
+	if got := filterTownWall(msgs, "", "", "", "world"); len(got) != 2 {
+		t.Errorf("contains: got %d, want 2", len(got))
+	}
+	if got := filterTownWall(msgs, "", "2026-05-28T10:30:00Z", "2026-05-28T11:30:00Z", ""); len(got) != 1 {
+		t.Errorf("since/until: got %d, want 1", len(got))
+	}
+	if got := filterTownWall(msgs, "worker-1", "", "", "again"); len(got) != 1 {
+		t.Errorf("agent_id+contains: got %d, want 1", len(got))
+	}
+}

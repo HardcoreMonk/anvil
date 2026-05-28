@@ -2,7 +2,9 @@ package orchestrator
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -191,15 +193,32 @@ type FlockManager struct {
 	mu      sync.RWMutex
 	flocks  map[string]*Flock
 	workDir string
+
+	townWallMaxBytes int64 // Town Wall rotation threshold (v0.4.3); 0 = off
+	townWallKeep     int   // rotated Town Wall backups to retain
 }
 
 // NewFlockManager returns an empty manager rooted at workDir.
 // workDir is where per-flock subdirectories (TOWN_WALL.log, handoff/) live.
 func NewFlockManager(workDir string) *FlockManager {
 	return &FlockManager{
-		flocks:  make(map[string]*Flock),
-		workDir: workDir,
+		flocks:           make(map[string]*Flock),
+		workDir:          workDir,
+		townWallMaxBytes: int64(envIntDefault("EPHEMERA_TOWNWALL_MAX_MIB", 10)) << 20,
+		townWallKeep:     envIntDefault("EPHEMERA_TOWNWALL_KEEP", 3),
 	}
+}
+
+// envIntDefault parses a positive int env var, falling back to def. The daemon's
+// envInt lives in package main; this mirrors it for Town Wall rotation config
+// (v0.4.3) since the orchestrator package can't import it.
+func envIntDefault(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return def
 }
 
 // WorkDir returns the directory used to root flock-local files.
@@ -211,6 +230,7 @@ func (fm *FlockManager) Create(flockID, task, townWallPath string) (*Flock, erro
 	if err != nil {
 		return nil, err
 	}
+	tw.SetRotation(fm.townWallMaxBytes, fm.townWallKeep)
 	f := &Flock{
 		ID:        flockID,
 		Task:      task,
@@ -276,6 +296,7 @@ func (fm *FlockManager) LoadFromDisk() (recovered int, failed []string, err erro
 			failed = append(failed, meta.FlockID)
 			continue
 		}
+		tw.SetRotation(fm.townWallMaxBytes, fm.townWallKeep)
 		f := &Flock{
 			ID:        meta.FlockID,
 			Task:      meta.Task,

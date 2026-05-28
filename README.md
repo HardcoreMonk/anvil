@@ -37,7 +37,7 @@ Ephemera Control Plane  :3000         ← VM + snapshot + flock management
   DELETE /flocks/{id}                 → tear down all member VMs in parallel
   POST   /flocks/{id}/post            → append message to Town Wall
   GET    /flocks/{id}/wall            → SSE stream of Town Wall messages
-  GET    /flocks/{id}/wall/history    → full Town Wall log
+  GET    /flocks/{id}/wall/history    → Town Wall log (filters: ?agent_id/since/until/contains, v0.4.3)
 
       │  provision
       ▼
@@ -151,6 +151,7 @@ DELETE /vms/{id}
 | **Per-agent restart** (v0.3.3) | `POST /flocks/{id}/agents/{agent_id}/restart` tears down one flock member's VM and respawns it with the same `agent_id`, role, and `agent_token` (callers' cached tokens keep working). The new VM gets a fresh `vm_id` / `guest_ip`; the agent's status resets to `ready`. |
 | **Dynamic flock membership** (v0.4.3) | `POST /flocks/{id}/agents` adds an agent (per-role `role-N` id, returns `agent_token`, 20-agent cap); `DELETE /flocks/{id}/agents/{agent_id}` removes one (empty flock allowed); `PATCH …/agents/{agent_id}` changes role by recreating the VM under the new sizing/prompt (`agent_id` + token preserved). CLI: `ephemera-ctl flock add-agent`/`rm-agent`/`set-role`. |
 | **Flock pause/resume + max_agents** (v0.4.3) | `POST /flocks/{id}/pause` · `/resume` pause/resume **all** member VMs via Firecracker (runtime-only — not persisted; the watchdog skips dead-marking paused agents). `POST /flocks` accepts `max_agents` for a per-flock cap (default 20), enforced on create and add. CLI: `ephemera-ctl flock pause`/`resume`, `create --max-agents`. |
+| **Town Wall query + rotation** (v0.4.3) | `GET /flocks/{id}/wall/history` filters: `?agent_id=` / `since=` / `until=` (RFC3339) / `contains=`. The log rotates by size (`EPHEMERA_TOWNWALL_MAX_MIB` default 10 MiB, `_KEEP` default 3); history reflects the active file (rotated backups kept on disk). |
 | **Auto-injected control-plane token** (v0.3.3) | When `EPHEMERA_API_TOKENS` is set, the host writes the first non-expired client's token (`apiClients[0]` until v0.4.1's per-token TTL) into each flock VM at `/root/.ephemera-cp-token` (mode 0600); the in-VM `/townwall/post` forwarder reads it automatically. No more manual `EPHEMERA_CONTROL_PLANE_TOKEN` env inside every VM. |
 | **CP token hot rotation** (v0.3.4) | `EPHEMERA_API_TOKENS_FILE=/path/to/tokens` enables true hot rotation: edit the file, send SIGHUP, and the daemon both swaps `cp.clients` and fans the new token out to every running VM over vsock (`SET_CP_TOKEN` command, atomic file rewrite inside the guest). No per-VM restart needed for the in-VM forwarder to pick up the new bearer. |
 | **Env-tunable watchdog** (v0.3.4) | `EPHEMERA_WATCHDOG_INTERVAL_SEC` / `_TIMEOUT_SEC` / `_THRESHOLD` override the 5 s / 1 s / 3-fail defaults at startup. `EPHEMERA_WATCHDOG_AUTO_HEAL=true` opts in to self-healing — a `dead` agent that resumes responding is auto-marked `ready` (default off preserves sticky-dead). |
@@ -424,6 +425,7 @@ sudo bash e2e_test.sh
 | 55 | `POST /flocks/{id}/post` accepts a message and persists it |
 | 55a | **In-VM forwarding** — direct `POST $agent_url/townwall/post` (the chain that `gtwall` uses) round-trips through goose-agent → control plane; unauthenticated probe rejected with 401 |
 | 56 | `GET /flocks/{id}/wall/history` returns ≥ 3 entries (orchestrator init + step 55 + step 55a) and the 55a body (escaped quote + backslash) matches verbatim |
+| 56a | **Town Wall query filters** (v0.4.3) — `?agent_id=` returns only that agent's entries; `?contains=` returns only matching bodies |
 | 57 | `GET /flocks` lists the new flock |
 | 57a–c | **Dynamic agent membership** (v0.4.3) — `POST /flocks/{id}/agents` adds `worker-2` (count→6, `/health` 200); `PATCH …/agents/worker-2` `{role:reviewer}` recreates the VM (vm_id swap, role updated); `DELETE …/agents/worker-2` (count→5, VM torn down) |
 | 57d–f | **Pause/resume + max_agents** (v0.4.3) — `POST /flocks/{id}/pause` (members → `paused`; watchdog leaves them alone past its threshold), `/resume` (→ `ready`, `/health` 200); `POST /flocks {roles:3, max_agents:2}` → 400 |
@@ -619,6 +621,7 @@ All settings are read from environment variables at startup.
 | `EPHEMERA_AUDIT_DISABLE` | `false` | Set to `true` to turn off the access audit log (v0.4.1). When enabled (the default), every API request is appended as one JSON line to `{workDir}/audit/access.jsonl` (method, path, client name, status, latency — never tokens or bodies) and is queryable via `GET /audit`. |
 | `EPHEMERA_AUDIT_MAX_MIB` | `100` | Active audit file size (MiB) that triggers rotation to `access.jsonl.1` (v0.4.1). |
 | `EPHEMERA_AUDIT_KEEP` | `5` | Number of rotated audit files to retain; older ones are deleted (v0.4.1). Disk ceiling ≈ `MAX_MIB × (KEEP + 1)`. |
+| `EPHEMERA_TOWNWALL_MAX_MIB` / `_KEEP` | `10` / `3` | Town Wall log size-based rotation (v0.4.3): once the active `TOWN_WALL.log` passes `MAX_MIB` it shifts to `.1`…`.KEEP` and a fresh file continues. `GET /flocks/{id}/wall/history` reflects the active file. |
 | `EPHEMERA_CTL_URL` | `http://127.0.0.1:3000` | Base URL the `ephemera-ctl` operator CLI dials (v0.4.1). Not derived from `EPHEMERA_API_ADDR` — that is a bind address and `0.0.0.0` is not dialable. |
 | `EPHEMERA_CTL_TOKEN` | *(unset)* | Bearer token for `ephemera-ctl`; falls back to `EPHEMERA_API_TOKEN`. A `--token` flag overrides both (v0.4.1). |
 
@@ -1010,6 +1013,9 @@ The stream begins with the full history, then keeps the connection open and emit
 
 ```bash
 curl http://localhost:3000/flocks/$FLOCK_ID/wall/history \
+  -H "Authorization: Bearer $TOKEN"
+# Filters (v0.4.3, combinable): ?agent_id=worker-1 · ?since= / ?until= (RFC3339) · ?contains=text
+curl "http://localhost:3000/flocks/$FLOCK_ID/wall/history?agent_id=worker-1&contains=build" \
   -H "Authorization: Bearer $TOKEN"
 ```
 

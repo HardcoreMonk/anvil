@@ -95,7 +95,7 @@ func (cp *ControlPlane) handleFlockItem(w http.ResponseWriter, r *http.Request) 
 	case sub == "wall" && r.Method == http.MethodGet:
 		cp.streamTownWall(w, r, flockID)
 	case sub == "wall/history" && r.Method == http.MethodGet:
-		cp.townWallHistory(w, flockID)
+		cp.townWallHistory(w, r, flockID)
 	case sub == "post" && r.Method == http.MethodPost:
 		cp.postToTownWall(w, r, flockID)
 	case sub == "pause" && r.Method == http.MethodPost:
@@ -294,7 +294,7 @@ func (cp *ControlPlane) postToTownWall(w http.ResponseWriter, r *http.Request, f
 	writeJSON(w, http.StatusOK, msg)
 }
 
-func (cp *ControlPlane) townWallHistory(w http.ResponseWriter, flockID string) {
+func (cp *ControlPlane) townWallHistory(w http.ResponseWriter, r *http.Request, flockID string) {
 	f, ok := cp.flockMgr.Get(flockID)
 	if !ok {
 		writeJSONError(w, http.StatusNotFound, fmt.Errorf("flock not found"))
@@ -305,10 +305,39 @@ func (cp *ControlPlane) townWallHistory(w http.ResponseWriter, flockID string) {
 		writeJSONError(w, http.StatusInternalServerError, err)
 		return
 	}
+	q := r.URL.Query()
+	history = filterTownWall(history, q.Get("agent_id"), q.Get("since"), q.Get("until"), q.Get("contains"))
 	if history == nil {
 		history = []orchestrator.Message{}
 	}
 	writeJSON(w, http.StatusOK, history)
+}
+
+// filterTownWall applies optional Town Wall history query filters (v0.4.3):
+// agent_id (exact match), since/until (RFC3339, inclusive — UTC strings sort in
+// time order so a lexical compare suffices), and contains (substring of body).
+// An all-empty filter set returns msgs unchanged.
+func filterTownWall(msgs []orchestrator.Message, agentID, since, until, contains string) []orchestrator.Message {
+	if agentID == "" && since == "" && until == "" && contains == "" {
+		return msgs
+	}
+	out := make([]orchestrator.Message, 0, len(msgs))
+	for _, m := range msgs {
+		if agentID != "" && m.AgentID != agentID {
+			continue
+		}
+		if since != "" && m.Timestamp < since {
+			continue
+		}
+		if until != "" && m.Timestamp > until {
+			continue
+		}
+		if contains != "" && !strings.Contains(m.Body, contains) {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 // streamTownWall streams new Town Wall messages as Server-Sent Events.
