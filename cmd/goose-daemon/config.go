@@ -238,6 +238,23 @@ func envBool(key string, defaultVal bool) bool {
 	return defaultVal
 }
 
+// resolveDiskModeCOW decides the spawn disk strategy once at startup. COW is the
+// default; EPHEMERA_DISK_MODE=plain (or "full") forces a full byte-for-byte copy.
+// When COW is intended but the host lacks dm-snapshot support, it logs a warning
+// and falls back to plain so spawns still succeed. probe is injected so the
+// decision logic is unit-testable without real device-mapper.
+func resolveDiskModeCOW(probe func() error) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("EPHEMERA_DISK_MODE"))) {
+	case "plain", "full":
+		return false
+	}
+	if err := probe(); err != nil {
+		slog.Warn("COW disk mode unavailable; falling back to plain full-clone", "err", err)
+		return false
+	}
+	return true
+}
+
 // AgentProfile bundles per-role VM sizing and the on-disk profile directory.
 // ProfileDir is resolved relative to {workDir}/configs/profiles/{ProfileDir}.
 // An empty ProfileDir signals "use the daemon's default goose config".

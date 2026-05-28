@@ -65,8 +65,8 @@ goose-agent  http://10.0.1.x:8080    ← private subnet 10.0.1.0/24 (host-only)
 ### VM Provisioning Flow
 
 ```
-CloneDisk()      → copy golden image → per-VM ext4 disk
-                   (or CloneDiskCOW with EPHEMERA_DISK_MODE=cow → dm-snapshot, ~0 MiB)
+CloneDiskCOW()   → dm-snapshot view of golden image → ~0 MiB initial (default)
+                   (or CloneDisk full copy with EPHEMERA_DISK_MODE=plain → per-VM ext4 disk)
 PrepareVM()      → inject goose.yaml, goose-secrets.yaml, agent_token,
                    /etc/localtime, and (flock members only) /root/.ephemera-flock
                    + /root/.goose-system-prompt   (single mount/unmount cycle)
@@ -131,7 +131,7 @@ DELETE /vms/{id}
 | **Multi-agent flocks** | `POST /flocks` spawns a group of role-specialized VMs in one call; `DELETE /flocks/{id}` tears them all down in parallel |
 | **Town Wall log** | Per-flock append-only log with SSE streaming (`/flocks/{id}/wall`) for coordination; `gtwall "..."` CLI inside each VM posts to it, and `gtcall <agent_id> "..."` (v0.3.6) dispatches a prompt to a peer agent — both hide curl/token/JSON-quoting behind a one-line interface |
 | **Role system prompts** | Each role profile can ship a `system.md` that is injected into the VM and prepended to every `/tasks` prompt |
-| **Optional COW spawn rootfs** | `EPHEMERA_DISK_MODE=cow` provisions new VMs with a dm-snapshot view of the golden image instead of a 700 MiB full copy (default off; safe rollback). Auto-recovered across a daemon restart since v0.4.0. |
+| **COW spawn rootfs (default)** | New VMs get a dm-snapshot view of the golden image instead of a 700 MiB full copy — ~43% faster spawn, ~0 MiB initial disk. Default since v0.4.2; opt out with `EPHEMERA_DISK_MODE=plain`. The daemon probes dm-snapshot support at startup and auto-falls back to a full clone if unavailable. Auto-recovered across a daemon restart since v0.4.0. |
 | **Runtime config injection** | `goose.yaml` and `goose-secrets.yaml` injected at provision time — no image rebuild required to change provider/model |
 | **Per-VM agent authentication** | Control plane generates a 32-byte random Bearer token per VM; token is written to the VM disk and returned once in `POST /vms` response |
 | **MicroVM snapshots (Full + Diff)** | Freeze VM memory state to disk; restore in ~5 s. First snapshot → Full; subsequent snapshots of the same VM → Diff, storing only changed memory pages **and** changed rootfs blocks (v0.4.0), merged onto the base on restore. Diff is automatically selected; Full is always the reference base. Original agent token preserved across restores. |
@@ -602,7 +602,7 @@ All settings are read from environment variables at startup.
 | `EPHEMERA_API_TOKEN` | *(unset)* | Single Bearer token (backward-compatible fallback). |
 | `EPHEMERA_AGENT_PORT` | `8080` | Port goose-agent listens on inside each VM. |
 | `EPHEMERA_PUBLIC_URL` | *(unset)* | Externally-reachable base URL of the control plane (no trailing slash). When set, `agent_url` in VM responses uses the proxy path `{EPHEMERA_PUBLIC_URL}/vms/{vm_id}` instead of the VM's private IP. Example: `https://api.example.com`. |
-| `EPHEMERA_DISK_MODE` | *(unset)* | Set to `cow` to provision spawn disks as a dm-snapshot view of the golden image (~0 MiB initial usage) instead of a 700 MiB full copy. Default behavior is preserved when unset. Auto-recovered across a daemon restart since v0.4.0. |
+| `EPHEMERA_DISK_MODE` | `cow` | Spawn disk strategy. **COW (a dm-snapshot view of the golden image, ~0 MiB initial usage) is the default since v0.4.2.** Set to `plain` (or `full`) to force a 700 MiB full copy. When COW is selected but the host lacks dm-snapshot support (`losetup`/`dmsetup`/`dm_snapshot`), the daemon logs a warning and falls back to plain at startup. Auto-recovered across a daemon restart since v0.4.0. |
 | `EPHEMERA_DISK_MIN_FREE_MIB` | `1024` | Free-space floor (MiB) enforced before a VM clone or snapshot writes to disk (v0.4.0). A `statfs` pre-flight estimates the footprint (clone / full snapshot ≈ rootfs + memory; diff snapshot ≈ memory only) and returns `507 Insufficient Storage` when the result would drop free space below this margin, rather than failing mid-write. |
 | `EPHEMERA_AUTOSNAPSHOT` | `false` | When `true` (`1`/`yes`/`on` also accepted), the daemon snapshots each recoverable VM's memory+state into `vms/<id>/auto/` on **graceful** shutdown, and the next start **warm-restores** it (in-flight agent work survives a daemon bounce) instead of cold-booting (v0.4.0). One-shot per shutdown; on any restore failure it falls back to cold boot. Requires a graceful shutdown — a SIGKILL/crash cold-boots as before. A 5-agent flock snapshot is ~10 GB, so default off. |
 | `EPHEMERA_WATCHDOG_INTERVAL_SEC` | `5` | Watchdog poll cadence (v0.3.4). |
