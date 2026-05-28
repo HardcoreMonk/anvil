@@ -1072,6 +1072,17 @@ MATCH=$(echo "$HIST" | jq --arg id "$TARGET_AGENT_ID" --arg body "$UNIQUE_BODY" 
     && ok "In-VM /townwall/post entry round-tripped (agent_id+body match) ✓" \
     || fail "In-VM /townwall/post entry not found in history (exact matches: $MATCH)"
 
+step "56a. Town Wall history query filters (v0.4.3 PR-C)"
+BY_AGENT=$(curl -s "$API/flocks/$FLOCK_ID/wall/history?agent_id=$TARGET_AGENT_ID")
+BY_AGENT_N=$(echo "$BY_AGENT" | jq 'length')
+BY_AGENT_WRONG=$(echo "$BY_AGENT" | jq --arg id "$TARGET_AGENT_ID" '[.[] | select(.agent_id != $id)] | length')
+[ "$BY_AGENT_N" -ge "1" ] && [ "$BY_AGENT_WRONG" = "0" ] \
+    && ok "?agent_id=$TARGET_AGENT_ID → $BY_AGENT_N entries, all match ✓" \
+    || fail "agent_id filter: $BY_AGENT_N entries, $BY_AGENT_WRONG wrong"
+CONTAINS_N=$(curl -s "$API/flocks/$FLOCK_ID/wall/history?contains=spawned" | jq 'length')
+[ "$CONTAINS_N" -ge "1" ] && ok "?contains=spawned → $CONTAINS_N entries ✓" \
+    || fail "contains filter returned $CONTAINS_N"
+
 # ── 57. List flocks ──────────────────────────────────────────────
 step "57. Verify GET /flocks lists the new flock"
 FLOCK_LIST_COUNT=$(curl -s "$API/flocks" | jq 'length')

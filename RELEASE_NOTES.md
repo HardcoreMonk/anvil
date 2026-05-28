@@ -1,6 +1,6 @@
-# v0.4.3 — Flock Lifecycle (in progress)
+# v0.4.3 — Flock Lifecycle
 
-**Ephemera** v0.4.3 makes flocks adjustable at runtime. **PR-A** adds dynamic agent membership (add/remove/role-change); **PR-B** adds flock pause/resume and a per-flock agent cap. Additive — no wire format changed.
+**Ephemera** v0.4.3 makes flocks adjustable at runtime: **PR-A** dynamic agent membership (add/remove/role-change), **PR-B** flock pause/resume + per-flock agent cap, **PR-C** Town Wall history filters + log rotation. Additive — no wire format changed.
 
 ---
 
@@ -20,6 +20,11 @@
 - The health watchdog **skips dead-marking `paused` agents** — a paused VM intentionally doesn't answer `/health`, so it must not be marked dead.
 - `POST /flocks` accepts `max_agents` — a per-flock agent cap (default 20), enforced on create **and** on `POST /flocks/{id}/agents`. Persisted in metadata (backward-compatible; an absent/0 value falls back to the default).
 - `ephemera-ctl flock pause`/`resume`; `flock create --max-agents N`.
+
+### Town Wall query filters + log rotation (PR-C)
+
+- `GET /flocks/{id}/wall/history` accepts filters: `agent_id` (exact), `since`/`until` (RFC3339, inclusive), `contains` (body substring). Combinable; an all-empty filter returns the full history.
+- The Town Wall log now **rotates by size**: past `EPHEMERA_TOWNWALL_MAX_MIB` (default 10) the active log shifts to `.1` (…→`EPHEMERA_TOWNWALL_KEEP`, default 3) and a fresh file continues. `History` reflects the active file (rotated backups stay on disk, mirroring the audit log).
 
 ---
 
