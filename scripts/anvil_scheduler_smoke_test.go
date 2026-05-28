@@ -44,6 +44,9 @@ func TestAnvilSchedulerSmokePassesAgainstFakeScheduler(t *testing.T) {
 	if hostPuts[0]["smoke_only"] != true {
 		t.Fatalf("PUT /hosts smoke_only = %v, want true; body=%+v", hostPuts[0]["smoke_only"], hostPuts[0])
 	}
+	if !server.controlLoopStatusChecked() {
+		t.Fatalf("smoke script did not call GET /control-loop/status")
+	}
 }
 
 func TestAnvilSchedulerSmokeGeneratesDefaultHostID(t *testing.T) {
@@ -315,6 +318,7 @@ type anvilSchedulerSmokeFakeServer struct {
 	retainHostOnDeleteFlag  bool
 	selectSmokeFallback     bool
 	denyFallbackSchedule    bool
+	controlLoopStatusCalls  int
 }
 
 func (s *anvilSchedulerSmokeFakeServer) hasHost(hostID string) bool {
@@ -347,6 +351,12 @@ func (s *anvilSchedulerSmokeFakeServer) hostPutSnapshots() []map[string]any {
 		out = append(out, cloneSmokeTestMap(body))
 	}
 	return out
+}
+
+func (s *anvilSchedulerSmokeFakeServer) controlLoopStatusChecked() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.controlLoopStatusCalls > 0
 }
 
 func (s *anvilSchedulerSmokeFakeServer) failHostPutAfterStore(message string) {
@@ -506,6 +516,22 @@ func newAnvilSchedulerSmokeFakeServerWithHost(t *testing.T, healthDelay time.Dur
 				"hosts":              hosts,
 				"vm_placements":      map[string]string{},
 				"snapshot_locations": map[string][]string{},
+			})
+		case "/control-loop/status":
+			if r.Method != http.MethodGet {
+				http.Error(w, "GET required", http.StatusMethodNotAllowed)
+				return
+			}
+			fake.mu.Lock()
+			fake.controlLoopStatusCalls++
+			fake.mu.Unlock()
+			writeSmokeTestJSON(t, w, map[string]any{
+				"running":                    true,
+				"poll_interval_seconds":      10,
+				"reconcile_interval_seconds": 30,
+				"failure_threshold":          3,
+				"persistence_degraded":       false,
+				"hosts":                      map[string]any{},
 			})
 		default:
 			if strings.HasPrefix(r.URL.Path, "/hosts/") {

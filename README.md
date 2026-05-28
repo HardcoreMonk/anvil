@@ -1209,8 +1209,20 @@ go build -o anvil-scheduler ./cmd/anvil-scheduler
 ANVIL_SCHEDULER_ADDR=127.0.0.1:3010 \
 ANVIL_SCHEDULER_STATE=/var/lib/anvil/scheduler.json \
 ANVIL_SCHEDULER_QUOTA_STORE=/var/lib/anvil/tenants.json \
+ANVIL_SCHEDULER_POLL_INTERVAL=10s \
+ANVIL_SCHEDULER_RECONCILE_INTERVAL=30s \
+ANVIL_SCHEDULER_FAILURE_THRESHOLD=3 \
 ./anvil-scheduler
 ```
+
+control loop과 host bootstrap 관련 scheduler 환경 변수:
+
+| Env var | 목적 |
+|---|---|
+| `ANVIL_SCHEDULER_HOSTS_FILE` | config-managed runtime host bootstrap JSON 파일. 설정한 파일은 존재해야 한다 |
+| `ANVIL_SCHEDULER_POLL_INTERVAL` | host observation poll 주기 |
+| `ANVIL_SCHEDULER_RECONCILE_INTERVAL` | placement reconciliation 주기 |
+| `ANVIL_SCHEDULER_FAILURE_THRESHOLD` | host를 `unhealthy`로 전이하기 전 연속 실패 횟수 |
 
 `--verify`와 standalone smoke harness는 host에 `curl`, `python3`가 있어야
 실행된다. systemd 설치 host에서는 dry-run, start, smoke verify를 같은 installer로
@@ -1245,6 +1257,7 @@ Scheduler service API는 operator가 host inventory와 placement 상태를 관�
 | `GET/PUT /hosts` | runtime host inventory 조회/등록 |
 | `DELETE /hosts/{name}` | smoke/운영 정리용 runtime host inventory 제거. 없는 host 삭제는 idempotent success로 처리 |
 | `GET /placements` | host, VM placement, snapshot location state 조회 |
+| `GET /control-loop/status` | scheduler control loop 실행 상태, host observation, degraded/unhealthy 판단 조회 |
 | `POST /reconcile` | 현재 placement state 반환. router reconciliation은 daemon `GET /vms` 기반 helper가 수행 |
 | `POST /schedule/spawn` | spawn 요청의 host decision 반환 |
 | `POST /schedule/restore?snapshot_id=...` | snapshot locality를 반영한 restore host decision 반환 |

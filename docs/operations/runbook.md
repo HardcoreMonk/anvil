@@ -111,6 +111,16 @@ curl http://127.0.0.1:3010/health
 curl http://127.0.0.1:3010/placements
 ```
 
+runtime scheduler control loop 상태:
+
+```bash
+curl http://127.0.0.1:3010/control-loop/status
+```
+
+`degraded`/`unhealthy` host는 신규 placement에서 제외되며, 기존 VM placement는
+`suspect_vm_placements`로 남는다. host가 다시 응답하면 reconciliation이 daemon
+`GET /vms` 결과로 stale placement를 정리한다.
+
 ## Tenant, egress, audit 확인
 
 tenant quota/usage state:

@@ -19,7 +19,7 @@
 - scheduler 운영 검증 자동화: `scripts/anvil-scheduler-smoke.sh`와
   `scripts/install-anvil-scheduler-systemd.sh --verify`는 `GET /health`,
   `PUT/GET /hosts`, `POST /schedule/spawn`, `GET /placements`,
-  `DELETE /hosts/{name}` cleanup을 제공한다.
+  `GET /control-loop/status`, `DELETE /hosts/{name}` cleanup을 제공한다.
 - 비구현 범위: multi-node HA, migration, cross-host snapshot replication,
   scheduler-aware cross-host flock placement, L7 egress proxy, billing, UI.
 
@@ -40,6 +40,8 @@ daemon 계약 확장을 필요로 한다.
 - `SelectRuntimeHost`: healthy host, VM capacity, snapshot bytes, egress policy를
   기준으로 첫 eligible host 선택
 - `HostInventory.PollOnce`: daemon `/health` polling으로 scheduler host 상태 갱신
+- scheduler control loop: host observation을 주기적으로 갱신하고 degraded/unhealthy
+  host와 `suspect_vm_placements` 상태를 운영자가 조회할 수 있게 제공
 - `RuntimeRouter`: scheduler decision을 daemon mutation 전에 적용하고 VM placement
   map으로 VM 후속 호출을 host별 daemon client에 라우팅. snapshot locality preferred
   host, retry/failover, placement reconciliation helper를 포함한다.
@@ -161,7 +163,8 @@ placement를 교체한다.
 별도 process인 `cmd/anvil-scheduler`는 `ANVIL_SCHEDULER_ADDR`,
 `ANVIL_SCHEDULER_STATE`, `ANVIL_SCHEDULER_QUOTA_STORE`를 읽는다. HTTP surface는
 `GET /health`, `GET/PUT /hosts`, `DELETE /hosts/{name}`, `GET /placements`,
-`POST /reconcile`, `POST /schedule/spawn`, `POST /schedule/restore`다.
+`GET /control-loop/status`, `POST /reconcile`, `POST /schedule/spawn`,
+`POST /schedule/restore`다.
 
 운영 배포 자동화는 `deploy/systemd/anvil-scheduler.service`,
 `deploy/systemd/anvil-scheduler.env.example`,

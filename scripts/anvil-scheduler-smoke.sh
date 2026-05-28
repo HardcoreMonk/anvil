@@ -322,6 +322,22 @@ if not isinstance(value, dict):
 PY
 }
 
+require_json_key() {
+  local path="$1"
+  local key="$2"
+
+  python3 - "$path" "$key" <<'PY'
+import json
+import sys
+
+path, key = sys.argv[1:3]
+with open(path, encoding="utf-8") as handle:
+    value = json.load(handle)
+if not isinstance(value, dict) or key not in value:
+    raise SystemExit(1)
+PY
+}
+
 require_deleted_true() {
   local path="$1"
 
@@ -497,6 +513,18 @@ if [[ "$PLACEMENTS_STATUS" != "200" ]]; then
 fi
 if ! require_json_object "$PLACEMENTS_BODY" 2>/dev/null; then
   fail_step placements_failed 'GET /placements did not return a JSON object'
+fi
+
+CONTROL_LOOP_BODY="$TMP_DIR/control_loop_status.json"
+CONTROL_LOOP_ERR="$TMP_DIR/control_loop_status.err"
+if ! CONTROL_LOOP_STATUS="$(request_json GET /control-loop/status "" "$CONTROL_LOOP_BODY" "$CONTROL_LOOP_ERR")"; then
+  fail_step control_loop_status_failed "GET /control-loop/status request failed: $(<"$CONTROL_LOOP_ERR")"
+fi
+if [[ "$CONTROL_LOOP_STATUS" != "200" ]]; then
+  fail_step control_loop_status_failed "GET /control-loop/status returned HTTP $CONTROL_LOOP_STATUS: $(response_body_snippet "$CONTROL_LOOP_BODY")"
+fi
+if ! require_json_key "$CONTROL_LOOP_BODY" "running" 2>/dev/null; then
+  fail_step control_loop_status_failed "GET /control-loop/status response missing running"
 fi
 
 if [[ "$SMOKE_HOST_REGISTERED" == "1" ]]; then
