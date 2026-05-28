@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"ephemera/internal/anvilmcp"
@@ -92,6 +95,27 @@ func intEnv(name string, fallback int) (int, error) {
 	return parsed, nil
 }
 
+func applyConfiguredHosts(store *anvilmcp.PlacementStore, hosts []anvilmcp.RuntimeHost) error {
+	if len(hosts) == 0 {
+		return nil
+	}
+	for _, host := range hosts {
+		existing, ok := store.Host(host.Name)
+		if ok {
+			host.Healthy = existing.Healthy
+			host.AvailableVMs = existing.AvailableVMs
+			host.AvailableSnapshotBytes = existing.AvailableSnapshotBytes
+		}
+		if err := store.SetHost(host); err != nil {
+			return err
+		}
+		if err := store.MarkConfigManagedHost(host.Name, true); err != nil {
+			return err
+		}
+	}
+	return store.Save()
+}
+
 func main() {
 	cfg, err := loadSchedulerConfig()
 	if err != nil {
@@ -101,16 +125,43 @@ func main() {
 	if err := placements.Load(); err != nil {
 		log.Fatalf("load scheduler placement store: %v", err)
 	}
+	configuredHosts, err := anvilmcp.LoadSchedulerHostsFile(cfg.HostsFile)
+	if err != nil {
+		log.Fatalf("load scheduler hosts file: %v", err)
+	}
+	if err := applyConfiguredHosts(placements, configuredHosts); err != nil {
+		log.Fatalf("apply scheduler hosts file: %v", err)
+	}
 	quotas := anvilmcp.NewQuotaStore(cfg.QuotaStorePath)
 	if err := quotas.Load(); err != nil {
 		log.Fatalf("load scheduler quota store: %v", err)
 	}
 	service := anvilmcp.NewSchedulerService(anvilmcp.SchedulerServiceOptions{
-		PlacementStore: placements,
-		QuotaStore:     quotas,
+		PlacementStore:     placements,
+		QuotaStore:         quotas,
+		RequirePersistence: cfg.RequirePersistence,
 	})
+	loop := anvilmcp.NewSchedulerControlLoop(placements, anvilmcp.SchedulerControlLoopOptions{
+		APIToken:          cfg.APIToken,
+		HostTimeout:       cfg.HostTimeout,
+		FailureThreshold:  cfg.FailureThreshold,
+		PollInterval:      cfg.PollInterval,
+		ReconcileInterval: cfg.ReconcileInterval,
+	})
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	loop.Start(ctx)
 	log.Printf("anvil scheduler service on %s", cfg.Addr)
-	if err := http.ListenAndServe(cfg.Addr, service.Handler()); err != nil {
+	server := &http.Server{Addr: cfg.Addr, Handler: service.Handler()}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			log.Printf("shutdown scheduler service: %v", err)
+		}
+	}()
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("scheduler service: %v", err)
 	}
 }

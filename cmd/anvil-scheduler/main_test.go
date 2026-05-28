@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"ephemera/internal/anvilmcp"
 )
 
 func TestLoadSchedulerConfigDefaultsAndEnv(t *testing.T) {
@@ -57,5 +59,34 @@ func TestLoadSchedulerConfigRejectsInvalidValues(t *testing.T) {
 	t.Setenv("ANVIL_SCHEDULER_FAILURE_THRESHOLD", "0")
 	if _, err := loadSchedulerConfig(); err == nil {
 		t.Fatal("invalid failure threshold error = nil")
+	}
+}
+
+func TestApplyConfiguredHostsMarksManagedAndPreservesObservation(t *testing.T) {
+	store := anvilmcp.NewPlacementStore(filepath.Join(t.TempDir(), "scheduler.json"))
+	_ = store.SetHost(anvilmcp.RuntimeHost{Name: "host-a", Endpoint: "http://old-host", Healthy: true, AvailableVMs: 9})
+	_ = store.SetHostObservation("host-a", anvilmcp.HostObservation{Status: anvilmcp.HostStatusDegraded, FailureCount: 1})
+
+	err := applyConfiguredHosts(store, []anvilmcp.RuntimeHost{{Name: "host-a", Endpoint: "http://new-host", EgressPolicies: []anvilmcp.EgressPolicy{anvilmcp.EgressPolicyProfile}}})
+	if err != nil {
+		t.Fatalf("applyConfiguredHosts: %v", err)
+	}
+	state := store.State()
+	if state.Hosts["host-a"].Endpoint != "http://new-host" {
+		t.Fatalf("host endpoint = %q, want config endpoint", state.Hosts["host-a"].Endpoint)
+	}
+	if state.HostObservations["host-a"].FailureCount != 1 {
+		t.Fatalf("observation = %+v, want preserved failure count", state.HostObservations["host-a"])
+	}
+	if !state.ConfigManagedHosts["host-a"] {
+		t.Fatalf("config managed hosts = %+v, want host-a", state.ConfigManagedHosts)
+	}
+}
+
+func TestApplyConfiguredHostsNoopsWithoutHosts(t *testing.T) {
+	store := anvilmcp.NewPlacementStore(t.TempDir())
+
+	if err := applyConfiguredHosts(store, nil); err != nil {
+		t.Fatalf("applyConfiguredHosts nil hosts: %v", err)
 	}
 }
