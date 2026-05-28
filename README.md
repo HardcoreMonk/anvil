@@ -1222,7 +1222,13 @@ control loop과 host bootstrap 관련 scheduler 환경 변수:
 | `ANVIL_SCHEDULER_HOSTS_FILE` | config-managed runtime host bootstrap JSON 파일. 설정한 파일은 존재해야 한다 |
 | `ANVIL_SCHEDULER_POLL_INTERVAL` | host observation poll 주기 |
 | `ANVIL_SCHEDULER_RECONCILE_INTERVAL` | placement reconciliation 주기 |
+| `ANVIL_SCHEDULER_HOST_TIMEOUT` | daemon `/health`, `/vms` 요청별 timeout |
 | `ANVIL_SCHEDULER_FAILURE_THRESHOLD` | host를 `unhealthy`로 전이하기 전 연속 실패 횟수 |
+| `ANVIL_SCHEDULER_API_TOKEN` | ephemera daemon에 전달할 bearer token |
+| `ANVIL_SCHEDULER_REQUIRE_PERSISTENCE` | `true`면 scheduler state 저장 장애 중 신규 scheduling을 503으로 차단 |
+
+현재 daemon `/health`는 scheduler capacity 필드를 제공하지 않으므로 hosts file에서
+`available_vms`, `available_snapshot_bytes`, `egress_policies`를 함께 지정한다.
 
 `--verify`와 standalone smoke harness는 host에 `curl`, `python3`가 있어야
 실행된다. systemd 설치 host에서는 dry-run, start, smoke verify를 같은 installer로

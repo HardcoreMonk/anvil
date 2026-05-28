@@ -8,7 +8,7 @@ import (
 
 func TestLoadSchedulerHostsFileParsesHosts(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "hosts.json")
-	writeTestFile(t, path, `{"hosts":[{"name":"host-a","endpoint":"http://127.0.0.1:3000","egress_policies":[" PROFILE ","Deny_All"],"smoke_only":true}]}`)
+	writeTestFile(t, path, `{"hosts":[{"name":"host-a","endpoint":"http://127.0.0.1:3000","available_vms":2,"available_snapshot_bytes":4096,"egress_policies":[" PROFILE ","Deny_All"],"smoke_only":true}]}`)
 
 	hosts, err := LoadSchedulerHostsFile(path)
 	if err != nil {
@@ -23,6 +23,9 @@ func TestLoadSchedulerHostsFileParsesHosts(t *testing.T) {
 	}
 	if len(host.EgressPolicies) != 2 || host.EgressPolicies[0] != EgressPolicyProfile || host.EgressPolicies[1] != EgressPolicyDenyAll {
 		t.Fatalf("egress policies = %+v", host.EgressPolicies)
+	}
+	if host.AvailableVMs != 2 || host.AvailableSnapshotBytes != 4096 {
+		t.Fatalf("host capacity = %d/%d, want 2/4096", host.AvailableVMs, host.AvailableSnapshotBytes)
 	}
 }
 

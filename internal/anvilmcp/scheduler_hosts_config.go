@@ -51,10 +51,12 @@ func LoadSchedulerHostsFile(path string) ([]RuntimeHost, error) {
 			egressPolicies = append(egressPolicies, normalized)
 		}
 		hosts = append(hosts, RuntimeHost{
-			Name:           host.Name,
-			Endpoint:       host.Endpoint,
-			EgressPolicies: egressPolicies,
-			SmokeOnly:      host.SmokeOnly,
+			Name:                   host.Name,
+			Endpoint:               host.Endpoint,
+			AvailableVMs:           host.AvailableVMs,
+			AvailableSnapshotBytes: host.AvailableSnapshotBytes,
+			EgressPolicies:         egressPolicies,
+			SmokeOnly:              host.SmokeOnly,
 		})
 	}
 	return hosts, nil

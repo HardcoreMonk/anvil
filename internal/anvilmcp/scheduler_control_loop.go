@@ -260,14 +260,11 @@ func (l *SchedulerControlLoop) pollHost(ctx context.Context, host RuntimeHost, p
 		return host, previous, true
 	}
 
-	host.Healthy = true
-	host.AvailableVMs = health.AvailableVMs
-	host.AvailableSnapshotBytes = health.AvailableSnapshotBytes
-	host.EgressPolicies = append([]EgressPolicy(nil), health.EgressPolicies...)
+	host = applyHealthResponseToHost(host, health)
 	return host, HostObservation{
 		Status:                 HostStatusHealthy,
-		AvailableVMs:           health.AvailableVMs,
-		AvailableSnapshotBytes: health.AvailableSnapshotBytes,
+		AvailableVMs:           host.AvailableVMs,
+		AvailableSnapshotBytes: host.AvailableSnapshotBytes,
 		LastSuccessAt:          now,
 	}, true
 }

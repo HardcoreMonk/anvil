@@ -27,14 +27,17 @@ type HostInventory struct {
 }
 
 type hostHealthResponse struct {
-	Status                 string         `json:"status"`
-	AvailableVMs           int64          `json:"available_vms"`
-	AvailableSnapshotBytes int64          `json:"available_snapshot_bytes"`
-	EgressPolicies         []EgressPolicy `json:"egress_policies"`
+	Status                 string          `json:"status"`
+	AvailableVMs           *int64          `json:"available_vms,omitempty"`
+	AvailableSnapshotBytes *int64          `json:"available_snapshot_bytes,omitempty"`
+	EgressPolicies         *[]EgressPolicy `json:"egress_policies,omitempty"`
 }
 
 func NewHostInventory(hosts []RuntimeHost, opts HostInventoryOptions) *HostInventory {
-	hostCopy := append([]RuntimeHost(nil), hosts...)
+	hostCopy := make([]RuntimeHost, 0, len(hosts))
+	for _, host := range hosts {
+		hostCopy = append(hostCopy, cloneRuntimeHost(host))
+	}
 	httpClient := opts.HTTPClient
 	if httpClient == nil {
 		httpClient = http.DefaultClient
@@ -54,7 +57,11 @@ func NewHostInventory(hosts []RuntimeHost, opts HostInventoryOptions) *HostInven
 func (i *HostInventory) RuntimeHosts() []RuntimeHost {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	return append([]RuntimeHost(nil), i.hosts...)
+	hosts := make([]RuntimeHost, 0, len(i.hosts))
+	for _, host := range i.hosts {
+		hosts = append(hosts, cloneRuntimeHost(host))
+	}
+	return hosts
 }
 
 func (i *HostInventory) PollOnce(ctx context.Context) error {
@@ -106,11 +113,7 @@ func (i *HostInventory) pollHost(ctx context.Context, host RuntimeHost) RuntimeH
 		return host
 	}
 
-	host.Healthy = true
-	host.AvailableVMs = health.AvailableVMs
-	host.AvailableSnapshotBytes = health.AvailableSnapshotBytes
-	host.EgressPolicies = append([]EgressPolicy(nil), health.EgressPolicies...)
-	return host
+	return applyHealthResponseToHost(host, health)
 }
 
 func (i *HostInventory) Scheduler(quotas map[string]TenantQuota, usage map[string]TenantUsage) *Scheduler {
@@ -127,4 +130,18 @@ func (i *HostInventory) HostByName(name string) (RuntimeHost, error) {
 		}
 	}
 	return RuntimeHost{}, fmt.Errorf("runtime host %q not found", normalized)
+}
+
+func applyHealthResponseToHost(host RuntimeHost, health hostHealthResponse) RuntimeHost {
+	host.Healthy = true
+	if health.AvailableVMs != nil {
+		host.AvailableVMs = *health.AvailableVMs
+	}
+	if health.AvailableSnapshotBytes != nil {
+		host.AvailableSnapshotBytes = *health.AvailableSnapshotBytes
+	}
+	if health.EgressPolicies != nil {
+		host.EgressPolicies = append([]EgressPolicy(nil), (*health.EgressPolicies)...)
+	}
+	return host
 }

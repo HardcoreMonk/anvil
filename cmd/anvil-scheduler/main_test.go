@@ -67,7 +67,13 @@ func TestApplyConfiguredHostsMarksManagedAndPreservesObservation(t *testing.T) {
 	_ = store.SetHost(anvilmcp.RuntimeHost{Name: "host-a", Endpoint: "http://old-host", Healthy: true, AvailableVMs: 9})
 	_ = store.SetHostObservation("host-a", anvilmcp.HostObservation{Status: anvilmcp.HostStatusDegraded, FailureCount: 1})
 
-	err := applyConfiguredHosts(store, []anvilmcp.RuntimeHost{{Name: "host-a", Endpoint: "http://new-host", EgressPolicies: []anvilmcp.EgressPolicy{anvilmcp.EgressPolicyProfile}}})
+	err := applyConfiguredHosts(store, []anvilmcp.RuntimeHost{{
+		Name:                   "host-a",
+		Endpoint:               "http://new-host",
+		AvailableVMs:           3,
+		AvailableSnapshotBytes: 4096,
+		EgressPolicies:         []anvilmcp.EgressPolicy{anvilmcp.EgressPolicyProfile},
+	}})
 	if err != nil {
 		t.Fatalf("applyConfiguredHosts: %v", err)
 	}
@@ -75,11 +81,50 @@ func TestApplyConfiguredHostsMarksManagedAndPreservesObservation(t *testing.T) {
 	if state.Hosts["host-a"].Endpoint != "http://new-host" {
 		t.Fatalf("host endpoint = %q, want config endpoint", state.Hosts["host-a"].Endpoint)
 	}
+	if state.Hosts["host-a"].AvailableVMs != 3 || state.Hosts["host-a"].AvailableSnapshotBytes != 4096 {
+		t.Fatalf("host capacity = %d/%d, want config capacity 3/4096", state.Hosts["host-a"].AvailableVMs, state.Hosts["host-a"].AvailableSnapshotBytes)
+	}
 	if state.HostObservations["host-a"].FailureCount != 1 {
 		t.Fatalf("observation = %+v, want preserved failure count", state.HostObservations["host-a"])
 	}
 	if !state.ConfigManagedHosts["host-a"] {
 		t.Fatalf("config managed hosts = %+v, want host-a", state.ConfigManagedHosts)
+	}
+}
+
+func TestApplyConfiguredHostsRemovesAbsentManagedHosts(t *testing.T) {
+	store := anvilmcp.NewPlacementStore(filepath.Join(t.TempDir(), "scheduler.json"))
+	_ = store.SetHost(anvilmcp.RuntimeHost{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 1})
+	_ = store.SetHost(anvilmcp.RuntimeHost{Name: "host-b", Endpoint: "http://host-b", Healthy: true, AvailableVMs: 2})
+	_ = store.SetHost(anvilmcp.RuntimeHost{Name: "runtime-host", Endpoint: "http://runtime-host", Healthy: true, AvailableVMs: 3})
+	_ = store.MarkConfigManagedHost("host-a", true)
+	_ = store.MarkConfigManagedHost("host-b", true)
+	_ = store.SetHostObservation("host-a", anvilmcp.HostObservation{Status: anvilmcp.HostStatusUnhealthy, FailureCount: 3})
+	_ = store.SetVMPlacement("vm-1", "host-a")
+	_ = store.MarkHostPlacementsSuspect("host-a", "host_unhealthy")
+
+	err := applyConfiguredHosts(store, []anvilmcp.RuntimeHost{{Name: "host-b", Endpoint: "http://host-b-new", EgressPolicies: []anvilmcp.EgressPolicy{anvilmcp.EgressPolicyProfile}}})
+	if err != nil {
+		t.Fatalf("applyConfiguredHosts: %v", err)
+	}
+	state := store.State()
+	if _, ok := state.Hosts["host-a"]; ok {
+		t.Fatalf("removed config host retained: %+v", state.Hosts["host-a"])
+	}
+	if state.ConfigManagedHosts["host-a"] {
+		t.Fatalf("config managed hosts = %+v, want host-a removed", state.ConfigManagedHosts)
+	}
+	if _, ok := state.HostObservations["host-a"]; ok {
+		t.Fatalf("host-a observation retained after config removal: %+v", state.HostObservations["host-a"])
+	}
+	if _, ok := state.SuspectVMPlacements["vm-1"]; ok {
+		t.Fatalf("host-a suspect placement retained after config removal: %+v", state.SuspectVMPlacements["vm-1"])
+	}
+	if state.Hosts["host-b"].Endpoint != "http://host-b-new" || !state.ConfigManagedHosts["host-b"] {
+		t.Fatalf("host-b = %+v managed=%v, want updated managed host", state.Hosts["host-b"], state.ConfigManagedHosts["host-b"])
+	}
+	if _, ok := state.Hosts["runtime-host"]; !ok {
+		t.Fatalf("runtime host removed by config reconciliation: %+v", state.Hosts)
 	}
 }
 

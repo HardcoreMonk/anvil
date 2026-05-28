@@ -65,6 +65,171 @@ func TestSchedulerControlLoopPollTransitionsHostStatus(t *testing.T) {
 	if state.HostObservations["host-a"].Status != HostStatusHealthy || state.Hosts["host-a"].AvailableVMs != 4 {
 		t.Fatalf("third status/host = %+v host=%+v, want healthy capacity 4", state.HostObservations["host-a"], state.Hosts["host-a"])
 	}
+	host := state.Hosts["host-a"]
+	if len(host.EgressPolicies) != 1 || host.EgressPolicies[0] != EgressPolicyProfile {
+		t.Fatalf("host egress policies = %+v, want profile from health poll", host.EgressPolicies)
+	}
+	decision, err := NewScheduler(store.ListHosts(), nil, nil).Schedule(ScheduleRequest{TenantID: "tenant-1", EgressPolicy: EgressPolicyProfile}, TenantUsage{ActiveVMs: 1})
+	if err != nil {
+		t.Fatalf("Schedule after health poll: %v", err)
+	}
+	if !decision.Allowed || decision.Host.Name != "host-a" {
+		t.Fatalf("decision = %+v, want host-a scheduled with observed profile policy", decision)
+	}
+}
+
+func TestSchedulerControlLoopPollPreservesCapacityForCurrentDaemonHealth(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			t.Fatalf("path = %s, want /health", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok","vm_count":2,"snapshot_count":1,"auth_enabled":true}`))
+	}))
+	defer server.Close()
+
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "scheduler.json"))
+	if err := store.SetHost(RuntimeHost{
+		Name:                   "host-a",
+		Endpoint:               server.URL,
+		Healthy:                false,
+		AvailableVMs:           2,
+		AvailableSnapshotBytes: 4096,
+		EgressPolicies:         []EgressPolicy{EgressPolicyProfile},
+	}); err != nil {
+		t.Fatalf("SetHost: %v", err)
+	}
+	loop := NewSchedulerControlLoop(store, SchedulerControlLoopOptions{
+		HTTPClient:        server.Client(),
+		HostTimeout:       time.Second,
+		FailureThreshold:  2,
+		PollInterval:      time.Second,
+		ReconcileInterval: time.Second,
+	})
+
+	if err := loop.PollOnce(context.Background()); err != nil {
+		t.Fatalf("PollOnce: %v", err)
+	}
+	state := store.State()
+	host := state.Hosts["host-a"]
+	if !host.Healthy || host.AvailableVMs != 2 || host.AvailableSnapshotBytes != 4096 {
+		t.Fatalf("host after current daemon health = %+v, want healthy with preserved capacity", host)
+	}
+	if len(host.EgressPolicies) != 1 || host.EgressPolicies[0] != EgressPolicyProfile {
+		t.Fatalf("egress policies = %+v, want preserved profile policy", host.EgressPolicies)
+	}
+	obs := state.HostObservations["host-a"]
+	if obs.Status != HostStatusHealthy || obs.AvailableVMs != 2 || obs.AvailableSnapshotBytes != 4096 {
+		t.Fatalf("observation = %+v, want healthy preserved capacity", obs)
+	}
+	decision, err := NewScheduler(store.ListHosts(), nil, nil).Schedule(ScheduleRequest{TenantID: "tenant-1", EgressPolicy: EgressPolicyProfile}, TenantUsage{ActiveVMs: 1})
+	if err != nil {
+		t.Fatalf("Schedule after current daemon health: %v", err)
+	}
+	if !decision.Allowed || decision.Host.Name != "host-a" {
+		t.Fatalf("decision = %+v, want host-a still schedulable", decision)
+	}
+}
+
+func TestSchedulerControlLoopUsesConfiguredCapacityAfterStaleZeroState(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			t.Fatalf("path = %s, want /health", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok","vm_count":2,"snapshot_count":1,"auth_enabled":true}`))
+	}))
+	defer server.Close()
+
+	path := filepath.Join(t.TempDir(), "hosts.json")
+	writeTestFile(t, path, `{"hosts":[{"name":"host-a","endpoint":"`+server.URL+`","available_vms":2,"available_snapshot_bytes":4096,"egress_policies":["profile"]}]}`)
+	hosts, err := LoadSchedulerHostsFile(path)
+	if err != nil {
+		t.Fatalf("LoadSchedulerHostsFile: %v", err)
+	}
+
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "scheduler.json"))
+	if err := store.SetHost(RuntimeHost{
+		Name:                   "host-a",
+		Endpoint:               server.URL,
+		Healthy:                true,
+		AvailableVMs:           0,
+		AvailableSnapshotBytes: 0,
+		EgressPolicies:         []EgressPolicy{EgressPolicyProfile},
+	}); err != nil {
+		t.Fatalf("SetHost stale host: %v", err)
+	}
+	if err := store.ApplyConfiguredHostsAndSave(hosts); err != nil {
+		t.Fatalf("ApplyConfiguredHostsAndSave: %v", err)
+	}
+
+	loop := NewSchedulerControlLoop(store, SchedulerControlLoopOptions{
+		HTTPClient:        server.Client(),
+		HostTimeout:       time.Second,
+		FailureThreshold:  2,
+		PollInterval:      time.Second,
+		ReconcileInterval: time.Second,
+	})
+	if err := loop.PollOnce(context.Background()); err != nil {
+		t.Fatalf("PollOnce: %v", err)
+	}
+
+	state := store.State()
+	host := state.Hosts["host-a"]
+	if !host.Healthy || host.AvailableVMs != 2 || host.AvailableSnapshotBytes != 4096 {
+		t.Fatalf("host after config apply and current daemon health = %+v, want configured capacity", host)
+	}
+	decision, err := NewScheduler(store.ListHosts(), nil, nil).Schedule(ScheduleRequest{TenantID: "tenant-1", EgressPolicy: EgressPolicyProfile}, TenantUsage{ActiveVMs: 1})
+	if err != nil {
+		t.Fatalf("Schedule after configured capacity: %v", err)
+	}
+	if !decision.Allowed || decision.Host.Name != "host-a" {
+		t.Fatalf("decision = %+v, want host-a schedulable with configured capacity", decision)
+	}
+}
+
+func TestSchedulerControlLoopPollClearsEgressPoliciesFromExplicitEmptyHealthList(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			t.Fatalf("path = %s, want /health", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok","egress_policies":[]}`))
+	}))
+	defer server.Close()
+
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "scheduler.json"))
+	if err := store.SetHost(RuntimeHost{
+		Name:           "host-a",
+		Endpoint:       server.URL,
+		Healthy:        true,
+		AvailableVMs:   1,
+		EgressPolicies: []EgressPolicy{EgressPolicyProfile},
+	}); err != nil {
+		t.Fatalf("SetHost: %v", err)
+	}
+	loop := NewSchedulerControlLoop(store, SchedulerControlLoopOptions{
+		HTTPClient:        server.Client(),
+		HostTimeout:       time.Second,
+		FailureThreshold:  2,
+		PollInterval:      time.Second,
+		ReconcileInterval: time.Second,
+	})
+
+	if err := loop.PollOnce(context.Background()); err != nil {
+		t.Fatalf("PollOnce: %v", err)
+	}
+	host := store.State().Hosts["host-a"]
+	if len(host.EgressPolicies) != 0 {
+		t.Fatalf("egress policies = %+v, want explicit empty list from health", host.EgressPolicies)
+	}
+	decision, err := NewScheduler(store.ListHosts(), nil, nil).Schedule(ScheduleRequest{TenantID: "tenant-1", EgressPolicy: EgressPolicyProfile}, TenantUsage{ActiveVMs: 1})
+	if err != nil {
+		t.Fatalf("Schedule after empty policy health: %v", err)
+	}
+	if decision.Allowed || decision.Reason != "no_eligible_host" {
+		t.Fatalf("decision = %+v, want no eligible host after explicit empty policy list", decision)
+	}
 }
 
 func TestSchedulerControlLoopPollSkipsMutationWhenParentContextCanceled(t *testing.T) {

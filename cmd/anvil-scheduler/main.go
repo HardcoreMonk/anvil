@@ -96,24 +96,10 @@ func intEnv(name string, fallback int) (int, error) {
 }
 
 func applyConfiguredHosts(store *anvilmcp.PlacementStore, hosts []anvilmcp.RuntimeHost) error {
-	if len(hosts) == 0 {
+	if hosts == nil {
 		return nil
 	}
-	for _, host := range hosts {
-		existing, ok := store.Host(host.Name)
-		if ok {
-			host.Healthy = existing.Healthy
-			host.AvailableVMs = existing.AvailableVMs
-			host.AvailableSnapshotBytes = existing.AvailableSnapshotBytes
-		}
-		if err := store.SetHost(host); err != nil {
-			return err
-		}
-		if err := store.MarkConfigManagedHost(host.Name, true); err != nil {
-			return err
-		}
-	}
-	return store.Save()
+	return store.ApplyConfiguredHostsAndSave(hosts)
 }
 
 func main() {

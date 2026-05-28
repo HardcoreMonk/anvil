@@ -181,6 +181,12 @@ func TestPlacementStoreRemoveHostAndSaveRollsBackOnFailure(t *testing.T) {
 	if err := store.SetHost(RuntimeHost{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 1}); err != nil {
 		t.Fatalf("SetHost host-a: %v", err)
 	}
+	if err := store.MarkConfigManagedHost("host-a", true); err != nil {
+		t.Fatalf("MarkConfigManagedHost: %v", err)
+	}
+	if err := store.SetHostObservation("host-a", HostObservation{Status: HostStatusDegraded, FailureCount: 1}); err != nil {
+		t.Fatalf("SetHostObservation: %v", err)
+	}
 	deleted, err := store.RemoveHostAndSave("host-a")
 	if err == nil {
 		t.Fatal("RemoveHostAndSave unexpectedly succeeded with directory path")
@@ -195,6 +201,13 @@ func TestPlacementStoreRemoveHostAndSaveRollsBackOnFailure(t *testing.T) {
 	if host.Endpoint != "http://host-a" {
 		t.Fatalf("host-a after failed RemoveHostAndSave = %+v, want original host", host)
 	}
+	state := store.State()
+	if !state.ConfigManagedHosts["host-a"] {
+		t.Fatalf("ConfigManagedHosts = %+v, want host-a restored after failed RemoveHostAndSave", state.ConfigManagedHosts)
+	}
+	if state.HostObservations["host-a"].FailureCount != 1 {
+		t.Fatalf("HostObservations[host-a] = %+v, want restored observation", state.HostObservations["host-a"])
+	}
 
 	deleted, err = store.RemoveHostAndSave("missing")
 	if err != nil {
@@ -202,6 +215,59 @@ func TestPlacementStoreRemoveHostAndSaveRollsBackOnFailure(t *testing.T) {
 	}
 	if deleted {
 		t.Fatal("deleted = true, want false for missing host")
+	}
+}
+
+func TestPlacementStoreRemoveHostAndSaveCleansControlLoopState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "placements.json")
+	store := NewPlacementStore(path)
+	if err := store.SetHost(RuntimeHost{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 1}); err != nil {
+		t.Fatalf("SetHost host-a: %v", err)
+	}
+	if err := store.MarkConfigManagedHost("host-a", true); err != nil {
+		t.Fatalf("MarkConfigManagedHost: %v", err)
+	}
+	if err := store.SetHostObservation("host-a", HostObservation{Status: HostStatusUnhealthy, FailureCount: 3}); err != nil {
+		t.Fatalf("SetHostObservation: %v", err)
+	}
+	if err := store.SetVMPlacement("vm-1", "host-a"); err != nil {
+		t.Fatalf("SetVMPlacement: %v", err)
+	}
+	if err := store.MarkHostPlacementsSuspect("host-a", "host_unhealthy"); err != nil {
+		t.Fatalf("MarkHostPlacementsSuspect: %v", err)
+	}
+	if err := store.SetControlLoopStatus(ControlLoopStatus{
+		Running: true,
+		Hosts:   map[string]HostObservation{"host-a": {Status: HostStatusUnhealthy, FailureCount: 3}},
+	}); err != nil {
+		t.Fatalf("SetControlLoopStatus: %v", err)
+	}
+
+	deleted, err := store.RemoveHostAndSave("host-a")
+	if err != nil {
+		t.Fatalf("RemoveHostAndSave: %v", err)
+	}
+	if !deleted {
+		t.Fatal("deleted = false, want true")
+	}
+	state := store.State()
+	if _, ok := state.Hosts["host-a"]; ok {
+		t.Fatalf("Hosts[host-a] retained after delete: %+v", state.Hosts["host-a"])
+	}
+	if state.ConfigManagedHosts["host-a"] {
+		t.Fatalf("ConfigManagedHosts = %+v, want host-a removed", state.ConfigManagedHosts)
+	}
+	if _, ok := state.HostObservations["host-a"]; ok {
+		t.Fatalf("HostObservations[host-a] retained after delete: %+v", state.HostObservations["host-a"])
+	}
+	if _, ok := state.ControlLoopStatus.Hosts["host-a"]; ok {
+		t.Fatalf("ControlLoopStatus.Hosts[host-a] retained after delete: %+v", state.ControlLoopStatus.Hosts["host-a"])
+	}
+	if _, ok := state.SuspectVMPlacements["vm-1"]; ok {
+		t.Fatalf("SuspectVMPlacements[vm-1] retained after delete: %+v", state.SuspectVMPlacements["vm-1"])
+	}
+	if state.VMPlacements["vm-1"] != "host-a" {
+		t.Fatalf("VMPlacements[vm-1] = %q, want retained host-a placement", state.VMPlacements["vm-1"])
 	}
 }
 
@@ -242,7 +308,7 @@ func TestPlacementStoreApplyHostObservationDoesNotResurrectDeletedHost(t *testin
 	}
 }
 
-func TestPlacementStoreApplyHostObservationPreservesConcurrentStaticHostFields(t *testing.T) {
+func TestPlacementStoreApplyHostObservationPreservesStaticFieldsAndUpdatesCapabilities(t *testing.T) {
 	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
 	base := RuntimeHost{
 		Name:                   "host-a",
@@ -294,8 +360,8 @@ func TestPlacementStoreApplyHostObservationPreservesConcurrentStaticHostFields(t
 	if host.Endpoint != "http://new-host-a" {
 		t.Fatalf("endpoint = %q, want concurrent value", host.Endpoint)
 	}
-	if len(host.EgressPolicies) != 1 || host.EgressPolicies[0] != EgressPolicyProfile {
-		t.Fatalf("egress policies = %+v, want concurrent profile policy", host.EgressPolicies)
+	if len(host.EgressPolicies) != 1 || host.EgressPolicies[0] != EgressPolicyAllowAll {
+		t.Fatalf("egress policies = %+v, want observed allow_all policy", host.EgressPolicies)
 	}
 	if !host.SmokeOnly {
 		t.Fatalf("smoke_only = false, want concurrent true")

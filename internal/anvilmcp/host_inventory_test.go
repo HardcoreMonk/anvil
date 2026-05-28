@@ -44,6 +44,58 @@ func TestHostInventoryPollMarksHealthyHost(t *testing.T) {
 	}
 }
 
+func TestHostInventoryPollPreservesFieldsOmittedByCurrentDaemonHealth(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			t.Fatalf("path = %s, want /health", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok","vm_count":2,"snapshot_count":1,"auth_enabled":true}`))
+	}))
+	defer server.Close()
+
+	inventory := NewHostInventory([]RuntimeHost{
+		{Name: "host-a", Endpoint: server.URL, AvailableVMs: 2, AvailableSnapshotBytes: 4096, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+	}, HostInventoryOptions{HTTPClient: server.Client()})
+
+	if err := inventory.PollOnce(context.Background()); err != nil {
+		t.Fatalf("PollOnce() error = %v", err)
+	}
+	host := inventory.RuntimeHosts()[0]
+	if !host.Healthy || host.AvailableVMs != 2 || host.AvailableSnapshotBytes != 4096 {
+		t.Fatalf("host after current daemon health = %+v, want healthy with preserved capacity", host)
+	}
+	if len(host.EgressPolicies) != 1 || host.EgressPolicies[0] != EgressPolicyProfile {
+		t.Fatalf("egress policies = %+v, want preserved profile policy", host.EgressPolicies)
+	}
+}
+
+func TestHostInventoryPollClearsEgressPoliciesWhenHealthReturnsEmptyList(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			t.Fatalf("path = %s, want /health", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok","egress_policies":[]}`))
+	}))
+	defer server.Close()
+
+	inventory := NewHostInventory([]RuntimeHost{
+		{Name: "host-a", Endpoint: server.URL, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+	}, HostInventoryOptions{HTTPClient: server.Client()})
+
+	if err := inventory.PollOnce(context.Background()); err != nil {
+		t.Fatalf("PollOnce() error = %v", err)
+	}
+	host := inventory.RuntimeHosts()[0]
+	if len(host.EgressPolicies) != 0 {
+		t.Fatalf("egress policies = %+v, want explicit empty list from health", host.EgressPolicies)
+	}
+	if host.AvailableVMs != 1 {
+		t.Fatalf("AvailableVMs = %d, want preserved 1", host.AvailableVMs)
+	}
+}
+
 func TestHostInventoryPollMarksUnreachableHostUnhealthy(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"down"}`, http.StatusServiceUnavailable)

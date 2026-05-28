@@ -175,6 +175,7 @@ func (s *PlacementStore) SetHost(host RuntimeHost) error {
 		return fmt.Errorf("host name must be non-empty")
 	}
 	host.Name = name
+	host = cloneRuntimeHost(host)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ensureMaps()
@@ -188,6 +189,7 @@ func (s *PlacementStore) SetHostAndSave(host RuntimeHost) error {
 		return fmt.Errorf("host name must be non-empty")
 	}
 	host.Name = name
+	host = cloneRuntimeHost(host)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ensureMaps()
@@ -199,6 +201,44 @@ func (s *PlacementStore) SetHostAndSave(host RuntimeHost) error {
 		} else {
 			delete(s.state.Hosts, name)
 		}
+		return err
+	}
+	return nil
+}
+
+func (s *PlacementStore) ApplyConfiguredHostsAndSave(hosts []RuntimeHost) error {
+	desired := make(map[string]RuntimeHost, len(hosts))
+	for _, host := range hosts {
+		name := strings.TrimSpace(host.Name)
+		if name == "" {
+			return fmt.Errorf("host name must be non-empty")
+		}
+		if _, exists := desired[name]; exists {
+			return fmt.Errorf("duplicate host %q", name)
+		}
+		host.Name = name
+		desired[name] = cloneRuntimeHost(host)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensureMaps()
+	previous := clonePlacementStoreState(s.state)
+
+	for name, host := range desired {
+		if existing, ok := s.state.Hosts[name]; ok {
+			host.Healthy = existing.Healthy
+		}
+		s.state.Hosts[name] = host
+		s.state.ConfigManagedHosts[name] = true
+	}
+	for name := range s.state.ConfigManagedHosts {
+		if _, ok := desired[name]; !ok {
+			s.removeHostLocked(name)
+		}
+	}
+	if err := s.saveLocked(); err != nil {
+		s.state = previous
 		return err
 	}
 	return nil
@@ -238,7 +278,7 @@ func (s *PlacementStore) RemoveHost(name string) bool {
 	if _, ok := s.state.Hosts[name]; !ok {
 		return false
 	}
-	delete(s.state.Hosts, name)
+	s.removeHostLocked(name)
 	return true
 }
 
@@ -250,13 +290,14 @@ func (s *PlacementStore) RemoveHostAndSave(name string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ensureMaps()
-	previous, existed := s.state.Hosts[name]
+	previous := clonePlacementStoreState(s.state)
+	_, existed := s.state.Hosts[name]
 	if !existed {
 		return false, nil
 	}
-	delete(s.state.Hosts, name)
+	s.removeHostLocked(name)
 	if err := s.saveLocked(); err != nil {
-		s.state.Hosts[name] = previous
+		s.state = previous
 		return true, err
 	}
 	return true, nil
@@ -270,7 +311,7 @@ func (s *PlacementStore) Host(name string) (RuntimeHost, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	host, ok := s.state.Hosts[name]
-	return host, ok
+	return cloneRuntimeHost(host), ok
 }
 
 func (s *PlacementStore) ListHosts() []RuntimeHost {
@@ -283,7 +324,7 @@ func (s *PlacementStore) ListHosts() []RuntimeHost {
 	sort.Strings(names)
 	out := make([]RuntimeHost, 0, len(names))
 	for _, name := range names {
-		out = append(out, s.state.Hosts[name])
+		out = append(out, cloneRuntimeHost(s.state.Hosts[name]))
 	}
 	return out
 }
@@ -357,6 +398,7 @@ func (s *PlacementStore) ApplyHostObservation(base RuntimeHost, observed Runtime
 	current.Healthy = observed.Healthy
 	current.AvailableVMs = observed.AvailableVMs
 	current.AvailableSnapshotBytes = observed.AvailableSnapshotBytes
+	current.EgressPolicies = append([]EgressPolicy(nil), observed.EgressPolicies...)
 	s.state.Hosts[name] = current
 	s.state.HostObservations[name] = obs
 	s.state.ControlLoopStatus.Hosts[name] = obs
@@ -523,6 +565,18 @@ func (s *PlacementStore) ensureMaps() {
 	normalizePlacementStoreState(&s.state)
 }
 
+func (s *PlacementStore) removeHostLocked(name string) {
+	delete(s.state.Hosts, name)
+	delete(s.state.ConfigManagedHosts, name)
+	delete(s.state.HostObservations, name)
+	delete(s.state.ControlLoopStatus.Hosts, name)
+	for vmID, suspect := range s.state.SuspectVMPlacements {
+		if suspect.Host == name {
+			delete(s.state.SuspectVMPlacements, vmID)
+		}
+	}
+}
+
 func normalizePlacementStoreState(state *PlacementStoreState) {
 	if state.Hosts == nil {
 		state.Hosts = make(map[string]RuntimeHost)
@@ -570,7 +624,7 @@ func clonePlacementStoreState(state PlacementStoreState) PlacementStoreState {
 		SuspectVMPlacements: make(map[string]SuspectVMPlacement, len(state.SuspectVMPlacements)),
 	}
 	for name, host := range state.Hosts {
-		out.Hosts[name] = host
+		out.Hosts[name] = cloneRuntimeHost(host)
 	}
 	for vmID, hostName := range state.VMPlacements {
 		out.VMPlacements[vmID] = hostName
@@ -593,4 +647,9 @@ func clonePlacementStoreState(state PlacementStoreState) PlacementStoreState {
 		out.ControlLoopStatus.Hosts[host] = obs
 	}
 	return out
+}
+
+func cloneRuntimeHost(host RuntimeHost) RuntimeHost {
+	host.EgressPolicies = append([]EgressPolicy(nil), host.EgressPolicies...)
+	return host
 }

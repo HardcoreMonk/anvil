@@ -27,7 +27,10 @@ type ScheduleDecision struct {
 }
 
 func NewScheduler(hosts []RuntimeHost, quotas map[string]TenantQuota, usage map[string]TenantUsage) *Scheduler {
-	hostCopy := append([]RuntimeHost(nil), hosts...)
+	hostCopy := make([]RuntimeHost, 0, len(hosts))
+	for _, host := range hosts {
+		hostCopy = append(hostCopy, cloneRuntimeHost(host))
+	}
 	quotaCopy := make(map[string]TenantQuota, len(quotas))
 	for tenantID, quota := range quotas {
 		quotaCopy[tenantID] = quota
