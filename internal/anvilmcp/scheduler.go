@@ -6,16 +6,24 @@ type Scheduler struct {
 	usage  map[string]TenantUsage
 }
 
+type HostStatusSummary struct {
+	Healthy   int `json:"healthy"`
+	Degraded  int `json:"degraded"`
+	Unhealthy int `json:"unhealthy"`
+	Unknown   int `json:"unknown"`
+}
+
 type ScheduleDecision struct {
-	Allowed      bool          `json:"allowed"`
-	Reason       string        `json:"reason"`
-	TenantID     string        `json:"tenant_id"`
-	Host         RuntimeHost   `json:"host,omitempty"`
-	Quota        QuotaDecision `json:"quota,omitempty"`
-	EgressPolicy EgressPolicy  `json:"egress_policy"`
-	Requested    TenantUsage   `json:"requested"`
-	CurrentUsage TenantUsage   `json:"current_usage"`
-	Limit        TenantQuota   `json:"limit"`
+	Allowed           bool              `json:"allowed"`
+	Reason            string            `json:"reason"`
+	TenantID          string            `json:"tenant_id"`
+	Host              RuntimeHost       `json:"host,omitempty"`
+	HostStatusSummary HostStatusSummary `json:"host_status_summary"`
+	Quota             QuotaDecision     `json:"quota,omitempty"`
+	EgressPolicy      EgressPolicy      `json:"egress_policy"`
+	Requested         TenantUsage       `json:"requested"`
+	CurrentUsage      TenantUsage       `json:"current_usage"`
+	Limit             TenantQuota       `json:"limit"`
 }
 
 func NewScheduler(hosts []RuntimeHost, quotas map[string]TenantQuota, usage map[string]TenantUsage) *Scheduler {
@@ -33,6 +41,32 @@ func NewScheduler(hosts []RuntimeHost, quotas map[string]TenantQuota, usage map[
 		quotas: quotaCopy,
 		usage:  usageCopy,
 	}
+}
+
+func SummarizeHostStatuses(hosts []RuntimeHost, observations map[string]HostObservation) HostStatusSummary {
+	var summary HostStatusSummary
+	for _, host := range hosts {
+		obs, ok := observations[host.Name]
+		if !ok {
+			if host.Healthy {
+				summary.Healthy++
+			} else {
+				summary.Unknown++
+			}
+			continue
+		}
+		switch obs.Status {
+		case HostStatusHealthy:
+			summary.Healthy++
+		case HostStatusDegraded:
+			summary.Degraded++
+		case HostStatusUnhealthy:
+			summary.Unhealthy++
+		default:
+			summary.Unknown++
+		}
+	}
+	return summary
 }
 
 func (s *Scheduler) Schedule(req ScheduleRequest, requested TenantUsage) (ScheduleDecision, error) {

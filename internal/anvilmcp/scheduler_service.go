@@ -4,17 +4,20 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 )
 
 type SchedulerServiceOptions struct {
-	PlacementStore *PlacementStore
-	QuotaStore     *QuotaStore
+	PlacementStore     *PlacementStore
+	QuotaStore         *QuotaStore
+	RequirePersistence bool
 }
 
 type SchedulerService struct {
-	placements *PlacementStore
-	quotas     *QuotaStore
+	placements         *PlacementStore
+	quotas             *QuotaStore
+	requirePersistence bool
 }
 
 type schedulerRequest struct {
@@ -31,7 +34,7 @@ func NewSchedulerService(opts SchedulerServiceOptions) *SchedulerService {
 	if quotas == nil {
 		quotas = NewQuotaStore("")
 	}
-	return &SchedulerService{placements: placements, quotas: quotas}
+	return &SchedulerService{placements: placements, quotas: quotas, requirePersistence: opts.RequirePersistence}
 }
 
 func (s *SchedulerService) Handler() http.Handler {
@@ -39,6 +42,7 @@ func (s *SchedulerService) Handler() http.Handler {
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/hosts", s.handleHosts)
 	mux.HandleFunc("/hosts/", s.handleHostItem)
+	mux.HandleFunc("/control-loop/status", s.handleControlLoopStatus)
 	mux.HandleFunc("/placements", s.handlePlacements)
 	mux.HandleFunc("/reconcile", s.handleReconcile)
 	mux.HandleFunc("/schedule/spawn", s.handleSchedule)
@@ -90,6 +94,10 @@ func (s *SchedulerService) handleHostItem(w http.ResponseWriter, r *http.Request
 		return
 	}
 	name = strings.TrimSpace(name)
+	if s.placements.IsConfigManagedHost(name) {
+		http.Error(w, "config-managed host must be removed from hosts file", http.StatusConflict)
+		return
+	}
 	deleted, err := s.placements.RemoveHostAndSave(name)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -104,6 +112,14 @@ func (s *SchedulerService) handlePlacements(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	writeSchedulerJSON(w, s.placements.State())
+}
+
+func (s *SchedulerService) handleControlLoopStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET required", http.StatusMethodNotAllowed)
+		return
+	}
+	writeSchedulerJSON(w, s.placements.State().ControlLoopStatus)
 }
 
 func (s *SchedulerService) handleReconcile(w http.ResponseWriter, r *http.Request) {
@@ -127,13 +143,29 @@ func (s *SchedulerService) handleSchedule(w http.ResponseWriter, r *http.Request
 	if strings.HasSuffix(r.URL.Path, "/restore") && len(req.PreferredHosts) == 0 {
 		req.PreferredHosts = s.placements.SnapshotHosts(strings.TrimSpace(r.URL.Query().Get("snapshot_id")))
 	}
+	state := s.placements.State()
+	hosts := runtimeHostsFromPlacementState(state)
 	quotas, usage := s.quotas.SchedulerInputs()
-	decision, err := NewScheduler(s.placements.ListHosts(), quotas, usage).Schedule(req.ScheduleRequest, req.Requested)
+	decision, err := NewScheduler(hosts, quotas, usage).Schedule(req.ScheduleRequest, req.Requested)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	decision.HostStatusSummary = SummarizeHostStatuses(hosts, state.HostObservations)
 	writeSchedulerJSON(w, decision)
+}
+
+func runtimeHostsFromPlacementState(state PlacementStoreState) []RuntimeHost {
+	names := make([]string, 0, len(state.Hosts))
+	for name := range state.Hosts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	hosts := make([]RuntimeHost, 0, len(names))
+	for _, name := range names {
+		hosts = append(hosts, state.Hosts[name])
+	}
+	return hosts
 }
 
 func writeSchedulerJSON(w http.ResponseWriter, value any) {

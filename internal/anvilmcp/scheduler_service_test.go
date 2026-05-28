@@ -219,6 +219,110 @@ func TestSchedulerServiceReconcileReturnsPlacementSnapshot(t *testing.T) {
 	}
 }
 
+func TestSchedulerServiceControlLoopStatusEndpoint(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "scheduler.json"))
+	_ = store.SetHostObservation("host-a", HostObservation{Status: HostStatusUnhealthy, FailureCount: 3, LastError: "health returned 503"})
+	_ = store.SetControlLoopStatus(ControlLoopStatus{Running: true, PollIntervalSeconds: 10, ReconcileIntervalSeconds: 30, FailureThreshold: 3, Hosts: map[string]HostObservation{"host-a": {Status: HostStatusUnhealthy, FailureCount: 3}}})
+	service := NewSchedulerService(SchedulerServiceOptions{PlacementStore: store})
+
+	req := httptest.NewRequest(http.MethodGet, "/control-loop/status", nil)
+	rr := httptest.NewRecorder()
+	service.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /control-loop/status status = %d body=%s, want 200", rr.Code, rr.Body.String())
+	}
+	var status ControlLoopStatus
+	if err := json.Unmarshal(rr.Body.Bytes(), &status); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if !status.Running || status.Hosts["host-a"].Status != HostStatusUnhealthy {
+		t.Fatalf("status = %+v", status)
+	}
+}
+
+func TestSchedulerServiceControlLoopStatusRejectsNonGET(t *testing.T) {
+	service := NewSchedulerService(SchedulerServiceOptions{})
+
+	req := httptest.NewRequest(http.MethodPost, "/control-loop/status", nil)
+	rr := httptest.NewRecorder()
+	service.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /control-loop/status status = %d body=%s, want 405", rr.Code, rr.Body.String())
+	}
+}
+
+func TestSchedulerServiceRejectsDeleteConfigManagedHost(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "scheduler.json"))
+	_ = store.SetHost(RuntimeHost{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 1})
+	_ = store.MarkConfigManagedHost("host-a", true)
+	service := NewSchedulerService(SchedulerServiceOptions{PlacementStore: store})
+
+	req := httptest.NewRequest(http.MethodDelete, "/hosts/host-a", nil)
+	rr := httptest.NewRecorder()
+	service.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("DELETE config-managed host status = %d body=%s, want 409", rr.Code, rr.Body.String())
+	}
+}
+
+func TestSchedulerServiceRejectsDeleteConfigManagedHostWithEncodedWhitespace(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "scheduler.json"))
+	_ = store.SetHost(RuntimeHost{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 1})
+	_ = store.MarkConfigManagedHost("host-a", true)
+	service := NewSchedulerService(SchedulerServiceOptions{PlacementStore: store})
+
+	for _, path := range []string{"/hosts/%20host-a%20", "/hosts/host-a%20"} {
+		req := httptest.NewRequest(http.MethodDelete, path, nil)
+		rr := httptest.NewRecorder()
+		service.Handler().ServeHTTP(rr, req)
+		if rr.Code != http.StatusConflict {
+			t.Fatalf("DELETE %s status = %d body=%s, want 409", path, rr.Code, rr.Body.String())
+		}
+	}
+}
+
+func TestSchedulerServiceScheduleIncludesHostStatusSummary(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "scheduler.json"))
+	_ = store.SetHost(RuntimeHost{Name: "host-a", Endpoint: "http://host-a", Healthy: false, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}})
+	_ = store.SetHostObservation("host-a", HostObservation{Status: HostStatusDegraded, FailureCount: 1})
+	service := NewSchedulerService(SchedulerServiceOptions{PlacementStore: store})
+
+	req := httptest.NewRequest(http.MethodPost, "/schedule/spawn", strings.NewReader(`{"tenant_id":"tenant-1","egress_policy":"profile","requested":{"active_vms":1}}`))
+	rr := httptest.NewRecorder()
+	service.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("POST /schedule/spawn status = %d body=%s, want 200", rr.Code, rr.Body.String())
+	}
+	var decision ScheduleDecision
+	if err := json.Unmarshal(rr.Body.Bytes(), &decision); err != nil {
+		t.Fatalf("decode decision: %v", err)
+	}
+	if decision.Allowed || decision.HostStatusSummary.Degraded != 1 {
+		t.Fatalf("decision = %+v, want denied with degraded host summary", decision)
+	}
+}
+
+func TestSchedulerServiceAllowedScheduleIncludesHealthyHostStatusSummary(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "scheduler.json"))
+	_ = store.SetHost(RuntimeHost{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}})
+	_ = store.SetHostObservation("host-a", HostObservation{Status: HostStatusHealthy})
+	service := NewSchedulerService(SchedulerServiceOptions{PlacementStore: store})
+
+	req := httptest.NewRequest(http.MethodPost, "/schedule/spawn", strings.NewReader(`{"tenant_id":"tenant-1","egress_policy":"profile","requested":{"active_vms":1}}`))
+	rr := httptest.NewRecorder()
+	service.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("POST /schedule/spawn status = %d body=%s, want 200", rr.Code, rr.Body.String())
+	}
+	var decision ScheduleDecision
+	if err := json.Unmarshal(rr.Body.Bytes(), &decision); err != nil {
+		t.Fatalf("decode decision: %v", err)
+	}
+	if !decision.Allowed || decision.HostStatusSummary.Healthy != 1 {
+		t.Fatalf("decision = %+v, want allowed with healthy host summary", decision)
+	}
+}
+
 func schedulerServiceListHosts(t *testing.T, service *SchedulerService) []RuntimeHost {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/hosts", nil)
