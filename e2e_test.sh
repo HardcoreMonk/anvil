@@ -714,8 +714,9 @@ COW_FINAL_SNAP=$(curl -s "$API/snapshots" | jq 'length')
 # both a graceful restart (DestroyAll keeps the exception store; RecoverVMs
 # re-layers it over the golden image) and a crash (RemoveOrphanCOWDevices reclaims
 # a state-less COW device while a surviving VM is cold-restarted). The shared
-# daemon runs in plain mode, so this block relaunches it in COW mode and restores
-# plain mode at the end for the remaining flock/recovery steps.
+# daemon defaults to COW since v0.4.2; these steps pin EPHEMERA_DISK_MODE=cow
+# explicitly, then switch to EPHEMERA_DISK_MODE=plain at the end so the remaining
+# flock/recovery steps run on (and exercise) the plain opt-out path.
 # ════════════════════════════════════════════════════════════════
 
 # Helper: (re)launch the daemon with optional extra env, wait until /vms answers.
@@ -865,12 +866,13 @@ COW_FILE_END=$(find /tmp/goose-workspaces -maxdepth 1 -name "*.cow" 2>/dev/null 
 [ "$COW_FILE_END" = "0" ] \
     && ok "All exception stores removed after delete ✓" \
     || fail "Exception store(s) still present after delete: $COW_FILE_END"
-# Restore plain disk mode so the remaining flock/recovery steps run unchanged.
+# Switch to the plain opt-out so the remaining flock/recovery steps run on full
+# clones. COW is the default since v0.4.2, so plain must now be set explicitly.
 kill "$DAEMON_PID" 2>/dev/null
 wait "$DAEMON_PID" 2>/dev/null || true
 pkill -f "firecracker --api-sock" 2>/dev/null || true
 sleep 2
-relaunch_daemon ""
+relaunch_daemon "EPHEMERA_DISK_MODE=plain"
 ok "Daemon restored to plain disk mode ✓"
 
 # ════════════════════════════════════════════════════════════════
@@ -1729,7 +1731,7 @@ step "77. Recovery with a missing disk artifact drops state cleanly (TAP release
 kill "$DAEMON_PID" 2>/dev/null || true; wait "$DAEMON_PID" 2>/dev/null || true
 pkill -f "firecracker --api-sock" 2>/dev/null || true
 sleep 2
-relaunch_daemon ""
+relaunch_daemon "EPHEMERA_DISK_MODE=plain"
 ok "Plain-mode daemon up for disk-missing recovery test"
 
 DFLOCK_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/flocks" \
@@ -1760,7 +1762,7 @@ sleep 2
 rm -f "$DVM_DISK" || true
 ok "Crashed daemon; deleted worker rootfs $DVM_DISK"
 
-relaunch_daemon ""
+relaunch_daemon "EPHEMERA_DISK_MODE=plain"
 sleep 3
 
 [ ! -f "$(pwd)/vms/$DVM_ID/state.json" ] \

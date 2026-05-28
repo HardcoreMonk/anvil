@@ -1,3 +1,20 @@
+# v0.4.2 — COW Spawn by Default
+
+**Ephemera** v0.4.2 promotes copy-on-write spawn disks to the default. New VMs now get a dm-snapshot view of the golden image instead of a 700 MiB full `io.Copy` clone — measured ~43% faster spawn (1.96s → 1.12s warm) with ~0 MiB initial per-VM disk. The daemon probes dm-snapshot support at startup and **auto-falls back to a full clone** when `losetup`/`dmsetup`/`dm_snapshot` are unavailable, so hosts without device-mapper keep working. Opt out explicitly with `EPHEMERA_DISK_MODE=plain` (or `full`). Additive — no wire format changed.
+
+---
+
+## What's New
+
+### COW spawn rootfs is the default
+
+- `EPHEMERA_DISK_MODE` now defaults to `cow`. The previous behavior (full byte-for-byte copy) is selected with `EPHEMERA_DISK_MODE=plain` or `full`.
+- New `storage.DMSnapshotAvailable()` probes the host once at startup (tool presence + a `dmsetup version` device-mapper round-trip + the `dm_snapshot` module); on failure the daemon logs a warning and uses a full clone. The strategy is resolved once into `ControlPlane.useCOW` instead of re-reading the env on every spawn.
+- Recovery is unaffected: each VM's `DiskMode` is recorded from the actual provisioning result, so plain and COW VMs both cold-restart correctly.
+- COW spawn VMs now support **Diff snapshots**: `WriteRootfsDiff` reads the rootfs size via `blockdev` when the current rootfs is a dm-snapshot block device (whose `Stat().Size()` is 0), so a COW VM's 2nd-and-later snapshot is a sparse rootfs diff. Previously this hit a size-mismatch — the COW+Diff combination was untested while COW was opt-in.
+
+---
+
 # v0.4.1 — Operational Interfaces
 
 **Ephemera** v0.4.1 makes the daemon operable as a service: authenticated **client identity** threaded into request handling, a per-request **access audit log** (`GET /audit`), **per-token TTL/rotation**, and a dependency-free **operator CLI** (`ephemera-ctl`). Additive — no wire format changed; the only behavior changes are that an expired token is now rejected (401) and the in-VM CP token is the first non-expired client.

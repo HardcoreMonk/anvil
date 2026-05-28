@@ -199,6 +199,10 @@ type ControlPlane struct {
 	// {workDir}/audit/. On by default; nil/disabled is a no-op.
 	audit *auditLogger
 
+	// useCOW selects the spawn disk strategy (COW dm-snapshot view vs full byte
+	// copy), resolved once at startup (default COW, plain fallback). See resolveDiskModeCOW.
+	useCOW bool
+
 	stopCh chan struct{}
 	srv    *http.Server
 }
@@ -223,7 +227,9 @@ func NewControlPlane(
 		flockMgr:         orchestrator.NewFlockManager(workDir),
 		agentHTTPClient:  &http.Client{},
 		stopCh:           make(chan struct{}, 1),
+		useCOW:           resolveDiskModeCOW(storage.DMSnapshotAvailable),
 	}
+	slog.Info("spawn disk mode resolved", "cow", cp.useCOW)
 
 	// Audit access log (v0.4.1): on by default, rotated jsonl under {workDir}/audit/.
 	audit, auditErr := newAuditLogger(workDir)
@@ -720,7 +726,7 @@ func (cp *ControlPlane) spawnVMInternal(opts spawnVMOptions) (*VMInfo, string, e
 	// file (~0 bytes up front), so only the margin must be free.
 	{
 		var needBytes uint64
-		if os.Getenv("EPHEMERA_DISK_MODE") != "cow" {
+		if !cp.useCOW {
 			if fi, statErr := os.Stat(cp.provisioner.GoldenImagePath); statErr == nil {
 				needBytes = uint64(fi.Size())
 			}
@@ -758,7 +764,7 @@ func (cp *ControlPlane) spawnVMInternal(opts spawnVMOptions) (*VMInfo, string, e
 	// members share the same provisioning strategy in a given daemon run.
 	var diskPath string
 	var dmInfo *storage.DMSnapshotInfo
-	if os.Getenv("EPHEMERA_DISK_MODE") == "cow" {
+	if cp.useCOW {
 		var cowStore string
 		diskPath, cowStore, dmInfo, err = cp.provisioner.CloneDiskCOW(vmID)
 		_ = cowStore // tracked via dmInfo.ExceptionStore for cleanup

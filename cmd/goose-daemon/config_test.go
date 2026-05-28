@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"testing"
 )
@@ -123,5 +124,59 @@ func TestEnvBool_Autosnapshot(t *testing.T) {
 				t.Errorf("envBool(%q=%q) = %v, want %v", key, c.val, got, c.want)
 			}
 		})
+	}
+}
+
+// TestResolveDiskModeCOW covers the COW-by-default decision (v0.4.2): unset/"cow"
+// resolves to COW when the host probe passes, falls back to plain when it fails,
+// and "plain"/"full" force plain regardless of the probe.
+func TestResolveDiskModeCOW(t *testing.T) {
+	const key = "EPHEMERA_DISK_MODE"
+	okProbe := func() error { return nil }
+	errProbe := func() error { return errors.New("no dm-snapshot") }
+	cases := []struct {
+		name  string
+		val   string
+		set   bool
+		probe func() error
+		want  bool
+	}{
+		{name: "unset + probe ok -> cow", set: false, probe: okProbe, want: true},
+		{name: "cow + probe ok -> cow", val: "cow", set: true, probe: okProbe, want: true},
+		{name: "unset + probe fails -> fallback plain", set: false, probe: errProbe, want: false},
+		{name: "cow + probe fails -> fallback plain", val: "cow", set: true, probe: errProbe, want: false},
+		{name: "plain forces plain", val: "plain", set: true, probe: okProbe, want: false},
+		{name: "full forces plain", val: "full", set: true, probe: okProbe, want: false},
+		{name: "PLAIN case-insensitive", val: "PLAIN", set: true, probe: okProbe, want: false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if c.set {
+				os.Setenv(key, c.val)
+				defer os.Unsetenv(key)
+			} else {
+				os.Unsetenv(key)
+			}
+			if got := resolveDiskModeCOW(c.probe); got != c.want {
+				t.Errorf("resolveDiskModeCOW(%q=%q) = %v, want %v", key, c.val, got, c.want)
+			}
+		})
+	}
+}
+
+// TestResolveDiskModeCOW_OptOutSkipsProbe verifies the plain/full opt-out
+// short-circuits before the (potentially expensive) host probe runs.
+func TestResolveDiskModeCOW_OptOutSkipsProbe(t *testing.T) {
+	const key = "EPHEMERA_DISK_MODE"
+	os.Setenv(key, "plain")
+	defer os.Unsetenv(key)
+
+	probed := false
+	got := resolveDiskModeCOW(func() error { probed = true; return nil })
+	if got {
+		t.Errorf("plain should resolve to false, got %v", got)
+	}
+	if probed {
+		t.Error("probe must not run when EPHEMERA_DISK_MODE=plain")
 	}
 }
