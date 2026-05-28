@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -86,14 +87,21 @@ func (cp *ControlPlane) handleFlockItem(w http.ResponseWriter, r *http.Request) 
 		cp.townWallHistory(w, flockID)
 	case sub == "post" && r.Method == http.MethodPost:
 		cp.postToTownWall(w, r, flockID)
-	case strings.HasPrefix(sub, "agents/") && r.Method == http.MethodPost:
-		rest := strings.TrimPrefix(sub, "agents/")
+	case sub == "agents" || strings.HasPrefix(sub, "agents/"):
+		rest := strings.TrimPrefix(strings.TrimPrefix(sub, "agents"), "/")
 		agentID, action, _ := strings.Cut(rest, "/")
-		if action == "restart" && agentID != "" {
+		switch {
+		case agentID == "" && r.Method == http.MethodPost:
+			cp.addFlockAgent(w, r, flockID)
+		case agentID != "" && action == "" && r.Method == http.MethodDelete:
+			cp.removeFlockAgent(w, flockID, agentID)
+		case agentID != "" && action == "" && r.Method == http.MethodPatch:
+			cp.changeFlockAgentRole(w, r, flockID, agentID)
+		case agentID != "" && action == "restart" && r.Method == http.MethodPost:
 			cp.restartAgent(w, flockID, agentID)
-			return
+		default:
+			writeJSONError(w, http.StatusBadRequest, fmt.Errorf("unsupported agent action"))
 		}
-		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("unsupported agent action"))
 	default:
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 	}
@@ -394,6 +402,204 @@ func (cp *ControlPlane) restartAgent(w http.ResponseWriter, flockID, agentID str
 		slog.Warn("restart agent: persist failed", "flock_id", flockID, "err", err)
 	}
 	slog.Warn("flock: agent restarted", "flock_id", flockID, "agent_id", agentID, "old_vm_id", oldVMID, "new_vm_id", info.VMID)
+	writeJSON(w, http.StatusOK, info)
+}
+
+// AgentRoleRequest is the body for POST /flocks/{id}/agents (add) and
+// PATCH /flocks/{id}/agents/{agent_id} (role change): the target role.
+type AgentRoleRequest struct {
+	Role string `json:"role"`
+}
+
+// nextAgentID returns the next "<role>-N" id for a role within a flock, using
+// max(existing N for that role)+1 so ids stay stable and never collide with a
+// live agent (matches createFlock's per-role indexing).
+func nextAgentID(f *orchestrator.Flock, role string) string {
+	max := 0
+	prefix := role + "-"
+	for _, a := range f.Snapshot() {
+		if strings.HasPrefix(a.AgentID, prefix) {
+			if n, err := strconv.Atoi(strings.TrimPrefix(a.AgentID, prefix)); err == nil && n > max {
+				max = n
+			}
+		}
+	}
+	return fmt.Sprintf("%s-%d", role, max+1)
+}
+
+// addFlockAgent spawns one new VM and registers it as a member of an existing
+// flock. POST /flocks/{id}/agents  {"role":"worker"}. The per-VM agent_token is
+// returned once (as in POST /flocks); it is not persisted on the flock.
+func (cp *ControlPlane) addFlockAgent(w http.ResponseWriter, r *http.Request, flockID string) {
+	f, ok := cp.flockMgr.Get(flockID)
+	if !ok {
+		writeJSONError(w, http.StatusNotFound, fmt.Errorf("flock not found"))
+		return
+	}
+	var req AgentRoleRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.Role == "" {
+		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("role required"))
+		return
+	}
+	if len(f.Snapshot())+1 > maxAgentsPerFlock {
+		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("max %d agents per flock", maxAgentsPerFlock))
+		return
+	}
+
+	agentID := nextAgentID(f, req.Role)
+	vmInfo, agentToken, err := cp.spawnVMForFlock(flockID, agentID, req.Role)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, fmt.Errorf("spawn %s: %w", agentID, err))
+		return
+	}
+	f.AddAgent(&orchestrator.AgentInfo{
+		AgentID:  agentID,
+		Role:     req.Role,
+		VMID:     vmInfo.VMID,
+		AgentURL: vmInfo.AgentURL,
+		Status:   orchestrator.AgentStatusReady,
+	})
+	if err := f.Persist(cp.workDir); err != nil {
+		slog.Warn("add agent: persist failed", "flock_id", flockID, "agent_id", agentID, "err", err)
+	}
+	if _, err := f.TownWall.Post("orchestrator", fmt.Sprintf("Agent %s (%s) joined the flock", agentID, req.Role)); err != nil {
+		slog.Warn("add agent: town wall post failed", "flock_id", flockID, "err", err)
+	}
+	slog.Warn("flock: agent added", "flock_id", flockID, "agent_id", agentID, "role", req.Role, "vm_id", vmInfo.VMID)
+	writeJSON(w, http.StatusCreated, map[string]string{
+		"agent_id":    agentID,
+		"role":        req.Role,
+		"vm_id":       vmInfo.VMID,
+		"agent_url":   vmInfo.AgentURL,
+		"agent_token": agentToken,
+	})
+}
+
+// removeFlockAgent tears down a single agent's VM and removes it from the flock.
+// DELETE /flocks/{id}/agents/{agent_id}. Removing the last agent leaves an empty
+// flock (recoverable via add); use DELETE /flocks/{id} for the whole flock.
+func (cp *ControlPlane) removeFlockAgent(w http.ResponseWriter, flockID, agentID string) {
+	f, ok := cp.flockMgr.Get(flockID)
+	if !ok {
+		writeJSONError(w, http.StatusNotFound, fmt.Errorf("flock not found"))
+		return
+	}
+	var vmID string
+	for _, a := range f.Snapshot() {
+		if a.AgentID == agentID {
+			vmID = a.VMID
+			break
+		}
+	}
+	if vmID == "" {
+		writeJSONError(w, http.StatusNotFound, fmt.Errorf("agent not found"))
+		return
+	}
+
+	cp.destroyVM(vmID)
+	cp.watchdog.ForgetVM(vmID)
+	f.RemoveAgent(agentID)
+	if err := f.Persist(cp.workDir); err != nil {
+		slog.Warn("remove agent: persist failed", "flock_id", flockID, "agent_id", agentID, "err", err)
+	}
+	if _, err := f.TownWall.Post("orchestrator", fmt.Sprintf("Agent %s left the flock", agentID)); err != nil {
+		slog.Warn("remove agent: town wall post failed", "flock_id", flockID, "err", err)
+	}
+	slog.Warn("flock: agent removed", "flock_id", flockID, "agent_id", agentID, "vm_id", vmID)
+	writeJSON(w, http.StatusOK, map[string]string{"flock_id": flockID, "agent_id": agentID, "status": "removed"})
+}
+
+// changeFlockAgentRole recreates an agent's VM under a new role so the new role's
+// sizing and system prompt take effect (role is bound at spawn time). The
+// agent_id and agent_token are preserved (like restart); only the role and the
+// backing VM change. PATCH /flocks/{id}/agents/{agent_id}  {"role":"reviewer"}.
+func (cp *ControlPlane) changeFlockAgentRole(w http.ResponseWriter, r *http.Request, flockID, agentID string) {
+	f, ok := cp.flockMgr.Get(flockID)
+	if !ok {
+		writeJSONError(w, http.StatusNotFound, fmt.Errorf("flock not found"))
+		return
+	}
+	var req AgentRoleRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.Role == "" {
+		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("role required"))
+		return
+	}
+
+	var oldVMID, curRole string
+	for _, a := range f.Snapshot() {
+		if a.AgentID == agentID {
+			oldVMID = a.VMID
+			curRole = a.Role
+			break
+		}
+	}
+	if oldVMID == "" {
+		writeJSONError(w, http.StatusNotFound, fmt.Errorf("agent not found"))
+		return
+	}
+	if req.Role == curRole {
+		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("agent already has role %q (use restart to recreate)", curRole))
+		return
+	}
+
+	// Token must be read before destroyVM removes the runningVM entry.
+	cp.mu.RLock()
+	var oldToken string
+	if v, ok := cp.vms[oldVMID]; ok {
+		oldToken = v.agentToken
+	}
+	cp.mu.RUnlock()
+
+	cp.destroyVM(oldVMID)
+	cp.watchdog.ForgetVM(oldVMID)
+
+	configPath, secretsPath, err := cp.profileConfigPaths(req.Role)
+	if err != nil {
+		f.UpdateAgentStatus(agentID, orchestrator.AgentStatusDead)
+		if perr := f.Persist(cp.workDir); perr != nil {
+			slog.Warn("change role: persist dead status failed", "agent_id", agentID, "err", perr)
+		}
+		writeJSONError(w, http.StatusInternalServerError, err)
+		return
+	}
+	profile := LookupProfile(req.Role)
+	info, _, err := cp.spawnVMInternal(spawnVMOptions{
+		Profile:           req.Role,
+		ConfigPath:        configPath,
+		SecretsPath:       secretsPath,
+		SystemPrompt:      cp.loadProfileSystemPrompt(profile.ProfileDir),
+		FlockID:           flockID,
+		AgentID:           agentID,
+		AgentToken:        oldToken,
+		ControlPlaneToken: cp.controlPlaneTokenForVM(),
+		VcpuCount:         profile.VcpuCount,
+		MemSizeMib:        profile.MemSizeMib,
+	})
+	if err != nil {
+		f.UpdateAgentStatus(agentID, orchestrator.AgentStatusDead)
+		if perr := f.Persist(cp.workDir); perr != nil {
+			slog.Warn("change role: persist dead status failed", "agent_id", agentID, "err", perr)
+		}
+		writeJSONError(w, http.StatusInternalServerError, err)
+		return
+	}
+	f.ChangeAgentRole(agentID, req.Role)
+	f.UpdateAgentVM(agentID, info.VMID, info.AgentURL)
+	if err := f.Persist(cp.workDir); err != nil {
+		slog.Warn("change role: persist failed", "flock_id", flockID, "err", err)
+	}
+	if _, err := f.TownWall.Post("orchestrator", fmt.Sprintf("Agent %s role changed %s → %s", agentID, curRole, req.Role)); err != nil {
+		slog.Warn("change role: town wall post failed", "flock_id", flockID, "err", err)
+	}
+	slog.Warn("flock: agent role changed", "flock_id", flockID, "agent_id", agentID, "old_role", curRole, "new_role", req.Role, "old_vm_id", oldVMID, "new_vm_id", info.VMID)
 	writeJSON(w, http.StatusOK, info)
 }
 

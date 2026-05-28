@@ -117,3 +117,47 @@ func TestFlock_MarshalJSON(t *testing.T) {
 		t.Errorf("MarshalJSON should not expose TownWall: %s", s)
 	}
 }
+
+func TestFlock_RemoveAgent(t *testing.T) {
+	tmp := t.TempDir()
+	fm := NewFlockManager(tmp)
+	f, err := fm.Create("flock-rm", "task", filepath.Join(tmp, "flock-rm", "wall.log"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	f.AddAgent(&AgentInfo{AgentID: "worker-1", Role: "worker"})
+	f.AddAgent(&AgentInfo{AgentID: "worker-2", Role: "worker"})
+
+	f.RemoveAgent("worker-1")
+	if n := len(f.Snapshot()); n != 1 {
+		t.Errorf("expected 1 agent after remove, got %d", n)
+	}
+	for _, a := range f.Snapshot() {
+		if a.AgentID == "worker-1" {
+			t.Error("worker-1 should be removed")
+		}
+	}
+	f.RemoveAgent("nonexistent") // no-op, must not panic
+}
+
+func TestFlock_ChangeAgentRole(t *testing.T) {
+	tmp := t.TempDir()
+	fm := NewFlockManager(tmp)
+	f, err := fm.Create("flock-role", "task", filepath.Join(tmp, "flock-role", "wall.log"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	f.AddAgent(&AgentInfo{AgentID: "worker-1", Role: "worker"})
+
+	f.ChangeAgentRole("worker-1", "reviewer")
+	role := ""
+	for _, a := range f.Snapshot() {
+		if a.AgentID == "worker-1" {
+			role = a.Role
+		}
+	}
+	if role != "reviewer" {
+		t.Errorf("role not changed: %q", role)
+	}
+	f.ChangeAgentRole("nonexistent", "x") // no-op, must not panic
+}

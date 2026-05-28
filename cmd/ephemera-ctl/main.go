@@ -58,6 +58,9 @@ Usage: ephemera-ctl <noun> <verb> [args] [--json] [--token T]
   vm task <id> <prompt>            flock wall <id> [--history]
   vm stats <id>                    flock restart <id> <agent_id>
   vm snapshot <id> [--stop-after] [--type full|diff]
+                                   flock add-agent <id> <role>
+                                   flock rm-agent <id> <agent_id>
+                                   flock set-role <id> <agent_id> <role>
 
   snapshot ls | restore <id> | rm <id>
   audit [--limit N] [--client C] [--status S] [--method M]

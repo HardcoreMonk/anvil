@@ -72,6 +72,27 @@ func (f *Flock) UpdateAgentVM(agentID, newVMID, newAgentURL string) {
 	}
 }
 
+// RemoveAgent deletes an agent record from the flock under lock. No-op when the
+// agent ID is unknown. The agent's Town Wall messages are intentionally left in
+// place — a membership change is not an audit erasure.
+func (f *Flock) RemoveAgent(agentID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.Agents, agentID)
+}
+
+// ChangeAgentRole updates the role label of an existing agent under lock. No-op
+// when the agent ID is unknown. Because role is bound at spawn time (VM sizing +
+// system prompt), callers that need the new role to take effect must also
+// recreate the agent's VM.
+func (f *Flock) ChangeAgentRole(agentID, newRole string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if a, ok := f.Agents[agentID]; ok {
+		a.Role = newRole
+	}
+}
+
 // Persist atomically writes the flock's current metadata to disk. Holds
 // writeMu so concurrent callers (createFlock, watchdog, recovery) cannot
 // race the tmp+rename inside SaveFlockMetadata. All flock metadata writers
