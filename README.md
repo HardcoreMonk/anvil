@@ -52,9 +52,9 @@ baseline은 upstream ephemera `v0.3.6`까지 병합한 상태다. 이 병합은 
 lifecycle, flock resilience, token rotation, observability 같은 runtime substrate를
 끌어올린 것이며, anvil의 제품 정체성을 ephemera로 바꾸는 작업이 아니다.
 
-IronClaw 통합 프로젝트 anvil의 최신 공개 tag는 `anvil-v0.3.0`이다. 이 release는
-ephemera `v0.3.2`-`v0.3.6` runtime baseline과 anvil 고유 workload/scheduler 자동화를
-분리해 기록한다. 첫 공개 tag는 `anvil-v0.1.0`이다.
+IronClaw 통합 프로젝트 anvil의 최신 공개 tag는 `anvil-v0.3.1`이다. 이 release는
+ephemera `v0.3.2`-`v0.3.6` runtime baseline 위에 anvil scheduler control loop와
+운영 후속 개발 목록을 기록한다. 첫 공개 tag는 `anvil-v0.1.0`이다.
 
 <p align="center">
   <img src="docs/assets/ironclaw-e2e.gif" alt="IronClaw anvil E2E terminal replay" width="900">

@@ -127,6 +127,87 @@ v0.3.6 기반 upstream E2E는 `/metrics`, `/stats`, real-LLM smoke, in-VM helper
 `webdev_demo.sh` 검증은 paid-tier Gemini key와 충분한 host memory가 필요하므로
 release blocker가 아니라 operator demo 검증으로 별도 기록한다.
 
+## `anvil-v0.3.1` GitHub Release 게시 기록과 본문
+
+- Tag: `anvil-v0.3.1`
+- Target commit: `1f63f04bc559270ca3fa2f5b9ee80078927ead93`
+- Published: 2026-05-29 01:48:25 KST
+- URL: <https://github.com/HardcoreMonk/anvil/releases/tag/anvil-v0.3.1>
+- Release source: anvil scheduler control loop + operational follow-up roadmap
+
+```markdown
+# anvil-v0.3.1 - Scheduler control loop and operational roadmap
+
+`anvil-v0.3.1`은 `anvil-v0.3.0` 이후 scheduler service를 장시간 운영 가능한
+control-plane process에 가깝게 확장한 release다. upstream ephemera `v0.4.0`
+PR-A storage/recovery 변경은 포함하지 않는다.
+
+## 포함 내용
+
+- scheduler control loop:
+  - configured runtime host의 `/health`를 주기적으로 poll
+  - degraded/unhealthy host observation 저장
+  - daemon `GET /vms` 기반 VM placement reconciliation
+  - 장애 host의 기존 VM placement를 `suspect_vm_placements`로 표시
+- scheduler bootstrap config:
+  - `ANVIL_SCHEDULER_HOSTS_FILE`
+  - `ANVIL_SCHEDULER_POLL_INTERVAL`
+  - `ANVIL_SCHEDULER_RECONCILE_INTERVAL`
+  - `ANVIL_SCHEDULER_HOST_TIMEOUT`
+  - `ANVIL_SCHEDULER_FAILURE_THRESHOLD`
+  - `ANVIL_SCHEDULER_API_TOKEN`
+  - `ANVIL_SCHEDULER_REQUIRE_PERSISTENCE`
+- scheduler API:
+  - `GET /control-loop/status`
+  - 확장된 `GET /placements`
+- persistence degraded gate:
+  - `ANVIL_SCHEDULER_REQUIRE_PERSISTENCE=true`이면 scheduler state 저장 장애 중 신규
+    scheduling을 `503`으로 차단
+- smoke/runtime verification:
+  - `scripts/anvil-scheduler-smoke.sh`가 `/control-loop/status`까지 확인
+  - `smoke_only: true` host가 일반 scheduling fallback에 섞이지 않는지 확인
+- 운영 문서:
+  - `docs/operations/2026-05-29-anvil-follow-up-development.md`
+
+## 보안/운영 주의
+
+- current daemon `/health`가 scheduler capacity fields를 생략해도 hosts file의
+  `available_vms`, `available_snapshot_bytes`, `egress_policies`를 보존한다.
+- `/health`의 `egress_policies`는 omitted와 explicit `[]`를 구분한다.
+- config-managed host는 hosts file이 source of truth다.
+- hosts file에서 제거된 managed host와 runtime-added host 삭제 경로는
+  observation/status/suspect state를 함께 정리한다.
+- `agent_token`은 scheduler surface와 release artifact에 노출하지 않는다.
+
+## 검증
+
+- `go test ./... -count=1`
+- `go build ./cmd/goose-daemon`
+- `go build ./cmd/anvil-mcp`
+- `go build ./cmd/anvil-scheduler`
+- `bash -n scripts/anvil-scheduler-smoke.sh`
+- `bash -n scripts/install-anvil-scheduler-systemd.sh`
+- `bash -n scripts/vm-workload-e2e.sh`
+- local scheduler binary smoke:
+  - `/control-loop/status` returned `running: true`
+  - `scripts/anvil-scheduler-smoke.sh --base-url http://127.0.0.1:3010` returned
+    `ok: true`
+- `bash scripts/install-anvil-scheduler-systemd.sh --dry-run --no-build --no-enable --verify`
+- independent code review: no blocking or important issues after review fixes
+
+## 다음 후보
+
+- scheduler full-process integration test
+- 실제 systemd host에서 scheduler 운영 배포 검증
+- scheduler observability metrics/alerts
+- cross-host snapshot replication
+- scheduler-aware cross-host flock placement
+- egress L7 proxy/SNI hardening
+- snapshot storage quota dashboard
+- scheduler host registration hardening
+- upstream ephemera `v0.4.0` PR-A adoption review
+```
+
 ## `anvil-v0.3.0` GitHub Release 게시 기록과 본문
 
 - Tag: `anvil-v0.3.0`
