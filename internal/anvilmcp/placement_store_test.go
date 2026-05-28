@@ -89,6 +89,69 @@ func TestPlacementStoreReplacesVMPlacementsDuringReconciliation(t *testing.T) {
 	}
 }
 
+func TestPlacementStoreReconcileVMPlacementsPreservesConcurrentChanges(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
+	base := map[string]string{
+		"vm-keep":         "host-a",
+		"vm-suspect-keep": "host-a",
+		"vm-remove":       "host-a",
+		"vm-move":         "host-a",
+	}
+	if err := store.ReplaceVMPlacements(base); err != nil {
+		t.Fatalf("ReplaceVMPlacements: %v", err)
+	}
+	if err := store.MarkHostPlacementsSuspect("host-a", "host_degraded"); err != nil {
+		t.Fatalf("MarkHostPlacementsSuspect: %v", err)
+	}
+	if err := store.SetVMPlacement("vm-added", "host-c"); err != nil {
+		t.Fatalf("SetVMPlacement vm-added: %v", err)
+	}
+	store.RemoveVMPlacement("vm-remove")
+	if err := store.SetVMPlacement("vm-move", "host-b"); err != nil {
+		t.Fatalf("SetVMPlacement vm-move: %v", err)
+	}
+
+	err := store.ReconcileVMPlacements(base, map[string]string{
+		"vm-keep":         "host-reconciled",
+		"vm-suspect-keep": "host-a",
+		"vm-remove":       "host-reconciled",
+		"vm-move":         "host-reconciled",
+		"vm-new":          "host-d",
+	})
+	if err != nil {
+		t.Fatalf("ReconcileVMPlacements: %v", err)
+	}
+
+	state := store.State()
+	if state.VMPlacements["vm-keep"] != "host-reconciled" {
+		t.Fatalf("vm-keep = %q, want host-reconciled", state.VMPlacements["vm-keep"])
+	}
+	if state.VMPlacements["vm-suspect-keep"] != "host-a" {
+		t.Fatalf("vm-suspect-keep = %q, want host-a", state.VMPlacements["vm-suspect-keep"])
+	}
+	if _, ok := state.VMPlacements["vm-remove"]; ok {
+		t.Fatalf("vm-remove was re-added after concurrent removal: %+v", state.VMPlacements)
+	}
+	if state.VMPlacements["vm-move"] != "host-b" {
+		t.Fatalf("vm-move = %q, want concurrent host-b", state.VMPlacements["vm-move"])
+	}
+	if state.VMPlacements["vm-added"] != "host-c" {
+		t.Fatalf("vm-added = %q, want concurrent host-c", state.VMPlacements["vm-added"])
+	}
+	if state.VMPlacements["vm-new"] != "host-d" {
+		t.Fatalf("vm-new = %q, want host-d", state.VMPlacements["vm-new"])
+	}
+	if suspect, ok := state.SuspectVMPlacements["vm-suspect-keep"]; !ok || suspect.Host != "host-a" || suspect.Reason != "host_degraded" {
+		t.Fatalf("vm-suspect-keep suspect = %+v,%v want host-a host_degraded,true", suspect, ok)
+	}
+	if _, ok := state.SuspectVMPlacements["vm-remove"]; ok {
+		t.Fatalf("vm-remove suspect still exists after concurrent removal: %+v", state.SuspectVMPlacements["vm-remove"])
+	}
+	if _, ok := state.SuspectVMPlacements["vm-move"]; ok {
+		t.Fatalf("vm-move suspect still exists after concurrent move: %+v", state.SuspectVMPlacements["vm-move"])
+	}
+}
+
 func TestPlacementStoreSetHostAndSaveRollsBackOnFailure(t *testing.T) {
 	store := NewPlacementStore(t.TempDir())
 	if err := store.SetHost(RuntimeHost{Name: "host-a", Endpoint: "http://old-host-a", Healthy: true, AvailableVMs: 1}); err != nil {
@@ -139,6 +202,114 @@ func TestPlacementStoreRemoveHostAndSaveRollsBackOnFailure(t *testing.T) {
 	}
 	if deleted {
 		t.Fatal("deleted = true, want false for missing host")
+	}
+}
+
+func TestPlacementStoreApplyHostObservationDoesNotResurrectDeletedHost(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
+	base := RuntimeHost{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 1}
+	if err := store.SetHost(base); err != nil {
+		t.Fatalf("SetHost: %v", err)
+	}
+	store.RemoveHost("host-a")
+
+	applied, err := store.ApplyHostObservation(base, RuntimeHost{
+		Name:                   "host-a",
+		Endpoint:               "http://stale-host-a",
+		Healthy:                true,
+		AvailableVMs:           7,
+		AvailableSnapshotBytes: 8192,
+	}, HostObservation{
+		Status:                 HostStatusHealthy,
+		AvailableVMs:           7,
+		AvailableSnapshotBytes: 8192,
+	})
+	if err != nil {
+		t.Fatalf("ApplyHostObservation: %v", err)
+	}
+	if applied {
+		t.Fatal("applied = true, want false for deleted host")
+	}
+	state := store.State()
+	if _, ok := state.Hosts["host-a"]; ok {
+		t.Fatalf("deleted host was resurrected: %+v", state.Hosts["host-a"])
+	}
+	if _, ok := state.HostObservations["host-a"]; ok {
+		t.Fatalf("observation was created for deleted host: %+v", state.HostObservations["host-a"])
+	}
+	if _, ok := state.ControlLoopStatus.Hosts["host-a"]; ok {
+		t.Fatalf("control loop host status was created for deleted host: %+v", state.ControlLoopStatus.Hosts["host-a"])
+	}
+}
+
+func TestPlacementStoreApplyHostObservationPreservesConcurrentStaticHostFields(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
+	base := RuntimeHost{
+		Name:                   "host-a",
+		Endpoint:               "http://old-host-a",
+		Healthy:                false,
+		AvailableVMs:           1,
+		AvailableSnapshotBytes: 4096,
+		EgressPolicies:         []EgressPolicy{EgressPolicyDenyAll},
+		SmokeOnly:              false,
+	}
+	if err := store.SetHost(base); err != nil {
+		t.Fatalf("SetHost base: %v", err)
+	}
+	if err := store.SetHost(RuntimeHost{
+		Name:                   "host-a",
+		Endpoint:               "http://new-host-a",
+		Healthy:                false,
+		AvailableVMs:           2,
+		AvailableSnapshotBytes: 2048,
+		EgressPolicies:         []EgressPolicy{EgressPolicyProfile},
+		SmokeOnly:              true,
+	}); err != nil {
+		t.Fatalf("SetHost concurrent update: %v", err)
+	}
+
+	obs := HostObservation{
+		Status:                 HostStatusHealthy,
+		AvailableVMs:           9,
+		AvailableSnapshotBytes: 16384,
+		LastError:              "  ",
+	}
+	applied, err := store.ApplyHostObservation(base, RuntimeHost{
+		Name:                   "host-a",
+		Endpoint:               "http://old-host-a",
+		Healthy:                true,
+		AvailableVMs:           9,
+		AvailableSnapshotBytes: 16384,
+		EgressPolicies:         []EgressPolicy{EgressPolicyAllowAll},
+		SmokeOnly:              false,
+	}, obs)
+	if err != nil {
+		t.Fatalf("ApplyHostObservation: %v", err)
+	}
+	if !applied {
+		t.Fatal("applied = false, want true for existing host")
+	}
+	state := store.State()
+	host := state.Hosts["host-a"]
+	if host.Endpoint != "http://new-host-a" {
+		t.Fatalf("endpoint = %q, want concurrent value", host.Endpoint)
+	}
+	if len(host.EgressPolicies) != 1 || host.EgressPolicies[0] != EgressPolicyProfile {
+		t.Fatalf("egress policies = %+v, want concurrent profile policy", host.EgressPolicies)
+	}
+	if !host.SmokeOnly {
+		t.Fatalf("smoke_only = false, want concurrent true")
+	}
+	if !host.Healthy || host.AvailableVMs != 9 || host.AvailableSnapshotBytes != 16384 {
+		t.Fatalf("dynamic host fields = %+v, want healthy capacity from observation", host)
+	}
+	storedObs := state.HostObservations["host-a"]
+	if storedObs.Status != HostStatusHealthy || storedObs.AvailableVMs != 9 || storedObs.AvailableSnapshotBytes != 16384 || storedObs.LastError != "" {
+		t.Fatalf("stored observation = %+v, want normalized healthy observation", storedObs)
+	}
+	statusObs := state.ControlLoopStatus.Hosts["host-a"]
+	if statusObs != storedObs {
+		t.Fatalf("control loop status observation = %+v, want %+v", statusObs, storedObs)
 	}
 }
 

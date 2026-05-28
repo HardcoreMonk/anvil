@@ -334,6 +334,35 @@ func (s *PlacementStore) SetHostObservation(name string, obs HostObservation) er
 	return nil
 }
 
+func (s *PlacementStore) ApplyHostObservation(base RuntimeHost, observed RuntimeHost, obs HostObservation) (bool, error) {
+	name := strings.TrimSpace(observed.Name)
+	if name == "" {
+		name = strings.TrimSpace(base.Name)
+	}
+	if name == "" {
+		return false, fmt.Errorf("host name must be non-empty")
+	}
+	if obs.Status == "" {
+		obs.Status = HostStatusUnhealthy
+	}
+	obs.LastError = strings.TrimSpace(obs.LastError)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensureMaps()
+	current, ok := s.state.Hosts[name]
+	if !ok {
+		return false, nil
+	}
+	current.Healthy = observed.Healthy
+	current.AvailableVMs = observed.AvailableVMs
+	current.AvailableSnapshotBytes = observed.AvailableSnapshotBytes
+	s.state.Hosts[name] = current
+	s.state.HostObservations[name] = obs
+	s.state.ControlLoopStatus.Hosts[name] = obs
+	return true, nil
+}
+
 func (s *PlacementStore) HostObservation(name string) (HostObservation, bool) {
 	name = strings.TrimSpace(name)
 	s.mu.RLock()
@@ -356,6 +385,48 @@ func (s *PlacementStore) ReplaceVMPlacements(placements map[string]string) error
 	defer s.mu.Unlock()
 	s.ensureMaps()
 	s.state.VMPlacements = next
+	return nil
+}
+
+func (s *PlacementStore) ReconcileVMPlacements(base map[string]string, reconciled map[string]string) error {
+	normalizedBase := normalizeVMPlacements(base)
+	normalizedReconciled := normalizeVMPlacements(reconciled)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensureMaps()
+
+	for vmID, baseHost := range normalizedBase {
+		currentHost, exists := s.state.VMPlacements[vmID]
+		if !exists {
+			continue
+		}
+		if currentHost != baseHost {
+			continue
+		}
+		reconciledHost, ok := normalizedReconciled[vmID]
+		if ok {
+			s.state.VMPlacements[vmID] = reconciledHost
+		} else {
+			delete(s.state.VMPlacements, vmID)
+		}
+	}
+
+	for vmID, hostName := range normalizedReconciled {
+		if _, wasInBase := normalizedBase[vmID]; wasInBase {
+			continue
+		}
+		if _, exists := s.state.VMPlacements[vmID]; exists {
+			continue
+		}
+		s.state.VMPlacements[vmID] = hostName
+	}
+	for vmID, suspect := range s.state.SuspectVMPlacements {
+		currentHost, ok := s.state.VMPlacements[vmID]
+		if !ok || currentHost != suspect.Host {
+			delete(s.state.SuspectVMPlacements, vmID)
+		}
+	}
 	return nil
 }
 
@@ -474,6 +545,19 @@ func normalizePlacementStoreState(state *PlacementStoreState) {
 	if state.ControlLoopStatus.Hosts == nil {
 		state.ControlLoopStatus.Hosts = make(map[string]HostObservation)
 	}
+}
+
+func normalizeVMPlacements(placements map[string]string) map[string]string {
+	normalized := make(map[string]string, len(placements))
+	for vmID, hostName := range placements {
+		vmID = strings.TrimSpace(vmID)
+		hostName = strings.TrimSpace(hostName)
+		if vmID == "" || hostName == "" {
+			continue
+		}
+		normalized[vmID] = hostName
+	}
+	return normalized
 }
 
 func clonePlacementStoreState(state PlacementStoreState) PlacementStoreState {
