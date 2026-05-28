@@ -135,6 +135,10 @@ func (s *SchedulerService) handleSchedule(w http.ResponseWriter, r *http.Request
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
 		return
 	}
+	if s.requirePersistence && s.placements.State().ControlLoopStatus.PersistenceDegraded {
+		http.Error(w, "scheduler persistence degraded", http.StatusServiceUnavailable)
+		return
+	}
 	var req schedulerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid schedule body", http.StatusBadRequest)

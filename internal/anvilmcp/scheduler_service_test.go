@@ -323,6 +323,98 @@ func TestSchedulerServiceAllowedScheduleIncludesHealthyHostStatusSummary(t *test
 	}
 }
 
+func TestSchedulerServicePersistenceGateAllowsSchedulingWhenNotRequiredOrNotDegraded(t *testing.T) {
+	tests := []struct {
+		name                string
+		requirePersistence  bool
+		persistenceDegraded bool
+	}{
+		{
+			name:                "not required with degraded persistence",
+			requirePersistence:  false,
+			persistenceDegraded: true,
+		},
+		{
+			name:                "required with healthy persistence",
+			requirePersistence:  true,
+			persistenceDegraded: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := NewPlacementStore(filepath.Join(t.TempDir(), "scheduler.json"))
+			_ = store.SetHost(RuntimeHost{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}})
+			_ = store.SetControlLoopStatus(ControlLoopStatus{PersistenceDegraded: tt.persistenceDegraded})
+			service := NewSchedulerService(SchedulerServiceOptions{PlacementStore: store, RequirePersistence: tt.requirePersistence})
+
+			req := httptest.NewRequest(http.MethodPost, "/schedule/spawn", strings.NewReader(`{"tenant_id":"tenant-1","egress_policy":"profile","requested":{"active_vms":1}}`))
+			rr := httptest.NewRecorder()
+			service.Handler().ServeHTTP(rr, req)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("POST /schedule/spawn status = %d body=%s, want 200", rr.Code, rr.Body.String())
+			}
+			var decision ScheduleDecision
+			if err := json.Unmarshal(rr.Body.Bytes(), &decision); err != nil {
+				t.Fatalf("decode decision: %v", err)
+			}
+			if !decision.Allowed || decision.Host.Name != "host-a" {
+				t.Fatalf("decision = %+v, want scheduled host-a", decision)
+			}
+		})
+	}
+}
+
+func TestSchedulerServiceRequiresPersistenceWhenConfigured(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "scheduler.json"))
+	_ = store.SetHost(RuntimeHost{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}})
+	_ = store.SetControlLoopStatus(ControlLoopStatus{PersistenceDegraded: true, LastError: "save failed"})
+	service := NewSchedulerService(SchedulerServiceOptions{PlacementStore: store, RequirePersistence: true})
+
+	req := httptest.NewRequest(http.MethodPost, "/schedule/spawn", strings.NewReader(`{"tenant_id":"tenant-1","egress_policy":"profile","requested":{"active_vms":1}}`))
+	rr := httptest.NewRecorder()
+	service.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("POST /schedule/spawn status = %d body=%s, want 503", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "scheduler persistence degraded") {
+		t.Fatalf("body = %q, want persistence degraded message", rr.Body.String())
+	}
+}
+
+func TestSchedulerServiceScheduleMethodValidationPrecedesPersistenceGate(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "scheduler.json"))
+	_ = store.SetControlLoopStatus(ControlLoopStatus{PersistenceDegraded: true, LastError: "save failed"})
+	service := NewSchedulerService(SchedulerServiceOptions{PlacementStore: store, RequirePersistence: true})
+
+	req := httptest.NewRequest(http.MethodGet, "/schedule/spawn", nil)
+	rr := httptest.NewRecorder()
+	service.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET /schedule/spawn status = %d body=%s, want 405", rr.Code, rr.Body.String())
+	}
+}
+
+func TestSchedulerServicePersistenceGateDoesNotBlockControlLoopStatus(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "scheduler.json"))
+	_ = store.SetControlLoopStatus(ControlLoopStatus{Running: true, PersistenceDegraded: true, LastError: "save failed"})
+	service := NewSchedulerService(SchedulerServiceOptions{PlacementStore: store, RequirePersistence: true})
+
+	req := httptest.NewRequest(http.MethodGet, "/control-loop/status", nil)
+	rr := httptest.NewRecorder()
+	service.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /control-loop/status status = %d body=%s, want 200", rr.Code, rr.Body.String())
+	}
+	var status ControlLoopStatus
+	if err := json.Unmarshal(rr.Body.Bytes(), &status); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if !status.PersistenceDegraded {
+		t.Fatalf("status = %+v, want PersistenceDegraded=true", status)
+	}
+}
+
 func schedulerServiceListHosts(t *testing.T, service *SchedulerService) []RuntimeHost {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/hosts", nil)
