@@ -47,14 +47,14 @@ daemon 이름, HTTP API, 일부 환경 변수에는 `ephemera` 또는 `goose` �
 있다. README에서는 `anvil`을 IronClaw 통합 프로젝트로, `ephemera`를 분리된 기반
 runtime으로 구분한다.
 
-버전별 ephemera 소스 snapshot은 Git tag로 공개된다. 현재 anvil sync branch의 runtime
+버전별 ephemera 소스 snapshot은 Git tag로 공개된다. 현재 `main`의 anvil runtime
 baseline은 upstream ephemera `v0.3.6`까지 병합한 상태다. 이 병합은 MicroVM
 lifecycle, flock resilience, token rotation, observability 같은 runtime substrate를
 끌어올린 것이며, anvil의 제품 정체성을 ephemera로 바꾸는 작업이 아니다.
 
-IronClaw 통합 프로젝트 anvil의 최신 공개 tag는 아직 `anvil-v0.2.0`이다. 다음
-anvil product release에서는 ephemera `v0.3.2`-`v0.3.6` runtime baseline과 anvil
-고유 변경분을 분리해 기록한다. 첫 공개 tag는 `anvil-v0.1.0`이다.
+IronClaw 통합 프로젝트 anvil의 최신 공개 tag는 `anvil-v0.3.0`이다. 이 release는
+ephemera `v0.3.2`-`v0.3.6` runtime baseline과 anvil 고유 workload/scheduler 자동화를
+분리해 기록한다. 첫 공개 tag는 `anvil-v0.1.0`이다.
 
 <p align="center">
   <img src="docs/assets/ironclaw-e2e.gif" alt="IronClaw anvil E2E terminal replay" width="900">
@@ -636,7 +636,7 @@ artifacts/            Auto-populated at runtime (gitignored)
 
 - [RELEASE_NOTES.md](RELEASE_NOTES.md):
   anvil product release note와 upstream ephemera runtime release note를 분리해
-  기록한다. 현재 `v0.3.2`-`v0.3.6`은 anvil sync branch에 병합된 runtime baseline이다.
+  기록한다. 현재 `v0.3.2`-`v0.3.6`은 `main`에 병합된 anvil runtime baseline이다.
 
 - [docs/architecture/runtime-architecture.md](docs/architecture/runtime-architecture.md):
   ephemera daemon, MicroVM, storage, network, guest runtime 구조.

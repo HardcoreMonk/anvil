@@ -1,10 +1,16 @@
-# Unreleased — anvil v0.3.0 release candidate
+# anvil v0.3.0 — ephemera v0.3.6 runtime baseline and workload automation
 
-`anvil-v0.2.0` 이후 다음 runtime/product 변경이 release candidate로 준비됐다.
+- Tag: `anvil-v0.3.0`
+- GitHub Release:
+  <https://github.com/HardcoreMonk/anvil/releases/tag/anvil-v0.3.0>
+- Published: 2026-05-28 14:57:59 KST
+- Target commit: `95215e2cf85b14f82cf5d0ef7caa2b1ea77da992`
+
+`anvil-v0.2.0` 이후 다음 runtime/product 변경을 공개 release로 게시했다.
 
 ## 추가됨
 
-- upstream ephemera `v0.3.2`-`v0.3.6` runtime baseline을 anvil sync branch에
+- upstream ephemera `v0.3.2`-`v0.3.6` runtime baseline을 anvil `main`에
   병합했다.
   이 변경은 anvil의 제품 정체성을 ephemera로 바꾸지 않고, Firecracker MicroVM
   runtime substrate를 최신 baseline으로 끌어올린다.

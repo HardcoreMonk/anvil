@@ -31,13 +31,13 @@ ephemera는 계속 버전업되는 runtime engine upstream이며, anvil은 그 r
 IronClaw 실행 계층으로 통합하는 downstream product fork다. 이 저장소의 Go 모듈
 경로와 기존 API/환경 변수에는 `ephemera` 또는 `goose` 이름이 남아 있다. anvil
 통합 릴리즈는 ephemera runtime tag와 충돌하지 않도록 `anvil-v0.1.0`처럼 별도
-prefix를 사용한다. 현재 최신 anvil 공개 integration tag는 `anvil-v0.2.0`이고,
-현재 sync branch의 anvil runtime baseline은 upstream ephemera `v0.3.6` 병합분이다.
-`main`은 `v0.3.5`까지 병합된 상태였고, `sync/ephemera-v0.3.6`에서
+prefix를 사용한다. 현재 최신 anvil 공개 integration tag는 `anvil-v0.3.0`이고,
+tag target은 `95215e2cf85b14f82cf5d0ef7caa2b1ea77da992`다. 현재 `main`의 anvil
+runtime baseline은 upstream ephemera `v0.3.6` 병합분이다. 이 baseline은
 autonomous webdev demo, in-VM `gtcall`, multi-line-safe `gtwall`, Goose JSON output
-parsing을 추가 채택한다. upstream `main`은 이미 `v0.4.0` PR-A까지 진행되어 있으므로
-`v0.3.6` sync는 `upstream/main`이 아니라 `v0.3.6` tag 기준으로 수행한다.
-문서에서는 anvil과 ephemera를 같은 이름으로 취급하지 않는다.
+parsing을 채택한다. upstream `main`은 이미 `v0.4.0` PR-A까지 진행되어 있으므로 다음
+sync는 anvil 보안/운영 정책에 맞춘 adoption review 후 진행한다. 문서에서는 anvil과
+ephemera를 같은 이름으로 취급하지 않는다.
 
 ## 진실 기준 문서 순서
 
@@ -57,7 +57,7 @@ parsing을 추가 채택한다. upstream `main`은 이미 `v0.4.0` PR-A까지 �
 | anvil | IronClaw와 ephemera를 결합하는 새 프로젝트 이름 | project-wide |
 | IronClaw | MCP client/orchestration 계층. anvil VM 실행 기능을 사용하는 상위 시스템 | 외부/상위 통합 |
 | OpenClaw | anvil의 통합 대상이 아님. anvil 문서와 구현은 OpenClaw 운영 계약을 제공하지 않음 | 제외 범위 |
-| ephemera | Firecracker MicroVM 기반 격리 실행 runtime. 현재 sync branch의 anvil baseline은 upstream `v0.3.6` 병합분이고, upstream `v0.4.0` PR-A는 다음 채택 검토 후보 | `cmd/goose-daemon`, `internal/*` |
+| ephemera | Firecracker MicroVM 기반 격리 실행 runtime. 현재 `main`의 anvil baseline은 upstream `v0.3.6` 병합분이고, upstream `v0.4.0` PR-A는 다음 채택 검토 후보 | `cmd/goose-daemon`, `internal/*` |
 | ephemera control plane | VM 생성, 삭제, snapshot, restore, proxy를 담당하는 호스트 daemon | `cmd/goose-daemon` |
 | MicroVM | Firecracker + KVM으로 실행되는 ephemera 격리 실행 환경 | `internal/vm` |
 | goose-agent | VM 안에서 prompt 실행, health, stop API를 제공하는 HTTP agent | `cmd/goose-agent` |

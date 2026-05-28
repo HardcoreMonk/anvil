@@ -127,10 +127,12 @@ v0.3.6 기반 upstream E2E는 `/metrics`, `/stats`, real-LLM smoke, in-VM helper
 `webdev_demo.sh` 검증은 paid-tier Gemini key와 충분한 host memory가 필요하므로
 release blocker가 아니라 operator demo 검증으로 별도 기록한다.
 
-## `anvil-v0.3.0` GitHub Release 게시 예정 본문
+## `anvil-v0.3.0` GitHub Release 게시 기록과 본문
 
 - Tag: `anvil-v0.3.0`
-- Target commit: release 승인 시 최종 `main` merge commit
+- Target commit: `95215e2cf85b14f82cf5d0ef7caa2b1ea77da992`
+- Published: 2026-05-28 14:57:59 KST
+- URL: <https://github.com/HardcoreMonk/anvil/releases/tag/anvil-v0.3.0>
 - Release source: ephemera `v0.3.6` runtime baseline + anvil workload/scheduler
   automation
 
