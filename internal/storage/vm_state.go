@@ -47,6 +47,12 @@ type VMState struct {
 	AgentID       string    `json:"agent_id,omitempty"`
 	AgentURL      string    `json:"agent_url"`
 	CreatedAt     time.Time `json:"created_at"`
+	// SourceSnapshotID, when non-empty, marks this VM as snapshot-derived
+	// (v0.4.5): recovery re-restores it from that snapshot instead of cold-
+	// booting from a rootfs clone. The exception store in DiskPath is transient
+	// (discarded on shutdown, recreated fresh on re-restore), so the recoverable
+	// artifact is the source snapshot, not the disk. Empty for spawn-path VMs.
+	SourceSnapshotID string `json:"source_snapshot_id,omitempty"`
 }
 
 // vmStatePath returns the per-VM state.json location under workDir.

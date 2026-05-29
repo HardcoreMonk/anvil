@@ -139,6 +139,7 @@ DELETE /vms/{id}
 | **MicroVM snapshots (Full + Diff)** | Freeze VM memory state to disk; restore in ~5 s. First snapshot → Full; subsequent snapshots of the same VM → Diff, storing only changed memory pages **and** changed rootfs blocks (v0.4.0), merged onto the base on restore. Diff is automatically selected; Full is always the reference base. Original agent token preserved across restores. |
 | **COW rootfs on restore** | Restored VMs use a Linux dm-snapshot COW device backed by the snapshot's `rootfs.ext4` (read-only base, shared). Per-VM guest writes accumulate in a sparse exception store (~0 initial disk usage). Eliminates the ~700 MB full copy previously required per restore. |
 | **Post-restore IP reconfiguration** | Restored VMs receive a fresh IP from the pool via vsock — the guest's network stack is updated in-place without reboot, decoupling the restore IP from the snapshot state. |
+| **Restored VM auto-recovery** (v0.4.5) | dm-snapshot restored VMs now persist a `state.json` (with `source_snapshot_id`) and are **auto-recovered** across a daemon restart — re-restored from their source snapshot (back to snapshot-time memory+disk; post-restore writes are not preserved, same as a manual re-restore). Spawn-path VMs were already cold-restarted since v0.4.0. Caveats: bind-mount-fallback restores (dm-snapshot tooling absent) and restored VMs whose source snapshot was deleted are not recovered (the latter is surfaced as dropped, not silently kept). |
 | **IP and TAP recycling** | IPs (10.0.1.2–254) and TAP IDs are returned to a pool and reused across VM lifecycle |
 | **NAT for outbound internet** | Host bridge `goose-br0` with iptables MASQUERADE enables VM-to-internet for LLM API calls |
 | **Per-client API auth** | Named Bearer tokens per client (`alice:tok1,bob:tok2`); timing-safe comparison; optional per-token TTL (`name:token:expires`, v0.4.1); the matched client identity is threaded into request context for the audit log |
@@ -278,7 +279,7 @@ snapshots/            Stored snapshot directories (auto-created, gitignored)
     rootfs.diff       Sparse rootfs delta vs base — Diff snapshots only (changed 4 KiB blocks)
     metadata.json     Restore params (IP, TAP, MAC, token, type, base_snapshot_id, rootfs_diff_path)
 
-e2e_test.sh           End-to-end integration test (80+ numbered steps incl. resilience + v0.3.x–v0.4.4 sub-steps; requires /dev/kvm + root)
+e2e_test.sh           End-to-end integration test (80+ numbered steps incl. resilience + v0.3.x–v0.4.5 sub-steps; requires /dev/kvm + root)
 observability_demo.sh One-shot live demo: daemon + Prometheus + Grafana, auto workload, browser-driven exploration until Ctrl-C (v0.3.5)
 webdev_demo.sh        One-shot live demo: orchestrator+worker+reviewer flock builds a React+Vite site, harvested from the Town Wall and served via vite preview until Ctrl-C (v0.3.6; manual gate, needs a Gemini key + /dev/kvm)
 
@@ -425,6 +426,7 @@ sudo bash e2e_test.sh
 | 38 | Delete restored VM: verify dm device, loop devices, and `.cow` file all cleaned up |
 | 39 | Delete snapshot and verify empty |
 | 40–46 | **COW spawn cold-restart** (v0.4.0) — relaunch daemon with `EPHEMERA_DISK_MODE=cow`; spawn 2 COW VMs; graceful restart preserves each `.cow` store and re-creates the dm device (same `vm_id`, `/health` 200); then a SIGKILL crash with one `state.json` removed proves `RemoveOrphanCOWDevices` reclaims the orphan while the survivor is cold-restarted; restores plain disk mode |
+| 46a–c | **Restored VM auto-recovery** (v0.4.5) — restore a snapshot (its `state.json` records `source_snapshot_id`); a graceful daemon bounce re-restores the VM from its snapshot (back in `/vms`, `/health` 200, log `re-restored from snapshot`); then deleting the source snapshot + bouncing drops the now-unrecoverable VM |
 | 47–49 | **Agent proxy** — `GET /vms/{id}/health`, `POST /vms/{id}/stop` via control plane proxy; no direct VM IP access |
 | 50–51 | **`EPHEMERA_PUBLIC_URL`** — restart daemon with var set; verify `agent_url` becomes proxy path; use `agent_url` for health + stop |
 | 52 | Prep role profile yaml files from `.example` placeholders |
@@ -1617,7 +1619,7 @@ The daemon-side shutdown path is designed to feed cold-restart:
 - **Explicit `DELETE /vms/{id}`** — routes through `destroyVM`, which does a full cleanup (deletes `state.json`, removes the rootfs ext4, releases all resources). The VM is gone and is not cold-restarted.
 - **SIGKILL / crash** — defers don't run. `state.json` + rootfs survive on disk; on the next start, cold-restart picks them up exactly as for graceful shutdown.
 - **COW spawn VMs** (`EPHEMERA_DISK_MODE=cow`) — `DestroyAll` releases the dm-snapshot kernel objects but **preserves the sparse exception store + `state.json`** (`TeardownDMSnapshotKeepStore`); the next start re-layers the store over the golden image and cold-restarts them (v0.4.0).
-- **Snapshot-restored VMs** (`POST /snapshots/{id}/restore`, dm-snapshot or legacy bind-mount) — torn down fully during `DestroyAll`; they persist no `state.json`, and their base is a snapshot copy rather than the golden image, so they are not auto-recovered.
+- **Snapshot-restored VMs** (`POST /snapshots/{id}/restore`, dm-snapshot path) — `DestroyAll` drops the dm device + transient exception store but **keeps `state.json`** (which carries `source_snapshot_id`). The next start **re-restores** the VM from that source snapshot via `RecoverVMs` → `recoverRestoredVM` (back to snapshot-time memory+disk; the store is recreated fresh), v0.4.5. The legacy **bind-mount fallback** path (dm-snapshot tooling unavailable) still persists no `state.json` and is not auto-recovered.
 
 **Memory auto-snapshot (v0.4.0, opt-in).** With `EPHEMERA_AUTOSNAPSHOT=true`, `DestroyAll` additionally snapshots each recoverable VM's live memory+state into `vms/<id>/auto/{memory.bin,state.bin}` *before* stopping it (graceful shutdown only — a SIGKILL cannot run it). On the next start, `RecoverVMs` **warm-restores** from that snapshot via `vm.RestoreMachine` (memory preserved, same `vm_id`/IP/TAP/MAC/token), so in-flight `/tasks` work survives a daemon bounce. The snapshot is **one-shot** (deleted after the attempt, so a later bounce never rolls the VM back to a stale image) and **best-effort**: any failure — snapshot write, restore, or agent handshake — logs and falls back to the cold boot above. This is why `forwardSignals` omits `SIGTERM`/`SIGINT` (v0.4.0): the daemon owns graceful teardown, and a forwarded SIGTERM would kill Firecracker mid-snapshot.
 
@@ -1633,8 +1635,7 @@ What this preserves:
 
 Callers that need at-most-once semantics across daemon restarts should idempotency-key their `/tasks` calls or poll for completion before retrying.
 
-**Out of scope**:
-- Snapshot-restored VMs (`POST /snapshots/{id}/restore`) are not auto-recovered — restore from the snapshot again after the daemon comes back.
+**Snapshot-restored VM recovery (v0.4.5):** dm-snapshot restored VMs **are** auto-recovered — they persist a `state.json` with `source_snapshot_id`, and `RecoverVMs` re-restores them from that snapshot on the next start (the VM returns to its snapshot-time memory+disk; writes since the restore are not preserved, same as a manual re-restore). Still **out of scope**: the legacy bind-mount-fallback restore path (no `state.json`), and a restored VM whose **source snapshot was deleted** while it ran — recovery cannot re-restore it, so it is dropped and surfaced (not silently kept).
 
 > COW *spawn* VMs (`EPHEMERA_DISK_MODE=cow`) **are** auto-recovered as of v0.4.0: `DestroyAll` preserves the exception store and `RecoverVMs` re-layers it over the golden image. Orphan dm-snapshot devices left by a crashed run (no surviving `state.json`) are reclaimed on the next start via `RemoveOrphanCOWDevices`.
 
@@ -1823,8 +1824,7 @@ Requirements: a Google Gemini API key in `configs/goose-secrets.yaml`, `/dev/kvm
 | **Same-snapshot concurrent restores not supported** | The guest IP is reconfigured via vsock after restore, so different-snapshot concurrent restores each get a fresh IP. However, two VMs from the *same* snapshot would still collide on the Firecracker vsock UDS path (which is fixed in `state.bin`), so same-snapshot concurrent restores are not supported. |
 | **Cross-machine restore** | Supported manually: copy the `snapshots/<id>/` directory to the target host at the same absolute path, then call `POST /snapshots/{id}/restore`. Automated transfer is not built in. |
 | **Cold-restart loses in-VM memory by default** (v0.3.2; mitigated v0.4.0) | Live VM auto-restart re-boots each VM from its rootfs clone — the guest kernel and `goose-agent` start fresh, and any `/tasks` request in flight at the moment of daemon shutdown is dropped. Set `EPHEMERA_AUTOSNAPSHOT=true` to warm-restore in-VM memory across a *graceful* shutdown (v0.4.0). A SIGKILL/crash still cold-boots, so callers should still idempotency-key tasks or re-poll for completion across an ungraceful restart. |
-| **Snapshot-restored VMs are not auto-recovered** (v0.3.2) | Only spawn-path VMs are cold-restarted. After a daemon restart, call `POST /snapshots/{id}/restore` again to bring back a snapshot-derived VM. (COW *spawn* VMs — `EPHEMERA_DISK_MODE=cow` — **are** auto-recovered as of v0.4.0.) |
-| **CP token rotation needs v0.3.4 VMs and `_TOKENS_FILE`** (updated v0.3.4) | v0.3.4 hot-propagates the new control-plane token (the first non-expired client since v0.4.1; `apiClients[0]` before) to running VMs via vsock on SIGHUP. Two prerequisites: (a) the daemon must source tokens from `EPHEMERA_API_TOKENS_FILE` rather than env (env values are fixed at exec time and cannot change on SIGHUP); (b) the VMs must run a v0.3.4+ `goose-agent` (older ones lack the `SET_CP_TOKEN` vsock handler). When either is missing the v0.3.3 fallback (`POST /flocks/{id}/agents/{agent_id}/restart`) still works. |
+| **CP token hot-rotation requires `_TOKENS_FILE`** (v0.3.4) | On SIGHUP the daemon hot-propagates the new control-plane token (the first non-expired client since v0.4.1; `apiClients[0]` before) to running VMs via the `SET_CP_TOKEN` vsock command. This requires sourcing tokens from `EPHEMERA_API_TOKENS_FILE` — env-supplied tokens are fixed at exec and cannot change on SIGHUP. (The in-VM `SET_CP_TOKEN` handler ships in every current golden image, which auto-rebakes on any `goose-agent` change.) When tokens come from the env, the `POST /flocks/{id}/agents/{agent_id}/restart` fallback re-injects the current token. |
 | **Metrics retention is external** (v0.3.5) | `/metrics` exposes raw counters and gauges only — the daemon does not aggregate, store, or rotate history. Operators are expected to wire an external Prometheus (or any text-exposition-compatible) scraper. |
 
 ---

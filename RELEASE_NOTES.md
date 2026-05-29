@@ -1,3 +1,25 @@
+# v0.4.5 — Snapshot-Restore Auto-Recovery
+
+**Ephemera** v0.4.5 closes a recovery gap from the Known Limitations audit. Additive — no wire format changed; no golden-image rebake (daemon/storage only).
+
+---
+
+## What's New
+
+### Snapshot-restored VMs are auto-recovered across a daemon restart
+
+- A VM created via `POST /snapshots/{id}/restore` now persists a `state.json` carrying `source_snapshot_id`. On the next daemon start, `RecoverVMs` **re-restores it from that source snapshot** (it cannot cold-boot like a spawn VM) instead of dropping it — automating what previously required a manual re-restore.
+- Semantics: the VM returns to its **snapshot-time** memory and disk. Writes made *after* the original restore are not preserved across the restart (identical to a manual re-restore); the COW exception store is recreated fresh so the re-loaded snapshot memory and disk stay consistent.
+- Shutdown handling: graceful shutdown discards a restored VM's dm device + transient exception store but **keeps its `state.json`** (recovery re-restores fresh). Restored VMs are excluded from the opt-in memory auto-snapshot (they re-restore from source, so an `auto/` image would never be used).
+- Caveats (documented, by design): **bind-mount-fallback** restores (when dm-snapshot tooling is unavailable) are not auto-recovered; and if the **source snapshot was deleted** while the restored VM ran, recovery drops the VM and surfaces it (via `failed[]` / a flock agent marked dead) rather than silently keeping it.
+
+### Known-Limitations refresh
+
+- Removed the "Snapshot-restored VMs are not auto-recovered" limitation (now resolved above).
+- Reworded the CP-token-rotation limitation to "CP token hot-rotation requires `_TOKENS_FILE`": the old "needs v0.3.4 VMs" clause is obsolete — the golden image auto-rebakes on any `goose-agent` change, so every current VM carries the `SET_CP_TOKEN` vsock handler. The only real requirement is sourcing tokens from a file (env tokens are fixed at exec and cannot change on SIGHUP).
+
+---
+
 # v0.4.4 — Feature Extensions
 
 **Ephemera** v0.4.4 is the last single-host cycle, rounding out the operator surface: **PR-A** flock broadcast + a watchdog status route; **PR-B** streaming `/tasks`, the `goose-agent` slog migration, and a nested-invocation depth guard. Additive — no wire format changed.

@@ -130,6 +130,10 @@ type runningVM struct {
 	machine         *firecracker.Machine
 	tapDevice       string
 	socketPath      string
+	// sourceSnapshotID is non-empty for snapshot-restored VMs (v0.4.5). It lets
+	// DestroyAll distinguish them from COW-spawn VMs (re-restore from the source
+	// snapshot on recovery rather than re-layering the preserved exception store).
+	sourceSnapshotID string
 	// v0.3.5 additions for /vms/{vm_id}/stats. memSizeMib mirrors VMState.MemSizeMib,
 	// spawnedAt mirrors VMState.CreatedAt, and fcPID caches the Firecracker child
 	// PID resolved via /proc/net/unix on first stats request. atomic stores so
@@ -1129,7 +1133,7 @@ func (cp *ControlPlane) DestroyAll() {
 		// non-fatal: it is logged, the partial snapshot removed, and the VM falls
 		// through to the normal stop + cold-restart preservation below, so the
 		// next start cold-boots it. Auto-snapshot is strictly additive.
-		if enableAutoSnapshot && storage.VMStateExists(cp.workDir, v.VMID) {
+		if enableAutoSnapshot && storage.VMStateExists(cp.workDir, v.VMID) && v.sourceSnapshotID == "" {
 			autoDir := storage.AutoSnapshotDir(cp.workDir, v.VMID)
 			memPath, statPath := storage.AutoSnapshotPaths(cp.workDir, v.VMID)
 			if mkErr := os.MkdirAll(autoDir, 0755); mkErr != nil {
@@ -1150,15 +1154,22 @@ func (cp *ControlPlane) DestroyAll() {
 		if v.vsockPath != "" {
 			os.Remove(v.vsockPath)
 		}
-		if v.dmSnapshot != nil && storage.VMStateExists(cp.workDir, v.VMID) {
+		if v.dmSnapshot != nil && v.sourceSnapshotID == "" && storage.VMStateExists(cp.workDir, v.VMID) {
 			// COW spawn VM: release the dm-snapshot kernel objects (mount, dm device,
 			// loops) but PRESERVE the exception store + state.json so RecoverVMs can
 			// re-layer the store over the golden image and bring the VM back with the
 			// same identity on the next start.
 			storage.TeardownDMSnapshotKeepStore(v.dmSnapshot)
+		} else if v.dmSnapshot != nil && v.sourceSnapshotID != "" {
+			// Snapshot-restored VM (recoverable, v0.4.5): drop the dm device AND the
+			// transient exception store, but KEEP state.json so RecoverVMs re-restores
+			// it fresh from the source snapshot on the next start. (Re-loading the
+			// snapshot's memory onto an evolved store would be inconsistent, so the
+			// store is intentionally discarded and recreated.)
+			storage.TeardownDMSnapshot(v.dmSnapshot)
 		} else if v.dmSnapshot != nil {
-			// dm-snapshot restored VM (no persisted state → not recoverable):
-			// full teardown including the exception store.
+			// dm-snapshot restored VM with no persisted state (legacy, or persist
+			// failed → not recoverable): full teardown including the exception store.
 			storage.TeardownDMSnapshot(v.dmSnapshot)
 			storage.DeleteVMState(cp.workDir, v.VMID)
 		} else if v.bindMountTarget != "" {
@@ -1694,18 +1705,42 @@ func (cp *ControlPlane) restoreSnapshot(w http.ResponseWriter, snapID string) {
 
 	cp.mu.Lock()
 	cp.vms[newVMID] = &runningVM{
-		VMInfo:     info,
-		agentToken: meta.AgentToken,
-		diskPath:   exceptionStorePath, // only the COW store needs cleanup (not a full disk copy)
-		dmSnapshot: dmInfo,
-		vsockPath:  meta.VsockPath,
-		machine:    machine,
-		tapDevice:  tapDevice,
-		socketPath: socketPath,
-		memSizeMib: 2048, // restore default; meta does not carry per-snapshot sizing
-		spawnedAt:  time.Now().UTC(),
+		VMInfo:           info,
+		agentToken:       meta.AgentToken,
+		diskPath:         exceptionStorePath, // only the COW store needs cleanup (not a full disk copy)
+		dmSnapshot:       dmInfo,
+		vsockPath:        meta.VsockPath,
+		machine:          machine,
+		tapDevice:        tapDevice,
+		socketPath:       socketPath,
+		memSizeMib:       2048, // restore default; meta does not carry per-snapshot sizing
+		spawnedAt:        time.Now().UTC(),
+		sourceSnapshotID: snapID,
 	}
 	cp.mu.Unlock()
+
+	// Persist a recovery record (v0.4.5) so a daemon restart auto-re-restores this
+	// VM from snapID instead of dropping it. DiskPath is the transient COW store;
+	// the recoverable artifact is the source snapshot (see recoverRestoredVM).
+	// Non-fatal: the VM is already live; a failed write only forfeits auto-recovery.
+	if err := storage.SaveVMState(cp.workDir, storage.VMState{
+		VMID:             newVMID,
+		GuestIP:          newGuestIP,
+		TapDevice:        tapDevice,
+		MacAddr:          meta.MacAddr,
+		VsockPath:        meta.VsockPath,
+		SocketPath:       socketPath,
+		AgentToken:       meta.AgentToken,
+		DiskPath:         exceptionStorePath,
+		DiskMode:         storage.DiskModeCOW,
+		Profile:          meta.Profile,
+		MemSizeMib:       2048,
+		AgentURL:         info.AgentURL,
+		SourceSnapshotID: snapID,
+		CreatedAt:        time.Now().UTC(),
+	}); err != nil {
+		slog.Warn("restore: persist vm state failed (VM live but won't auto-recover)", "vm_id", newVMID, "err", err)
+	}
 
 	slog.Warn("restore: waiting for agent", "snapshot_id", snapID, "agent_url", info.AgentURL)
 	if err := waitForAgent(newGuestIP, 30*time.Second); err != nil {
