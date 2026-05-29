@@ -156,6 +156,8 @@ DELETE /vms/{id}
 | **Town Wall query + rotation** (v0.4.3) | `GET /flocks/{id}/wall/history` filters: `?agent_id=` / `since=` / `until=` (RFC3339) / `contains=`. The log rotates by size (`EPHEMERA_TOWNWALL_MAX_MIB` default 10 MiB, `_KEEP` default 3); history reflects the active file (rotated backups kept on disk). |
 | **Flock broadcast** (v0.4.4) | `POST /flocks/{id}/broadcast` `{"body":"…"}` scatters one prompt to **every** member agent's `/tasks` in parallel and gathers each result (`sent`/`skipped`/`failed` tally + per-agent `results`); busy agents are reported `busy` (skipped). The broadcast is also recorded on the Town Wall. CLI: `ephemera-ctl flock broadcast <flock_id> <message>`. |
 | **Watchdog status** (v0.4.4) | `GET /watchdog/status` returns the health watchdog's tunables (`interval_sec`/`timeout_sec`/`dying_threshold`/`auto_heal`) and live per-VM state (`vm_fail_counts`, `vm_dead_marked`). Read-only; behind the same auth as the other internal routes. |
+| **Streaming `/tasks`** (v0.4.4) | `POST /vms/{id}/tasks?stream=1` streams newline-delimited JSON — `{"type":"progress",…}` frames (goose stderr activity + 15s heartbeat) then one `{"type":"result","output":…,"error":…}` frame. The proxy flushes per chunk. The default (no `stream=1`) path is unchanged. Streaming commits `200` up front, so goose errors arrive in `result.error`, not the status code. |
+| **Nested-task depth guard** (v0.4.4) | Agent→agent `gtcall` is loop-guarded: the proxy reads `X-Ephemera-Task-Depth` on each `/tasks` hop, refuses at/over `EPHEMERA_MAX_TASK_DEPTH` (default 5) with `508 Loop Detected`, and forwards `depth+1`. `goose-agent` passes the depth to the goose subprocess (`EPHEMERA_TASK_DEPTH`) and `gtcall` re-sends it, so depth accumulates across the call tree. |
 | **Auto-injected control-plane token** (v0.3.3) | When `EPHEMERA_API_TOKENS` is set, the host writes the first non-expired client's token (`apiClients[0]` until v0.4.1's per-token TTL) into each flock VM at `/root/.ephemera-cp-token` (mode 0600); the in-VM `/townwall/post` forwarder reads it automatically. No more manual `EPHEMERA_CONTROL_PLANE_TOKEN` env inside every VM. |
 | **CP token hot rotation** (v0.3.4) | `EPHEMERA_API_TOKENS_FILE=/path/to/tokens` enables true hot rotation: edit the file, send SIGHUP, and the daemon both swaps `cp.clients` and fans the new token out to every running VM over vsock (`SET_CP_TOKEN` command, atomic file rewrite inside the guest). No per-VM restart needed for the in-VM forwarder to pick up the new bearer. |
 | **Env-tunable watchdog** (v0.3.4) | `EPHEMERA_WATCHDOG_INTERVAL_SEC` / `_TIMEOUT_SEC` / `_THRESHOLD` override the 5 s / 1 s / 3-fail defaults at startup. `EPHEMERA_WATCHDOG_AUTO_HEAL=true` opts in to self-healing — a `dead` agent that resumes responding is auto-marked `ready` (default off preserves sticky-dead). |
@@ -276,7 +278,7 @@ snapshots/            Stored snapshot directories (auto-created, gitignored)
     rootfs.diff       Sparse rootfs delta vs base — Diff snapshots only (changed 4 KiB blocks)
     metadata.json     Restore params (IP, TAP, MAC, token, type, base_snapshot_id, rootfs_diff_path)
 
-e2e_test.sh           End-to-end integration test (62 numbered steps incl. resilience + v0.3.3 / v0.3.4 / v0.3.5 sub-steps; requires /dev/kvm + root)
+e2e_test.sh           End-to-end integration test (80+ numbered steps incl. resilience + v0.3.x–v0.4.4 sub-steps; requires /dev/kvm + root)
 observability_demo.sh One-shot live demo: daemon + Prometheus + Grafana, auto workload, browser-driven exploration until Ctrl-C (v0.3.5)
 webdev_demo.sh        One-shot live demo: orchestrator+worker+reviewer flock builds a React+Vite site, harvested from the Town Wall and served via vite preview until Ctrl-C (v0.3.6; manual gate, needs a Gemini key + /dev/kvm)
 
@@ -401,11 +403,13 @@ go build -o ephemera-daemon ./cmd/goose-daemon/
 sudo bash e2e_test.sh
 ```
 
-**What it tests (62 numbered steps incl. sub-steps):**
+**What it tests (80+ numbered steps incl. sub-steps):**
 
 | Steps | Scenario |
 |-------|----------|
 | 1–5 | Daemon startup, single VM lifecycle (create → task → stop → delete) |
+| 3a | **Streaming `/tasks`** (v0.4.4) — `POST /vms/{id}/tasks?stream=1` through the proxy returns `Content-Type: application/x-ndjson`; every frame is valid JSON and the stream ends with a `result` frame (proxy per-chunk flush + agent NDJSON) |
+| 3b | **Task depth guard** (v0.4.4) — an over-cap `/tasks` hop (`X-Ephemera-Task-Depth: 99`) is refused with `508 Loop Detected` before goose is contacted |
 | 6–9 | Two VMs in parallel — concurrent task execution |
 | 10–16 | Full snapshot lifecycle: create with `stop_after`, list, restore, verify agent token and new IP, delete |
 | 17–22 | **Concurrent restore** — two different snapshots restored simultaneously; verifies both VMs run at the same time with independent IPs and disks |
@@ -614,6 +618,7 @@ All settings are read from environment variables at startup.
 | `EPHEMERA_API_TOKENS` | *(unset)* | Per-client Bearer tokens: `alice:token1,bob:token2` (each entry may carry an optional `:expires`, see `_TOKENS_FILE` and the Token TTL docs — v0.4.1). The first **non-expired** token is also auto-injected into every flock VM at `/root/.ephemera-cp-token` so the in-VM `/townwall/post` forwarder can call back to the control plane without manual setup (v0.3.3; first-non-expired since v0.4.1). v0.3.4 SIGHUP fan-out propagates rotations to running VMs — see `_TOKENS_FILE` for true hot rotation. |
 | `EPHEMERA_API_TOKEN` | *(unset)* | Single Bearer token (backward-compatible fallback). |
 | `EPHEMERA_AGENT_PORT` | `8080` | Port goose-agent listens on inside each VM. |
+| `EPHEMERA_MAX_TASK_DEPTH` | `5` | Max nested agent→agent `/tasks` hops (v0.4.4). The proxy reads `X-Ephemera-Task-Depth` per hop, rejects at/over this cap with `508 Loop Detected`, and forwards `depth+1`. A large value effectively disables the guard. |
 | `EPHEMERA_PUBLIC_URL` | *(unset)* | Externally-reachable base URL of the control plane (no trailing slash). When set, `agent_url` in VM responses uses the proxy path `{EPHEMERA_PUBLIC_URL}/vms/{vm_id}` instead of the VM's private IP. Example: `https://api.example.com`. |
 | `EPHEMERA_DISK_MODE` | `cow` | Spawn disk strategy. **COW (a dm-snapshot view of the golden image, ~0 MiB initial usage) is the default since v0.4.2.** Set to `plain` (or `full`) to force a 700 MiB full copy. When COW is selected but the host lacks dm-snapshot support (`losetup`/`dmsetup`/`dm_snapshot`), the daemon logs a warning and falls back to plain at startup. Auto-recovered across a daemon restart since v0.4.0. |
 | `EPHEMERA_DISK_MIN_FREE_MIB` | `1024` | Free-space floor (MiB) enforced before a VM clone or snapshot writes to disk (v0.4.0). A `statfs` pre-flight estimates the footprint (clone / full snapshot ≈ rootfs + memory; diff snapshot ≈ memory only) and returns `507 Insufficient Storage` when the result would drop free space below this margin, rather than failing mid-write. |
@@ -623,8 +628,8 @@ All settings are read from environment variables at startup.
 | `EPHEMERA_WATCHDOG_THRESHOLD` | `3` | Consecutive probe failures before marking an agent `dead` (v0.3.4). |
 | `EPHEMERA_WATCHDOG_AUTO_HEAL` | `false` | When `true` (`1`/`yes`/`on` also accepted), a `dead` agent that resumes responding is auto-marked `ready` and a recovery notice posted to the Town Wall (v0.3.4). Default off preserves sticky-dead. |
 | `EPHEMERA_METRICS_REQUIRE_AUTH` | `false` | When `true`, `GET /metrics` requires a valid Bearer token like every other endpoint (v0.3.5). Default off matches the standard Prometheus scrape pattern; flip on when the metrics endpoint is exposed beyond a trusted network. |
-| `EPHEMERA_LOG_FORMAT` | `text` | `text` (default) emits `key=value` lines from `log/slog`'s TextHandler; `json` switches to JSONHandler for log-aggregation pipelines (v0.3.5). |
-| `EPHEMERA_LOG_LEVEL` | `warn` | Minimum slog level: `debug`, `info`, `warn`, or `error` (v0.3.5). Default `warn` preserves the previous `log.Printf` tone — every lifecycle event in the daemon is emitted at warn-or-higher so operators see it without configuration. |
+| `EPHEMERA_LOG_FORMAT` | `text` | `text` (default) emits `key=value` lines from `log/slog`'s TextHandler; `json` switches to JSONHandler for log-aggregation pipelines (v0.3.5). The in-VM `goose-agent` honors the same variable since v0.4.4 (when injected into the VM environment). |
+| `EPHEMERA_LOG_LEVEL` | `warn` | Minimum slog level: `debug`, `info`, `warn`, or `error` (v0.3.5). Default `warn` preserves the previous `log.Printf` tone — every lifecycle event in the daemon is emitted at warn-or-higher so operators see it without configuration. `goose-agent` adopted `log/slog` with the same default in v0.4.4. |
 | `EPHEMERA_AUDIT_DISABLE` | `false` | Set to `true` to turn off the access audit log (v0.4.1). When enabled (the default), every API request is appended as one JSON line to `{workDir}/audit/access.jsonl` (method, path, client name, status, latency — never tokens or bodies) and is queryable via `GET /audit`. |
 | `EPHEMERA_AUDIT_MAX_MIB` | `100` | Active audit file size (MiB) that triggers rotation to `access.jsonl.1` (v0.4.1). |
 | `EPHEMERA_AUDIT_KEEP` | `5` | Number of rotated audit files to retain; older ones are deleted (v0.4.1). Disk ceiling ≈ `MAX_MIB × (KEEP + 1)`. |
@@ -1114,6 +1119,10 @@ curl -X POST http://10.0.1.10:8080/tasks \
 ```
 
 Returns when the task completes. `output` is the assistant text extracted from Goose's `--output-format json` envelope (v0.3.6): the agent slices from the first `{` to skip Goose's startup banner, concatenates every assistant `text` block, and falls back to raw stdout if the envelope cannot be parsed. This route bypasses goose-cli's streaming-buffer truncation, which otherwise caps fenced code at 50 lines and spills the overflow into an in-VM `/tmp/goose-*.txt` the host caller cannot reach. Only one task runs at a time per VM; concurrent requests receive `503 agent busy`. If `/root/.goose-system-prompt` is present (injected by `PrepareVM` for flock members), it is prepended to the user prompt as `[SYSTEM INSTRUCTIONS]\n...\n\n[USER TASK]\n...` before being piped to Goose.
+
+**Streaming (v0.4.4):** add `?stream=1` to receive the task as newline-delimited JSON over chunked transfer — zero or more `{"type":"progress","text":"…"}` frames (relayed from Goose's stderr activity, with a 15 s heartbeat) followed by exactly one `{"type":"result","output":"…","error":"…"}` frame mirroring the buffered shape. The control-plane proxy flushes per chunk. Because a `200` is committed before Goose runs, a Goose failure surfaces in `result.error` rather than an HTTP `500` — streaming clients must inspect the result frame, not the status code. Omitting `stream=1` keeps the buffered behavior above unchanged.
+
+**Nested-task depth guard (v0.4.4):** when an agent dispatches to a peer via `gtcall`, the control plane stamps `X-Ephemera-Task-Depth` on each `/tasks` hop and refuses at/over `EPHEMERA_MAX_TASK_DEPTH` (default 5) with `508 Loop Detected`, preventing runaway nested-invocation loops.
 
 #### Post to Town Wall (flock members only)
 
