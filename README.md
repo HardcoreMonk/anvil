@@ -467,7 +467,7 @@ sudo bash e2e_test.sh
 | 82 | **`ephemera-ctl` drives the daemon** (v0.4.1) — `ephemera-ctl vm spawn` / `ls` / `rm` against the live daemon (spawned VM appears then disappears); a bogus `--token` exits non-zero. |
 | 83 | **`ephemera-ctl audit`** (v0.4.1) — `ephemera-ctl audit --method GET` returns the access-log entries for the calls just made. |
 
-**Example output (passing, flock steps 52–75):**
+**Example output (passing, tail of the run — steps 52–83):**
 
 ```
 ━━━ 52. Prep role profile yaml files ━━━
@@ -596,8 +596,78 @@ sudo bash e2e_test.sh
 ━━━ 72g. Cleanup rotation test ━━━
   ✓ Rotation flock deleted, tokens file removed
 
+━━━ 73. /metrics endpoint exposes Prometheus format ━━━
+  ✓ GET /metrics returned 200 (unauthenticated by default) ✓
+  ✓ HELP line present
+  ✓ gauge TYPE present
+  ✓ vm_count value present
+  ✓ sighup_reload counter present
+
+━━━ 74. /vms/{vm_id}/stats returns per-VM snapshot ━━━
+  ✓ stats test VM spawned: vm-...
+  ✓ stats schema verified (uptime, mem_total, cpu_percent)
+  ✓ ?stats=true inlines per-VM stats ✓
+  ✓ stats test VM cleaned up
+
 ━━━ 75. Shut down rotation daemon ━━━
   ✓ Rotation daemon stopped
+
+━━━ 76. EPHEMERA_AUTOSNAPSHOT: warm restore preserves VM memory across a graceful daemon bounce ━━━
+  ✓ Daemon up with EPHEMERA_AUTOSNAPSHOT=true
+  ✓ POST /vms (autosnapshot) (HTTP 201)
+  ✓ Agent healthy before bounce ✓
+  ✓ auto-snapshot written: vms/<id>/auto/{memory,state}.bin ✓
+  ✓ VM <id> live after warm restore ✓
+  ✓ warm-restored agent /health → 200 ✓
+  ✓ daemon took warm-restore path (memory preserved, not cold boot) ✓
+  ✓ auto-snapshot consumed (one-shot delete) ✓
+  ✓ metric ephemera_auto_restore_total{ok} present ✓
+  ✓ Auto-snapshot test VM cleaned up
+
+━━━ 77. Recovery with a missing disk artifact drops state cleanly (TAP released, agent dead, surfaced) ━━━
+  ✓ Plain-mode daemon up for disk-missing recovery test
+  ✓ POST /flocks (disk-missing) (HTTP 201)
+  ✓ worker state.json persisted ✓
+  ✓ host TAP present before crash ✓
+  ✓ Crashed daemon; deleted worker rootfs ✓
+  ✓ state.json dropped on recovery ✓
+  ✓ dropped VM absent from /vms ✓
+  ✓ stale TAP released by recovery ✓
+  ✓ flock agent worker-1 marked dead in metadata.json ✓
+  ✓ daemon logged disk-missing drop ✓
+  ✓ drop surfaced in failed[] (vms not cold-restarted) ✓
+  ✓ Disk-missing flock cleaned up
+
+━━━ 78. Audit log records an authenticated request (client + status, no secrets) ━━━
+  ✓ Auth-on daemon up (client: ops)
+  ✓ GET /vms with valid bearer (HTTP 200)
+  ✓ GET /vms with bogus bearer (HTTP 401)
+  ✓ audit recorded GET /vms 200 by client=ops ✓
+  ✓ audit log contains no token/Authorization material ✓
+
+━━━ 79. Audit captures a 401 as client=- ━━━
+  ✓ audit recorded the 401 with client=- ✓
+
+━━━ 80. Per-token TTL: an expired token is rejected; never-expiring primary keeps working ━━━
+  ✓ Auth-on daemon up with a short-TTL token
+  ✓ short-TTL token accepted before expiry (HTTP 200)
+  ✓ short-TTL token rejected after expiry (HTTP 401)
+  ✓ never-expiring primary token still accepted (HTTP 200)
+  ✓ daemon logged token expiry ✓
+  ✓ metric ephemera_auth_total{outcome=expired} present ✓
+
+━━━ 81. SSE /flocks/{id}/wall streams through the audit statusRecorder (Flusher preserved) ━━━
+  ✓ SSE guard flock: flock-...
+  ✓ GET /flocks/{id}/wall streamed (200; Flusher preserved through audit wrapper) ✓
+
+━━━ 82. ephemera-ctl spawn/ls/rm against the live daemon ━━━
+  ✓ ctl vm spawn → vm-... ✓
+  ✓ ctl vm ls shows the spawned VM ✓
+  ✓ ctl vm rm removed it from ls ✓
+  ✓ ctl bogus token → non-zero exit ✓
+
+━━━ 83. ephemera-ctl audit reads the access log ━━━
+  ✓ ctl audit shows recent GET /vms ✓
 
 ══════════════════════════════════
   All test steps passed ✓
