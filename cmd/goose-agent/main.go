@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -58,6 +58,40 @@ const (
 	defaultControlPlaneAddr = "http://10.0.1.1:3000"
 )
 
+// initSlog configures the global slog default handler from EPHEMERA_LOG_FORMAT
+// (text|json) and EPHEMERA_LOG_LEVEL (debug|info|warn|error), mirroring the
+// host daemon (cmd/goose-daemon). Default level is Warn so the lifecycle lines
+// this binary historically printed via log.Printf stay visible without config.
+// The env vars only take effect when the control plane injects them into the
+// VM environment; absent, the Warn default applies.
+func initSlog() {
+	level := slog.LevelWarn
+	switch strings.ToLower(os.Getenv("EPHEMERA_LOG_LEVEL")) {
+	case "debug":
+		level = slog.LevelDebug
+	case "info":
+		level = slog.LevelInfo
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	opts := &slog.HandlerOptions{Level: level}
+	var h slog.Handler
+	if strings.EqualFold(os.Getenv("EPHEMERA_LOG_FORMAT"), "json") {
+		h = slog.NewJSONHandler(os.Stderr, opts)
+	} else {
+		h = slog.NewTextHandler(os.Stderr, opts)
+	}
+	slog.SetDefault(slog.New(h))
+}
+
+// fatal logs at Error and exits non-zero (mirrors the host daemon's fatal).
+func fatal(msg string, args ...any) {
+	slog.Error(msg, args...)
+	os.Exit(1)
+}
+
 // loadAgentToken reads the per-VM Bearer token written by the control plane at VM provision time.
 // Returns an empty string (auth disabled) if the file does not exist — backward compatible with
 // golden images that predate this feature.
@@ -65,7 +99,7 @@ func loadAgentToken() string {
 	b, err := os.ReadFile(agentTokenPath)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			log.Printf("Warning: could not read agent token file: %v", err)
+			slog.Warn("could not read agent token file", "err", err)
 		}
 		return ""
 	}
@@ -147,11 +181,12 @@ func agentAuthMiddleware(token string, next http.HandlerFunc) http.HandlerFunc {
 }
 
 func main() {
+	initSlog()
 	token := loadAgentToken()
 	if token == "" {
-		log.Println("Warning: no agent token found — authentication disabled")
+		slog.Warn("no agent token found, authentication disabled")
 	} else {
-		log.Println("goose-agent token auth enabled")
+		slog.Warn("goose-agent token auth enabled")
 	}
 
 	startVsockListener()
@@ -164,9 +199,9 @@ func main() {
 
 	addr := agentListenAddr()
 	srv = &http.Server{Addr: addr, Handler: mux}
-	log.Printf("goose-agent ready on %s", addr)
+	slog.Warn("goose-agent ready", "addr", addr)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("server error: %v", err)
+		fatal("server error", "err", err)
 	}
 }
 
@@ -176,26 +211,26 @@ func main() {
 func startVsockListener() {
 	fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM, 0)
 	if err != nil {
-		log.Printf("Warning: vsock unavailable — post-restore IP reconfiguration disabled: %v", err)
+		slog.Warn("vsock unavailable, post-restore IP reconfiguration disabled", "err", err)
 		return
 	}
 	sa := &unix.SockaddrVM{CID: unix.VMADDR_CID_ANY, Port: vsockReconfigPort}
 	if err := unix.Bind(fd, sa); err != nil {
 		unix.Close(fd)
-		log.Printf("Warning: vsock bind: %v", err)
+		slog.Warn("vsock bind failed", "err", err)
 		return
 	}
 	if err := unix.Listen(fd, 4); err != nil {
 		unix.Close(fd)
-		log.Printf("Warning: vsock listen: %v", err)
+		slog.Warn("vsock listen failed", "err", err)
 		return
 	}
-	log.Printf("vsock reconfig listener ready on port %d", vsockReconfigPort)
+	slog.Warn("vsock reconfig listener ready", "port", vsockReconfigPort)
 	go func() {
 		for {
 			connFd, _, err := unix.Accept(fd)
 			if err != nil {
-				log.Printf("vsock accept: %v", err)
+				slog.Warn("vsock accept failed", "err", err)
 				continue
 			}
 			go handleVsockConn(connFd)
@@ -233,11 +268,11 @@ func handleVsockConn(fd int) {
 		cidrIP, gateway := parts[1], parts[2]
 		if err := applyIPConfig(cidrIP, gateway); err != nil {
 			fmt.Fprintf(f, "ERROR: %v\n", err)
-			log.Printf("vsock CHANGE_IP failed: %v", err)
+			slog.Warn("vsock CHANGE_IP failed", "err", err)
 			return
 		}
 		fmt.Fprintf(f, "OK\n")
-		log.Printf("IP reconfigured: eth0 → %s via %s", cidrIP, gateway)
+		slog.Warn("IP reconfigured", "ip", cidrIP, "gateway", gateway)
 
 	case "SET_CP_TOKEN":
 		if len(parts) != 2 {
@@ -246,11 +281,11 @@ func handleVsockConn(fd int) {
 		}
 		if err := writeCPTokenAtomic(parts[1]); err != nil {
 			fmt.Fprintf(f, "ERROR: %v\n", err)
-			log.Printf("vsock SET_CP_TOKEN failed: %v", err)
+			slog.Warn("vsock SET_CP_TOKEN failed", "err", err)
 			return
 		}
 		fmt.Fprintf(f, "OK\n")
-		log.Printf("CP token updated via vsock")
+		slog.Warn("CP token updated via vsock")
 
 	default:
 		fmt.Fprintf(f, "ERROR: unknown command %q\n", parts[0])
@@ -335,6 +370,31 @@ func handleTask(w http.ResponseWriter, r *http.Request) {
 	// session/mod.rs gates the markdown buffer flush behind !is_json_mode.
 	cmd := exec.CommandContext(r.Context(), "/usr/local/bin/goose", "run", "--output-format", "json", "-i", "-")
 	cmd.Stdin = strings.NewReader(finalPrompt)
+
+	// Propagate the nested-invocation depth (v0.4.4) to the goose subprocess so a
+	// gtcall the agent spawns re-sends the accumulated depth. The control plane
+	// sets X-Ephemera-Task-Depth (>=1) on every proxied /tasks hop and enforces a
+	// ceiling; absent means a direct top-level call (depth 0). Set cmd.Env
+	// explicitly (it was nil → inherited) and pass the value through verbatim —
+	// the control plane increments again on the next hop.
+	depth := r.Header.Get("X-Ephemera-Task-Depth")
+	if depth == "" {
+		depth = "0"
+	}
+	cmd.Env = append(os.Environ(), "EPHEMERA_TASK_DEPTH="+depth)
+
+	// Opt-in streaming: ?stream=1 streams NDJSON progress + a final result frame.
+	// The default path keeps the buffered {"output","error"} contract verbatim.
+	if r.URL.Query().Get("stream") == "1" {
+		runTaskStreaming(w, cmd)
+		return
+	}
+	runTaskBuffered(w, cmd)
+}
+
+// runTaskBuffered runs goose to completion and returns the whole TaskResult as a
+// single JSON object — the original (pre-v0.4.4) behavior, unchanged.
+func runTaskBuffered(w http.ResponseWriter, cmd *exec.Cmd) {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	stdout, err := cmd.Output()
@@ -356,6 +416,126 @@ func handleTask(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(res)
+}
+
+// streamFrame is one newline-delimited JSON frame emitted by runTaskStreaming.
+// type="progress" carries an incremental stderr line (text); type="result" is
+// the single final frame and mirrors TaskResult (output/error). A streaming
+// client reconstructs the legacy object by reading the last frame.
+type streamFrame struct {
+	Type   string `json:"type"`
+	Text   string `json:"text,omitempty"`
+	Output string `json:"output,omitempty"`
+	Error  string `json:"error,omitempty"`
+}
+
+// runTaskStreaming streams goose's progress as NDJSON over chunked transfer.
+// goose --output-format json emits its envelope only at the end (stdout), so the
+// incremental signal is goose's stderr (tool-call / thinking activity); each
+// stderr line becomes a progress frame, and the buffered stdout is parsed into
+// the final result frame. A 15s heartbeat keeps idle proxies from dropping the
+// connection. Because the 200 status is committed before goose runs, a goose
+// failure cannot be a 500 — the error rides in the result frame's error field,
+// so streaming clients MUST inspect result.error rather than the status code.
+func runTaskStreaming(w http.ResponseWriter, cmd *exec.Cmd) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		// No flushing available — fall back to the buffered contract.
+		runTaskBuffered(w, cmd)
+		return
+	}
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		runTaskBuffered(w, cmd)
+		return
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		runTaskBuffered(w, cmd)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	// w is not safe for concurrent writes; serialize the stderr scanner, the
+	// heartbeat, and the final result behind one mutex.
+	var writeMu sync.Mutex
+	emit := func(fr streamFrame) {
+		b, err := json.Marshal(fr)
+		if err != nil {
+			return
+		}
+		writeMu.Lock()
+		w.Write(append(b, '\n'))
+		flusher.Flush()
+		writeMu.Unlock()
+	}
+
+	if err := cmd.Start(); err != nil {
+		emit(streamFrame{Type: "result", Error: err.Error()})
+		return
+	}
+
+	// Drain stderr line-by-line: relay each line as a progress frame and retain
+	// it for the final error field (mirrors the buffered path's stderr capture).
+	var stderrBuf bytes.Buffer
+	var stderrMu sync.Mutex
+	stderrDone := make(chan struct{})
+	go func() {
+		defer close(stderrDone)
+		sc := bufio.NewScanner(stderrPipe)
+		sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		for sc.Scan() {
+			line := sc.Text()
+			stderrMu.Lock()
+			stderrBuf.WriteString(line)
+			stderrBuf.WriteByte('\n')
+			stderrMu.Unlock()
+			emit(streamFrame{Type: "progress", Text: line})
+		}
+	}()
+
+	// Heartbeat so idle proxies/load balancers don't drop a long, quiet task.
+	hbDone := make(chan struct{})
+	go func() {
+		t := time.NewTicker(15 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-hbDone:
+				return
+			case <-t.C:
+				emit(streamFrame{Type: "progress", Text: ""})
+			}
+		}
+	}()
+
+	// Read stdout fully BEFORE Wait (StdoutPipe contract). stdout closes on
+	// process exit, by which point stderr is also draining to EOF.
+	stdout, _ := io.ReadAll(stdoutPipe)
+	<-stderrDone
+	close(hbDone)
+	waitErr := cmd.Wait()
+
+	res := TaskResult{Output: extractGooseJSONText(stdout)}
+	if res.Output == "" && len(stdout) > 0 {
+		res.Output = string(stdout)
+	}
+	if waitErr != nil {
+		stderrMu.Lock()
+		msg := strings.TrimSpace(stderrBuf.String())
+		stderrMu.Unlock()
+		if msg != "" {
+			res.Error = msg
+		} else {
+			res.Error = waitErr.Error()
+		}
+	}
+	emit(streamFrame{Type: "result", Output: res.Output, Error: res.Error})
 }
 
 // extractGooseJSONText parses the envelope produced by `goose run --output-format json`

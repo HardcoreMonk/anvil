@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -123,5 +125,61 @@ func TestExtractGooseJSONText_StripsBannerPrefix(t *testing.T) {
 		`{"messages":[{"role":"assistant","content":[{"type":"text","text":"hi"}]}]}`)
 	if got := extractGooseJSONText(in); got != "hi" {
 		t.Errorf("expected %q after banner strip, got %q", "hi", got)
+	}
+}
+
+// TestRunTaskStreaming_Frames exercises the NDJSON streaming path (v0.4.4)
+// without invoking the real goose binary: a stub command writes two stderr
+// lines (relayed as progress frames) and a goose-shaped JSON envelope on stdout
+// (parsed into the final result frame). httptest.ResponseRecorder satisfies
+// http.Flusher, so the streaming branch is taken end to end.
+func TestRunTaskStreaming_Frames(t *testing.T) {
+	script := `echo "thinking..." >&2; echo "tool call" >&2; ` +
+		`printf '%s' '{"messages":[{"role":"assistant","content":[{"type":"text","text":"hello"}]}]}'`
+	cmd := exec.Command("sh", "-c", script)
+
+	w := httptest.NewRecorder()
+	runTaskStreaming(w, cmd)
+
+	if ct := w.Header().Get("Content-Type"); ct != "application/x-ndjson" {
+		t.Errorf("expected NDJSON content-type, got %q", ct)
+	}
+
+	var frames []streamFrame
+	for _, line := range strings.Split(strings.TrimRight(w.Body.String(), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		var fr streamFrame
+		if err := json.Unmarshal([]byte(line), &fr); err != nil {
+			t.Fatalf("frame is not valid JSON (%q): %v", line, err)
+		}
+		frames = append(frames, fr)
+	}
+	if len(frames) == 0 {
+		t.Fatal("no frames emitted")
+	}
+
+	// The last frame must be the result with the parsed assistant text.
+	last := frames[len(frames)-1]
+	if last.Type != "result" {
+		t.Errorf("last frame type = %q, want result", last.Type)
+	}
+	if last.Output != "hello" {
+		t.Errorf("result output = %q, want hello", last.Output)
+	}
+	if last.Error != "" {
+		t.Errorf("result error = %q, want empty", last.Error)
+	}
+
+	// At least the first stderr line must have arrived as a progress frame.
+	sawProgress := false
+	for _, fr := range frames {
+		if fr.Type == "progress" && fr.Text == "thinking..." {
+			sawProgress = true
+		}
+	}
+	if !sawProgress {
+		t.Error("expected a progress frame carrying the stderr line \"thinking...\"")
 	}
 }
