@@ -50,6 +50,16 @@ if [ -z "$CP_TOKEN" ] && [ -n "${EPHEMERA_CONTROL_PLANE_TOKEN:-}" ]; then
     CP_TOKEN="$EPHEMERA_CONTROL_PLANE_TOKEN"
 fi
 
+# Forward the nested-invocation depth (v0.4.4). goose-agent injects
+# EPHEMERA_TASK_DEPTH into this process's environment as the depth of the task
+# that spawned this gtcall; re-send it so the control plane accumulates it and
+# enforces EPHEMERA_MAX_TASK_DEPTH. Only the /tasks dispatch carries the header
+# (the flock lookup below is not a task hop).
+DEPTH_HEADER=""
+if [ -n "${EPHEMERA_TASK_DEPTH:-}" ]; then
+    DEPTH_HEADER="X-Ephemera-Task-Depth: $EPHEMERA_TASK_DEPTH"
+fi
+
 # Step 1: resolve agent_id -> vm_id via GET /flocks/{flock_id}. 10s timeout is
 # comfortable for a local control plane on the host bridge.
 if [ -n "$CP_TOKEN" ]; then
@@ -84,6 +94,7 @@ if [ -n "$CP_TOKEN" ]; then
     RESP="$(curl -sf -m 300 \
         -H "Authorization: Bearer $CP_TOKEN" \
         -H 'Content-Type: application/json' \
+        ${DEPTH_HEADER:+ -H "$DEPTH_HEADER"} \
         -X POST -d "$BODY" \
         "$CP_URL/vms/$VM_ID/tasks")" || {
         echo "gtcall: dispatch to $AGENT_ID ($VM_ID) failed" >&2
@@ -92,6 +103,7 @@ if [ -n "$CP_TOKEN" ]; then
 else
     RESP="$(curl -sf -m 300 \
         -H 'Content-Type: application/json' \
+        ${DEPTH_HEADER:+ -H "$DEPTH_HEADER"} \
         -X POST -d "$BODY" \
         "$CP_URL/vms/$VM_ID/tasks")" || {
         echo "gtcall: dispatch to $AGENT_ID ($VM_ID) failed" >&2

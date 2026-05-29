@@ -27,6 +27,12 @@ var (
 	// Must match GOOSE_AGENT_PORT if overridden on the VM side.
 	agentPort = envInt("EPHEMERA_AGENT_PORT", defaultAgentPort)
 
+	// maxTaskDepth caps nested agent→agent /tasks invocations (v0.4.4). The proxy
+	// reads X-Ephemera-Task-Depth on each /tasks hop, rejects at/over the cap with
+	// 508 Loop Detected, and forwards depth+1. Default 5; a large value effectively
+	// disables the guard. envInt rejects <=0, so the default always holds.
+	maxTaskDepth = envInt("EPHEMERA_MAX_TASK_DEPTH", 5)
+
 	// Watchdog tunables (v0.3.4). Defaults match the original hard-coded values
 	// so existing deployments observe no change unless the env var is set.
 	watchdogIntervalSec = envInt("EPHEMERA_WATCHDOG_INTERVAL_SEC", 5)
