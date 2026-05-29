@@ -1,3 +1,23 @@
+# v0.4.4 — Feature Extensions
+
+**Ephemera** v0.4.4 is the last single-host cycle, rounding out the operator surface: **PR-A** flock broadcast + a watchdog status route; **PR-B** streaming `/tasks`, the `goose-agent` slog migration, and a nested-invocation depth guard. Additive — no wire format changed.
+
+---
+
+## What's New
+
+### Flock broadcast (PR-A)
+
+- `POST /flocks/{id}/broadcast` `{"body":"…"}` scatters one prompt to **every** member agent's `/tasks` endpoint in parallel and gathers each agent's result (scatter-gather). The response carries a `sent`/`skipped`/`failed` tally plus a per-agent `results` map (`status` = `ok`/`busy`/`error`, with `output`/`error`). Agents already running a task answer `503` and are reported `busy` (skipped); unreachable agents are `error`. The call blocks until every agent finishes, like calling `/tasks` on each — cancellation rides on the request context.
+- The broadcast is also recorded once on the Town Wall (`orchestrator` author) so observers see it happened.
+- `ephemera-ctl flock broadcast <flock_id> <message>` wraps the endpoint (trailing words are joined, so the message need not be quoted).
+
+### Watchdog status route (PR-A)
+
+- `GET /watchdog/status` exposes the health watchdog's tunables (`interval_sec`, `timeout_sec`, `dying_threshold`, `auto_heal`) and live per-VM state (`vm_fail_counts` — VMs with a non-zero consecutive-failure count; `vm_dead_marked` — VMs the watchdog has marked dead). Read-only, behind the same auth as the other internal routes. The watchdog has run since v0.3.4 but had no status route until now; the snapshot is taken under the same lock the polling loop uses, and the returned maps are copies.
+
+---
+
 # v0.4.3 — Flock Lifecycle
 
 **Ephemera** v0.4.3 makes flocks adjustable at runtime: **PR-A** dynamic agent membership (add/remove/role-change), **PR-B** flock pause/resume + per-flock agent cap, **PR-C** Town Wall history filters + log rotation. Additive — no wire format changed.

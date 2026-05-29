@@ -1161,6 +1161,36 @@ OVER_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/flocks" \
     -d '{"task":"cap test","roles":["worker","worker","worker"],"max_agents":2}')
 [ "$OVER_CODE" = "400" ] && ok "roles > max_agents rejected (400) ✓" || fail "expected 400, got $OVER_CODE"
 
+# ── 57g. Watchdog status endpoint (v0.4.4) ───────────────────────
+# GET /watchdog/status exposes the watchdog's tunables and per-VM health
+# state. The flock has just been resumed (57e) so no member is dead; the
+# dead-marked list must be empty and the config fields must be sane.
+step "57g. GET /watchdog/status returns config + state (v0.4.4)"
+WD_RESP=$(curl -s -w "\n%{http_code}" "$API/watchdog/status")
+check_http "$(echo "$WD_RESP" | tail -1)" "200" "GET /watchdog/status"
+WD_BODY=$(echo "$WD_RESP" | head -1)
+echo "$WD_BODY" | jq -e '.interval_sec >= 1 and .dying_threshold >= 1 and (.auto_heal|type=="boolean")' >/dev/null \
+    && ok "watchdog status config fields sane ✓" \
+    || fail "watchdog status config malformed: $WD_BODY"
+echo "$WD_BODY" | jq -e '(.vm_fail_counts|type=="object") and (.vm_dead_marked|type=="array")' >/dev/null \
+    && ok "watchdog status state fields well-typed ✓" \
+    || fail "watchdog status state malformed: $WD_BODY"
+echo "$WD_BODY" | jq -e '(.vm_dead_marked|length)==0' >/dev/null \
+    && ok "no agents marked dead on a healthy flock ✓" \
+    || fail "unexpected dead-marked VMs: $(echo "$WD_BODY" | jq -c '.vm_dead_marked')"
+
+# ── 57h. Broadcast contract (v0.4.4) ─────────────────────────────
+# Validate the broadcast endpoint's short-circuit paths that do NOT invoke
+# goose: a missing flock → 404, an empty body → 400. The full fan-out (which
+# runs goose on every member) is exercised in the LLM-gated block (step 71f).
+step "57h. POST /flocks/{id}/broadcast contract checks (v0.4.4)"
+BC_404=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/flocks/flock-does-not-exist/broadcast" \
+    -H "Content-Type: application/json" -d '{"body":"hi"}')
+[ "$BC_404" = "404" ] && ok "broadcast to unknown flock → 404 ✓" || fail "expected 404, got $BC_404"
+BC_400=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/flocks/$FLOCK_ID/broadcast" \
+    -H "Content-Type: application/json" -d '{"body":""}')
+[ "$BC_400" = "400" ] && ok "broadcast with empty body → 400 ✓" || fail "expected 400, got $BC_400"
+
 # ── 58. Delete flock and verify cleanup ──────────────────────────
 step "58. Delete flock and verify all member VMs are torn down"
 DEL_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/flocks/$FLOCK_ID")
@@ -1543,8 +1573,30 @@ else
     $FOUND && ok "Researcher posted ROUNDTRIP_OK to Town Wall via gtwall ✓" \
            || fail "Town Wall did not receive ROUNDTRIP_OK within 30s (see /tmp/t59c.json)"
 
-    # ── 71e. Cleanup ─────────────────────────────────────────────────
-    step "71e. DELETE LLM flock + restore profile files"
+    # ── 71e. Broadcast fan-out reaches the live agent (v0.4.4) ────────
+    # POST /flocks/{id}/broadcast scatters one prompt to every member's
+    # /tasks and gathers the results. With one real-LLM agent we expect a
+    # 200 with agents=1 and the researcher reporting status "ok".
+    step "71e. POST /flocks/{id}/broadcast fans out to the agent (v0.4.4)"
+    BC_BODY=$(jq -n '{body:"Respond with the JSON {\"ack\":true} and nothing else."}')
+    BC_RESP=$(curl -s -m 180 -w "\n%{http_code}" -X POST "$API/flocks/$LLM_FLOCK_ID/broadcast" \
+        -H "$AUTH_HDR" -H "Content-Type: application/json" -d "$BC_BODY")
+    check_http "$(echo "$BC_RESP" | tail -1)" "200" "POST /flocks/$LLM_FLOCK_ID/broadcast"
+    BC_OUT=$(echo "$BC_RESP" | head -1)
+    echo "$BC_OUT" | jq -e '.agents==1 and .sent==1' >/dev/null \
+        && ok "broadcast reported agents=1 sent=1 ✓" \
+        || fail "unexpected broadcast tally: $BC_OUT"
+    echo "$BC_OUT" | jq -e '.results["researcher-1"].status=="ok"' >/dev/null \
+        && ok "researcher-1 ran the broadcast task (status ok) ✓" \
+        || fail "researcher-1 did not report ok: $BC_OUT"
+    # The broadcast notice must land on the Town Wall.
+    curl -s -H "$AUTH_HDR" "$API/flocks/$LLM_FLOCK_ID/wall/history" | \
+        jq -e '[.[] | select(.agent_id=="orchestrator" and (.body|contains("Broadcast to 1 agents")))] | length >= 1' >/dev/null \
+        && ok "broadcast notice recorded on Town Wall ✓" \
+        || fail "Town Wall missing broadcast notice"
+
+    # ── 71f. Cleanup ─────────────────────────────────────────────────
+    step "71f. DELETE LLM flock + restore profile files"
     curl -s -o /dev/null -H "$AUTH_HDR" -X DELETE "$API/flocks/$LLM_FLOCK_ID"
     mv /tmp/researcher-secrets.bak configs/profiles/researcher/goose-secrets.yaml
     mv /tmp/researcher-goose.bak configs/profiles/researcher/goose.yaml
