@@ -36,8 +36,10 @@ Ephemera Control Plane  :3000         ← VM + snapshot + flock management
   GET    /flocks/{id}                 → describe flock + agents
   DELETE /flocks/{id}                 → tear down all member VMs in parallel
   POST   /flocks/{id}/post            → append message to Town Wall
+  POST   /flocks/{id}/broadcast       → fan one prompt out to every member agent (v0.4.4)
   GET    /flocks/{id}/wall            → SSE stream of Town Wall messages
   GET    /flocks/{id}/wall/history    → Town Wall log (filters: ?agent_id/since/until/contains, v0.4.3)
+  GET    /watchdog/status             → watchdog tunables + per-VM health state (v0.4.4)
 
       │  provision
       ▼
@@ -152,6 +154,8 @@ DELETE /vms/{id}
 | **Dynamic flock membership** (v0.4.3) | `POST /flocks/{id}/agents` adds an agent (per-role `role-N` id, returns `agent_token`, 20-agent cap); `DELETE /flocks/{id}/agents/{agent_id}` removes one (empty flock allowed); `PATCH …/agents/{agent_id}` changes role by recreating the VM under the new sizing/prompt (`agent_id` + token preserved). CLI: `ephemera-ctl flock add-agent`/`rm-agent`/`set-role`. |
 | **Flock pause/resume + max_agents** (v0.4.3) | `POST /flocks/{id}/pause` · `/resume` pause/resume **all** member VMs via Firecracker (runtime-only — not persisted; the watchdog skips dead-marking paused agents). `POST /flocks` accepts `max_agents` for a per-flock cap (default 20), enforced on create and add. CLI: `ephemera-ctl flock pause`/`resume`, `create --max-agents`. |
 | **Town Wall query + rotation** (v0.4.3) | `GET /flocks/{id}/wall/history` filters: `?agent_id=` / `since=` / `until=` (RFC3339) / `contains=`. The log rotates by size (`EPHEMERA_TOWNWALL_MAX_MIB` default 10 MiB, `_KEEP` default 3); history reflects the active file (rotated backups kept on disk). |
+| **Flock broadcast** (v0.4.4) | `POST /flocks/{id}/broadcast` `{"body":"…"}` scatters one prompt to **every** member agent's `/tasks` in parallel and gathers each result (`sent`/`skipped`/`failed` tally + per-agent `results`); busy agents are reported `busy` (skipped). The broadcast is also recorded on the Town Wall. CLI: `ephemera-ctl flock broadcast <flock_id> <message>`. |
+| **Watchdog status** (v0.4.4) | `GET /watchdog/status` returns the health watchdog's tunables (`interval_sec`/`timeout_sec`/`dying_threshold`/`auto_heal`) and live per-VM state (`vm_fail_counts`, `vm_dead_marked`). Read-only; behind the same auth as the other internal routes. |
 | **Auto-injected control-plane token** (v0.3.3) | When `EPHEMERA_API_TOKENS` is set, the host writes the first non-expired client's token (`apiClients[0]` until v0.4.1's per-token TTL) into each flock VM at `/root/.ephemera-cp-token` (mode 0600); the in-VM `/townwall/post` forwarder reads it automatically. No more manual `EPHEMERA_CONTROL_PLANE_TOKEN` env inside every VM. |
 | **CP token hot rotation** (v0.3.4) | `EPHEMERA_API_TOKENS_FILE=/path/to/tokens` enables true hot rotation: edit the file, send SIGHUP, and the daemon both swaps `cp.clients` and fans the new token out to every running VM over vsock (`SET_CP_TOKEN` command, atomic file rewrite inside the guest). No per-VM restart needed for the in-VM forwarder to pick up the new bearer. |
 | **Env-tunable watchdog** (v0.3.4) | `EPHEMERA_WATCHDOG_INTERVAL_SEC` / `_TIMEOUT_SEC` / `_THRESHOLD` override the 5 s / 1 s / 3-fail defaults at startup. `EPHEMERA_WATCHDOG_AUTO_HEAL=true` opts in to self-healing — a `dead` agent that resumes responding is auto-marked `ready` (default off preserves sticky-dead). |
@@ -429,6 +433,8 @@ sudo bash e2e_test.sh
 | 57 | `GET /flocks` lists the new flock |
 | 57a–c | **Dynamic agent membership** (v0.4.3) — `POST /flocks/{id}/agents` adds `worker-2` (count→6, `/health` 200); `PATCH …/agents/worker-2` `{role:reviewer}` recreates the VM (vm_id swap, role updated); `DELETE …/agents/worker-2` (count→5, VM torn down) |
 | 57d–f | **Pause/resume + max_agents** (v0.4.3) — `POST /flocks/{id}/pause` (members → `paused`; watchdog leaves them alone past its threshold), `/resume` (→ `ready`, `/health` 200); `POST /flocks {roles:3, max_agents:2}` → 400 |
+| 57g | **Watchdog status** (v0.4.4) — `GET /watchdog/status` returns 200 with sane config fields (`interval_sec`/`dying_threshold` ≥ 1, `auto_heal` boolean), well-typed state (`vm_fail_counts` object, `vm_dead_marked` array), and an empty dead list on the healthy flock |
+| 57h | **Broadcast contract** (v0.4.4) — `POST /flocks/{unknown}/broadcast` → 404; `POST /flocks/{id}/broadcast {body:""}` → 400 (short-circuit paths that do not invoke goose) |
 | 58 | **Flock teardown** — `DELETE /flocks/{id}` returns 200; all 5 VMs and the flock registry entry are gone |
 | 59 | Create a separate resilience flock (3 agents) |
 | 60 | **SSE seq monotonicity** — successive `POST /flocks/{id}/post` responses carry strictly increasing `seq` |
@@ -443,6 +449,7 @@ sudo bash e2e_test.sh
 | 69 | Daemon graceful shutdown |
 | 70 | **Auth-on CP token auto-injection** (v0.3.3) — restart daemon with `EPHEMERA_API_TOKENS` set; flock VM's `/townwall/post` forward to CP returns 200 without any in-VM env setup |
 | 71 | **Real-LLM round-trip** (v0.3.3) — when `GOOGLE_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` is in env, spawn researcher, send `/tasks`, verify `ROUNDTRIP_OK` reaches Town Wall via `gtwall`. Skipped (ok) when no key. |
+| 71e | **Broadcast fan-out** (v0.4.4, LLM-gated) — `POST /flocks/{id}/broadcast` to the live researcher flock returns 200 with `agents==1`/`sent==1`, `results["researcher-1"].status=="ok"`, and the broadcast notice lands on the Town Wall |
 | 72 | **CP token hot rotation via SIGHUP** (v0.3.4) — restart daemon with `EPHEMERA_API_TOKENS_FILE`; spawn flock under v1; edit file to v2 + SIGHUP; verify post-rotation `/townwall/post` still 200 (in-VM `/root/.ephemera-cp-token` rewritten via vsock), v1 operator bearer now 401, and the daemon log carries `msg="sighup: cp token propagated" ok=N total=M` (slog form since v0.3.5). |
 | 73 | **`/metrics` endpoint format** (v0.3.5) — `GET /metrics` returns 200 unauthenticated, `Content-Type: text/plain; version=0.0.4`, body contains `# HELP`/`# TYPE` lines plus `ephemera_vm_count` gauge and `ephemera_sighup_reload_total` counter samples. |
 | 74 | **Per-VM `/stats` endpoint + `?stats=true`** (v0.3.5) — spawn a VM, `GET /vms/{vm_id}/stats` returns a JSON snapshot with `uptime_seconds ≥ 0`, `mem_total_mib > 0`, numeric `cpu_percent`; `GET /vms?stats=true` inlines the same `stats` block on every VM list entry. |
