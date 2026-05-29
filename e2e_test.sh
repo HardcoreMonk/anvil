@@ -158,6 +158,43 @@ T1=$(curl -s --max-time 90 -X POST "$VM1_AGENT/tasks" \
 T1_OUT=$(echo "$T1" | jq -r '.output' 2>/dev/null | grep -v '^$' | tail -3 | tr '\n' ' ')
 [ -n "$T1_OUT" ] && ok "Response: $(echo "$T1_OUT" | sed 's/  */ /g')" || fail "No response"
 
+# ── 3a. Streaming /tasks via the control-plane proxy (v0.4.4) ────
+# POST /vms/{id}/tasks?stream=1 streams NDJSON: zero+ progress frames then one
+# result frame. Exercises both the agent's streaming path and the proxy's
+# per-chunk flush. The result frame is emitted whether goose succeeds or returns
+# an LLM error, so this does not depend on LLM success — only on goose running.
+step "3a. Streaming /tasks (?stream=1) emits NDJSON frames (v0.4.4)"
+STREAM_PROMPT=$(jq -n '{prompt:"Reply with the single word OK."}')
+curl -s -m 90 -D /tmp/stream_hdrs.txt -o /tmp/stream_body.ndjson \
+    -X POST "$API/vms/$VM1_ID/tasks?stream=1" \
+    -H "Content-Type: application/json" \
+    -d "$STREAM_PROMPT" || true
+grep -iq 'content-type: application/x-ndjson' /tmp/stream_hdrs.txt \
+    && ok "stream response is application/x-ndjson ✓" \
+    || fail "expected NDJSON content-type; headers: $(tr -d '\r' < /tmp/stream_hdrs.txt | head -5 | tr '\n' '|')"
+STREAM_ALL_JSON=true
+while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    echo "$line" | jq -e . >/dev/null 2>&1 || STREAM_ALL_JSON=false
+done < /tmp/stream_body.ndjson
+$STREAM_ALL_JSON && ok "every stream frame is valid JSON ✓" || fail "stream contained a non-JSON frame"
+STREAM_LAST_TYPE=$(grep -v '^$' /tmp/stream_body.ndjson | tail -1 | jq -r '.type')
+[ "$STREAM_LAST_TYPE" = "result" ] \
+    && ok "stream ends with a result frame ✓" \
+    || fail "last stream frame type=$STREAM_LAST_TYPE (want result)"
+
+# ── 3b. Nested-invocation depth guard (v0.4.4) ───────────────────
+# An over-cap /tasks hop through the proxy is refused with 508 Loop Detected
+# before goose is contacted (LLM-free; short-circuits on the depth header).
+step "3b. Task depth guard rejects an over-cap hop (508, v0.4.4)"
+DEPTH_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/vms/$VM1_ID/tasks" \
+    -H "Content-Type: application/json" \
+    -H "X-Ephemera-Task-Depth: 99" \
+    -d '{"prompt":"should not run"}')
+[ "$DEPTH_CODE" = "508" ] \
+    && ok "over-cap /tasks hop rejected (508 Loop Detected) ✓" \
+    || fail "expected 508, got $DEPTH_CODE"
+
 # ── 4. Stop goose agent on VM1 ───────────────────────────────────
 step "4. Stop goose agent on VM1"
 S1=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$VM1_AGENT/stop" \
