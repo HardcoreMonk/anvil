@@ -308,6 +308,7 @@ func NewControlPlane(
 	internalMux.HandleFunc("/snapshots", cp.handleSnapshots)
 	internalMux.HandleFunc("/snapshots/", cp.handleSnapshotItem)
 	internalMux.HandleFunc("/audit", cp.handleAudit)
+	internalMux.HandleFunc("/watchdog/status", cp.handleWatchdogStatus)
 	cp.registerOrchestratorRoutes(internalMux)
 
 	externalMux := http.NewServeMux()
@@ -634,6 +635,17 @@ func (cp *ControlPlane) proxyAgentEndpoint(w http.ResponseWriter, r *http.Reques
 	}
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
+}
+
+// handleWatchdogStatus serves GET /watchdog/status (v0.4.4): a JSON snapshot of
+// the health watchdog's tunables and current per-VM failure/dead state.
+// Registered on internalMux so it is always behind authMiddleware.
+func (cp *ControlPlane) handleWatchdogStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":"GET required"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, http.StatusOK, cp.watchdog.Status())
 }
 
 // buildAgentURL returns the agent_url field for VMInfo.

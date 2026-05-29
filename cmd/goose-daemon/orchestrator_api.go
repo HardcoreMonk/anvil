@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -102,6 +104,8 @@ func (cp *ControlPlane) handleFlockItem(w http.ResponseWriter, r *http.Request) 
 		cp.pauseFlock(w, flockID)
 	case sub == "resume" && r.Method == http.MethodPost:
 		cp.resumeFlock(w, flockID)
+	case sub == "broadcast" && r.Method == http.MethodPost:
+		cp.broadcastFlock(w, r, flockID)
 	case sub == "agents" || strings.HasPrefix(sub, "agents/"):
 		rest := strings.TrimPrefix(strings.TrimPrefix(sub, "agents"), "/")
 		agentID, action, _ := strings.Cut(rest, "/")
@@ -731,6 +735,132 @@ func (cp *ControlPlane) resumeFlock(w http.ResponseWriter, flockID string) {
 	}
 	slog.Warn("flock: resumed", "flock_id", flockID, "agents", resumed)
 	writeJSON(w, http.StatusOK, map[string]any{"flock_id": flockID, "status": "resumed", "agents": resumed})
+}
+
+// BroadcastRequest is the POST /flocks/{id}/broadcast body: the prompt sent to
+// every member agent.
+type BroadcastRequest struct {
+	Body string `json:"body"`
+}
+
+// broadcastResult captures one agent's outcome in a broadcast fan-out:
+// "ok" (task ran), "busy" (agent already running a task → 503), or "error".
+type broadcastResult struct {
+	Status string `json:"status"`
+	Output string `json:"output,omitempty"`
+	Error  string `json:"error,omitempty"`
+}
+
+// broadcastFlock fans a single prompt out to every member agent's /tasks
+// endpoint in parallel and gathers each agent's result (scatter-gather), then
+// records the broadcast on the Town Wall. Agents already running a task answer
+// 503 and are reported "busy" (counted as skipped); unreachable agents are
+// "error". The call blocks until every agent finishes, like calling /tasks on
+// each; cancellation rides on the request context.
+// POST /flocks/{id}/broadcast  {"body":"prompt for all agents"}.
+func (cp *ControlPlane) broadcastFlock(w http.ResponseWriter, r *http.Request, flockID string) {
+	f, ok := cp.flockMgr.Get(flockID)
+	if !ok {
+		writeJSONError(w, http.StatusNotFound, fmt.Errorf("flock not found"))
+		return
+	}
+	var req BroadcastRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.Body == "" {
+		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("body required"))
+		return
+	}
+
+	agents := f.Snapshot()
+	results := make(map[string]broadcastResult, len(agents))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, a := range agents {
+		wg.Add(1)
+		go func(a *orchestrator.AgentInfo) {
+			defer wg.Done()
+			res := cp.dispatchBroadcastTask(r.Context(), a.VMID, req.Body)
+			mu.Lock()
+			results[a.AgentID] = res
+			mu.Unlock()
+		}(a)
+	}
+	wg.Wait()
+
+	sent, skipped, failed := 0, 0, 0
+	for _, res := range results {
+		switch res.Status {
+		case "ok":
+			sent++
+		case "busy":
+			skipped++
+		default:
+			failed++
+		}
+	}
+
+	if _, err := f.TownWall.Post("orchestrator",
+		fmt.Sprintf("Broadcast to %d agents (%d sent, %d busy, %d failed): %s",
+			len(agents), sent, skipped, failed, req.Body)); err != nil {
+		slog.Warn("broadcast: town wall post failed", "flock_id", flockID, "err", err)
+	}
+	slog.Warn("flock: broadcast", "flock_id", flockID, "agents", len(agents), "sent", sent, "busy", skipped, "failed", failed)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"flock_id": flockID,
+		"agents":   len(agents),
+		"sent":     sent,
+		"skipped":  skipped,
+		"failed":   failed,
+		"results":  results,
+	})
+}
+
+// dispatchBroadcastTask POSTs one prompt to a single VM's goose-agent /tasks
+// endpoint, injecting the per-VM agent token, and maps the outcome onto a
+// broadcastResult. Mirrors proxyAgentEndpoint's token-injection path but
+// buffers the (bounded) result instead of streaming it.
+func (cp *ControlPlane) dispatchBroadcastTask(ctx context.Context, vmID, prompt string) broadcastResult {
+	cp.mu.RLock()
+	v, ok := cp.vms[vmID]
+	cp.mu.RUnlock()
+	if !ok {
+		return broadcastResult{Status: "error", Error: "vm not found"}
+	}
+	body, _ := json.Marshal(map[string]string{"prompt": prompt})
+	url := fmt.Sprintf("http://%s:%d/tasks", v.GuestIP, agentPort)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return broadcastResult{Status: "error", Error: err.Error()}
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if v.agentToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+v.agentToken)
+	}
+	resp, err := cp.agentHTTPClient.Do(httpReq)
+	if err != nil {
+		return broadcastResult{Status: "error", Error: err.Error()}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusServiceUnavailable {
+		return broadcastResult{Status: "busy"}
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	var tr struct {
+		Output string `json:"output"`
+		Error  string `json:"error"`
+	}
+	_ = json.Unmarshal(raw, &tr)
+	if resp.StatusCode != http.StatusOK {
+		errMsg := tr.Error
+		if errMsg == "" {
+			errMsg = strings.TrimSpace(string(raw))
+		}
+		return broadcastResult{Status: "error", Output: tr.Output, Error: errMsg}
+	}
+	return broadcastResult{Status: "ok", Output: tr.Output, Error: tr.Error}
 }
 
 // spawnVMForFlock spawns one VM as a flock member. role is mapped through
