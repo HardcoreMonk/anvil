@@ -40,6 +40,10 @@ check_host_dependencies
 mkdir -p "$(dirname "$IMAGE_NAME")"
 
 echo "==> 1. Downloading Goose binary on host <=="
+# Remove any pre-existing tarball first so a fresh root-owned download cannot be
+# blocked by a leftover at this fixed /tmp path (e.g. a foreign-owned file from
+# manual inspection). Root can unlink it in sticky /tmp regardless of owner.
+rm -f "$GOOSE_TARBALL"
 curl -fL -o "$GOOSE_TARBALL" "$GOOSE_URL"
 
 echo "==> 2. Creating and formatting image (512M initial; shrunk by resize2fs at the end) <=="

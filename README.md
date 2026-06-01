@@ -40,6 +40,9 @@ Ephemera Control Plane  :3000         ← VM + snapshot + flock management
   GET    /flocks/{id}/wall            → SSE stream of Town Wall messages
   GET    /flocks/{id}/wall/history    → Town Wall log (filters: ?agent_id/since/until/contains, v0.4.3)
   GET    /watchdog/status             → watchdog tunables + per-VM health state (v0.4.4)
+  GET    /config/profiles             → list each profile's provider/model (v0.5.0)
+  PUT    /config/profiles/{name}      → update a profile's provider/model (v0.5.0)
+  GET    /ui/                         → embedded browser Web console (Svelte SPA, v0.5.0)
 
       │  provision
       ▼
@@ -52,7 +55,7 @@ External Client
       │  HTTP (via control plane proxy — no direct VM access needed)
       ▼
 Control Plane  :3000  /vms/{vm_id}    ← proxies to VM's private agent
-  POST  /vms/{vm_id}/tasks            → proxy → goose-agent :8080/tasks
+  POST  /vms/{vm_id}/tasks            → proxy → goose-agent :8080/tasks  (?stream=1 NDJSON; ?session = multi-turn, v0.5.0)
   GET   /vms/{vm_id}/health           → proxy → goose-agent :8080/health
   POST  /vms/{vm_id}/stop             → proxy → goose-agent :8080/stop
 
@@ -169,6 +172,11 @@ DELETE /vms/{id}
 | **Access audit log** (v0.4.1) | Every API request is appended as one JSON line to `{workDir}/audit/access.jsonl` (`ts, client, method, path, status, duration_ms, remote_addr, bytes` — never tokens or bodies), size-rotated (`EPHEMERA_AUDIT_MAX_MIB`/`_KEEP`), queryable via authenticated `GET /audit`. On by default; `EPHEMERA_AUDIT_DISABLE=true` to disable. See [Access audit log](#access-audit-log-v041). |
 | **Per-token TTL & rotation** (v0.4.1) | Token entries accept an optional expiry — `name:token:expires` (RFC3339 or Unix seconds); a matched-but-expired token is rejected `401` (`ephemera_auth_total{outcome="expired"}`). The in-VM control-plane token is the first **non-expired** client. Two-field `name:token` never expires (backward compatible). |
 | **Operator CLI `ephemera-ctl`** (v0.4.1) | Dependency-free stdlib CLI wrapping the REST API (`vm`/`flock`/`snapshot`/`audit`/`metrics` verbs; human tables or `--json`). Reads `EPHEMERA_CTL_URL` + `--token`/`EPHEMERA_CTL_TOKEN`/`EPHEMERA_API_TOKEN`. See [Operator CLI](#operator-cli-ephemera-ctl-v041). |
+| **Web console** (v0.5.0) | A browser console the daemon serves at `/ui/` (single binary via `go:embed`, same origin as the API — no CORS): token login (auto-skipped when auth is disabled), VM list with live stats + model, Create VM (profile dropdown), VM detail with live stats and a **multi-turn conversation** panel (cancelable streaming), per-profile model/provider **Settings**, and VM delete. Svelte + Vite SPA; the build is committed (`cmd/goose-daemon/uidist/`) so `go build` needs no Node. See [Web UI](#web-ui-v050). |
+| **English / Korean UI** (v0.5.0) | The Web console ships full EN/KO localization (`svelte-i18n`); the initial language follows the browser (`ko*` → Korean, else English) and a nav toggle switches + persists the choice. UI vocabulary is generic IT (display only): *Platform Agent* (in-VM goose agent), *Agent Group* (flock), *Activity Feed* (Town Wall), *Create/Delete* (spawn/destroy). |
+| **Profile/model editing** (v0.5.0) | `GET /config/profiles` lists each profile's provider/model; `PUT /config/profiles/{name}` rewrites `GOOSE_PROVIDER`/`GOOSE_MODEL` in place (comments + `extensions:` preserved; API keys are never read or written here). The Settings screen drives these; an edit applies to the **next** VM (config is injected at spawn), and each VM records the provider/model it was spawned with (`VMInfo.model`). |
+| **Multi-turn conversation** (v0.5.0) | `POST /vms/{id}/tasks` accepts an optional `session`; with it, `goose-agent` runs goose as `-n <session> [--resume]`, so consecutive turns continue one goose chat session (context preserved). Omitting `session` keeps the original stateless one-shot behavior (`ephemera-ctl`, `gtcall`). |
+| **Graceful VM delete** (v0.5.0) | `DELETE /vms/{id}` first asks the in-VM agent to shut down cleanly (best-effort `POST /stop`, 2 s) before force-stopping Firecracker, then frees TAP/IP/disk and deregisters. The old "stop agent" action — which actually halted the whole guest while leaving the VM registered — was removed; Delete is the single teardown. |
 
 ---
 
@@ -204,8 +212,14 @@ cmd/
     context.go        client-identity context keys + request-scoped holder (v0.4.1)
     audit.go          access audit log: rotating jsonl writer, statusRecorder
                       (Flusher-preserving), GET /audit, auditMiddleware (v0.4.1)
+    ui.go             Serves the embedded Web UI at /ui/ (go:embed uidist) + SPA
+                      fallback + "/" → /ui/ redirect, outside the auth chain (v0.5.0)
+    config_api.go     GET /config/profiles, GET/PUT /config/profiles/{name} —
+                      read/update a profile's GOOSE_PROVIDER/GOOSE_MODEL on disk (v0.5.0)
+    uidist/           Committed Web UI build (go:embed input; rebuilt from web/, v0.5.0)
   goose-agent/        In-VM HTTP agent (baked into golden image)
-    main.go           /tasks, /health, /stop, /townwall/post  (Bearer token auth);
+    main.go           /tasks (optional `session` → goose -n/--resume for multi-turn, v0.5.0),
+                      /health, /stop, /townwall/post  (Bearer token auth);
                       prepends role system prompt to /tasks bodies;
                       runs `goose run --output-format json` and extracts the
                       assistant text via extractGooseJSONText (banner-skip) (v0.3.6)
@@ -216,6 +230,17 @@ cmd/
     main.go           noun/verb dispatch, EPHEMERA_CTL_URL/_TOKEN, --json
     client.go         HTTP client (Bearer, non-2xx → error) + wire-type mirrors
     commands.go       vm/flock/snapshot/audit/metrics verbs, tabwriter output
+
+web/                  Web UI source — Svelte 4 + Vite 5 SPA (v0.5.0)
+  src/
+    App.svelte        Shell: bootstrap/auth, nav, EN/KO language toggle, view router
+    components/       Login, VMList, SpawnModal (Create VM), VMDetail,
+                      TaskPanel (multi-turn conversation), Settings, Toasts
+    lib/              api.js (bearer + 401→login), store.js, stream.js (NDJSON),
+                      i18n.js (svelte-i18n: EN/KO, browser-detect, persist)
+    locales/          en.json, ko.json (all UI strings)
+  README.md           UI terminology glossary + i18n / rebuild docs
+  package.json        svelte-i18n dep; `npm run build` → ../cmd/goose-daemon/uidist/
 
 internal/
   vm/machine.go       Firecracker SDK wrapper — StartMachine, RestoreMachine
@@ -746,6 +771,39 @@ ephemera-ctl metrics                          # raw Prometheus exposition
 Non-2xx responses print the server's JSON error to stderr and exit non-zero, so
 the CLI composes in scripts. Global flags (`--json`, `--token`) may appear
 anywhere; command-specific flags precede positional arguments.
+
+---
+
+## Web UI (v0.5.0)
+
+A browser console served by the daemon itself — one stop from system management to agent usage. It is served at **`/ui/`** on the same address as the API (`EPHEMERA_API_ADDR`, default `127.0.0.1:3000`), so no extra process or port is needed:
+
+```
+http://localhost:3000/ui/      ← "/" also redirects here
+```
+
+The UI is a Svelte + Vite single-page app embedded into the daemon binary via `go:embed` (`cmd/goose-daemon/ui.go`). Its build output (`cmd/goose-daemon/uidist/`) is **committed**, so `go build` needs no Node toolchain; rebuild it only after editing `web/`:
+
+```bash
+cd web && npm install && npm run build   # writes ../cmd/goose-daemon/uidist/
+```
+
+`/ui/` is mounted **outside** the auth/audit chain — the login page and JS bundle must load before the user has a token, and the bundle carries no secrets — while every data API call the app makes still flows through Bearer auth.
+
+### Screens
+
+- **Login** — takes an API Bearer token (`sessionStorage`, or `localStorage` with "remember"). If the server has no clients configured (auth disabled), login is auto-skipped.
+- **VM list** — `GET /vms?stats=true` (polled): id, IP, profile, **model**, CPU/memory/uptime. *Create VM* opens a modal with a **profile dropdown** (`GET /config/profiles`) and shows the one-time `agent_token`.
+- **VM detail** — live stats + the spawned provider/model; a **conversation** panel that streams each turn (`POST /vms/{id}/tasks?stream=1`) and keeps context across turns (multi-turn, below), with Cancel + elapsed time; and a Delete action behind an in-app confirm (graceful teardown).
+- **Settings** — lists every profile and edits its provider/model (`PUT /config/profiles/{name}`); changes apply to the **next** Create VM, not running VMs.
+
+### Localization (EN / KO)
+
+All UI strings live in `web/src/locales/{en,ko}.json` and render via `svelte-i18n`. The initial language follows the browser (`ko*` → Korean, otherwise English); a nav toggle (`EN | 한국어`) switches it and persists the choice in `localStorage`. Server-originated error text (the daemon's `{"error":…}`) is shown verbatim, not translated. The UI uses generic IT vocabulary — *Platform Agent*, *Agent Group*, *Activity Feed*, *Create/Delete* — as display labels only; API routes/fields/env vars keep their original identifiers (see `web/README.md`).
+
+### Multi-turn conversation
+
+The conversation panel sends an optional `session` on `POST /vms/{id}/tasks`. When present, `goose-agent` runs `goose run --output-format json -n <session> [--resume] -i -` — the first turn creates the named session, later turns `--resume` it — so the agent keeps conversation context across turns (stored in the VM's goose session db). Omitting `session` preserves the original stateless one-shot behavior used by `ephemera-ctl` and `gtcall`.
 
 ---
 
@@ -1282,6 +1340,24 @@ curl -X POST http://localhost:3000/vms \
 Omitting `profile` (or sending an empty body) uses `configs/goose.yaml` and `configs/goose-secrets.yaml` at the legacy 2 vCPU / 2048 MiB sizing.
 
 If the profile directory has a `system.md`, its contents are written into the VM as `/root/.goose-system-prompt` and the in-VM `goose-agent` prepends it to every `/tasks` prompt — so the role stays in-character even when the orchestrator dispatches plain user prompts.
+
+### Editing a profile's model (Web UI / API, v0.5.0)
+
+A profile's provider/model can be read and changed at runtime without restarting the daemon — the Web UI **Settings** screen drives these endpoints:
+
+```bash
+# List all profiles with their current provider/model
+curl http://localhost:3000/config/profiles -H "Authorization: Bearer $TOKEN"
+# → [{"name":"default","provider":"google","model":"gemini-2.5-flash"}, {"name":"worker", …}]
+
+# Update one profile (rewrites GOOSE_PROVIDER/GOOSE_MODEL in place — comments +
+# extensions preserved; API keys in goose-secrets.yaml are never touched here)
+curl -X PUT http://localhost:3000/config/profiles/worker \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"provider":"anthropic","model":"claude-sonnet-4-6"}'
+```
+
+`name` is `default` for `configs/goose.yaml`, otherwise a `configs/profiles/{name}/` directory. Because config is injected at spawn, an edit applies to the **next** VM created from that profile; already-running VMs keep the model they were spawned with (`GET /vms` reports each VM's `provider`/`model`).
 
 ---
 
@@ -1826,6 +1902,7 @@ Requirements: a Google Gemini API key in `configs/goose-secrets.yaml`, `/dev/kvm
 | **Cold-restart loses in-VM memory by default** (v0.3.2; mitigated v0.4.0) | Live VM auto-restart re-boots each VM from its rootfs clone — the guest kernel and `goose-agent` start fresh, and any `/tasks` request in flight at the moment of daemon shutdown is dropped. Set `EPHEMERA_AUTOSNAPSHOT=true` to warm-restore in-VM memory across a *graceful* shutdown (v0.4.0). A SIGKILL/crash still cold-boots, so callers should still idempotency-key tasks or re-poll for completion across an ungraceful restart. |
 | **CP token hot-rotation requires `_TOKENS_FILE`** (v0.3.4) | On SIGHUP the daemon hot-propagates the new control-plane token (the first non-expired client since v0.4.1; `apiClients[0]` before) to running VMs via the `SET_CP_TOKEN` vsock command. This requires sourcing tokens from `EPHEMERA_API_TOKENS_FILE` — env-supplied tokens are fixed at exec and cannot change on SIGHUP. (The in-VM `SET_CP_TOKEN` handler ships in every current golden image, which auto-rebakes on any `goose-agent` change.) When tokens come from the env, the `POST /flocks/{id}/agents/{agent_id}/restart` fallback re-injects the current token. |
 | **Metrics retention is external** (v0.3.5) | `/metrics` exposes raw counters and gauges only — the daemon does not aggregate, store, or rotate history. Operators are expected to wire an external Prometheus (or any text-exposition-compatible) scraper. |
+| **Web UI conversation is in-memory** (v0.5.0) | The conversation panel holds its transcript in the browser tab; a page reload starts a fresh `session`, so prior turns are no longer shown (the underlying goose session persists in the VM but is not re-loaded into the UI). Snapshot-restored / cold-recovered VMs may also show an empty model, since `provider`/`model` is recorded only at spawn time. |
 
 ---
 
