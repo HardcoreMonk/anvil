@@ -61,7 +61,9 @@ func (cp *ControlPlane) collectVMStats(ctx context.Context, vmID string, v *runn
 	if busy, err := cp.probeAgentBusy(ctx, v.GuestIP); err == nil {
 		stats.AgentBusy = busy
 	} else {
-		slog.Warn("stats: agent busy probe failed", "vm_id", vmID, "err", err)
+		// Best-effort stat: a down/unreachable agent must not spam the log every
+		// poll (e.g. a halted VM awaiting teardown). Host-side stats still return.
+		slog.Debug("stats: agent busy probe failed", "vm_id", vmID, "err", err)
 	}
 
 	return stats
