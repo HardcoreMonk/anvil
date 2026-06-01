@@ -1,3 +1,38 @@
+# v0.5.0 — Web UI
+
+**Ephemera** v0.5.0 adds a **browser console** served by the daemon itself, replacing the script-form external client for everyday use. The existing control-plane API is unchanged and fully backward compatible; the only new server routes are `/ui/` (the embedded UI) and `/config/profiles` (profile model/provider editing). **Golden-image rebake**: `cmd/goose-agent` gains optional goose-session support, so the daemon rebuilds the golden image on first start after the change.
+
+---
+
+## What's New
+
+### Embedded Web console (`/ui/`)
+
+- The daemon serves a Svelte + Vite single-page app at **`/ui/`** on the same address as the API (`go:embed`, same origin — no CORS). The build output (`cmd/goose-daemon/uidist/`) is committed, so `go build` needs no Node toolchain; rebuild only after editing `web/` (`cd web && npm run build`). `/ui/` is mounted **outside** the auth/audit chain (the login page + JS bundle must load token-free; the bundle has no secrets), while every data call still flows through Bearer auth. `/` redirects to `/ui/`.
+- Screens: token **Login** (auto-skipped when auth is disabled), **VM list** (live stats + model), **Create VM** (profile dropdown, one-time `agent_token`), **VM detail** (live stats + a cancelable streaming conversation panel), **Settings** (per-profile model/provider).
+
+### English / Korean localization
+
+- All UI strings are externalized to `web/src/locales/{en,ko}.json` and rendered via `svelte-i18n`. The initial language follows the browser (`ko*` → Korean, else English); a nav toggle switches and persists the choice in `localStorage`. Server-originated error text is shown verbatim.
+- UI vocabulary is generic IT (display labels only — API identifiers unchanged): **Platform Agent** (in-VM goose agent), **Agent Group** (flock), **Activity Feed** (Town Wall), **Create/Delete** (spawn/destroy).
+
+### Profile model/provider editing (`/config/profiles`)
+
+- `GET /config/profiles` lists each profile (`default` + `configs/profiles/*`) with its `provider`/`model`; `PUT /config/profiles/{name}` rewrites `GOOSE_PROVIDER`/`GOOSE_MODEL` in place — comments and the `extensions:` block are preserved, values are validated against newline injection, and **API keys (`goose-secrets.yaml`) are never read or written** through this surface. The Settings screen drives both.
+- Config is injected at spawn, so an edit applies to the **next** VM from that profile; already-running VMs keep their spawn-time model. `VMInfo` now records each VM's `provider`/`model` (returned by `GET /vms`, shown in the UI) so the distinction is visible.
+
+### Multi-turn agent conversation
+
+- `POST /vms/{id}/tasks` accepts an optional `session`. With it, `goose-agent` runs `goose run --output-format json -n <session> [--resume] -i -` — the first turn creates the named session, later turns `--resume` it — so the agent keeps conversation context across turns. Omitting `session` preserves the original stateless one-shot behavior (`ephemera-ctl`, `gtcall`, depth-guard tests unaffected). The control plane proxies the request body verbatim, so no control-plane change was needed.
+
+### Graceful VM delete; "stop agent" removed
+
+- `DELETE /vms/{id}` now best-effort asks the in-VM agent to shut down cleanly (`POST /stop`, 2 s) before force-stopping Firecracker, then frees TAP/IP/disk and deregisters. The old UI "stop agent" action — which actually halted the whole guest (the agent is the VM's init) while leaving the VM registered and the stats poller spamming the log — was removed; **Delete is the single teardown**. The stats agent-busy probe-failure log was demoted to Debug so a down/halted VM can no longer spam.
+
+> **Caveats**: the Web UI conversation transcript is in-memory (a page reload starts a fresh `session`; the goose session persists in the VM but is not re-displayed). `scripts/build_image.sh` now removes any stale tarball before download, hardening the golden-image build against a leftover at the fixed `/tmp` path.
+
+---
+
 # v0.4.5 — Snapshot-Restore Auto-Recovery
 
 **Ephemera** v0.4.5 closes a recovery gap from the Known Limitations audit. Additive — no wire format changed; no golden-image rebake (daemon/storage only).
