@@ -40,6 +40,7 @@ func NewSchedulerService(opts SchedulerServiceOptions) *SchedulerService {
 func (s *SchedulerService) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
+	mux.HandleFunc("/metrics", s.handleMetrics)
 	mux.HandleFunc("/hosts", s.handleHosts)
 	mux.HandleFunc("/hosts/", s.handleHostItem)
 	mux.HandleFunc("/control-loop/status", s.handleControlLoopStatus)
@@ -56,6 +57,15 @@ func (s *SchedulerService) handleHealth(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeSchedulerJSON(w, map[string]string{"status": "ok"})
+}
+
+func (s *SchedulerService) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", schedulerMetricsContentType)
+	_, _ = w.Write([]byte(RenderSchedulerMetrics(s.placements.State())))
 }
 
 func (s *SchedulerService) handleHosts(w http.ResponseWriter, r *http.Request) {
