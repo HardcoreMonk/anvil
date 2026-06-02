@@ -22,6 +22,7 @@ func TestToolRegistrationsIncludeSnapshotTools(t *testing.T) {
 		"anvil_list_snapshots":       "List snapshots known to the ephemera daemon.",
 		"anvil_restore_snapshot":     "Restore a new ephemera VM from a snapshot and optionally bind a session_name alias.",
 		"anvil_delete_snapshot":      "Delete a snapshot by snapshot_id through the ephemera daemon.",
+		"anvil_replicate_snapshot":   "Replicate a snapshot from one scheduler runtime host to another and update snapshot locality.",
 		"anvil_spawn_flock":          "Create a Goosetown flock of ephemera VMs and return its Town Wall endpoints.",
 		"anvil_list_flocks":          "List live Goosetown flocks known to the ephemera daemon.",
 		"anvil_get_flock":            "Return a Goosetown flock and its agent status by flock_id.",

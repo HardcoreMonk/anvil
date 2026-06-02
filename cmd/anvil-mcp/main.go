@@ -98,6 +98,13 @@ func toolRegistrations() []toolRegistration {
 			},
 		},
 		{
+			name:        "anvil_replicate_snapshot",
+			description: "Replicate a snapshot from one scheduler runtime host to another and update snapshot locality.",
+			register: func(server *mcp.Server, tool *mcp.Tool, tools *anvilmcp.Tools) {
+				mcp.AddTool(server, tool, tools.MCPReplicateSnapshot)
+			},
+		},
+		{
 			name:        "anvil_spawn_flock",
 			description: "Create a Goosetown flock of ephemera VMs and return its Town Wall endpoints.",
 			register: func(server *mcp.Server, tool *mcp.Tool, tools *anvilmcp.Tools) {

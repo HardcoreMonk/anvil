@@ -49,6 +49,50 @@ func TestCurrentIronClawSchemasIncludeGoosetownTools(t *testing.T) {
 	}
 }
 
+func TestReplicateSnapshotSchemaRequiresHostAndSnapshotInputs(t *testing.T) {
+	schemas := CurrentIronClawToolInputSchemas()
+	var replicateSchema *IronClawToolInputSchema
+	for idx := range schemas {
+		if schemas[idx].ToolName == "anvil_replicate_snapshot" {
+			replicateSchema = &schemas[idx]
+			break
+		}
+	}
+
+	if replicateSchema == nil {
+		t.Fatal("anvil_replicate_snapshot schema not found")
+	}
+
+	fields := make(map[string]IronClawToolInputField, len(replicateSchema.Fields))
+	for _, field := range replicateSchema.Fields {
+		fields[field.Name] = field
+	}
+
+	for _, name := range []string{"snapshot_id", "source_host", "target_host"} {
+		field, ok := fields[name]
+		if !ok {
+			t.Fatalf("field %q not found in anvil_replicate_snapshot schema: %+v", name, replicateSchema.Fields)
+		}
+		if !field.Required {
+			t.Fatalf("field %q Required = false, want true", name)
+		}
+		if field.GeminiType != "STRING" {
+			t.Fatalf("field %q GeminiType = %q, want STRING", name, field.GeminiType)
+		}
+	}
+
+	field, ok := fields["include_dependencies"]
+	if !ok {
+		t.Fatal("field include_dependencies not found in anvil_replicate_snapshot schema")
+	}
+	if field.Required {
+		t.Fatal("field include_dependencies Required = true, want false")
+	}
+	if field.GeminiType != "BOOLEAN" {
+		t.Fatalf("field include_dependencies GeminiType = %q, want BOOLEAN", field.GeminiType)
+	}
+}
+
 func TestSpawnFlockRolesSchemaDescribesStringItems(t *testing.T) {
 	var rolesField *IronClawToolInputField
 	for _, schema := range CurrentIronClawToolInputSchemas() {

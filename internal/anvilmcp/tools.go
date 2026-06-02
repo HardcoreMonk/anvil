@@ -40,6 +40,10 @@ type Daemon interface {
 	TownWallHistory(ctx context.Context, flockID string) ([]TownWallMessage, error)
 }
 
+type snapshotReplicator interface {
+	ReplicateSnapshot(context.Context, SnapshotReplicationRequest) (*SnapshotReplicationResponse, error)
+}
+
 type sessionStore interface {
 	Exists(sessionName string) bool
 	Bind(sessionName, vmID string) error
@@ -137,6 +141,13 @@ type RestoreSnapshotInput struct {
 	SessionName  string `json:"session_name,omitempty"`
 	TenantID     string `json:"tenant_id,omitempty"`
 	EgressPolicy string `json:"egress_policy,omitempty"`
+}
+
+type ReplicateSnapshotInput struct {
+	SnapshotID          string `json:"snapshot_id"`
+	SourceHost          string `json:"source_host"`
+	TargetHost          string `json:"target_host"`
+	IncludeDependencies bool   `json:"include_dependencies,omitempty"`
 }
 
 type RestoreSnapshotOutput struct {
@@ -759,6 +770,53 @@ func (t *Tools) MCPDeleteSnapshot(ctx context.Context, req *mcp.CallToolRequest,
 	out, err := t.DeleteSnapshot(ctx, input)
 	if err != nil || out == nil {
 		return nil, RawDaemonResponse{}, err
+	}
+	return nil, *out, nil
+}
+
+func (t *Tools) ReplicateSnapshot(ctx context.Context, input ReplicateSnapshotInput) (*SnapshotReplicationResponse, error) {
+	tenantID, err := t.resolveTenantID("")
+	if err != nil {
+		return nil, err
+	}
+	snapshotID := strings.TrimSpace(input.SnapshotID)
+	if snapshotID == "" {
+		return nil, fmt.Errorf("snapshot_id is required")
+	}
+	sourceHost := strings.TrimSpace(input.SourceHost)
+	if sourceHost == "" {
+		return nil, fmt.Errorf("source_host is required")
+	}
+	targetHost := strings.TrimSpace(input.TargetHost)
+	if targetHost == "" {
+		return nil, fmt.Errorf("target_host is required")
+	}
+
+	replicator, ok := t.daemon.(snapshotReplicator)
+	if !ok {
+		err := fmt.Errorf("configured daemon does not support snapshot replication")
+		return nil, t.auditFailureAndReturn(tenantID, "", "", "anvil_replicate_snapshot", "POST /snapshots/{snapshot_id}/export -> POST /snapshots/import", err)
+	}
+
+	out, err := replicator.ReplicateSnapshot(ctx, SnapshotReplicationRequest{
+		SnapshotID:          snapshotID,
+		SourceHost:          sourceHost,
+		TargetHost:          targetHost,
+		IncludeDependencies: input.IncludeDependencies,
+	})
+	if err != nil {
+		return nil, t.auditFailureAndReturn(tenantID, "", "", "anvil_replicate_snapshot", "POST /snapshots/{snapshot_id}/export -> POST /snapshots/import", err)
+	}
+	if err := t.auditSuccess(tenantID, "", "", "anvil_replicate_snapshot", "POST /snapshots/{snapshot_id}/export -> POST /snapshots/import"); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (t *Tools) MCPReplicateSnapshot(ctx context.Context, req *mcp.CallToolRequest, input ReplicateSnapshotInput) (*mcp.CallToolResult, SnapshotReplicationResponse, error) {
+	out, err := t.ReplicateSnapshot(ctx, input)
+	if err != nil || out == nil {
+		return nil, SnapshotReplicationResponse{}, err
 	}
 	return nil, *out, nil
 }

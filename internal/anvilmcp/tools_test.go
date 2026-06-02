@@ -116,6 +116,33 @@ type fakeDaemon struct {
 	townWallHistoryErr       error
 }
 
+type fakeReplicatingDaemon struct {
+	*fakeDaemon
+
+	replicateSnapshotCalls int
+	replicateSnapshotReq   SnapshotReplicationRequest
+	replicateSnapshotResp  *SnapshotReplicationResponse
+	replicateSnapshotErr   error
+}
+
+func (f *fakeReplicatingDaemon) ReplicateSnapshot(_ context.Context, req SnapshotReplicationRequest) (*SnapshotReplicationResponse, error) {
+	f.replicateSnapshotCalls++
+	f.replicateSnapshotReq = req
+	if f.replicateSnapshotErr != nil {
+		return nil, f.replicateSnapshotErr
+	}
+	if f.replicateSnapshotResp != nil {
+		return f.replicateSnapshotResp, nil
+	}
+	return &SnapshotReplicationResponse{
+		SnapshotID: req.SnapshotID,
+		SourceHost: req.SourceHost,
+		TargetHost: req.TargetHost,
+		Status:     "replicated",
+		Replicated: []string{req.SnapshotID},
+	}, nil
+}
+
 func (f *fakeDaemon) SpawnVM(_ context.Context, req SpawnVMRequest) (*SpawnVMResponse, error) {
 	f.spawnCalls++
 	f.spawnProfile = req.Profile
@@ -1456,6 +1483,142 @@ func TestToolsDeleteSnapshotRequiresSnapshotID(t *testing.T) {
 	}
 	if daemon.deleteSnapshotCalls != 0 {
 		t.Fatalf("DeleteSnapshot calls = %d, want 0", daemon.deleteSnapshotCalls)
+	}
+}
+
+func TestToolsReplicateSnapshotCallsReplicator(t *testing.T) {
+	daemon := &fakeReplicatingDaemon{fakeDaemon: &fakeDaemon{}}
+	tools := NewTools(daemon, NewSessionStore(), time.Second)
+
+	out, err := tools.ReplicateSnapshot(context.Background(), ReplicateSnapshotInput{
+		SnapshotID:          " snap-1 ",
+		SourceHost:          " host-a ",
+		TargetHost:          " host-b ",
+		IncludeDependencies: true,
+	})
+	if err != nil {
+		t.Fatalf("ReplicateSnapshot returned error: %v", err)
+	}
+
+	if daemon.replicateSnapshotCalls != 1 {
+		t.Fatalf("ReplicateSnapshot calls = %d, want 1", daemon.replicateSnapshotCalls)
+	}
+	if daemon.replicateSnapshotReq.SnapshotID != "snap-1" {
+		t.Fatalf("SnapshotID = %q, want snap-1", daemon.replicateSnapshotReq.SnapshotID)
+	}
+	if daemon.replicateSnapshotReq.SourceHost != "host-a" {
+		t.Fatalf("SourceHost = %q, want host-a", daemon.replicateSnapshotReq.SourceHost)
+	}
+	if daemon.replicateSnapshotReq.TargetHost != "host-b" {
+		t.Fatalf("TargetHost = %q, want host-b", daemon.replicateSnapshotReq.TargetHost)
+	}
+	if !daemon.replicateSnapshotReq.IncludeDependencies {
+		t.Fatal("IncludeDependencies = false, want true")
+	}
+	if out.Status != "replicated" {
+		t.Fatalf("Status = %q, want replicated", out.Status)
+	}
+	if len(out.Replicated) != 1 || out.Replicated[0] != "snap-1" {
+		t.Fatalf("Replicated = %v, want [snap-1]", out.Replicated)
+	}
+}
+
+func TestToolsReplicateSnapshotRejectsUnsupportedDaemon(t *testing.T) {
+	daemon := &fakeDaemon{}
+	tools := NewTools(daemon, NewSessionStore(), time.Second)
+
+	_, err := tools.ReplicateSnapshot(context.Background(), ReplicateSnapshotInput{
+		SnapshotID: "snap-1",
+		SourceHost: "host-a",
+		TargetHost: "host-b",
+	})
+	if err == nil {
+		t.Fatal("ReplicateSnapshot error = nil, want unsupported daemon error")
+	}
+	if !strings.Contains(err.Error(), "configured daemon does not support snapshot replication") {
+		t.Fatalf("ReplicateSnapshot error = %q, want unsupported daemon error", err.Error())
+	}
+}
+
+func TestToolsMCPReplicateSnapshotOutputOmitsSecrets(t *testing.T) {
+	daemon := &fakeReplicatingDaemon{
+		fakeDaemon: &fakeDaemon{},
+		replicateSnapshotResp: &SnapshotReplicationResponse{
+			SnapshotID: "snap-1",
+			SourceHost: "host-a",
+			TargetHost: "host-b",
+			Status:     "replicated",
+			Replicated: []string{"snap-1"},
+		},
+	}
+	tools := NewTools(daemon, NewSessionStore(), time.Second)
+
+	_, out, err := tools.MCPReplicateSnapshot(context.Background(), nil, ReplicateSnapshotInput{
+		SnapshotID: "snap-1",
+		SourceHost: "host-a",
+		TargetHost: "host-b",
+	})
+	if err != nil {
+		t.Fatalf("MCPReplicateSnapshot returned error: %v", err)
+	}
+
+	data, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal output: %v", err)
+	}
+	for _, forbidden := range []string{
+		"agent_token",
+		"Authorization",
+		"Bearer",
+		"metadata.json",
+		"http://",
+		"https://",
+	} {
+		if strings.Contains(string(data), forbidden) {
+			t.Fatalf("MCP replicate output JSON exposes %q: %s", forbidden, string(data))
+		}
+	}
+}
+
+func TestToolsReplicateSnapshotRequiresInputs(t *testing.T) {
+	tests := []struct {
+		name  string
+		input ReplicateSnapshotInput
+		want  string
+	}{
+		{
+			name:  "snapshot_id",
+			input: ReplicateSnapshotInput{SourceHost: "host-a", TargetHost: "host-b"},
+			want:  "snapshot_id is required",
+		},
+		{
+			name:  "source_host",
+			input: ReplicateSnapshotInput{SnapshotID: "snap-1", TargetHost: "host-b"},
+			want:  "source_host is required",
+		},
+		{
+			name:  "target_host",
+			input: ReplicateSnapshotInput{SnapshotID: "snap-1", SourceHost: "host-a"},
+			want:  "target_host is required",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			daemon := &fakeReplicatingDaemon{fakeDaemon: &fakeDaemon{}}
+			tools := NewTools(daemon, NewSessionStore(), time.Second)
+
+			_, err := tools.ReplicateSnapshot(context.Background(), tt.input)
+			if err == nil {
+				t.Fatalf("ReplicateSnapshot error = nil, want %q", tt.want)
+			}
+			if err.Error() != tt.want {
+				t.Fatalf("ReplicateSnapshot error = %q, want %q", err.Error(), tt.want)
+			}
+			if daemon.replicateSnapshotCalls != 0 {
+				t.Fatalf("ReplicateSnapshot calls = %d, want 0", daemon.replicateSnapshotCalls)
+			}
+		})
 	}
 }
 
