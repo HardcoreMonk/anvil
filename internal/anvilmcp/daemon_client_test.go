@@ -1,6 +1,7 @@
 package anvilmcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"ephemera/internal/storage"
 )
 
 func TestDaemonClientSpawnVM(t *testing.T) {
@@ -540,6 +543,145 @@ func TestDaemonClientListSnapshots(t *testing.T) {
 	}
 }
 
+func TestDaemonClientExportSnapshotReturnsStream(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want %s", r.Method, http.MethodPost)
+		}
+		if r.URL.Path != "/snapshots/snap-1/export" {
+			t.Fatalf("path = %s, want /snapshots/snap-1/export", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer token-1" {
+			t.Fatalf("Authorization = %q, want Bearer token-1", got)
+		}
+
+		w.Header().Set("Content-Type", storage.SnapshotBundleContentType)
+		_, _ = w.Write([]byte("bundle-bytes"))
+	}))
+	defer server.Close()
+
+	client := NewDaemonClient(Config{DaemonURL: server.URL, APIToken: "token-1"}, server.Client())
+	stream, err := client.ExportSnapshot(context.Background(), "snap-1")
+	if err != nil {
+		t.Fatalf("ExportSnapshot returned error: %v", err)
+	}
+	defer stream.Body.Close()
+
+	if stream.ContentType != storage.SnapshotBundleContentType {
+		t.Fatalf("ContentType = %q, want %q", stream.ContentType, storage.SnapshotBundleContentType)
+	}
+	data, err := io.ReadAll(stream.Body)
+	if err != nil {
+		t.Fatalf("read stream body: %v", err)
+	}
+	if string(data) != "bundle-bytes" {
+		t.Fatalf("body = %q, want bundle-bytes", string(data))
+	}
+}
+
+func TestDaemonClientImportSnapshotSendsBundleContentType(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want %s", r.Method, http.MethodPost)
+		}
+		if r.URL.Path != "/snapshots/import" {
+			t.Fatalf("path = %s, want /snapshots/import", r.URL.Path)
+		}
+		if got := r.Header.Get("Content-Type"); got != storage.SnapshotBundleContentType {
+			t.Fatalf("Content-Type = %q, want %q", got, storage.SnapshotBundleContentType)
+		}
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+		if string(data) != "bundle-bytes" {
+			t.Fatalf("body = %q, want bundle-bytes", string(data))
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"snapshot_id":"snap-1","snapshot_type":"full","status":"imported","skipped":false}`))
+	}))
+	defer server.Close()
+
+	client := NewDaemonClient(Config{DaemonURL: server.URL}, server.Client())
+	resp, err := client.ImportSnapshot(context.Background(), bytes.NewReader([]byte("bundle-bytes")))
+	if err != nil {
+		t.Fatalf("ImportSnapshot returned error: %v", err)
+	}
+
+	if resp.SnapshotID != "snap-1" {
+		t.Fatalf("SnapshotID = %q, want snap-1", resp.SnapshotID)
+	}
+	if resp.SnapshotType != "full" {
+		t.Fatalf("SnapshotType = %q, want full", resp.SnapshotType)
+	}
+	if resp.Status != "imported" {
+		t.Fatalf("Status = %q, want imported", resp.Status)
+	}
+	if resp.Skipped {
+		t.Fatal("Skipped = true, want false")
+	}
+}
+
+func TestDaemonClientExportSnapshotRejectsEmptySnapshotID(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		t.Fatalf("unexpected request: %s %s", r.Method, r.URL.RequestURI())
+	}))
+	defer server.Close()
+
+	client := NewDaemonClient(Config{DaemonURL: server.URL}, server.Client())
+	_, err := client.ExportSnapshot(context.Background(), " \t\n ")
+	if err == nil {
+		t.Fatal("ExportSnapshot returned nil error")
+	}
+	if requests != 0 {
+		t.Fatalf("requests = %d, want 0", requests)
+	}
+}
+
+func TestDaemonClientExportSnapshotPreservesDaemonError(t *testing.T) {
+	body := &trackingReadCloser{
+		Buffer: bytes.NewBufferString(`{"error":"missing snapshot"}`),
+	}
+	client := NewDaemonClient(Config{DaemonURL: "http://daemon.test"}, &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Method != http.MethodPost {
+				t.Fatalf("method = %s, want %s", req.Method, http.MethodPost)
+			}
+			if req.URL.Path != "/snapshots/snap-404/export" {
+				t.Fatalf("path = %s, want /snapshots/snap-404/export", req.URL.Path)
+			}
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Header:     make(http.Header),
+				Body:       body,
+				Request:    req,
+			}, nil
+		}),
+	})
+
+	_, err := client.ExportSnapshot(context.Background(), "snap-404")
+	if err == nil {
+		t.Fatal("ExportSnapshot returned nil error")
+	}
+
+	var daemonErr *DaemonError
+	if !errors.As(err, &daemonErr) {
+		t.Fatalf("error type = %T, want *DaemonError", err)
+	}
+	if daemonErr.StatusCode != http.StatusNotFound {
+		t.Fatalf("StatusCode = %d, want %d", daemonErr.StatusCode, http.StatusNotFound)
+	}
+	if daemonErr.Body != `{"error":"missing snapshot"}` {
+		t.Fatalf("Body = %q, want daemon body", daemonErr.Body)
+	}
+	if !body.closed {
+		t.Fatal("response body was not closed")
+	}
+}
+
 func TestDaemonClientRestoreSnapshotForwardsContractAndOmitsAgentToken(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -637,4 +779,20 @@ func TestDaemonClientPreservesDaemonError(t *testing.T) {
 	if daemonErr.Body != `{"error":"agent unreachable"}` {
 		t.Fatalf("Body = %q, want exact daemon JSON", daemonErr.Body)
 	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type trackingReadCloser struct {
+	*bytes.Buffer
+	closed bool
+}
+
+func (r *trackingReadCloser) Close() error {
+	r.closed = true
+	return nil
 }
