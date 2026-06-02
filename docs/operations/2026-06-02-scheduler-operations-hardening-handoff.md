@@ -1,19 +1,19 @@
-# Scheduler Operations Hardening Handoff
+# Scheduler 운영 강화 운영 인계
 
 작성일: 2026-06-02
 
-## Release Scope
+## 릴리즈 범위 (Release Scope)
 
 - scheduler service에 `GET /metrics` endpoint를 추가했다.
 - scheduler smoke harness가 `/metrics`와
   `anvil_scheduler_control_loop_running` line을 검증한다.
 - `cmd/anvil-scheduler` full-process integration test를 추가해 hosts file bootstrap,
-  stale state override, fake daemon `/health`, `/control-loop/status`,
+  stale state override, fake daemon `/health`, scheduler `/control-loop/status`,
   `/schedule/spawn`, `/metrics` 경로를 검증한다.
 - scheduler 운영 문서와 release note를 scheduler `/metrics`와 실제 systemd 검증
   상태에 맞춰 갱신했다.
 
-## Verification
+## 검증 (Verification)
 
 - `go test ./internal/anvilmcp -run 'TestRenderSchedulerMetrics|TestSchedulerServiceMetrics' -count=1`: PASS
 - `go test ./scripts -run 'TestAnvilSchedulerSmoke' -count=1`: PASS
@@ -36,7 +36,7 @@
 - installed unit path: `/etc/systemd/system/anvil-scheduler.service`
 - installed binary path: `/usr/local/bin/anvil-scheduler`
 
-## Audit
+## 감사 (Audit)
 
 - scheduler metric namespace는 `anvil_scheduler_*`다.
 - scheduler metrics에는 `agent_token`, daemon raw response, authorization header,
@@ -47,11 +47,11 @@
   Firecracker/KVM runtime, snapshot/restore storage semantics, flock placement는
   변경하지 않았다.
 
-## Blockers
+## 차단 요소 (Blockers)
 
 - 없음.
 
-## Warnings
+## 경고 (Warnings)
 
 - 실제 systemd 검증은 `/etc/anvil`, `/var/lib/anvil`,
   `/usr/local/bin/anvil-scheduler`, `anvil-scheduler.service`를 변경했다.
@@ -60,7 +60,7 @@
   race가 남아 있지만, code quality review에서 local Go integration test의 허용 가능한
   residual risk로 분류했다.
 
-## Residual Risk
+## 잔여 위험 (Residual Risk)
 
 - Scheduler `/metrics`는 scheduler service 자체와 동일하게 unauthenticated다. 외부
   노출 환경에서는 loopback/private network 또는 reverse proxy policy로 보호해야 한다.
@@ -68,18 +68,17 @@
   metric은 아직 구현되지 않았고 후속 후보로 남아 있다.
 - Process integration test는 KVM, Firecracker, real VM lifecycle을 실행하지 않는다.
 
-## Current Lifecycle Stage
+## 현재 lifecycle 단계 (Current Lifecycle Stage)
 
-Operate has been entered for scheduler operations hardening after verification and
-review.
+검증과 review를 마친 뒤 scheduler 운영 강화 작업은 operate 단계에 진입했다.
 
-## Next Action
+## 다음 작업 (Next Action)
 
 - 후속 item 4인 cross-host snapshot replication은 별도 design spec에서 시작한다.
 - upstream ephemera `v0.4.0`-`v0.5.0` adoption review는 scheduler operations
   hardening과 섞지 않고 별도 sync/adoption 작업으로 진행한다.
 
-## Follow-Up Tasks
+## 후속 작업 (Follow-Up Tasks)
 
 - scheduler poll/reconcile latency metric 추가 여부 결정
 - scheduler poll/reconcile failure count metric 추가 여부 결정

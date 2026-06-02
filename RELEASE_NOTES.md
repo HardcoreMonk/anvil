@@ -9,7 +9,7 @@
   - `anvil_scheduler_suspect_vm_placements`
   - 마지막 poll/reconcile 완료 timestamp gauge
 - `cmd/anvil-scheduler` full-process integration test는 hosts file 기반 bootstrap,
-  오래된 state override, fake daemon `/health`, `/control-loop/status`,
+  오래된 state override, fake daemon `/health`, scheduler `/control-loop/status`,
   `/schedule/spawn`, `/metrics` 경로를 검증한다.
 - scheduler smoke harness가 `/metrics`를 검증한다.
 

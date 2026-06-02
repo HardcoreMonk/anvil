@@ -337,6 +337,9 @@ func TestAnvilSchedulerSmokeFailsMetricsWithSummary(t *testing.T) {
 	if summary.FailedStep != "metrics_failed" {
 		t.Fatalf("failed_step = %q, want metrics_failed", summary.FailedStep)
 	}
+	if server.hasHost("smoke-test-host") {
+		t.Fatalf("fake scheduler still has smoke host after metrics failure cleanup:\n%s", output)
+	}
 }
 
 type anvilSchedulerSmokeFakeServer struct {
