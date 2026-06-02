@@ -1,7 +1,17 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -134,4 +144,169 @@ func TestApplyConfiguredHostsNoopsWithoutHosts(t *testing.T) {
 	if err := applyConfiguredHosts(store, nil); err != nil {
 		t.Fatalf("applyConfiguredHosts nil hosts: %v", err)
 	}
+}
+
+func TestSchedulerProcessLoadsHostsPollsMetricsAndSchedules(t *testing.T) {
+	if os.Getenv("ANVIL_SCHEDULER_TEST_CHILD") == "1" {
+		return
+	}
+
+	fakeDaemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			if r.Method != http.MethodGet {
+				http.Error(w, "GET required", http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"ok","vm_count":0}`))
+		case "/vms":
+			if r.Method != http.MethodGet {
+				http.Error(w, "GET required", http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer fakeDaemon.Close()
+
+	tempDir := t.TempDir()
+	statePath := filepath.Join(tempDir, "scheduler-state.json")
+	quotaPath := filepath.Join(tempDir, "scheduler-quotas.json")
+	hostsPath := filepath.Join(tempDir, "hosts.json")
+	stale := anvilmcp.NewPlacementStore(statePath)
+	if err := stale.SetHost(anvilmcp.RuntimeHost{Name: "host-a", Endpoint: "http://stale-host", Healthy: false, AvailableVMs: 0, EgressPolicies: []anvilmcp.EgressPolicy{anvilmcp.EgressPolicyProfile}}); err != nil {
+		t.Fatalf("SetHost stale host: %v", err)
+	}
+	if err := stale.Save(); err != nil {
+		t.Fatalf("Save stale scheduler state: %v", err)
+	}
+	hostsJSON := fmt.Sprintf(`{"hosts":[{"name":"host-a","endpoint":%q,"available_vms":2,"available_snapshot_bytes":4096,"egress_policies":["profile"]}]}`, fakeDaemon.URL)
+	if err := os.WriteFile(hostsPath, []byte(hostsJSON), 0600); err != nil {
+		t.Fatalf("write hosts file: %v", err)
+	}
+
+	addr := reserveLoopbackAddr(t)
+	baseURL := "http://" + addr
+	cmd := exec.Command(os.Args[0], "-test.run=TestSchedulerProcessChildMain", "-test.v")
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	cmd.Env = append(os.Environ(),
+		"ANVIL_SCHEDULER_TEST_CHILD=1",
+		"ANVIL_SCHEDULER_ADDR="+addr,
+		"ANVIL_SCHEDULER_STATE="+statePath,
+		"ANVIL_SCHEDULER_QUOTA_STORE="+quotaPath,
+		"ANVIL_SCHEDULER_HOSTS_FILE="+hostsPath,
+		"ANVIL_SCHEDULER_POLL_INTERVAL=50ms",
+		"ANVIL_SCHEDULER_RECONCILE_INTERVAL=100ms",
+		"ANVIL_SCHEDULER_HOST_TIMEOUT=500ms",
+		"ANVIL_SCHEDULER_FAILURE_THRESHOLD=2",
+	)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start scheduler child: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Signal(syscall.SIGTERM)
+		}
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+		}
+	})
+
+	waitForSchedulerBody(t, baseURL+"/health", func(body string) bool {
+		return strings.Contains(body, `"status":"ok"`)
+	}, &output)
+	waitForSchedulerBody(t, baseURL+"/control-loop/status", func(body string) bool {
+		return strings.Contains(body, `"running":true`)
+	}, &output)
+	waitForSchedulerBody(t, baseURL+"/metrics", func(body string) bool {
+		return strings.Contains(body, "anvil_scheduler_control_loop_running 1") &&
+			strings.Contains(body, "anvil_scheduler_host_status_count{status=\"healthy\"} 1")
+	}, &output)
+
+	resp, err := http.Post(baseURL+"/schedule/spawn", "application/json", strings.NewReader(`{"tenant_id":"tenant-1","egress_policy":"profile","requested":{"active_vms":1}}`))
+	if err != nil {
+		t.Fatalf("POST /schedule/spawn: %v\nscheduler output:\n%s", err, output.String())
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /schedule/spawn status = %d, want 200\nscheduler output:\n%s", resp.StatusCode, output.String())
+	}
+	var decision anvilmcp.ScheduleDecision
+	if err := json.NewDecoder(resp.Body).Decode(&decision); err != nil {
+		t.Fatalf("decode schedule decision: %v", err)
+	}
+	if !decision.Allowed || decision.Host.Name != "host-a" || decision.Host.AvailableVMs != 2 {
+		t.Fatalf("decision = %+v, want allowed host-a with configured capacity", decision)
+	}
+
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("signal scheduler child: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("scheduler child exited with error: %v\noutput:\n%s", err, output.String())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("scheduler child did not exit after SIGTERM\noutput:\n%s", output.String())
+	}
+}
+
+func TestSchedulerProcessChildMain(t *testing.T) {
+	if os.Getenv("ANVIL_SCHEDULER_TEST_CHILD") != "1" {
+		return
+	}
+	main()
+}
+
+func reserveLoopbackAddr(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve loopback addr: %v", err)
+	}
+	addr := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatalf("close reserved listener: %v", err)
+	}
+	return addr
+}
+
+func waitForSchedulerBody(t *testing.T, url string, accepts func(string) bool, output *bytes.Buffer) string {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var lastBody string
+	var lastErr error
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(url)
+		if err != nil {
+			lastErr = err
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		bodyBytes := new(bytes.Buffer)
+		_, _ = bodyBytes.ReadFrom(resp.Body)
+		_ = resp.Body.Close()
+		lastBody = bodyBytes.String()
+		if resp.StatusCode == http.StatusOK && accepts(lastBody) {
+			return lastBody
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("scheduler endpoint %s did not become ready; lastErr=%v lastBody=%q\nscheduler output:\n%s", url, lastErr, lastBody, output.String())
+	return ""
 }
