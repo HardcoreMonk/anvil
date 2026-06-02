@@ -26,6 +26,8 @@
 
 - replication response, audit, operator 문서는 `agent_token`, authorization header,
   daemon raw body, raw `metadata.json` body를 노출하지 않는다.
+- `POST /snapshots/{id}/export` bundle의 `metadata.json`은 raw local metadata가 아니라
+  token과 source host path를 제거한 portable metadata를 사용한다.
 - diff snapshot replication은 target host에 base full snapshot이 필요하다.
   `include_dependencies=true`이면 router가 base full을 먼저 복제하고 diff를 복제한다.
 - scheduler metrics에는 `agent_token`, host endpoint, daemon raw response,

@@ -289,6 +289,11 @@ daemon은 `snapshots/.import-*` staging directory에 bundle payload를 먼저 �
 local path를 target daemon의 work directory 기준으로 rebase하고 최종
 `snapshots/<snapshot_id>/` directory로 atomic rename한다. publish 전 실패는 staging
 directory만 정리하며, 이미 존재하는 최종 snapshot directory를 부분 갱신하지 않는다.
+export bundle의 `metadata.json`은 source host의 raw metadata file이 아니라
+`agent_token`, `disk_path`, `vsock_path`를 제거한 portable metadata다. target import는
+publish 전에 `disk_path`, `vsock_path`, `mem_file_path`, `state_file_path`,
+`disk_copy_path`를 target-local path로 다시 쓴 뒤 최종 metadata checksum을 manifest에
+기록한다.
 operator-facing import/replication 결과는 raw `metadata.json`, `agent_token`,
 authorization header를 포함하지 않는다.
 

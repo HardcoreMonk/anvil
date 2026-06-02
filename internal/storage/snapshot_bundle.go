@@ -56,12 +56,17 @@ type SnapshotImportResult struct {
 	Metadata       SnapshotMetadata       `json:"-"`
 }
 
+type SnapshotImportOptions struct {
+	WorkspaceDir string
+}
+
 const (
 	snapshotBundleManifestPath = "manifest.json"
 	snapshotBundleMetadataPath = "metadata.json"
 	snapshotBundleMemoryPath   = "memory.bin"
 	snapshotBundleStatePath    = "state.bin"
 	snapshotBundleRootFSPath   = "rootfs.ext4"
+	snapshotBundleDiskPrefix   = "imported-"
 )
 
 var snapshotBundleAllowedFiles = map[string]struct{}{
@@ -101,10 +106,21 @@ func ExportSnapshotBundle(workDir, snapshotID string, dst io.Writer) (SnapshotEx
 		BaseSnapshotID: meta.BaseSnapshotID,
 		CreatedAt:      meta.CreatedAt,
 	}
+	portableMeta := snapshotBundlePortableMetadata(meta)
+	metadataBytes, err := json.MarshalIndent(portableMeta, "", "  ")
+	if err != nil {
+		return SnapshotExportManifest{}, fmt.Errorf("marshal snapshot bundle metadata: %w", err)
+	}
 	for _, name := range snapshotBundleChecksummedFiles {
-		info, err := snapshotBundleFileInfo(filepath.Join(snapDir, name), name)
-		if err != nil {
-			return SnapshotExportManifest{}, err
+		var info SnapshotBundleFile
+		var err error
+		if name == snapshotBundleMetadataPath {
+			info = snapshotBundleBytesInfo(name, metadataBytes)
+		} else {
+			info, err = snapshotBundleFileInfo(filepath.Join(snapDir, name), name)
+			if err != nil {
+				return SnapshotExportManifest{}, err
+			}
 		}
 		manifest.Files = append(manifest.Files, info)
 	}
@@ -122,8 +138,11 @@ func ExportSnapshotBundle(workDir, snapshotID string, dst io.Writer) (SnapshotEx
 		tw.Close()
 		return SnapshotExportManifest{}, err
 	}
+	if err := snapshotBundleWriteBytes(tw, snapshotBundleMetadataPath, metadataBytes, meta.CreatedAt); err != nil {
+		tw.Close()
+		return SnapshotExportManifest{}, err
+	}
 	for _, name := range []string{
-		snapshotBundleMetadataPath,
 		snapshotBundleMemoryPath,
 		snapshotBundleStatePath,
 		snapshotBundleRootFSPath,
@@ -141,6 +160,11 @@ func ExportSnapshotBundle(workDir, snapshotID string, dst io.Writer) (SnapshotEx
 
 // ImportSnapshotBundle imports a snapshot bundle tar stream into the target workDir.
 func ImportSnapshotBundle(workDir string, src io.Reader) (SnapshotImportResult, error) {
+	return ImportSnapshotBundleWithOptions(workDir, src, SnapshotImportOptions{})
+}
+
+// ImportSnapshotBundleWithOptions imports a snapshot bundle tar stream into the target workDir.
+func ImportSnapshotBundleWithOptions(workDir string, src io.Reader, opts SnapshotImportOptions) (SnapshotImportResult, error) {
 	snapshotsDir := filepath.Join(workDir, "snapshots")
 	if err := os.MkdirAll(snapshotsDir, 0700); err != nil {
 		return SnapshotImportResult{}, fmt.Errorf("create snapshots dir: %w", err)
@@ -188,9 +212,7 @@ func ImportSnapshotBundle(workDir string, src io.Reader) (SnapshotImportResult, 
 	}
 
 	finalDir := SnapshotDir(workDir, manifest.SnapshotID)
-	meta.MemFilePath = filepath.Join(finalDir, snapshotBundleMemoryPath)
-	meta.StatFilePath = filepath.Join(finalDir, snapshotBundleStatePath)
-	meta.DiskCopyPath = filepath.Join(finalDir, snapshotBundleRootFSPath)
+	meta = snapshotBundleImportedMetadata(workDir, finalDir, opts, meta)
 	if err := SaveMetadata(stageDir, meta); err != nil {
 		return SnapshotImportResult{}, err
 	}
@@ -237,6 +259,38 @@ func ImportSnapshotBundle(workDir string, src io.Reader) (SnapshotImportResult, 
 		Manifest:       finalManifest,
 		Metadata:       meta,
 	}, nil
+}
+
+func snapshotBundlePortableMetadata(meta SnapshotMetadata) SnapshotMetadata {
+	meta.AgentToken = ""
+	meta.DiskPath = ""
+	meta.VsockPath = ""
+	meta.MemFilePath = snapshotBundleMemoryPath
+	meta.StatFilePath = snapshotBundleStatePath
+	meta.DiskCopyPath = snapshotBundleRootFSPath
+	return meta
+}
+
+func snapshotBundleImportedMetadata(workDir, finalDir string, opts SnapshotImportOptions, meta SnapshotMetadata) SnapshotMetadata {
+	meta.AgentToken = ""
+	meta.DiskPath = snapshotBundleImportedDiskPath(workDir, opts.WorkspaceDir, meta.SnapshotID)
+	meta.VsockPath = snapshotBundleImportedVsockPath(workDir, meta.SnapshotID)
+	meta.MemFilePath = filepath.Join(finalDir, snapshotBundleMemoryPath)
+	meta.StatFilePath = filepath.Join(finalDir, snapshotBundleStatePath)
+	meta.DiskCopyPath = filepath.Join(finalDir, snapshotBundleRootFSPath)
+	return meta
+}
+
+func snapshotBundleImportedDiskPath(workDir, workspaceDir, snapshotID string) string {
+	workspaceDir = strings.TrimSpace(workspaceDir)
+	if workspaceDir == "" {
+		workspaceDir = filepath.Join(workDir, "workspaces")
+	}
+	return filepath.Join(workspaceDir, snapshotBundleDiskPrefix+snapshotID+".ext4")
+}
+
+func snapshotBundleImportedVsockPath(workDir, snapshotID string) string {
+	return filepath.Join(workDir, "tmp", "firecracker-vsock-"+snapshotID+".sock")
 }
 
 func snapshotBundleWriteBytes(tw *tar.Writer, name string, data []byte, modTime time.Time) error {
@@ -363,6 +417,18 @@ func snapshotBundleLoadManifest(path string) (SnapshotExportManifest, error) {
 func snapshotBundleValidateManifestMetadata(manifest SnapshotExportManifest, meta SnapshotMetadata) error {
 	if manifest.SnapshotID != meta.SnapshotID {
 		return fmt.Errorf("%w: snapshot id mismatch", ErrSnapshotBundleInvalid)
+	}
+	if manifest.SourceVMID != meta.SourceVMID {
+		return fmt.Errorf("%w: source vm id mismatch", ErrSnapshotBundleInvalid)
+	}
+	if manifest.TenantID != meta.TenantID {
+		return fmt.Errorf("%w: tenant id mismatch", ErrSnapshotBundleInvalid)
+	}
+	if manifest.Profile != meta.Profile {
+		return fmt.Errorf("%w: profile mismatch", ErrSnapshotBundleInvalid)
+	}
+	if manifest.EgressPolicy != meta.EgressPolicy {
+		return fmt.Errorf("%w: egress policy mismatch", ErrSnapshotBundleInvalid)
 	}
 	if manifest.SnapshotType != meta.SnapshotType {
 		return fmt.Errorf("%w: snapshot type mismatch", ErrSnapshotBundleInvalid)
@@ -546,7 +612,7 @@ func (m snapshotBundleFileMap) Equal(other snapshotBundleFileMap) bool {
 func snapshotBundleArtifactFileMap(manifest SnapshotExportManifest) snapshotBundleFileMap {
 	files := make(snapshotBundleFileMap)
 	for _, file := range manifest.Files {
-		if file.Path == snapshotBundleMemoryPath || file.Path == snapshotBundleStatePath || file.Path == snapshotBundleRootFSPath {
+		if _, ok := snapshotBundleAllowedChecksumFile(file.Path); ok {
 			files[file.Path] = file
 		}
 	}
@@ -555,10 +621,10 @@ func snapshotBundleArtifactFileMap(manifest SnapshotExportManifest) snapshotBund
 
 func snapshotBundleCompareCurrentArtifacts(finalDir string, incoming SnapshotExportManifest) error {
 	want := snapshotBundleArtifactFileMap(incoming)
-	if len(want) != 3 {
-		return fmt.Errorf("%w: incoming manifest missing artifact checksums", ErrSnapshotBundleInvalid)
+	if len(want) != len(snapshotBundleChecksummedFiles) {
+		return fmt.Errorf("%w: incoming manifest missing checksums", ErrSnapshotBundleInvalid)
 	}
-	for _, name := range []string{snapshotBundleMemoryPath, snapshotBundleStatePath, snapshotBundleRootFSPath} {
+	for _, name := range snapshotBundleChecksummedFiles {
 		wantFile, ok := want[name]
 		if !ok {
 			return fmt.Errorf("%w: incoming manifest missing %s", ErrSnapshotBundleInvalid, name)
@@ -572,6 +638,15 @@ func snapshotBundleCompareCurrentArtifacts(finalDir string, incoming SnapshotExp
 		}
 	}
 	return nil
+}
+
+func snapshotBundleBytesInfo(bundlePath string, data []byte) SnapshotBundleFile {
+	hash := sha256.Sum256(data)
+	return SnapshotBundleFile{
+		Path:      bundlePath,
+		SizeBytes: int64(len(data)),
+		SHA256:    hex.EncodeToString(hash[:]),
+	}
 }
 
 func snapshotBundleFileInfo(path, bundlePath string) (SnapshotBundleFile, error) {

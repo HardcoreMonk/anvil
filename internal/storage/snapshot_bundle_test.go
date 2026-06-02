@@ -46,7 +46,7 @@ func TestExportSnapshotBundleContainsManifestAndArtifacts(t *testing.T) {
 
 func TestImportSnapshotBundleRebasesPathsAndPublishesAtomically(t *testing.T) {
 	sourceWorkDir := t.TempDir()
-	sourceMeta := writeSnapshotBundleFixture(t, sourceWorkDir, "snap-1", "full", "")
+	writeSnapshotBundleFixture(t, sourceWorkDir, "snap-1", "full", "")
 
 	var buf bytes.Buffer
 	if _, err := ExportSnapshotBundle(sourceWorkDir, "snap-1", &buf); err != nil {
@@ -76,8 +76,14 @@ func TestImportSnapshotBundleRebasesPathsAndPublishesAtomically(t *testing.T) {
 	if importedMeta.DiskCopyPath != filepath.Join(targetSnapDir, "rootfs.ext4") {
 		t.Fatalf("DiskCopyPath = %q, want target snapshot path", importedMeta.DiskCopyPath)
 	}
-	if importedMeta.DiskPath != sourceMeta.DiskPath || importedMeta.VsockPath != sourceMeta.VsockPath {
-		t.Fatalf("Firecracker path fields changed: got disk %q vsock %q", importedMeta.DiskPath, importedMeta.VsockPath)
+	if importedMeta.DiskPath != filepath.Join(targetWorkDir, "workspaces", "imported-snap-1.ext4") {
+		t.Fatalf("DiskPath = %q, want target workspace path", importedMeta.DiskPath)
+	}
+	if importedMeta.VsockPath != filepath.Join(targetWorkDir, "tmp", "firecracker-vsock-snap-1.sock") {
+		t.Fatalf("VsockPath = %q, want target tmp path", importedMeta.VsockPath)
+	}
+	if importedMeta.AgentToken != "" {
+		t.Fatalf("AgentToken = %q, want scrubbed", importedMeta.AgentToken)
 	}
 	if _, err := os.Stat(filepath.Join(targetSnapDir, "manifest.json")); err != nil {
 		t.Fatalf("published manifest.json missing: %v", err)
@@ -149,6 +155,24 @@ func TestImportSnapshotBundleIdempotentAndConflict(t *testing.T) {
 		t.Fatalf("idempotent result = status %q skipped %v, want already_present/true", result.Status, result.Skipped)
 	}
 
+	targetSnapDir := SnapshotDir(targetWorkDir, "snap-1")
+	existingMeta, err := LoadMetadata(targetSnapDir)
+	if err != nil {
+		t.Fatalf("load target metadata: %v", err)
+	}
+	existingMeta.Profile = "corrupted"
+	if err := SaveMetadata(targetSnapDir, existingMeta); err != nil {
+		t.Fatalf("corrupt target metadata: %v", err)
+	}
+	_, err = ImportSnapshotBundle(targetWorkDir, bytes.NewReader(bundleBytes))
+	if !errors.Is(err, ErrSnapshotBundleConflict) {
+		t.Fatalf("metadata conflict import error = %v, want ErrSnapshotBundleConflict", err)
+	}
+	existingMeta.Profile = "researcher"
+	if err := SaveMetadata(targetSnapDir, existingMeta); err != nil {
+		t.Fatalf("restore target metadata: %v", err)
+	}
+
 	targetRootFS := filepath.Join(SnapshotDir(targetWorkDir, "snap-1"), "rootfs.ext4")
 	if err := os.WriteFile(targetRootFS, []byte("mutated-rootfs"), 0600); err != nil {
 		t.Fatalf("mutate target rootfs: %v", err)
@@ -156,6 +180,38 @@ func TestImportSnapshotBundleIdempotentAndConflict(t *testing.T) {
 	_, err = ImportSnapshotBundle(targetWorkDir, bytes.NewReader(bundleBytes))
 	if !errors.Is(err, ErrSnapshotBundleConflict) {
 		t.Fatalf("conflict import error = %v, want ErrSnapshotBundleConflict", err)
+	}
+}
+
+func TestImportSnapshotBundleScrubsUnsafeMetadataFields(t *testing.T) {
+	sourceWorkDir := t.TempDir()
+	writeSnapshotBundleFixture(t, sourceWorkDir, "snap-1", "full", "")
+
+	var buf bytes.Buffer
+	if _, err := ExportSnapshotBundle(sourceWorkDir, "snap-1", &buf); err != nil {
+		t.Fatalf("export snapshot bundle: %v", err)
+	}
+	bundleBytes := mutateSnapshotBundle(t, buf.Bytes(), func(manifest *SnapshotExportManifest, meta *SnapshotMetadata) {
+		meta.AgentToken = "imported-secret"
+		meta.DiskPath = "/etc/passwd"
+		meta.VsockPath = "/var/run/unsafe.sock"
+	})
+
+	targetWorkDir := t.TempDir()
+	result, err := ImportSnapshotBundleWithOptions(targetWorkDir, bytes.NewReader(bundleBytes), SnapshotImportOptions{
+		WorkspaceDir: filepath.Join(targetWorkDir, "daemon-workspaces"),
+	})
+	if err != nil {
+		t.Fatalf("import snapshot bundle: %v", err)
+	}
+	if result.Metadata.AgentToken != "" {
+		t.Fatalf("AgentToken = %q, want scrubbed", result.Metadata.AgentToken)
+	}
+	if result.Metadata.DiskPath != filepath.Join(targetWorkDir, "daemon-workspaces", "imported-snap-1.ext4") {
+		t.Fatalf("DiskPath = %q, want target workspace path", result.Metadata.DiskPath)
+	}
+	if result.Metadata.VsockPath != filepath.Join(targetWorkDir, "tmp", "firecracker-vsock-snap-1.sock") {
+		t.Fatalf("VsockPath = %q, want target tmp path", result.Metadata.VsockPath)
 	}
 }
 
@@ -285,7 +341,7 @@ func TestExportSnapshotBundleRejectsPathLikeSnapshotID(t *testing.T) {
 	}
 }
 
-func TestSnapshotExportManifestDoesNotExposeAgentToken(t *testing.T) {
+func TestSnapshotExportBundleDoesNotExposeAgentTokenInMetadata(t *testing.T) {
 	workDir := t.TempDir()
 	writeSnapshotBundleFixture(t, workDir, "snap-1", "full", "")
 
@@ -300,6 +356,20 @@ func TestSnapshotExportManifestDoesNotExposeAgentToken(t *testing.T) {
 	}
 	if strings.Contains(string(manifestJSON), snapshotBundleFixtureToken) {
 		t.Fatalf("manifest exposes agent token: %s", string(manifestJSON))
+	}
+	entries := readSnapshotBundleTar(t, buf.Bytes())
+	if strings.Contains(string(entries["metadata.json"]), snapshotBundleFixtureToken) {
+		t.Fatalf("bundle metadata exposes agent token: %s", string(entries["metadata.json"]))
+	}
+	var bundleMeta SnapshotMetadata
+	if err := json.Unmarshal(entries["metadata.json"], &bundleMeta); err != nil {
+		t.Fatalf("parse bundle metadata: %v", err)
+	}
+	if bundleMeta.AgentToken != "" {
+		t.Fatalf("bundle metadata AgentToken = %q, want empty", bundleMeta.AgentToken)
+	}
+	if bundleMeta.DiskPath != "" || bundleMeta.VsockPath != "" {
+		t.Fatalf("bundle metadata host paths = disk %q vsock %q, want empty", bundleMeta.DiskPath, bundleMeta.VsockPath)
 	}
 }
 

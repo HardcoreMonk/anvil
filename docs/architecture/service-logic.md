@@ -635,6 +635,8 @@ restore가 dependency 오류로 실패할 수 있다. `include_dependencies=true
 - operator-facing replication response와 audit record는 `agent_token`을 포함하지 않는다.
 - authorization header와 `ANVIL_API_TOKEN` 값은 response/audit/log에 기록하지 않는다.
 - daemon raw body와 raw `metadata.json` body를 MCP output에 포함하지 않는다.
+- `POST /snapshots/{id}/export` bundle의 `metadata.json`은 raw local metadata가 아니라
+  token과 host path를 제거한 portable metadata다.
 
 ## Snapshot 삭제 로직
 

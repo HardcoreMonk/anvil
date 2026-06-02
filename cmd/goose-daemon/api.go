@@ -2103,7 +2103,13 @@ func (cp *ControlPlane) handleSnapshotImport(w http.ResponseWriter, r *http.Requ
 	cp.snapshotLifecycleMu.Lock()
 	defer cp.snapshotLifecycleMu.Unlock()
 
-	result, err := storage.ImportSnapshotBundle(cp.workDir, r.Body)
+	workspaceDir := ""
+	if cp.provisioner != nil {
+		workspaceDir = cp.provisioner.WorkspaceDir
+	}
+	result, err := storage.ImportSnapshotBundleWithOptions(cp.workDir, r.Body, storage.SnapshotImportOptions{
+		WorkspaceDir: workspaceDir,
+	})
 	if err != nil {
 		status := http.StatusInternalServerError
 		msg := "snapshot_import_failed"

@@ -1592,6 +1592,10 @@ daemon은 restore를 거부한다. restore success response에는 `agent_token`�
 snapshot `metadata.json`은 restore 인증 계약을 보존하기 위해 `agent_token`을
 담고 있다. metadata를 반출하거나 백업 산출물이 신뢰된 host 경계 밖으로 나가기
 전에는 scrubber로 token을 제거한다.
+단, `POST /snapshots/{id}/export` replication bundle 안의 `metadata.json`은 raw local
+metadata file이 아니라 `agent_token`, `disk_path`, `vsock_path`를 제거한 portable
+copy다. target daemon은 import 시 target-local `disk_path`, `vsock_path`,
+`mem_file_path`, `state_file_path`, `disk_copy_path`로 다시 기록한다.
 
 ```bash
 go run ./scripts/snapshot-metadata-scrub.go -input snapshots/snap-1778229000000/metadata.json > metadata.scrubbed.json
