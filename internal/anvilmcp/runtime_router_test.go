@@ -27,8 +27,10 @@ type routerFakeDaemon struct {
 	deleteVMID           string
 	listVMResp           []VMInfo
 	snapshotList         []SnapshotInfo
+	listSnapshotErr      error
 	exportCalls          []string
 	exportBodies         map[string]string
+	exportStreams        map[string]io.ReadCloser
 	exportErr            error
 	importCalls          []string
 	importErrForBody     map[string]error
@@ -84,6 +86,9 @@ func (f *routerFakeDaemon) CreateSnapshot(_ context.Context, vmID string, req Cr
 }
 
 func (f *routerFakeDaemon) ListSnapshots(context.Context) ([]SnapshotInfo, error) {
+	if f.listSnapshotErr != nil {
+		return nil, f.listSnapshotErr
+	}
 	return append([]SnapshotInfo(nil), f.snapshotList...), nil
 }
 
@@ -96,6 +101,11 @@ func (f *routerFakeDaemon) ExportSnapshot(_ context.Context, snapshotID string) 
 	if f.exportBodies != nil {
 		if configured, ok := f.exportBodies[snapshotID]; ok {
 			body = configured
+		}
+	}
+	if f.exportStreams != nil {
+		if configured, ok := f.exportStreams[snapshotID]; ok {
+			return &SnapshotExportStream{Body: configured, ContentType: "application/vnd.anvil.snapshot-bundle"}, nil
 		}
 	}
 	return &SnapshotExportStream{Body: io.NopCloser(strings.NewReader(body)), ContentType: "application/vnd.anvil.snapshot-bundle"}, nil
@@ -444,6 +454,194 @@ func TestRuntimeRouterReplicateRejectsUnhealthyHostBeforeDaemonCall(t *testing.T
 	if len(source.exportCalls) != 0 || len(target.importCalls) != 0 {
 		t.Fatalf("export/import calls = %d/%d, want 0/0", len(source.exportCalls), len(target.importCalls))
 	}
+}
+
+func TestRuntimeRouterReplicateScrubsImportDaemonErrorBody(t *testing.T) {
+	source := &routerFakeDaemon{snapshotList: []SnapshotInfo{{SnapshotID: "snap-1", SnapshotType: "full"}}}
+	target := &routerFakeDaemon{importErrForBody: map[string]error{
+		"bundle:snap-1": &DaemonError{StatusCode: 409, Body: "agent_token secret raw body"},
+	}}
+	router := newSnapshotReplicationTestRouter(source, target, NewPlacementStore(""), true, true)
+
+	resp, err := router.ReplicateSnapshot(context.Background(), SnapshotReplicationRequest{
+		SnapshotID:          "snap-1",
+		SourceHost:          "host-a",
+		TargetHost:          "host-b",
+		IncludeDependencies: true,
+	})
+	if err != nil {
+		t.Fatalf("ReplicateSnapshot returned error: %v", err)
+	}
+	if resp.Status != "failed" {
+		t.Fatalf("status = %q, want failed", resp.Status)
+	}
+	if len(resp.Errors) != 1 {
+		t.Fatalf("errors = %+v, want one safe import error", resp.Errors)
+	}
+	errText := resp.Errors[0]
+	for _, forbidden := range []string{"agent_token", "secret", "raw body"} {
+		if strings.Contains(errText, forbidden) {
+			t.Fatalf("error %q contains forbidden raw body text %q", errText, forbidden)
+		}
+	}
+	if !strings.Contains(errText, "import_failed") || !strings.Contains(errText, "status_code=409") {
+		t.Fatalf("error = %q, want safe import failure with status code", errText)
+	}
+}
+
+func TestRuntimeRouterReplicateDoesNotPreSkipTargetListPresence(t *testing.T) {
+	t.Run("already present import records skipped locality", func(t *testing.T) {
+		source := &routerFakeDaemon{snapshotList: []SnapshotInfo{{SnapshotID: "snap-1", SnapshotType: "full"}}}
+		target := &routerFakeDaemon{
+			snapshotList:        []SnapshotInfo{{SnapshotID: "snap-1", SnapshotType: "full"}},
+			importStatusForBody: map[string]string{"bundle:snap-1": "already_present"},
+		}
+		store := NewPlacementStore("")
+		router := newSnapshotReplicationTestRouter(source, target, store, true, true)
+
+		resp, err := router.ReplicateSnapshot(context.Background(), SnapshotReplicationRequest{
+			SnapshotID:          "snap-1",
+			SourceHost:          "host-a",
+			TargetHost:          "host-b",
+			IncludeDependencies: true,
+		})
+		if err != nil {
+			t.Fatalf("ReplicateSnapshot returned error: %v", err)
+		}
+		if got := strings.Join(source.exportCalls, ","); got != "snap-1" {
+			t.Fatalf("source export calls = %q, want snap-1", got)
+		}
+		if got := strings.Join(target.importCalls, ","); got != "bundle:snap-1" {
+			t.Fatalf("target import calls = %q, want bundle:snap-1", got)
+		}
+		if got := strings.Join(resp.Skipped, ","); got != "snap-1" {
+			t.Fatalf("skipped = %q, want snap-1", got)
+		}
+		if got := strings.Join(store.SnapshotHosts("snap-1"), ","); got != "host-b" {
+			t.Fatalf("snapshot hosts = %q, want host-b", got)
+		}
+	})
+
+	t.Run("conflict import does not record locality", func(t *testing.T) {
+		source := &routerFakeDaemon{snapshotList: []SnapshotInfo{{SnapshotID: "snap-1", SnapshotType: "full"}}}
+		target := &routerFakeDaemon{
+			snapshotList: []SnapshotInfo{{SnapshotID: "snap-1", SnapshotType: "full"}},
+			importErrForBody: map[string]error{
+				"bundle:snap-1": &DaemonError{StatusCode: 409, Body: "conflict raw daemon body"},
+			},
+		}
+		store := NewPlacementStore("")
+		router := newSnapshotReplicationTestRouter(source, target, store, true, true)
+
+		resp, err := router.ReplicateSnapshot(context.Background(), SnapshotReplicationRequest{
+			SnapshotID:          "snap-1",
+			SourceHost:          "host-a",
+			TargetHost:          "host-b",
+			IncludeDependencies: true,
+		})
+		if err != nil {
+			t.Fatalf("ReplicateSnapshot returned error: %v", err)
+		}
+		if resp.Status != "failed" {
+			t.Fatalf("status = %q, want failed", resp.Status)
+		}
+		if got := strings.Join(source.exportCalls, ","); got != "snap-1" {
+			t.Fatalf("source export calls = %q, want snap-1", got)
+		}
+		if got := strings.Join(target.importCalls, ","); got != "bundle:snap-1" {
+			t.Fatalf("target import calls = %q, want bundle:snap-1", got)
+		}
+		if hosts := store.SnapshotHosts("snap-1"); len(hosts) != 0 {
+			t.Fatalf("snapshot hosts = %+v, want empty", hosts)
+		}
+	})
+}
+
+func TestRuntimeRouterReplicateClosesExportStreamOnImportFailure(t *testing.T) {
+	body := &routerTrackingReadCloser{Reader: strings.NewReader("bundle:snap-1")}
+	source := &routerFakeDaemon{
+		snapshotList:  []SnapshotInfo{{SnapshotID: "snap-1", SnapshotType: "full"}},
+		exportStreams: map[string]io.ReadCloser{"snap-1": body},
+	}
+	target := &routerFakeDaemon{importErrForBody: map[string]error{"bundle:snap-1": errors.New("import failed")}}
+	router := newSnapshotReplicationTestRouter(source, target, NewPlacementStore(""), true, true)
+
+	resp, err := router.ReplicateSnapshot(context.Background(), SnapshotReplicationRequest{
+		SnapshotID:          "snap-1",
+		SourceHost:          "host-a",
+		TargetHost:          "host-b",
+		IncludeDependencies: true,
+	})
+	if err != nil {
+		t.Fatalf("ReplicateSnapshot returned error: %v", err)
+	}
+	if resp.Status != "failed" {
+		t.Fatalf("status = %q, want failed", resp.Status)
+	}
+	if !body.closed {
+		t.Fatal("export stream was not closed after import failure")
+	}
+}
+
+func TestRuntimeRouterReplicateScrubsSourceListDaemonErrorBody(t *testing.T) {
+	source := &routerFakeDaemon{listSnapshotErr: &DaemonError{StatusCode: 500, Body: "agent_token secret raw body"}}
+	target := &routerFakeDaemon{}
+	router := newSnapshotReplicationTestRouter(source, target, NewPlacementStore(""), true, true)
+
+	_, err := router.ReplicateSnapshot(context.Background(), SnapshotReplicationRequest{
+		SnapshotID:          "snap-1",
+		SourceHost:          "host-a",
+		TargetHost:          "host-b",
+		IncludeDependencies: true,
+	})
+	if err == nil {
+		t.Fatal("ReplicateSnapshot error = nil, want safe source list error")
+	}
+	errText := err.Error()
+	for _, forbidden := range []string{"agent_token", "secret", "raw body"} {
+		if strings.Contains(errText, forbidden) {
+			t.Fatalf("error %q contains forbidden raw body text %q", errText, forbidden)
+		}
+	}
+	if !strings.Contains(errText, "source_list_failed") || !strings.Contains(errText, "status_code=500") {
+		t.Fatalf("error = %q, want safe source list failure with status code", errText)
+	}
+}
+
+func TestRuntimeRouterReplicateReportsTransferWhenPlacementSaveFails(t *testing.T) {
+	source := &routerFakeDaemon{snapshotList: []SnapshotInfo{{SnapshotID: "snap-1", SnapshotType: "full"}}}
+	target := &routerFakeDaemon{}
+	store := NewPlacementStore(t.TempDir())
+	router := newSnapshotReplicationTestRouter(source, target, store, true, true)
+
+	resp, err := router.ReplicateSnapshot(context.Background(), SnapshotReplicationRequest{
+		SnapshotID:          "snap-1",
+		SourceHost:          "host-a",
+		TargetHost:          "host-b",
+		IncludeDependencies: true,
+	})
+	if err != nil {
+		t.Fatalf("ReplicateSnapshot returned error: %v", err)
+	}
+	if resp.Status != "partial" {
+		t.Fatalf("status = %q, want partial", resp.Status)
+	}
+	if got := strings.Join(resp.Replicated, ","); got != "snap-1" {
+		t.Fatalf("replicated = %q, want snap-1", got)
+	}
+	if len(resp.Errors) != 1 || !strings.Contains(resp.Errors[0], "record_location_failed") {
+		t.Fatalf("errors = %+v, want record_location_failed", resp.Errors)
+	}
+}
+
+type routerTrackingReadCloser struct {
+	*strings.Reader
+	closed bool
+}
+
+func (r *routerTrackingReadCloser) Close() error {
+	r.closed = true
+	return nil
 }
 
 func newSnapshotReplicationTestRouter(source, target *routerFakeDaemon, store *PlacementStore, sourceHealthy, targetHealthy bool) *RuntimeRouter {

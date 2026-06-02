@@ -2,6 +2,7 @@ package anvilmcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -83,11 +84,11 @@ func (r *RuntimeRouter) ReplicateSnapshot(ctx context.Context, req SnapshotRepli
 
 	sourceSnapshots, err := source.ListSnapshots(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("list snapshots on source host %q: %w", sourceHostName, err)
+		return nil, errors.New(safeReplicationError("source_list_failed", "", "source", sourceHostName, err))
 	}
 	targetSnapshots, err := target.ListSnapshots(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("list snapshots on target host %q: %w", targetHostName, err)
+		return nil, errors.New(safeReplicationError("target_list_failed", "", "target", targetHostName, err))
 	}
 
 	requested, ok := snapshotInfoByID(sourceSnapshots, snapshotID)
@@ -104,7 +105,7 @@ func (r *RuntimeRouter) ReplicateSnapshot(ctx context.Context, req SnapshotRepli
 	}
 
 	var transferOrder []SnapshotInfo
-	if isDiffSnapshot(requested) && !targetSnapshotIDs[snapshotID] {
+	if isDiffSnapshot(requested) {
 		baseSnapshotID := strings.TrimSpace(requested.BaseSnapshotID)
 		if baseSnapshotID == "" || !targetSnapshotIDs[baseSnapshotID] {
 			if !req.IncludeDependencies {
@@ -128,25 +129,16 @@ func (r *RuntimeRouter) ReplicateSnapshot(ctx context.Context, req SnapshotRepli
 		if id == "" {
 			continue
 		}
-		if targetSnapshotIDs[id] {
-			if err := r.recordSnapshotLocation(id, targetHostName); err != nil {
-				resp.Status = statusForFailure(resp)
-				resp.Errors = append(resp.Errors, fmt.Sprintf("record snapshot location %s on %s: %v", id, targetHostName, err))
-				return resp, nil
-			}
-			resp.Skipped = append(resp.Skipped, id)
-			continue
-		}
 
 		stream, err := source.ExportSnapshot(ctx, id)
 		if err != nil {
 			resp.Status = statusForFailure(resp)
-			resp.Errors = append(resp.Errors, fmt.Sprintf("export %s: %v", id, err))
+			resp.Errors = append(resp.Errors, safeReplicationError("export_failed", id, "source", sourceHostName, err))
 			return resp, nil
 		}
 		if stream == nil || stream.Body == nil {
 			resp.Status = statusForFailure(resp)
-			resp.Errors = append(resp.Errors, fmt.Sprintf("export %s: empty snapshot stream", id))
+			resp.Errors = append(resp.Errors, safeReplicationError("export_failed", id, "source", sourceHostName, nil))
 			return resp, nil
 		}
 
@@ -154,25 +146,25 @@ func (r *RuntimeRouter) ReplicateSnapshot(ctx context.Context, req SnapshotRepli
 		closeErr := stream.Body.Close()
 		if importErr != nil {
 			resp.Status = statusForFailure(resp)
-			resp.Errors = append(resp.Errors, fmt.Sprintf("import %s: %v", id, importErr))
+			resp.Errors = append(resp.Errors, safeReplicationError("import_failed", id, "target", targetHostName, importErr))
 			return resp, nil
 		}
 		if closeErr != nil {
 			resp.Status = statusForFailure(resp)
-			resp.Errors = append(resp.Errors, fmt.Sprintf("close export stream %s: %v", id, closeErr))
+			resp.Errors = append(resp.Errors, safeReplicationError("close_export_stream_failed", id, "source", sourceHostName, closeErr))
 			return resp, nil
 		}
 
 		targetSnapshotIDs[id] = true
-		if err := r.recordSnapshotLocation(id, targetHostName); err != nil {
-			resp.Status = statusForFailure(resp)
-			resp.Errors = append(resp.Errors, fmt.Sprintf("record snapshot location %s on %s: %v", id, targetHostName, err))
-			return resp, nil
-		}
 		if importResp != nil && importResp.Status == "already_present" {
 			resp.Skipped = append(resp.Skipped, id)
 		} else {
 			resp.Replicated = append(resp.Replicated, id)
+		}
+		if err := r.recordSnapshotLocation(id, targetHostName); err != nil {
+			resp.Status = statusForFailure(resp)
+			resp.Errors = append(resp.Errors, safeReplicationError("record_location_failed", id, "target", targetHostName, err))
+			return resp, nil
 		}
 	}
 
@@ -198,6 +190,24 @@ func statusForFailure(resp *SnapshotReplicationResponse) string {
 		return "partial"
 	}
 	return "failed"
+}
+
+func safeReplicationError(operation, snapshotID, hostRole, hostName string, err error) string {
+	parts := []string{operation}
+	if snapshotID = strings.TrimSpace(snapshotID); snapshotID != "" {
+		parts = append(parts, "snapshot_id="+snapshotID)
+	}
+	if hostRole = strings.TrimSpace(hostRole); hostRole != "" {
+		parts = append(parts, "host_role="+hostRole)
+	}
+	if hostName = strings.TrimSpace(hostName); hostName != "" {
+		parts = append(parts, "host="+hostName)
+	}
+	var daemonErr *DaemonError
+	if errors.As(err, &daemonErr) {
+		parts = append(parts, fmt.Sprintf("status_code=%d", daemonErr.StatusCode))
+	}
+	return strings.Join(parts, " ")
 }
 
 func snapshotInfoByID(snapshots []SnapshotInfo, snapshotID string) (SnapshotInfo, bool) {
