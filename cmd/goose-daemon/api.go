@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -12,6 +11,7 @@ import (
 	"io"
 	"log"
 	"log/slog"
+	"mime"
 	"net/http"
 	"os"
 	"os/exec"
@@ -515,6 +515,8 @@ func (cp *ControlPlane) Start() error {
 		"  GET    /snapshots                        — list snapshots\n" +
 		"  POST   /snapshots/gc                     — plan/apply snapshot retention GC\n" +
 		"  POST   /snapshots/{snapshot_id}/restore  — restore VM from snapshot\n" +
+		"  POST   /snapshots/{snapshot_id}/export   — export snapshot bundle\n" +
+		"  POST   /snapshots/import                 — import snapshot bundle\n" +
 		"  DELETE /snapshots/{snapshot_id}          — delete snapshot\n" +
 		"  POST   /flocks                           — create multi-agent flock\n" +
 		"  GET    /flocks                           — list flocks\n" +
@@ -2029,27 +2031,61 @@ func (cp *ControlPlane) handleSnapshotExport(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	cp.snapshotLifecycleMu.Lock()
-	defer cp.snapshotLifecycleMu.Unlock()
-
-	cp.snapshotsMu.RLock()
-	_, ok := cp.snapshots[snapID]
-	cp.snapshotsMu.RUnlock()
-	if !ok {
-		writeJSONError(w, http.StatusNotFound, "snapshot_not_found")
-		return
-	}
-
-	var bundle bytes.Buffer
-	if _, err := storage.ExportSnapshotBundle(cp.workDir, snapID, &bundle); err != nil {
-		slog.Warn("snapshot export failed", "snapshot_id", snapID, "err", err)
+	tmpDir := filepath.Join(cp.workDir, "tmp")
+	if err := os.MkdirAll(tmpDir, 0700); err != nil {
+		slog.Warn("snapshot export temp dir failed", "snapshot_id", snapID, "dir", tmpDir, "err", err)
 		writeJSONError(w, http.StatusInternalServerError, "snapshot_export_failed")
 		return
 	}
 
+	var tmpPath string
+	cp.snapshotLifecycleMu.Lock()
+	cp.snapshotsMu.RLock()
+	_, ok := cp.snapshots[snapID]
+	cp.snapshotsMu.RUnlock()
+	if !ok {
+		cp.snapshotLifecycleMu.Unlock()
+		writeJSONError(w, http.StatusNotFound, "snapshot_not_found")
+		return
+	}
+
+	tmp, err := os.CreateTemp(tmpDir, "snapshot-export-*.tar")
+	if err != nil {
+		cp.snapshotLifecycleMu.Unlock()
+		slog.Warn("snapshot export temp file failed", "snapshot_id", snapID, "dir", tmpDir, "err", err)
+		writeJSONError(w, http.StatusInternalServerError, "snapshot_export_failed")
+		return
+	}
+	tmpPath = tmp.Name()
+	_, exportErr := storage.ExportSnapshotBundle(cp.workDir, snapID, tmp)
+	closeErr := tmp.Close()
+	cp.snapshotLifecycleMu.Unlock()
+	defer os.Remove(tmpPath)
+
+	if exportErr != nil {
+		slog.Warn("snapshot export failed", "snapshot_id", snapID, "err", exportErr)
+		writeJSONError(w, http.StatusInternalServerError, "snapshot_export_failed")
+		return
+	}
+	if closeErr != nil {
+		slog.Warn("snapshot export temp close failed", "snapshot_id", snapID, "path", tmpPath, "err", closeErr)
+		writeJSONError(w, http.StatusInternalServerError, "snapshot_export_failed")
+		return
+	}
+
+	bundle, err := os.Open(tmpPath)
+	if err != nil {
+		slog.Warn("snapshot export failed", "snapshot_id", snapID, "err", err)
+		writeJSONError(w, http.StatusInternalServerError, "snapshot_export_failed")
+		return
+	}
+	defer bundle.Close()
+
 	w.Header().Set("Content-Type", storage.SnapshotBundleContentType)
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(bundle.Bytes())
+	if _, err := io.Copy(w, bundle); err != nil {
+		slog.Warn("snapshot export response write failed", "snapshot_id", snapID, "err", err)
+	}
 }
 
 func (cp *ControlPlane) handleSnapshotImport(w http.ResponseWriter, r *http.Request) {
@@ -2058,7 +2094,8 @@ func (cp *ControlPlane) handleSnapshotImport(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
 		return
 	}
-	if ct := strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"), ";")[0]); ct != storage.SnapshotBundleContentType {
+	ct, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || !strings.EqualFold(ct, storage.SnapshotBundleContentType) {
 		writeJSONError(w, http.StatusBadRequest, "invalid snapshot bundle content type")
 		return
 	}

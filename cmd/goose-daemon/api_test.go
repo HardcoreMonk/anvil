@@ -47,6 +47,29 @@ func newTestCP(t *testing.T) *ControlPlane {
 	return cp
 }
 
+func newTestControlPlaneWithHandler(t *testing.T) *ControlPlane {
+	t.Helper()
+	tmp := t.TempDir()
+	defaultCfg := filepath.Join(tmp, "goose.yaml")
+	defaultSec := filepath.Join(tmp, "goose-secrets.yaml")
+	if err := os.WriteFile(defaultCfg, []byte("GOOSE_PROVIDER: default\n"), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(defaultSec, []byte("DEFAULT_KEY: x\n"), 0644); err != nil {
+		t.Fatalf("write secrets: %v", err)
+	}
+	cp := NewControlPlane(nil, nil, "", "", defaultCfg, defaultSec, tmp, filepath.Join(tmp, "snapshots"))
+	cp.clients = []APIClient{{Name: "operator", Token: "secret-token"}}
+	cp.agentHTTPClient = &http.Client{Timeout: time.Second}
+	return cp
+}
+
+func authorizedRequest(method, target string, body io.Reader) *http.Request {
+	req := httptest.NewRequest(method, target, body)
+	req.Header.Set("Authorization", "Bearer secret-token")
+	return req
+}
+
 func TestCreateFlockRejectsInvalidTenantBeforeRegistration(t *testing.T) {
 	cp := newTestCP(t)
 	cp.flockMgr = orchestrator.NewFlockManager(cp.workDir)
@@ -545,6 +568,21 @@ func exportSnapshotBundleFixture(t *testing.T, workDir, snapshotID string) []byt
 		t.Fatalf("export snapshot bundle fixture: %v", err)
 	}
 	return bundle.Bytes()
+}
+
+type snapshotExportLockCheckingRecorder struct {
+	*httptest.ResponseRecorder
+	cp                *ControlPlane
+	lockedDuringWrite bool
+}
+
+func (r *snapshotExportLockCheckingRecorder) Write(b []byte) (int, error) {
+	if r.cp.snapshotLifecycleMu.TryLock() {
+		r.cp.snapshotLifecycleMu.Unlock()
+	} else {
+		r.lockedDuringWrite = true
+	}
+	return r.ResponseRecorder.Write(b)
 }
 
 func snapshotIDs(entries []SnapshotGCEntry) []string {
@@ -1186,6 +1224,48 @@ func TestHandleSnapshotExportStreamsBundle(t *testing.T) {
 	}
 }
 
+func TestHandleSnapshotExportDoesNotHoldLifecycleLockWhileWriting(t *testing.T) {
+	cp := newTestCP(t)
+	meta := testSnapshotMeta("snap-1", "vm-1", "full", time.Now().UTC())
+	meta = writeSnapshotBundleFixture(t, cp.workDir, meta)
+	cp.snapshots[meta.SnapshotID] = meta
+
+	req := httptest.NewRequest(http.MethodPost, "/snapshots/snap-1/export", nil)
+	rr := &snapshotExportLockCheckingRecorder{
+		ResponseRecorder: httptest.NewRecorder(),
+		cp:               cp,
+	}
+	cp.handleSnapshotItem(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q; want 200", rr.Code, rr.Body.String())
+	}
+	if rr.lockedDuringWrite {
+		t.Fatal("snapshotLifecycleMu was held while writing export response")
+	}
+}
+
+func TestHandleSnapshotExportFailureDoesNotReturnBundleResponse(t *testing.T) {
+	cp := newTestCP(t)
+	meta := testSnapshotMeta("snap-corrupt", "vm-1", "full", time.Now().UTC())
+	meta = writeSnapshotBundleFixture(t, cp.workDir, meta)
+	cp.snapshots[meta.SnapshotID] = meta
+	if err := os.Remove(filepath.Join(storage.SnapshotDir(cp.workDir, meta.SnapshotID), "rootfs.ext4")); err != nil {
+		t.Fatalf("remove rootfs fixture: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/snapshots/snap-corrupt/export", nil)
+	rr := httptest.NewRecorder()
+	cp.handleSnapshotItem(rr, req)
+
+	if rr.Code == http.StatusOK {
+		t.Fatalf("status = %d, body len = %d; want non-200", rr.Code, rr.Body.Len())
+	}
+	if got := rr.Header().Get("Content-Type"); strings.HasPrefix(got, storage.SnapshotBundleContentType) {
+		t.Fatalf("content-type = %q, want non-bundle error response", got)
+	}
+}
+
 func TestHandleSnapshotImportPublishesSnapshot(t *testing.T) {
 	sourceDir := t.TempDir()
 	meta := testSnapshotMeta("snap-import", "vm-1", "full", time.Now().UTC())
@@ -1213,6 +1293,71 @@ func TestHandleSnapshotImportPublishesSnapshot(t *testing.T) {
 	}
 	if _, err := os.Stat(storage.SnapshotDir(cp.workDir, "snap-import")); err != nil {
 		t.Fatalf("imported snapshot directory missing: %v", err)
+	}
+}
+
+func TestSnapshotBundleRoutesThroughControlPlaneHandler(t *testing.T) {
+	sourceDir := t.TempDir()
+	meta := testSnapshotMeta("snap-route", "vm-1", "full", time.Now().UTC())
+	writeSnapshotBundleFixture(t, sourceDir, meta)
+	bundle := exportSnapshotBundleFixture(t, sourceDir, "snap-route")
+
+	cp := newTestControlPlaneWithHandler(t)
+	importReq := authorizedRequest(http.MethodPost, "/snapshots/import", bytes.NewReader(bundle))
+	importReq.Header.Set("Content-Type", storage.SnapshotBundleContentType)
+	importRR := httptest.NewRecorder()
+	cp.srv.Handler.ServeHTTP(importRR, importReq)
+	if importRR.Code != http.StatusCreated {
+		t.Fatalf("import status = %d, body = %q; want 201", importRR.Code, importRR.Body.String())
+	}
+	if _, ok := cp.snapshots["snap-route"]; !ok {
+		t.Fatal("mux import route did not publish snapshot")
+	}
+
+	exportReq := authorizedRequest(http.MethodPost, "/snapshots/snap-route/export", nil)
+	exportRR := httptest.NewRecorder()
+	cp.srv.Handler.ServeHTTP(exportRR, exportReq)
+	if exportRR.Code != http.StatusOK {
+		t.Fatalf("export status = %d, body = %q; want 200", exportRR.Code, exportRR.Body.String())
+	}
+	if got := exportRR.Header().Get("Content-Type"); got != storage.SnapshotBundleContentType {
+		t.Fatalf("export content-type = %q, want %q", got, storage.SnapshotBundleContentType)
+	}
+}
+
+func TestHandleSnapshotImportAcceptsParameterizedContentType(t *testing.T) {
+	sourceDir := t.TempDir()
+	meta := testSnapshotMeta("snap-content-type", "vm-1", "full", time.Now().UTC())
+	writeSnapshotBundleFixture(t, sourceDir, meta)
+	bundle := exportSnapshotBundleFixture(t, sourceDir, "snap-content-type")
+
+	cp := newTestCP(t)
+	req := httptest.NewRequest(http.MethodPost, "/snapshots/import", bytes.NewReader(bundle))
+	req.Header.Set("Content-Type", "Application/Vnd.Anvil.Snapshot-Bundle; charset=binary")
+	rr := httptest.NewRecorder()
+	cp.handleSnapshotImport(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %q; want 201", rr.Code, rr.Body.String())
+	}
+	if _, ok := cp.snapshots["snap-content-type"]; !ok {
+		t.Fatal("imported snapshot was not added to cp.snapshots")
+	}
+}
+
+func TestHandleSnapshotImportRejectsInvalidContentType(t *testing.T) {
+	for _, contentType := range []string{"", "%", "application/octet-stream"} {
+		t.Run(contentType, func(t *testing.T) {
+			cp := newTestCP(t)
+			req := httptest.NewRequest(http.MethodPost, "/snapshots/import", strings.NewReader("not a bundle"))
+			req.Header.Set("Content-Type", contentType)
+			rr := httptest.NewRecorder()
+			cp.handleSnapshotImport(rr, req)
+
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, body = %q; want 400", rr.Code, rr.Body.String())
+			}
+		})
 	}
 }
 
