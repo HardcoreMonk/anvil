@@ -184,6 +184,13 @@ func TestSchedulerProcessLoadsHostsPollsMetricsAndSchedules(t *testing.T) {
 	if err := stale.Save(); err != nil {
 		t.Fatalf("Save stale scheduler state: %v", err)
 	}
+	quotas := anvilmcp.NewQuotaStore(quotaPath)
+	if err := quotas.SetTenantQuota("tenant-1", anvilmcp.TenantQuota{ActiveVMs: 2}); err != nil {
+		t.Fatalf("SetTenantQuota tenant-1: %v", err)
+	}
+	if err := quotas.Save(); err != nil {
+		t.Fatalf("Save scheduler quota store: %v", err)
+	}
 	hostsJSON := fmt.Sprintf(`{"hosts":[{"name":"host-a","endpoint":%q,"available_vms":2,"available_snapshot_bytes":4096,"egress_policies":["profile"]}]}`, fakeDaemon.URL)
 	if err := os.WriteFile(hostsPath, []byte(hostsJSON), 0600); err != nil {
 		t.Fatalf("write hosts file: %v", err)
