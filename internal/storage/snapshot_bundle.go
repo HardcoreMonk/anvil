@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -166,6 +167,14 @@ func ImportSnapshotBundle(workDir string, src io.Reader) (SnapshotImportResult, 
 	}
 	if err := snapshotBundleValidateManifestMetadata(manifest, meta); err != nil {
 		return SnapshotImportResult{}, err
+	}
+	if err := snapshotBundleValidateSnapshotID(manifest.SnapshotID); err != nil {
+		return SnapshotImportResult{}, err
+	}
+	if manifest.BaseSnapshotID != "" {
+		if err := snapshotBundleValidateSnapshotID(manifest.BaseSnapshotID); err != nil {
+			return SnapshotImportResult{}, err
+		}
 	}
 	if err := snapshotBundleValidateManifestFiles(stageDir, manifest); err != nil {
 		return SnapshotImportResult{}, err
@@ -346,9 +355,6 @@ func snapshotBundleLoadManifest(path string) (SnapshotExportManifest, error) {
 }
 
 func snapshotBundleValidateManifestMetadata(manifest SnapshotExportManifest, meta SnapshotMetadata) error {
-	if manifest.SnapshotID == "" {
-		return fmt.Errorf("%w: empty snapshot id", ErrSnapshotBundleInvalid)
-	}
 	if manifest.SnapshotID != meta.SnapshotID {
 		return fmt.Errorf("%w: snapshot id mismatch", ErrSnapshotBundleInvalid)
 	}
@@ -360,6 +366,28 @@ func snapshotBundleValidateManifestMetadata(manifest SnapshotExportManifest, met
 	}
 	if !manifest.CreatedAt.Equal(meta.CreatedAt) {
 		return fmt.Errorf("%w: created_at mismatch", ErrSnapshotBundleInvalid)
+	}
+	return nil
+}
+
+func snapshotBundleValidateSnapshotID(snapshotID string) error {
+	if snapshotID == "" {
+		return fmt.Errorf("%w: empty snapshot id", ErrSnapshotBundleInvalid)
+	}
+	if filepath.IsAbs(snapshotID) {
+		return fmt.Errorf("%w: absolute snapshot id", ErrSnapshotBundleInvalid)
+	}
+	if filepath.Base(snapshotID) != snapshotID || filepath.Clean(snapshotID) != snapshotID {
+		return fmt.Errorf("%w: path-like snapshot id", ErrSnapshotBundleInvalid)
+	}
+	if snapshotID == "." || snapshotID == ".." {
+		return fmt.Errorf("%w: path-like snapshot id", ErrSnapshotBundleInvalid)
+	}
+	if strings.Contains(snapshotID, "..") {
+		return fmt.Errorf("%w: path-like snapshot id", ErrSnapshotBundleInvalid)
+	}
+	if strings.ContainsAny(snapshotID, `/\`) {
+		return fmt.Errorf("%w: path-like snapshot id", ErrSnapshotBundleInvalid)
 	}
 	return nil
 }

@@ -3,6 +3,8 @@ package storage
 import (
 	"archive/tar"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -141,6 +143,29 @@ func TestImportSnapshotBundleIdempotentAndConflict(t *testing.T) {
 	}
 }
 
+func TestImportSnapshotBundleRejectsPathLikeSnapshotID(t *testing.T) {
+	sourceWorkDir := t.TempDir()
+	writeSnapshotBundleFixture(t, sourceWorkDir, "snap-1", "full", "")
+
+	var buf bytes.Buffer
+	if _, err := ExportSnapshotBundle(sourceWorkDir, "snap-1", &buf); err != nil {
+		t.Fatalf("export snapshot bundle: %v", err)
+	}
+	bundleBytes := mutateSnapshotBundleID(t, buf.Bytes(), "../outside")
+
+	targetWorkDir := t.TempDir()
+	err := importSnapshotBundleDiscard(targetWorkDir, bundleBytes)
+	if !errors.Is(err, ErrSnapshotBundleInvalid) {
+		t.Fatalf("import error = %v, want ErrSnapshotBundleInvalid", err)
+	}
+	if _, err := os.Stat(filepath.Join(targetWorkDir, "outside")); !os.IsNotExist(err) {
+		t.Fatalf("path-like snapshot id created %s: %v", filepath.Join(targetWorkDir, "outside"), err)
+	}
+	if _, err := os.Stat(filepath.Join(targetWorkDir, "snapshots", "outside")); !os.IsNotExist(err) {
+		t.Fatalf("path-like snapshot id created %s: %v", filepath.Join(targetWorkDir, "snapshots", "outside"), err)
+	}
+}
+
 func TestSnapshotExportManifestDoesNotExposeAgentToken(t *testing.T) {
 	workDir := t.TempDir()
 	writeSnapshotBundleFixture(t, workDir, "snap-1", "full", "")
@@ -228,4 +253,61 @@ func readSnapshotBundleTar(t *testing.T, bundle []byte) map[string][]byte {
 func importSnapshotBundleDiscard(workDir string, bundle []byte) error {
 	_, err := ImportSnapshotBundle(workDir, bytes.NewReader(bundle))
 	return err
+}
+
+func mutateSnapshotBundleID(t *testing.T, bundle []byte, snapshotID string) []byte {
+	t.Helper()
+
+	entries := readSnapshotBundleTar(t, bundle)
+
+	var manifest SnapshotExportManifest
+	if err := json.Unmarshal(entries["manifest.json"], &manifest); err != nil {
+		t.Fatalf("parse manifest fixture: %v", err)
+	}
+	manifest.SnapshotID = snapshotID
+	manifestBytes, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("marshal mutated manifest: %v", err)
+	}
+	entries["manifest.json"] = manifestBytes
+
+	var meta SnapshotMetadata
+	if err := json.Unmarshal(entries["metadata.json"], &meta); err != nil {
+		t.Fatalf("parse metadata fixture: %v", err)
+	}
+	meta.SnapshotID = snapshotID
+	metadataBytes, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatalf("marshal mutated metadata: %v", err)
+	}
+	entries["metadata.json"] = metadataBytes
+
+	for i := range manifest.Files {
+		if manifest.Files[i].Path == "metadata.json" {
+			sum := sha256.Sum256(metadataBytes)
+			manifest.Files[i].SizeBytes = int64(len(metadataBytes))
+			manifest.Files[i].SHA256 = hex.EncodeToString(sum[:])
+		}
+	}
+	manifestBytes, err = json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("marshal mutated manifest with metadata checksum: %v", err)
+	}
+	entries["manifest.json"] = manifestBytes
+
+	var out bytes.Buffer
+	tw := tar.NewWriter(&out)
+	for _, name := range []string{"manifest.json", "metadata.json", "memory.bin", "state.bin", "rootfs.ext4"} {
+		data := entries[name]
+		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0600, Size: int64(len(data))}); err != nil {
+			t.Fatalf("write mutated tar header %s: %v", name, err)
+		}
+		if _, err := tw.Write(data); err != nil {
+			t.Fatalf("write mutated tar entry %s: %v", name, err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close mutated tar: %v", err)
+	}
+	return out.Bytes()
 }
