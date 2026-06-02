@@ -79,8 +79,8 @@ func TestSchedulerServiceMetricsEndpoint(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("GET /metrics status = %d body=%s, want 200", rr.Code, rr.Body.String())
 	}
-	if contentType := rr.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "text/plain") {
-		t.Fatalf("Content-Type = %q, want text/plain", contentType)
+	if contentType := rr.Header().Get("Content-Type"); contentType != schedulerMetricsContentType {
+		t.Fatalf("Content-Type = %q, want %q", contentType, schedulerMetricsContentType)
 	}
 	requireMetricLine(t, rr.Body.String(), "anvil_scheduler_control_loop_running 1")
 	requireMetricLine(t, rr.Body.String(), "anvil_scheduler_host_status_count{status=\"healthy\"} 1")
