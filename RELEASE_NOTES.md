@@ -2,6 +2,15 @@
 
 ## 추가됨
 
+- manual cross-host snapshot replication:
+  - daemon `POST /snapshots/{id}/export`는
+    `application/vnd.anvil.snapshot-bundle` streamable bundle을 export한다.
+  - daemon `POST /snapshots/import`는 bundle을 staging/validation 후 atomic publish로
+    target snapshot directory에 반입한다.
+  - MCP `anvil_replicate_snapshot`은 `snapshot_id`, `source_host`, `target_host`,
+    `include_dependencies` 입력으로 source export stream을 target import로 전달한다.
+  - RuntimeRouter는 replication 성공 후 target host만 scheduler
+    `PlacementStoreState.SnapshotLocations`에 기록한다.
 - scheduler service 전용 `GET /metrics` endpoint:
   - `anvil_scheduler_control_loop_running`
   - `anvil_scheduler_persistence_degraded`
@@ -15,6 +24,10 @@
 
 ## 보안/운영 강화
 
+- replication response, audit, operator 문서는 `agent_token`, authorization header,
+  daemon raw body, raw `metadata.json` body를 노출하지 않는다.
+- diff snapshot replication은 target host에 base full snapshot이 필요하다.
+  `include_dependencies=true`이면 router가 base full을 먼저 복제하고 diff를 복제한다.
 - scheduler metrics에는 `agent_token`, host endpoint, daemon raw response,
   authorization header, snapshot metadata가 들어가지 않는다.
 - 실제 systemd 검증은 명시적 operator action으로 유지한다:

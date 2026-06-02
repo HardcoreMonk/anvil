@@ -23,6 +23,10 @@
   full-process integration test, scheduler `/metrics`, smoke의 `/metrics` 확인,
   실제 systemd `--start --verify` 결과는
   `docs/operations/2026-06-02-scheduler-operations-hardening-handoff.md`에 기록했다.
+- 4번 cross-host snapshot replication은 2026-06-02 feature branch에서 구현 완료
+  상태로 전환됐다. 설계와 구현 계획은
+  `docs/superpowers/specs/2026-06-02-cross-host-snapshot-replication-design.md`,
+  `docs/superpowers/plans/2026-06-02-cross-host-snapshot-replication.md`를 기준으로 한다.
 
 ## 1. Scheduler full-process integration test
 
@@ -104,6 +108,17 @@ degraded 상태를 사람이 curl로 확인하기 전에 알림으로 받아야 
 
 ## 4. Cross-host snapshot replication
 
+### 상태
+
+구현 완료. 2026-06-02 feature branch에서 daemon snapshot bundle export/import,
+MCP `anvil_replicate_snapshot`, RuntimeRouter streaming replication, scheduler
+`SnapshotLocations` 갱신이 반영됐다.
+
+설계/계획:
+
+- `docs/superpowers/specs/2026-06-02-cross-host-snapshot-replication-design.md`
+- `docs/superpowers/plans/2026-06-02-cross-host-snapshot-replication.md`
+
 ### 목표
 
 snapshot locality 정보를 실제 cross-host snapshot replication과 연결한다.
@@ -124,10 +139,13 @@ scheduler는 snapshot locality preference를 고려할 준비가 되어 있지�
 
 ### 완료 기준
 
-- snapshot metadata가 host별 location을 표현한다.
-- replication 성공/실패가 audit/state에 남는다.
-- restore scheduler가 복제된 host location을 선택에 반영한다.
-- diff snapshot이 참조하는 full snapshot은 복제/삭제 순서에서 보호된다.
+- 완료: scheduler `PlacementStoreState.SnapshotLocations`가 성공한 target host를
+  표현한다.
+- 완료: replication 성공은 scheduler state에 반영되고 operator-facing response는
+  secret/raw body를 노출하지 않는다.
+- 완료: restore scheduler는 복제된 host location을 선택에 반영할 수 있다.
+- 완료: `include_dependencies=true`는 diff snapshot의 base full snapshot을 먼저
+  복제한다.
 
 ## 5. Scheduler-aware cross-host flock placement
 

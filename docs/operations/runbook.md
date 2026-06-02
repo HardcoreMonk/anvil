@@ -310,3 +310,37 @@ curl -X POST http://127.0.0.1:3000/snapshots/gc \
 
 `apply:true` 호출은 `snapshots/gc-audit.jsonl`에 count-only audit record를 append한다.
 이 audit record에는 snapshot metadata 전체나 `agent_token`이 들어가지 않는다.
+
+## Snapshot cross-host replication
+
+복제 전 source/target daemon과 scheduler 상태를 확인한다.
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" http://host-a:3000/health
+curl -H "Authorization: Bearer $TOKEN" http://host-b:3000/health
+curl http://127.0.0.1:3010/placements
+```
+
+diff snapshot은 target host에 base full snapshot이 있어야 restore할 수 있다. 운영자가
+base 존재를 확신하지 못하면 `include_dependencies=true`를 사용한다.
+
+```bash
+anvil_replicate_snapshot \
+  snapshot_id=snap-1 \
+  source_host=host-a \
+  target_host=host-b \
+  include_dependencies=true
+```
+
+성공 후 scheduler `/placements` 또는 state file의 `snapshot_locations`에서 target host가
+기록됐는지 확인한다.
+
+```bash
+curl http://127.0.0.1:3010/placements
+```
+
+target import가 실패하면 daemon log를 확인하고 target snapshot directory 아래
+`snapshots/.import-*` staging directory가 남아 있지 않은지 점검한다. 남아 있다면 즉시
+수동 삭제하기 전에 같은 import를 재시도할지, daemon이 해당 staging path를 사용 중인지
+확인한다. replication response, audit, 운영 기록에는 `agent_token`, authorization
+header, daemon raw body, raw `metadata.json` body를 남기지 않는다.

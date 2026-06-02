@@ -184,7 +184,7 @@ IronClaw 관점에서 anvil은 다음 계약을 제공한다.
 
 - **Snapshot lifecycle tool**:
   `anvil_create_snapshot`, `anvil_list_snapshots`, `anvil_restore_snapshot`,
-  `anvil_delete_snapshot`을 제공한다.
+  `anvil_delete_snapshot`, `anvil_replicate_snapshot`을 제공한다.
 
 - **Session alias**:
   adapter process 내부에서 `session_name -> vm_id` alias를 유지해
@@ -233,6 +233,9 @@ ephemera control plane :3000
   POST   /vms/{vm_id}/snapshot -> VM snapshot 생성
   GET    /snapshots            -> snapshot 목록
   POST   /snapshots/gc         -> snapshot GC dry-run/apply
+  POST   /snapshots/{id}/export
+                                -> snapshot bundle export
+  POST   /snapshots/import     -> snapshot bundle import
   POST   /snapshots/{id}/restore
                                 -> snapshot에서 VM 복원
   DELETE /snapshots/{id}       -> snapshot 삭제
@@ -1154,6 +1157,11 @@ MCP tool:
 - `anvil_delete_snapshot`:
   `snapshot_id`로 snapshot을 삭제한다.
 
+- `anvil_replicate_snapshot`:
+  `snapshot_id`, `source_host`, `target_host`, `include_dependencies`로 host 간
+  snapshot bundle을 복제한다. diff snapshot에서 `include_dependencies=true`이면
+  base full snapshot을 먼저 target host로 복제한 뒤 diff를 복제한다.
+
 - `anvil_spawn_flock`:
   `task`, `roles`, optional `tenant_id`, optional `egress_policy`로 Goosetown
   flock을 생성한다. blank `task`, empty role, `/` 또는 `\`가 포함된 role은
@@ -1199,7 +1207,30 @@ metadata, daemon raw body, `agent_token`을 저장하지 않는다.
 scheduler-backed `RuntimeRouter`, JSON quota store, persistent placement/snapshot
 locality store, daemon `/tenants`, `/audit/runtime`, `/health`, `/metrics`,
 `/metrics/vms`를 제공한다. router는 snapshot locality preferred host, retry/failover,
-placement reconciliation helper를 제공한다.
+placement reconciliation helper를 제공한다. `anvil_replicate_snapshot`은
+RuntimeRouter가 source daemon의 `POST /snapshots/{id}/export` stream을 target
+daemon의 `POST /snapshots/import`로 전달하고, 성공한 target host만 scheduler
+`SnapshotLocations`에 기록한다. operator-facing response와 audit record는
+`agent_token`, authorization header, daemon raw body, raw `metadata.json` body를
+포함하지 않는다.
+
+MCP production config에서 기존 VM/snapshot tool은 `ANVIL_DAEMON_URL` direct daemon
+동작을 유지한다. replication만 router를 사용하며, router는 `scheduler_state_path`
+또는 `ANVIL_MCP_SCHEDULER_STATE`, `scheduler_hosts_file` 또는
+`ANVIL_MCP_SCHEDULER_HOSTS_FILE`이 설정된 경우 활성화된다.
+`scheduler_quota_store_path` 또는 `ANVIL_MCP_SCHEDULER_QUOTA_STORE`는 scheduler quota
+store를 함께 지정할 때 사용한다. host daemon client 인증에는 `ANVIL_API_TOKEN`을
+사용한다.
+
+예시:
+
+```bash
+anvil_replicate_snapshot \
+  snapshot_id=snap-1 \
+  source_host=host-a \
+  target_host=host-b \
+  include_dependencies=true
+```
 
 Scheduler service를 별도 process로 실행할 때는 다음 환경 변수를 사용한다.
 
@@ -1432,6 +1463,20 @@ curl -X POST http://localhost:3000/vms/vm-1778227813435/snapshot \
 curl http://localhost:3000/snapshots \
   -H "Authorization: Bearer $TOKEN"
 ```
+
+### Snapshot bundle export/import
+
+```text
+POST /snapshots/{id}/export       -> snapshot bundle export
+POST /snapshots/import            -> snapshot bundle import
+```
+
+`POST /snapshots/{id}/export`는 `application/vnd.anvil.snapshot-bundle` content type의
+streamable bundle을 반환한다. `POST /snapshots/import`는 target host에서 bundle을
+staging, validation, atomic publish 순서로 반입한다. cross-host 복제는 MCP
+`anvil_replicate_snapshot`을 통해 source export stream을 target import로 전달한다.
+diff snapshot 복제 시 `include_dependencies=true`를 사용하면 base full snapshot을
+먼저 복제하고 diff를 복제한다.
 
 ### Snapshot 복원
 
@@ -2093,9 +2138,9 @@ Requirements: a Google Gemini API key in `configs/goose-secrets.yaml`, `/dev/kvm
 
 | Limitation | Detail |
 |------------|--------|
-| **Single-host** | All VMs run on one physical host. Multi-host clustering is not supported. |
+| **Single-host VM runtime** | VM 실행 자체는 host-local daemon이 소유한다. Cross-host snapshot replication은 MCP router와 scheduler state를 통해 수동 운영 workflow로 지원한다. |
 | **Same-snapshot concurrent restores not supported** | The guest IP is reconfigured via vsock after restore, so different-snapshot concurrent restores each get a fresh IP. However, two VMs from the *same* snapshot would still collide on the Firecracker vsock UDS path (which is fixed in `state.bin`), so same-snapshot concurrent restores are not supported. |
-| **Cross-machine restore** | Supported manually: copy the `snapshots/<id>/` directory to the target host at the same absolute path, then call `POST /snapshots/{id}/restore`. Automated transfer is not built in. |
+| **Cross-machine restore** | `anvil_replicate_snapshot`으로 target host에 snapshot bundle을 import한 뒤 `POST /snapshots/{id}/restore`를 호출한다. diff snapshot은 target에 base full snapshot이 필요하며 `include_dependencies=true`가 base를 먼저 복제한다. |
 | **Cold-restart loses in-VM memory** (v0.3.2) | Live VM auto-restart re-boots each VM from its rootfs clone; the guest kernel and `goose-agent` start fresh. Any `/tasks` request in flight at the moment of daemon shutdown is dropped. Callers should idempotency-key tasks or re-poll for completion across a restart. |
 | **COW-mode VMs are not auto-recovered** (v0.3.2) | VMs spawned with `EPHEMERA_DISK_MODE=cow` are skipped during cold-restart (logged on startup). dm-snapshot orphan cleanup is deferred. Workaround: re-spawn the agent if you depend on it. |
 | **Snapshot-restored VMs are not auto-recovered** (v0.3.2) | Only spawn-path VMs are cold-restarted. After a daemon restart, call `POST /snapshots/{id}/restore` again to bring back a snapshot-derived VM. |

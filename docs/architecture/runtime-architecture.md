@@ -282,6 +282,16 @@ Snapshot type 선택:
 Diff snapshot은 sparse dirty memory page만 저장하고, `base_snapshot_id`로 full
 base snapshot을 참조한다. rootfs는 full/diff 모두 현재는 전체 copy한다.
 
+Cross-host snapshot import는 target host에서 bundle을 곧바로 최종 경로에 풀지 않는다.
+daemon은 `snapshots/.import-*` staging directory에 bundle payload를 먼저 기록하고,
+`metadata.json`, `memory.bin`, `state.bin`, `rootfs.ext4`와 diff
+`base_snapshot_id` dependency를 validation한다. validation이 끝나면 bundle 안의 host
+local path를 target daemon의 work directory 기준으로 rebase하고 최종
+`snapshots/<snapshot_id>/` directory로 atomic rename한다. publish 전 실패는 staging
+directory만 정리하며, 이미 존재하는 최종 snapshot directory를 부분 갱신하지 않는다.
+operator-facing import/replication 결과는 raw `metadata.json`, `agent_token`,
+authorization header를 포함하지 않는다.
+
 Restore는 Linux device-mapper snapshot COW를 우선 사용한다.
 
 ```text
