@@ -82,6 +82,22 @@ func TestImportSnapshotBundleRebasesPathsAndPublishesAtomically(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(targetSnapDir, "manifest.json")); err != nil {
 		t.Fatalf("published manifest.json missing: %v", err)
 	}
+
+	publishedManifest := loadSnapshotBundleManifestFixture(t, filepath.Join(targetSnapDir, "manifest.json"))
+	metadataInfo, err := snapshotBundleFileInfo(filepath.Join(targetSnapDir, "metadata.json"), "metadata.json")
+	if err != nil {
+		t.Fatalf("checksum final metadata: %v", err)
+	}
+	publishedMetadataEntry := snapshotBundleManifestFileFixture(t, publishedManifest, "metadata.json")
+	if publishedMetadataEntry.SizeBytes != metadataInfo.SizeBytes || publishedMetadataEntry.SHA256 != metadataInfo.SHA256 {
+		t.Fatalf("published manifest metadata checksum = %d/%s, want %d/%s",
+			publishedMetadataEntry.SizeBytes, publishedMetadataEntry.SHA256, metadataInfo.SizeBytes, metadataInfo.SHA256)
+	}
+	resultMetadataEntry := snapshotBundleManifestFileFixture(t, result.Manifest, "metadata.json")
+	if resultMetadataEntry.SizeBytes != metadataInfo.SizeBytes || resultMetadataEntry.SHA256 != metadataInfo.SHA256 {
+		t.Fatalf("result manifest metadata checksum = %d/%s, want %d/%s",
+			resultMetadataEntry.SizeBytes, resultMetadataEntry.SHA256, metadataInfo.SizeBytes, metadataInfo.SHA256)
+	}
 }
 
 func TestImportSnapshotBundleRejectsDiffWithoutBaseAndCleansTemp(t *testing.T) {
@@ -163,6 +179,109 @@ func TestImportSnapshotBundleRejectsPathLikeSnapshotID(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(targetWorkDir, "snapshots", "outside")); !os.IsNotExist(err) {
 		t.Fatalf("path-like snapshot id created %s: %v", filepath.Join(targetWorkDir, "snapshots", "outside"), err)
+	}
+}
+
+func TestImportSnapshotBundleRejectsBogusSnapshotType(t *testing.T) {
+	sourceWorkDir := t.TempDir()
+	writeSnapshotBundleFixture(t, sourceWorkDir, "snap-1", "full", "")
+
+	var buf bytes.Buffer
+	if _, err := ExportSnapshotBundle(sourceWorkDir, "snap-1", &buf); err != nil {
+		t.Fatalf("export snapshot bundle: %v", err)
+	}
+	bundleBytes := mutateSnapshotBundle(t, buf.Bytes(), func(manifest *SnapshotExportManifest, meta *SnapshotMetadata) {
+		manifest.SnapshotType = "bogus"
+		meta.SnapshotType = "bogus"
+	})
+
+	err := importSnapshotBundleDiscard(t.TempDir(), bundleBytes)
+	if !errors.Is(err, ErrSnapshotBundleInvalid) {
+		t.Fatalf("import error = %v, want ErrSnapshotBundleInvalid", err)
+	}
+}
+
+func TestImportSnapshotBundleRejectsFullSnapshotWithBaseID(t *testing.T) {
+	sourceWorkDir := t.TempDir()
+	writeSnapshotBundleFixture(t, sourceWorkDir, "snap-1", "full", "")
+
+	var buf bytes.Buffer
+	if _, err := ExportSnapshotBundle(sourceWorkDir, "snap-1", &buf); err != nil {
+		t.Fatalf("export snapshot bundle: %v", err)
+	}
+	bundleBytes := mutateSnapshotBundle(t, buf.Bytes(), func(manifest *SnapshotExportManifest, meta *SnapshotMetadata) {
+		manifest.BaseSnapshotID = "base-1"
+		meta.BaseSnapshotID = "base-1"
+	})
+
+	err := importSnapshotBundleDiscard(t.TempDir(), bundleBytes)
+	if !errors.Is(err, ErrSnapshotBundleInvalid) {
+		t.Fatalf("import error = %v, want ErrSnapshotBundleInvalid", err)
+	}
+}
+
+func TestImportSnapshotBundleRejectsDiffWithInvalidBaseMetadata(t *testing.T) {
+	sourceWorkDir := t.TempDir()
+	writeSnapshotBundleFixture(t, sourceWorkDir, "snap-diff", "diff", "base-1")
+
+	var buf bytes.Buffer
+	if _, err := ExportSnapshotBundle(sourceWorkDir, "snap-diff", &buf); err != nil {
+		t.Fatalf("export snapshot bundle: %v", err)
+	}
+	bundleBytes := buf.Bytes()
+
+	t.Run("empty base dir", func(t *testing.T) {
+		targetWorkDir := t.TempDir()
+		if err := os.MkdirAll(SnapshotDir(targetWorkDir, "base-1"), 0700); err != nil {
+			t.Fatalf("create empty base dir: %v", err)
+		}
+		err := importSnapshotBundleDiscard(targetWorkDir, bundleBytes)
+		if !errors.Is(err, ErrDiffBaseMissing) {
+			t.Fatalf("import error = %v, want ErrDiffBaseMissing", err)
+		}
+	})
+
+	t.Run("non full base metadata", func(t *testing.T) {
+		targetWorkDir := t.TempDir()
+		writeSnapshotBundleFixture(t, targetWorkDir, "base-1", "diff", "base-0")
+		err := importSnapshotBundleDiscard(targetWorkDir, bundleBytes)
+		if !errors.Is(err, ErrDiffBaseMissing) {
+			t.Fatalf("import error = %v, want ErrDiffBaseMissing", err)
+		}
+	})
+}
+
+func TestExportSnapshotBundleRejectsPathLikeSnapshotID(t *testing.T) {
+	workDir := t.TempDir()
+	outsideDir := filepath.Join(workDir, "outside")
+	if err := os.MkdirAll(outsideDir, 0700); err != nil {
+		t.Fatalf("create outside dir: %v", err)
+	}
+	for name, content := range map[string][]byte{
+		"memory.bin":  []byte("outside-memory"),
+		"state.bin":   []byte("outside-state"),
+		"rootfs.ext4": []byte("outside-rootfs"),
+	} {
+		if err := os.WriteFile(filepath.Join(outsideDir, name), content, 0600); err != nil {
+			t.Fatalf("write outside %s: %v", name, err)
+		}
+	}
+	if err := SaveMetadata(outsideDir, SnapshotMetadata{
+		SnapshotID:   "../outside",
+		SourceVMID:   "vm-outside",
+		SnapshotType: "full",
+		MemFilePath:  filepath.Join(outsideDir, "memory.bin"),
+		StatFilePath: filepath.Join(outsideDir, "state.bin"),
+		DiskCopyPath: filepath.Join(outsideDir, "rootfs.ext4"),
+		CreatedAt:    time.Date(2026, 6, 2, 1, 2, 3, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("save outside metadata: %v", err)
+	}
+
+	var buf bytes.Buffer
+	_, err := ExportSnapshotBundle(workDir, "../outside", &buf)
+	if !errors.Is(err, ErrSnapshotBundleInvalid) {
+		t.Fatalf("export error = %v, want ErrSnapshotBundleInvalid", err)
 	}
 }
 
@@ -258,24 +377,29 @@ func importSnapshotBundleDiscard(workDir string, bundle []byte) error {
 func mutateSnapshotBundleID(t *testing.T, bundle []byte, snapshotID string) []byte {
 	t.Helper()
 
+	return mutateSnapshotBundle(t, bundle, func(manifest *SnapshotExportManifest, meta *SnapshotMetadata) {
+		manifest.SnapshotID = snapshotID
+		meta.SnapshotID = snapshotID
+	})
+}
+
+func mutateSnapshotBundle(t *testing.T, bundle []byte, mutate func(*SnapshotExportManifest, *SnapshotMetadata)) []byte {
+	t.Helper()
+
 	entries := readSnapshotBundleTar(t, bundle)
 
 	var manifest SnapshotExportManifest
 	if err := json.Unmarshal(entries["manifest.json"], &manifest); err != nil {
 		t.Fatalf("parse manifest fixture: %v", err)
 	}
-	manifest.SnapshotID = snapshotID
-	manifestBytes, err := json.Marshal(manifest)
-	if err != nil {
-		t.Fatalf("marshal mutated manifest: %v", err)
-	}
-	entries["manifest.json"] = manifestBytes
 
 	var meta SnapshotMetadata
 	if err := json.Unmarshal(entries["metadata.json"], &meta); err != nil {
 		t.Fatalf("parse metadata fixture: %v", err)
 	}
-	meta.SnapshotID = snapshotID
+
+	mutate(&manifest, &meta)
+
 	metadataBytes, err := json.Marshal(meta)
 	if err != nil {
 		t.Fatalf("marshal mutated metadata: %v", err)
@@ -289,7 +413,7 @@ func mutateSnapshotBundleID(t *testing.T, bundle []byte, snapshotID string) []by
 			manifest.Files[i].SHA256 = hex.EncodeToString(sum[:])
 		}
 	}
-	manifestBytes, err = json.Marshal(manifest)
+	manifestBytes, err := json.Marshal(manifest)
 	if err != nil {
 		t.Fatalf("marshal mutated manifest with metadata checksum: %v", err)
 	}
@@ -310,4 +434,30 @@ func mutateSnapshotBundleID(t *testing.T, bundle []byte, snapshotID string) []by
 		t.Fatalf("close mutated tar: %v", err)
 	}
 	return out.Bytes()
+}
+
+func loadSnapshotBundleManifestFixture(t *testing.T, path string) SnapshotExportManifest {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read manifest fixture: %v", err)
+	}
+	var manifest SnapshotExportManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("parse manifest fixture: %v", err)
+	}
+	return manifest
+}
+
+func snapshotBundleManifestFileFixture(t *testing.T, manifest SnapshotExportManifest, path string) SnapshotBundleFile {
+	t.Helper()
+
+	for _, file := range manifest.Files {
+		if file.Path == path {
+			return file
+		}
+	}
+	t.Fatalf("manifest missing file %s", path)
+	return SnapshotBundleFile{}
 }
