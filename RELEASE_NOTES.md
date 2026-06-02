@@ -20,7 +20,7 @@
 - 실제 systemd 검증은 명시적 operator action으로 유지한다:
   `sudo bash scripts/install-anvil-scheduler-systemd.sh --start --verify`.
 
-## 검증 예정
+## 검증됨
 
 - `go test ./... -count=1`
 - `go build ./cmd/goose-daemon`
@@ -28,7 +28,7 @@
 - `go build ./cmd/anvil-scheduler`
 - `bash -n scripts/anvil-scheduler-smoke.sh`
 - `bash -n scripts/install-anvil-scheduler-systemd.sh`
-- 승인이 필요한 systemd `--start --verify`
+- `sudo bash scripts/install-anvil-scheduler-systemd.sh --start --verify`
 
 # anvil v0.3.1 — Scheduler control loop and operational roadmap
 

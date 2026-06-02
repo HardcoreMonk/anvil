@@ -21,9 +21,8 @@
   3번은 초기 scheduler `/metrics` endpoint로 일부 대응됐지만, poll/reconcile 지연
   시간과 실패 횟수 metric은 계속 후속 후보로 남는다.
   full-process integration test, scheduler `/metrics`, smoke의 `/metrics` 확인,
-  실제 systemd `--start --verify` 결과는 승인이 필요한 검증 이후
-  `docs/operations/2026-06-02-scheduler-operations-hardening-handoff.md`에 기록할
-  예정이다.
+  실제 systemd `--start --verify` 결과는
+  `docs/operations/2026-06-02-scheduler-operations-hardening-handoff.md`에 기록했다.
 
 ## 1. Scheduler full-process integration test
 
