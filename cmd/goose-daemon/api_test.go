@@ -546,6 +546,12 @@ func writeSnapshotBundleFixture(t *testing.T, workDir string, meta storage.Snaps
 	if meta.Profile == "" {
 		meta.Profile = "dev"
 	}
+	if meta.DiskPath == "" {
+		meta.DiskPath = filepath.Join(os.TempDir(), "goose-workspaces", meta.SnapshotID+".ext4")
+	}
+	if meta.VsockPath == "" {
+		meta.VsockPath = filepath.Join(os.TempDir(), "firecracker-vsock-"+meta.SnapshotID+".sock")
+	}
 	for name, body := range map[string][]byte{
 		"memory.bin":  []byte("memory:" + meta.SnapshotID),
 		"state.bin":   []byte("state:" + meta.SnapshotID),

@@ -66,7 +66,6 @@ const (
 	snapshotBundleMemoryPath   = "memory.bin"
 	snapshotBundleStatePath    = "state.bin"
 	snapshotBundleRootFSPath   = "rootfs.ext4"
-	snapshotBundleDiskPrefix   = "imported-"
 )
 
 var snapshotBundleAllowedFiles = map[string]struct{}{
@@ -212,7 +211,10 @@ func ImportSnapshotBundleWithOptions(workDir string, src io.Reader, opts Snapsho
 	}
 
 	finalDir := SnapshotDir(workDir, manifest.SnapshotID)
-	meta = snapshotBundleImportedMetadata(workDir, finalDir, opts, meta)
+	meta, err = snapshotBundleImportedMetadata(workDir, finalDir, opts, meta)
+	if err != nil {
+		return SnapshotImportResult{}, err
+	}
 	if err := SaveMetadata(stageDir, meta); err != nil {
 		return SnapshotImportResult{}, err
 	}
@@ -263,34 +265,62 @@ func ImportSnapshotBundleWithOptions(workDir string, src io.Reader, opts Snapsho
 
 func snapshotBundlePortableMetadata(meta SnapshotMetadata) SnapshotMetadata {
 	meta.AgentToken = ""
-	meta.DiskPath = ""
-	meta.VsockPath = ""
 	meta.MemFilePath = snapshotBundleMemoryPath
 	meta.StatFilePath = snapshotBundleStatePath
 	meta.DiskCopyPath = snapshotBundleRootFSPath
 	return meta
 }
 
-func snapshotBundleImportedMetadata(workDir, finalDir string, opts SnapshotImportOptions, meta SnapshotMetadata) SnapshotMetadata {
+func snapshotBundleImportedMetadata(workDir, finalDir string, opts SnapshotImportOptions, meta SnapshotMetadata) (SnapshotMetadata, error) {
+	if err := snapshotBundleValidateImportedHostPaths(meta, opts); err != nil {
+		return SnapshotMetadata{}, err
+	}
 	meta.AgentToken = ""
-	meta.DiskPath = snapshotBundleImportedDiskPath(workDir, opts.WorkspaceDir, meta.SnapshotID)
-	meta.VsockPath = snapshotBundleImportedVsockPath(workDir, meta.SnapshotID)
 	meta.MemFilePath = filepath.Join(finalDir, snapshotBundleMemoryPath)
 	meta.StatFilePath = filepath.Join(finalDir, snapshotBundleStatePath)
 	meta.DiskCopyPath = filepath.Join(finalDir, snapshotBundleRootFSPath)
-	return meta
+	return meta, nil
 }
 
-func snapshotBundleImportedDiskPath(workDir, workspaceDir, snapshotID string) string {
-	workspaceDir = strings.TrimSpace(workspaceDir)
-	if workspaceDir == "" {
-		workspaceDir = filepath.Join(workDir, "workspaces")
+func snapshotBundleValidateImportedHostPaths(meta SnapshotMetadata, opts SnapshotImportOptions) error {
+	diskPath := filepath.Clean(strings.TrimSpace(meta.DiskPath))
+	vsockPath := filepath.Clean(strings.TrimSpace(meta.VsockPath))
+	if diskPath == "." || !filepath.IsAbs(diskPath) {
+		return fmt.Errorf("%w: unsafe disk_path", ErrSnapshotBundleInvalid)
 	}
-	return filepath.Join(workspaceDir, snapshotBundleDiskPrefix+snapshotID+".ext4")
+	if vsockPath == "." || !filepath.IsAbs(vsockPath) {
+		return fmt.Errorf("%w: unsafe vsock_path", ErrSnapshotBundleInvalid)
+	}
+	if diskPath != strings.TrimSpace(meta.DiskPath) || vsockPath != strings.TrimSpace(meta.VsockPath) {
+		return fmt.Errorf("%w: unsafe host path", ErrSnapshotBundleInvalid)
+	}
+	allowedWorkspaceDir := strings.TrimSpace(opts.WorkspaceDir)
+	if allowedWorkspaceDir == "" {
+		allowedWorkspaceDir = filepath.Join(os.TempDir(), "goose-workspaces")
+	}
+	defaultWorkspaceDir := filepath.Join(os.TempDir(), "goose-workspaces")
+	if !snapshotBundlePathWithinDir(diskPath, allowedWorkspaceDir) && !snapshotBundlePathWithinDir(diskPath, defaultWorkspaceDir) {
+		return fmt.Errorf("%w: disk_path outside workspace", ErrSnapshotBundleInvalid)
+	}
+	tmpDir := filepath.Clean(os.TempDir())
+	if !snapshotBundlePathWithinDir(vsockPath, tmpDir) {
+		return fmt.Errorf("%w: vsock_path outside tmp", ErrSnapshotBundleInvalid)
+	}
+	base := filepath.Base(vsockPath)
+	if !strings.HasPrefix(base, "firecracker-vsock-") || !strings.HasSuffix(base, ".sock") {
+		return fmt.Errorf("%w: unsafe vsock_path", ErrSnapshotBundleInvalid)
+	}
+	return nil
 }
 
-func snapshotBundleImportedVsockPath(workDir, snapshotID string) string {
-	return filepath.Join(workDir, "tmp", "firecracker-vsock-"+snapshotID+".sock")
+func snapshotBundlePathWithinDir(path, dir string) bool {
+	path = filepath.Clean(path)
+	dir = filepath.Clean(dir)
+	rel, err := filepath.Rel(dir, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
 }
 
 func snapshotBundleWriteBytes(tw *tar.Writer, name string, data []byte, modTime time.Time) error {

@@ -1593,9 +1593,10 @@ snapshot `metadata.json`은 restore 인증 계약을 보존하기 위해 `agent_
 담고 있다. metadata를 반출하거나 백업 산출물이 신뢰된 host 경계 밖으로 나가기
 전에는 scrubber로 token을 제거한다.
 단, `POST /snapshots/{id}/export` replication bundle 안의 `metadata.json`은 raw local
-metadata file이 아니라 `agent_token`, `disk_path`, `vsock_path`를 제거한 portable
-copy다. target daemon은 import 시 target-local `disk_path`, `vsock_path`,
-`mem_file_path`, `state_file_path`, `disk_copy_path`로 다시 기록한다. 복제된 snapshot을
+metadata file이 아니라 `agent_token`을 제거한 portable copy다. Firecracker restore
+state가 요구하는 `disk_path`, `vsock_path`는 safe workspace/tmp path인지 import 때
+검증한 뒤 보존하고, target daemon은 `mem_file_path`, `state_file_path`,
+`disk_copy_path`를 target snapshot directory로 다시 기록한다. 복제된 snapshot을
 restore할 때는 target daemon이 새 `agent_token`을 생성해 vsock control channel로
 guest agent에 주입하므로 source host의 token을 bundle에 싣지 않는다.
 

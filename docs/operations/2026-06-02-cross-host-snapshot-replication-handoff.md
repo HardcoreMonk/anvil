@@ -49,8 +49,9 @@
 
 - replication response와 audit record에는 `agent_token`, authorization header,
   daemon raw body, raw `metadata.json` body를 넣지 않는다.
-- export bundle의 `metadata.json`은 raw local metadata가 아니라 token과 source host
-  path를 제거한 portable metadata다.
+- export bundle의 `metadata.json`은 raw local metadata가 아니라 token을 제거한
+  portable metadata다. `disk_path`와 `vsock_path`는 Firecracker restore 제약 때문에
+  safe path로 검증한 뒤 보존한다.
 - 복제된 snapshot restore는 target daemon이 새 `agent_token`을 생성해 guest agent에
   vsock으로 주입한다.
 - MCP production entrypoint는 기존 tool을 계속 `ANVIL_DAEMON_URL` base daemon에

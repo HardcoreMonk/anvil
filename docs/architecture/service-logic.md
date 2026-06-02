@@ -636,7 +636,8 @@ restore가 dependency 오류로 실패할 수 있다. `include_dependencies=true
 - authorization header와 `ANVIL_API_TOKEN` 값은 response/audit/log에 기록하지 않는다.
 - daemon raw body와 raw `metadata.json` body를 MCP output에 포함하지 않는다.
 - `POST /snapshots/{id}/export` bundle의 `metadata.json`은 raw local metadata가 아니라
-  token과 host path를 제거한 portable metadata다.
+  token을 제거한 portable metadata다. Firecracker restore가 요구하는 `disk_path`와
+  `vsock_path`는 safe path로 검증한 뒤 보존한다.
 - 복제된 snapshot restore는 source host token을 재사용하지 않고 target daemon이 새
   agent token을 vsock으로 주입한다.
 

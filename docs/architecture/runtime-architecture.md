@@ -290,11 +290,12 @@ local path를 target daemon의 work directory 기준으로 rebase하고 최종
 `snapshots/<snapshot_id>/` directory로 atomic rename한다. publish 전 실패는 staging
 directory만 정리하며, 이미 존재하는 최종 snapshot directory를 부분 갱신하지 않는다.
 export bundle의 `metadata.json`은 source host의 raw metadata file이 아니라
-`agent_token`, `disk_path`, `vsock_path`를 제거한 portable metadata다. target import는
-publish 전에 `disk_path`, `vsock_path`, `mem_file_path`, `state_file_path`,
-`disk_copy_path`를 target-local path로 다시 쓴 뒤 최종 metadata checksum을 manifest에
-기록한다. 복제된 snapshot restore는 target daemon이 새 `agent_token`을 생성하고
-rebased `vsock_path`로 guest agent에 주입해 source host token을 재사용하지 않는다.
+`agent_token`을 제거한 portable metadata다. Firecracker snapshot state는 original
+`disk_path`와 `vsock_path`를 요구하므로 target import는 두 path가 safe workspace/tmp
+pattern인지 검증한 뒤 보존한다. `mem_file_path`, `state_file_path`, `disk_copy_path`는
+target snapshot directory로 다시 쓴 뒤 최종 metadata checksum을 manifest에 기록한다.
+복제된 snapshot restore는 target daemon이 새 `agent_token`을 생성하고 validated
+`vsock_path`로 guest agent에 주입해 source host token을 재사용하지 않는다.
 operator-facing import/replication 결과는 raw `metadata.json`, `agent_token`,
 authorization header를 포함하지 않는다.
 
