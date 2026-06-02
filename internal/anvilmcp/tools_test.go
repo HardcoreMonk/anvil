@@ -122,6 +122,7 @@ type fakeReplicatingDaemon struct {
 	replicateSnapshotCalls int
 	replicateSnapshotReq   SnapshotReplicationRequest
 	replicateSnapshotResp  *SnapshotReplicationResponse
+	replicateSnapshotNil   bool
 	replicateSnapshotErr   error
 }
 
@@ -130,6 +131,9 @@ func (f *fakeReplicatingDaemon) ReplicateSnapshot(_ context.Context, req Snapsho
 	f.replicateSnapshotReq = req
 	if f.replicateSnapshotErr != nil {
 		return nil, f.replicateSnapshotErr
+	}
+	if f.replicateSnapshotNil {
+		return nil, nil
 	}
 	if f.replicateSnapshotResp != nil {
 		return f.replicateSnapshotResp, nil
@@ -1540,6 +1544,83 @@ func TestToolsReplicateSnapshotRejectsUnsupportedDaemon(t *testing.T) {
 	}
 }
 
+func TestToolsReplicateSnapshotNilResponseAuditsFailure(t *testing.T) {
+	auditPath := filepath.Join(t.TempDir(), "runtime-audit.jsonl")
+	daemon := &fakeReplicatingDaemon{fakeDaemon: &fakeDaemon{}, replicateSnapshotNil: true}
+	tools := NewToolsWithOptions(daemon, NewSessionStore(), time.Second, ToolsOptions{
+		DefaultTenantID: "tenant-1",
+		AuditLogPath:    auditPath,
+	})
+
+	_, err := tools.ReplicateSnapshot(context.Background(), ReplicateSnapshotInput{
+		SnapshotID: "snap-1",
+		SourceHost: "host-a",
+		TargetHost: "host-b",
+	})
+	if err == nil {
+		t.Fatal("ReplicateSnapshot error = nil, want nil response error")
+	}
+	if !strings.Contains(err.Error(), "snapshot replication returned nil response") {
+		t.Fatalf("ReplicateSnapshot error = %q, want nil response error", err.Error())
+	}
+
+	records, err := ReadRuntimeAudit(auditPath)
+	if err != nil {
+		t.Fatalf("ReadRuntimeAudit returned error: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("audit record count = %d, want 1", len(records))
+	}
+	if records[0].ResultCode != "error" {
+		t.Fatalf("audit result = %q, want error", records[0].ResultCode)
+	}
+}
+
+func TestToolsReplicateSnapshotSemanticFailureAuditsFailureAndReturnsOutput(t *testing.T) {
+	auditPath := filepath.Join(t.TempDir(), "runtime-audit.jsonl")
+	daemon := &fakeReplicatingDaemon{
+		fakeDaemon: &fakeDaemon{},
+		replicateSnapshotResp: &SnapshotReplicationResponse{
+			SnapshotID: "snap-1",
+			SourceHost: "host-a",
+			TargetHost: "host-b",
+			Status:     "partial",
+			Replicated: []string{"snap-base"},
+			Errors:     []string{"import_failed snapshot_id=snap-1 status_code=409"},
+		},
+	}
+	tools := NewToolsWithOptions(daemon, NewSessionStore(), time.Second, ToolsOptions{
+		DefaultTenantID: "tenant-1",
+		AuditLogPath:    auditPath,
+	})
+
+	out, err := tools.ReplicateSnapshot(context.Background(), ReplicateSnapshotInput{
+		SnapshotID: "snap-1",
+		SourceHost: "host-a",
+		TargetHost: "host-b",
+	})
+	if err != nil {
+		t.Fatalf("ReplicateSnapshot returned error: %v", err)
+	}
+	if out.Status != "partial" {
+		t.Fatalf("Status = %q, want partial", out.Status)
+	}
+	if len(out.Errors) != 1 || out.Errors[0] != "import_failed snapshot_id=snap-1 status_code=409" {
+		t.Fatalf("Errors = %+v, want safe import failure", out.Errors)
+	}
+
+	records, err := ReadRuntimeAudit(auditPath)
+	if err != nil {
+		t.Fatalf("ReadRuntimeAudit returned error: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("audit record count = %d, want 1", len(records))
+	}
+	if records[0].ResultCode != "error" {
+		t.Fatalf("audit result = %q, want error", records[0].ResultCode)
+	}
+}
+
 func TestToolsMCPReplicateSnapshotOutputOmitsSecrets(t *testing.T) {
 	daemon := &fakeReplicatingDaemon{
 		fakeDaemon: &fakeDaemon{},
@@ -1547,8 +1628,11 @@ func TestToolsMCPReplicateSnapshotOutputOmitsSecrets(t *testing.T) {
 			SnapshotID: "snap-1",
 			SourceHost: "host-a",
 			TargetHost: "host-b",
-			Status:     "replicated",
+			Status:     "failed",
 			Replicated: []string{"snap-1"},
+			Errors: []string{
+				`import_failed metadata.json body={"agent_token":"secret"} Authorization: Bearer token path=/data/projects/codex-zone/anvil/snapshots/snap-1 endpoint=https://host-a.example/snapshots/snap-1/export`,
+			},
 		},
 	}
 	tools := NewTools(daemon, NewSessionStore(), time.Second)
@@ -1573,6 +1657,9 @@ func TestToolsMCPReplicateSnapshotOutputOmitsSecrets(t *testing.T) {
 		"metadata.json",
 		"http://",
 		"https://",
+		"/data/projects",
+		"secret",
+		"token",
 	} {
 		if strings.Contains(string(data), forbidden) {
 			t.Fatalf("MCP replicate output JSON exposes %q: %s", forbidden, string(data))

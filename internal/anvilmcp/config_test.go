@@ -41,6 +41,9 @@ func TestLoadConfigFile(t *testing.T) {
 			"session_store_path: /var/lib/anvil-mcp/sessions.json",
 			"default_tenant_id: tenant.file",
 			"audit_log_path: /var/log/anvil-mcp/audit.jsonl",
+			"scheduler_state_path: /var/lib/anvil-mcp/scheduler.json",
+			"scheduler_hosts_file: /etc/anvil-mcp/hosts.json",
+			"scheduler_quota_store_path: /var/lib/anvil-mcp/quotas.json",
 			"",
 		}, "\n"),
 	}
@@ -71,6 +74,15 @@ func TestLoadConfigFile(t *testing.T) {
 	if cfg.AuditLogPath != "/var/log/anvil-mcp/audit.jsonl" {
 		t.Errorf("AuditLogPath = %q, want %q", cfg.AuditLogPath, "/var/log/anvil-mcp/audit.jsonl")
 	}
+	if cfg.SchedulerStatePath != "/var/lib/anvil-mcp/scheduler.json" {
+		t.Errorf("SchedulerStatePath = %q, want %q", cfg.SchedulerStatePath, "/var/lib/anvil-mcp/scheduler.json")
+	}
+	if cfg.SchedulerHostsFile != "/etc/anvil-mcp/hosts.json" {
+		t.Errorf("SchedulerHostsFile = %q, want %q", cfg.SchedulerHostsFile, "/etc/anvil-mcp/hosts.json")
+	}
+	if cfg.SchedulerQuotaStorePath != "/var/lib/anvil-mcp/quotas.json" {
+		t.Errorf("SchedulerQuotaStorePath = %q, want %q", cfg.SchedulerQuotaStorePath, "/var/lib/anvil-mcp/quotas.json")
+	}
 }
 
 func TestLoadConfigEnvOverridesFile(t *testing.T) {
@@ -82,17 +94,23 @@ func TestLoadConfigEnvOverridesFile(t *testing.T) {
 			"session_store_path: /var/lib/anvil-mcp/file-sessions.json",
 			"default_tenant_id: tenant.file",
 			"audit_log_path: /var/log/anvil-mcp/file-audit.jsonl",
+			"scheduler_state_path: /var/lib/anvil-mcp/file-scheduler.json",
+			"scheduler_hosts_file: /etc/anvil-mcp/file-hosts.json",
+			"scheduler_quota_store_path: /var/lib/anvil-mcp/file-quotas.json",
 			"",
 		}, "\n"),
 	}
 	env := map[string]string{
-		"ANVIL_MCP_CONFIG":          "/tmp/anvil-mcp.yaml",
-		"ANVIL_DAEMON_URL":          "http://env.example.com/",
-		"ANVIL_API_TOKEN":           "env-token",
-		"ANVIL_MCP_DEFAULT_TIMEOUT": "90",
-		"ANVIL_MCP_SESSION_STORE":   "/var/lib/anvil-mcp/env-sessions.json",
-		"ANVIL_MCP_TENANT_ID":       "tenant.env",
-		"ANVIL_MCP_AUDIT_LOG":       "/var/log/anvil-mcp/env-audit.jsonl",
+		"ANVIL_MCP_CONFIG":                "/tmp/anvil-mcp.yaml",
+		"ANVIL_DAEMON_URL":                "http://env.example.com/",
+		"ANVIL_API_TOKEN":                 "env-token",
+		"ANVIL_MCP_DEFAULT_TIMEOUT":       "90",
+		"ANVIL_MCP_SESSION_STORE":         "/var/lib/anvil-mcp/env-sessions.json",
+		"ANVIL_MCP_TENANT_ID":             "tenant.env",
+		"ANVIL_MCP_AUDIT_LOG":             "/var/log/anvil-mcp/env-audit.jsonl",
+		"ANVIL_MCP_SCHEDULER_STATE":       "/var/lib/anvil-mcp/env-scheduler.json",
+		"ANVIL_MCP_SCHEDULER_HOSTS_FILE":  "/etc/anvil-mcp/env-hosts.json",
+		"ANVIL_MCP_SCHEDULER_QUOTA_STORE": "/var/lib/anvil-mcp/env-quotas.json",
 	}
 
 	cfg, err := LoadConfig(testConfigSource(env, files))
@@ -117,6 +135,15 @@ func TestLoadConfigEnvOverridesFile(t *testing.T) {
 	}
 	if cfg.AuditLogPath != "/var/log/anvil-mcp/env-audit.jsonl" {
 		t.Errorf("AuditLogPath = %q, want %q", cfg.AuditLogPath, "/var/log/anvil-mcp/env-audit.jsonl")
+	}
+	if cfg.SchedulerStatePath != "/var/lib/anvil-mcp/env-scheduler.json" {
+		t.Errorf("SchedulerStatePath = %q, want %q", cfg.SchedulerStatePath, "/var/lib/anvil-mcp/env-scheduler.json")
+	}
+	if cfg.SchedulerHostsFile != "/etc/anvil-mcp/env-hosts.json" {
+		t.Errorf("SchedulerHostsFile = %q, want %q", cfg.SchedulerHostsFile, "/etc/anvil-mcp/env-hosts.json")
+	}
+	if cfg.SchedulerQuotaStorePath != "/var/lib/anvil-mcp/env-quotas.json" {
+		t.Errorf("SchedulerQuotaStorePath = %q, want %q", cfg.SchedulerQuotaStorePath, "/var/lib/anvil-mcp/env-quotas.json")
 	}
 }
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -155,7 +156,10 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 
-	daemon := anvilmcp.NewDaemonClient(cfg, http.DefaultClient)
+	daemon, err := newMCPDaemon(cfg, http.DefaultClient)
+	if err != nil {
+		log.Fatalf("configure daemon: %v", err)
+	}
 	sessions, err := anvilmcp.LoadSessionStore(cfg.SessionStorePath)
 	if err != nil {
 		log.Fatalf("load session store: %v", err)
@@ -174,4 +178,54 @@ func main() {
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
 		log.Fatalf("mcp server: %v", err)
 	}
+}
+
+func newMCPDaemon(cfg anvilmcp.Config, httpClient *http.Client) (anvilmcp.Daemon, error) {
+	if !mcpRouterConfigProvided(cfg) {
+		return anvilmcp.NewDaemonClient(cfg, httpClient), nil
+	}
+
+	store := anvilmcp.NewPlacementStore(cfg.SchedulerStatePath)
+	if err := store.Load(); err != nil {
+		return nil, err
+	}
+	if cfg.SchedulerHostsFile != "" {
+		hosts, err := anvilmcp.LoadSchedulerHostsFile(cfg.SchedulerHostsFile)
+		if err != nil {
+			return nil, err
+		}
+		if err := store.ApplyConfiguredHostsAndSave(hosts); err != nil {
+			return nil, err
+		}
+	}
+
+	hosts := store.ListHosts()
+	if len(hosts) == 0 {
+		return nil, fmt.Errorf("scheduler router config provided but no runtime hosts are configured")
+	}
+
+	quotaStore := anvilmcp.NewQuotaStore(cfg.SchedulerQuotaStorePath)
+	if err := quotaStore.Load(); err != nil {
+		return nil, err
+	}
+	quotas, usage := quotaStore.SchedulerInputs()
+
+	daemons := make(map[string]anvilmcp.Daemon, len(hosts))
+	for _, host := range hosts {
+		daemons[host.Name] = anvilmcp.NewDaemonClient(anvilmcp.Config{
+			DaemonURL: host.Endpoint,
+			APIToken:  cfg.APIToken,
+		}, httpClient)
+	}
+
+	router := anvilmcp.NewRuntimeRouterWithOptions(
+		anvilmcp.NewScheduler(hosts, quotas, usage),
+		daemons,
+		anvilmcp.RuntimeRouterOptions{PlacementStore: store},
+	)
+	return anvilmcp.NewRuntimeRouterDaemon(router), nil
+}
+
+func mcpRouterConfigProvided(cfg anvilmcp.Config) bool {
+	return cfg.SchedulerStatePath != "" || cfg.SchedulerHostsFile != ""
 }
