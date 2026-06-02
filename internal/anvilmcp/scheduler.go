@@ -1,5 +1,7 @@
 package anvilmcp
 
+import "strings"
+
 type Scheduler struct {
 	hosts  []RuntimeHost
 	quotas map[string]TenantQuota
@@ -44,6 +46,19 @@ func NewScheduler(hosts []RuntimeHost, quotas map[string]TenantQuota, usage map[
 		quotas: quotaCopy,
 		usage:  usageCopy,
 	}
+}
+
+func (s *Scheduler) RuntimeHost(name string) (RuntimeHost, bool) {
+	name = strings.TrimSpace(name)
+	if s == nil || name == "" {
+		return RuntimeHost{}, false
+	}
+	for _, host := range s.hosts {
+		if host.Name == name {
+			return cloneRuntimeHost(host), true
+		}
+	}
+	return RuntimeHost{}, false
 }
 
 func SummarizeHostStatuses(hosts []RuntimeHost, observations map[string]HostObservation) HostStatusSummary {

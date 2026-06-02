@@ -3,6 +3,8 @@ package anvilmcp
 import (
 	"context"
 	"errors"
+	"io"
+	"strings"
 	"testing"
 )
 
@@ -24,6 +26,13 @@ type routerFakeDaemon struct {
 	deleteCalls          int
 	deleteVMID           string
 	listVMResp           []VMInfo
+	snapshotList         []SnapshotInfo
+	exportCalls          []string
+	exportBodies         map[string]string
+	exportErr            error
+	importCalls          []string
+	importErrForBody     map[string]error
+	importStatusForBody  map[string]string
 }
 
 func (f *routerFakeDaemon) SpawnVM(_ context.Context, req SpawnVMRequest) (*SpawnVMResponse, error) {
@@ -75,7 +84,43 @@ func (f *routerFakeDaemon) CreateSnapshot(_ context.Context, vmID string, req Cr
 }
 
 func (f *routerFakeDaemon) ListSnapshots(context.Context) ([]SnapshotInfo, error) {
-	return nil, nil
+	return append([]SnapshotInfo(nil), f.snapshotList...), nil
+}
+
+func (f *routerFakeDaemon) ExportSnapshot(_ context.Context, snapshotID string) (*SnapshotExportStream, error) {
+	f.exportCalls = append(f.exportCalls, snapshotID)
+	if f.exportErr != nil {
+		return nil, f.exportErr
+	}
+	body := "bundle:" + snapshotID
+	if f.exportBodies != nil {
+		if configured, ok := f.exportBodies[snapshotID]; ok {
+			body = configured
+		}
+	}
+	return &SnapshotExportStream{Body: io.NopCloser(strings.NewReader(body)), ContentType: "application/vnd.anvil.snapshot-bundle"}, nil
+}
+
+func (f *routerFakeDaemon) ImportSnapshot(_ context.Context, body io.Reader) (*SnapshotImportResponse, error) {
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return nil, err
+	}
+	text := string(data)
+	f.importCalls = append(f.importCalls, text)
+	if f.importErrForBody != nil {
+		if err, ok := f.importErrForBody[text]; ok {
+			return nil, err
+		}
+	}
+	status := "imported"
+	if f.importStatusForBody != nil {
+		if configured, ok := f.importStatusForBody[text]; ok {
+			status = configured
+		}
+	}
+	snapshotID := strings.TrimPrefix(text, "bundle:")
+	return &SnapshotImportResponse{SnapshotID: snapshotID, SnapshotType: "full", Status: status, Skipped: status == "already_present"}, nil
 }
 
 func (f *routerFakeDaemon) RestoreSnapshot(_ context.Context, snapshotID string, req RestoreSnapshotRequest) (*RestoreSnapshotResponse, error) {
@@ -271,4 +316,147 @@ func TestRuntimeRouterReconcilePlacementsFromDaemonVMLists(t *testing.T) {
 	if host, ok := store.VMHost("vm-b"); !ok || host != "host-b" {
 		t.Fatalf("store vm-b placement = %q,%v want host-b,true", host, ok)
 	}
+}
+
+func TestRuntimeRouterReplicateSnapshotRecordsTargetLocation(t *testing.T) {
+	source := &routerFakeDaemon{snapshotList: []SnapshotInfo{{SnapshotID: "snap-1", SnapshotType: "full"}}}
+	target := &routerFakeDaemon{}
+	store := NewPlacementStore("")
+	router := newSnapshotReplicationTestRouter(source, target, store, true, true)
+
+	resp, err := router.ReplicateSnapshot(context.Background(), SnapshotReplicationRequest{
+		SnapshotID:          "snap-1",
+		SourceHost:          "host-a",
+		TargetHost:          "host-b",
+		IncludeDependencies: true,
+	})
+	if err != nil {
+		t.Fatalf("ReplicateSnapshot returned error: %v", err)
+	}
+	if resp.Status != "replicated" {
+		t.Fatalf("status = %q, want replicated", resp.Status)
+	}
+	if got := strings.Join(target.importCalls, ","); got != "bundle:snap-1" {
+		t.Fatalf("target import calls = %q, want bundle:snap-1", got)
+	}
+	hosts := store.SnapshotHosts("snap-1")
+	if got := strings.Join(hosts, ","); got != "host-b" {
+		t.Fatalf("snapshot hosts = %q, want host-b", got)
+	}
+}
+
+func TestRuntimeRouterReplicateDiffIncludesBaseFirst(t *testing.T) {
+	source := &routerFakeDaemon{snapshotList: []SnapshotInfo{
+		{SnapshotID: "snap-base", SnapshotType: "full"},
+		{SnapshotID: "snap-diff", SnapshotType: "diff", BaseSnapshotID: "snap-base"},
+	}}
+	target := &routerFakeDaemon{}
+	router := newSnapshotReplicationTestRouter(source, target, NewPlacementStore(""), true, true)
+
+	resp, err := router.ReplicateSnapshot(context.Background(), SnapshotReplicationRequest{
+		SnapshotID:          "snap-diff",
+		SourceHost:          "host-a",
+		TargetHost:          "host-b",
+		IncludeDependencies: true,
+	})
+	if err != nil {
+		t.Fatalf("ReplicateSnapshot returned error: %v", err)
+	}
+	if got := strings.Join(source.exportCalls, ","); got != "snap-base,snap-diff" {
+		t.Fatalf("source export calls = %q, want snap-base,snap-diff", got)
+	}
+	if got := strings.Join(resp.Replicated, ","); got != "snap-base,snap-diff" {
+		t.Fatalf("replicated = %q, want snap-base,snap-diff", got)
+	}
+	if resp.Status != "replicated" {
+		t.Fatalf("status = %q, want replicated", resp.Status)
+	}
+}
+
+func TestRuntimeRouterReplicateDiffWithoutDependencyFails(t *testing.T) {
+	source := &routerFakeDaemon{snapshotList: []SnapshotInfo{{SnapshotID: "snap-diff", SnapshotType: "diff", BaseSnapshotID: "snap-base"}}}
+	target := &routerFakeDaemon{}
+	router := newSnapshotReplicationTestRouter(source, target, NewPlacementStore(""), true, true)
+
+	resp, err := router.ReplicateSnapshot(context.Background(), SnapshotReplicationRequest{
+		SnapshotID:          "snap-diff",
+		SourceHost:          "host-a",
+		TargetHost:          "host-b",
+		IncludeDependencies: false,
+	})
+	if err != nil {
+		t.Fatalf("ReplicateSnapshot returned error: %v", err)
+	}
+	if resp.Status != "failed" {
+		t.Fatalf("status = %q, want failed", resp.Status)
+	}
+	if len(resp.Errors) != 1 || resp.Errors[0] != "diff_base_missing" {
+		t.Fatalf("errors = %+v, want [diff_base_missing]", resp.Errors)
+	}
+	if len(source.exportCalls) != 0 || len(target.importCalls) != 0 {
+		t.Fatalf("export/import calls = %d/%d, want 0/0", len(source.exportCalls), len(target.importCalls))
+	}
+}
+
+func TestRuntimeRouterReplicateDoesNotRecordFailedDiffLocation(t *testing.T) {
+	source := &routerFakeDaemon{snapshotList: []SnapshotInfo{
+		{SnapshotID: "snap-base", SnapshotType: "full"},
+		{SnapshotID: "snap-diff", SnapshotType: "diff", BaseSnapshotID: "snap-base"},
+	}}
+	target := &routerFakeDaemon{importErrForBody: map[string]error{"bundle:snap-diff": errors.New("import failed")}}
+	store := NewPlacementStore("")
+	router := newSnapshotReplicationTestRouter(source, target, store, true, true)
+
+	resp, err := router.ReplicateSnapshot(context.Background(), SnapshotReplicationRequest{
+		SnapshotID:          "snap-diff",
+		SourceHost:          "host-a",
+		TargetHost:          "host-b",
+		IncludeDependencies: true,
+	})
+	if err != nil {
+		t.Fatalf("ReplicateSnapshot returned error: %v", err)
+	}
+	if resp.Status != "partial" {
+		t.Fatalf("status = %q, want partial", resp.Status)
+	}
+	if got := strings.Join(store.SnapshotHosts("snap-base"), ","); got != "host-b" {
+		t.Fatalf("base hosts = %q, want host-b", got)
+	}
+	if hosts := store.SnapshotHosts("snap-diff"); len(hosts) != 0 {
+		t.Fatalf("diff hosts = %+v, want empty", hosts)
+	}
+}
+
+func TestRuntimeRouterReplicateRejectsUnhealthyHostBeforeDaemonCall(t *testing.T) {
+	source := &routerFakeDaemon{snapshotList: []SnapshotInfo{{SnapshotID: "snap-1", SnapshotType: "full"}}}
+	target := &routerFakeDaemon{}
+	router := newSnapshotReplicationTestRouter(source, target, NewPlacementStore(""), false, true)
+
+	_, err := router.ReplicateSnapshot(context.Background(), SnapshotReplicationRequest{
+		SnapshotID:          "snap-1",
+		SourceHost:          "host-a",
+		TargetHost:          "host-b",
+		IncludeDependencies: true,
+	})
+	if err == nil || err.Error() != "source_host_unavailable" {
+		t.Fatalf("error = %v, want source_host_unavailable", err)
+	}
+	if len(source.exportCalls) != 0 || len(target.importCalls) != 0 {
+		t.Fatalf("export/import calls = %d/%d, want 0/0", len(source.exportCalls), len(target.importCalls))
+	}
+}
+
+func newSnapshotReplicationTestRouter(source, target *routerFakeDaemon, store *PlacementStore, sourceHealthy, targetHealthy bool) *RuntimeRouter {
+	return NewRuntimeRouterWithOptions(
+		NewScheduler(
+			[]RuntimeHost{
+				{Name: "host-a", Endpoint: "http://host-a", Healthy: sourceHealthy, AvailableVMs: 1},
+				{Name: "host-b", Endpoint: "http://host-b", Healthy: targetHealthy, AvailableVMs: 1},
+			},
+			nil,
+			nil,
+		),
+		map[string]Daemon{"host-a": source, "host-b": target},
+		RuntimeRouterOptions{PlacementStore: store},
+	)
 }
