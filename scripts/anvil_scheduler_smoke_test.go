@@ -47,6 +47,9 @@ func TestAnvilSchedulerSmokePassesAgainstFakeScheduler(t *testing.T) {
 	if !server.controlLoopStatusChecked() {
 		t.Fatalf("smoke script did not call GET /control-loop/status")
 	}
+	if !server.metricsChecked() {
+		t.Fatalf("smoke script did not call GET /metrics")
+	}
 }
 
 func TestAnvilSchedulerSmokeGeneratesDefaultHostID(t *testing.T) {
@@ -308,6 +311,34 @@ func TestAnvilSchedulerSmokeFailsSlowHealthWithSummary(t *testing.T) {
 	}
 }
 
+func TestAnvilSchedulerSmokeFailsMetricsWithSummary(t *testing.T) {
+	server := newAnvilSchedulerSmokeFakeServer(t, 0)
+	server.failMetrics("metrics unavailable")
+	defer server.Close()
+
+	outPath := filepath.Join(t.TempDir(), "summary.json")
+	cmd := exec.Command("bash", "anvil-scheduler-smoke.sh", "--base-url", server.URL, "--host-id", "smoke-test-host", "--json-out", outPath)
+	cmd.Dir = scriptsDir(t)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("smoke script unexpectedly succeeded:\n%s", output)
+	}
+	if !strings.Contains(string(output), "metrics_failed") {
+		t.Fatalf("output = %s, want metrics_failed", output)
+	}
+	if !strings.Contains(string(output), "metrics unavailable") {
+		t.Fatalf("output = %s, want metrics unavailable", output)
+	}
+
+	summary := readSmokeSummary(t, outPath)
+	if summary.OK {
+		t.Fatalf("summary ok = true, want false")
+	}
+	if summary.FailedStep != "metrics_failed" {
+		t.Fatalf("failed_step = %q, want metrics_failed", summary.FailedStep)
+	}
+}
+
 type anvilSchedulerSmokeFakeServer struct {
 	*httptest.Server
 	mu                      sync.Mutex
@@ -319,6 +350,8 @@ type anvilSchedulerSmokeFakeServer struct {
 	selectSmokeFallback     bool
 	denyFallbackSchedule    bool
 	controlLoopStatusCalls  int
+	metricsCalls            int
+	metricsFailure          string
 }
 
 func (s *anvilSchedulerSmokeFakeServer) hasHost(hostID string) bool {
@@ -357,6 +390,18 @@ func (s *anvilSchedulerSmokeFakeServer) controlLoopStatusChecked() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.controlLoopStatusCalls > 0
+}
+
+func (s *anvilSchedulerSmokeFakeServer) metricsChecked() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.metricsCalls > 0
+}
+
+func (s *anvilSchedulerSmokeFakeServer) failMetrics(message string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.metricsFailure = message
 }
 
 func (s *anvilSchedulerSmokeFakeServer) failHostPutAfterStore(message string) {
@@ -533,6 +578,21 @@ func newAnvilSchedulerSmokeFakeServerWithHost(t *testing.T, healthDelay time.Dur
 				"persistence_degraded":       false,
 				"hosts":                      map[string]any{},
 			})
+		case "/metrics":
+			if r.Method != http.MethodGet {
+				http.Error(w, "GET required", http.StatusMethodNotAllowed)
+				return
+			}
+			fake.mu.Lock()
+			fake.metricsCalls++
+			metricsFailure := fake.metricsFailure
+			fake.mu.Unlock()
+			if metricsFailure != "" {
+				http.Error(w, metricsFailure, http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+			_, _ = fmt.Fprint(w, "# HELP anvil_scheduler_control_loop_running Scheduler control loop running flag.\n# TYPE anvil_scheduler_control_loop_running gauge\nanvil_scheduler_control_loop_running 1\n")
 		default:
 			if strings.HasPrefix(r.URL.Path, "/hosts/") {
 				if r.Method != http.MethodDelete {
