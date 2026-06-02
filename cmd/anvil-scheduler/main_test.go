@@ -216,35 +216,65 @@ func TestSchedulerProcessLoadsHostsPollsMetricsAndSchedules(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start scheduler child: %v", err)
 	}
+	client := &http.Client{Timeout: 500 * time.Millisecond}
 	done := make(chan error, 1)
 	go func() {
 		done <- cmd.Wait()
 	}()
-	t.Cleanup(func() {
+	childStopped := false
+	var childExitErr error
+	stopScheduler := func() error {
+		t.Helper()
+		if childStopped {
+			return childExitErr
+		}
+		select {
+		case childExitErr = <-done:
+			childStopped = true
+			return childExitErr
+		default:
+		}
 		if cmd.Process != nil {
 			_ = cmd.Process.Signal(syscall.SIGTERM)
 		}
 		select {
-		case <-done:
+		case childExitErr = <-done:
+			childStopped = true
+			return childExitErr
 		case <-time.After(3 * time.Second):
-			if cmd.Process != nil {
-				_ = cmd.Process.Kill()
-			}
+		}
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		select {
+		case childExitErr = <-done:
+			childStopped = true
+			return childExitErr
+		case <-time.After(3 * time.Second):
+			return fmt.Errorf("scheduler child did not exit after SIGTERM and Kill")
+		}
+	}
+	t.Cleanup(func() {
+		if childStopped {
+			return
+		}
+		if err := stopScheduler(); err != nil {
+			t.Errorf("scheduler child cleanup: %v\noutput:\n%s", err, output.String())
 		}
 	})
 
-	waitForSchedulerBody(t, baseURL+"/health", func(body string) bool {
+	waitForSchedulerBody(t, client, baseURL+"/health", func(body string) bool {
 		return strings.Contains(body, `"status":"ok"`)
 	}, &output)
-	waitForSchedulerBody(t, baseURL+"/control-loop/status", func(body string) bool {
+	waitForSchedulerBody(t, client, baseURL+"/control-loop/status", func(body string) bool {
 		return strings.Contains(body, `"running":true`)
 	}, &output)
-	waitForSchedulerBody(t, baseURL+"/metrics", func(body string) bool {
+	waitForSchedulerBody(t, client, baseURL+"/metrics", func(body string) bool {
 		return strings.Contains(body, "anvil_scheduler_control_loop_running 1") &&
 			strings.Contains(body, "anvil_scheduler_host_status_count{status=\"healthy\"} 1")
 	}, &output)
 
-	resp, err := http.Post(baseURL+"/schedule/spawn", "application/json", strings.NewReader(`{"tenant_id":"tenant-1","egress_policy":"profile","requested":{"active_vms":1}}`))
+	resp, err := client.Post(baseURL+"/schedule/spawn", "application/json", strings.NewReader(`{"tenant_id":"tenant-1","egress_policy":"profile","requested":{"active_vms":1}}`))
 	if err != nil {
 		t.Fatalf("POST /schedule/spawn: %v\nscheduler output:\n%s", err, output.String())
 	}
@@ -259,17 +289,12 @@ func TestSchedulerProcessLoadsHostsPollsMetricsAndSchedules(t *testing.T) {
 	if !decision.Allowed || decision.Host.Name != "host-a" || decision.Host.AvailableVMs != 2 {
 		t.Fatalf("decision = %+v, want allowed host-a with configured capacity", decision)
 	}
-
-	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
-		t.Fatalf("signal scheduler child: %v", err)
+	if decision.Limit.ActiveVMs != 2 {
+		t.Fatalf("decision limit = %+v, want active_vms=2 from quota store", decision.Limit)
 	}
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("scheduler child exited with error: %v\noutput:\n%s", err, output.String())
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatalf("scheduler child did not exit after SIGTERM\noutput:\n%s", output.String())
+
+	if err := stopScheduler(); err != nil {
+		t.Fatalf("scheduler child exited with error: %v\noutput:\n%s", err, output.String())
 	}
 }
 
@@ -293,13 +318,13 @@ func reserveLoopbackAddr(t *testing.T) string {
 	return addr
 }
 
-func waitForSchedulerBody(t *testing.T, url string, accepts func(string) bool, output *bytes.Buffer) string {
+func waitForSchedulerBody(t *testing.T, client *http.Client, url string, accepts func(string) bool, output *bytes.Buffer) string {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	var lastBody string
 	var lastErr error
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(url)
+		resp, err := client.Get(url)
 		if err != nil {
 			lastErr = err
 			time.Sleep(50 * time.Millisecond)
