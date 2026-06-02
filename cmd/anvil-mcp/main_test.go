@@ -81,6 +81,22 @@ func TestToolRegistrationsHaveIronClawInputSchemas(t *testing.T) {
 }
 
 func TestNewMCPDaemonUsesRuntimeRouterWhenSchedulerConfigIsSet(t *testing.T) {
+	base := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/snapshots":
+			if r.Method != http.MethodGet {
+				t.Fatalf("base method for /snapshots = %s, want GET", r.Method)
+			}
+			_ = json.NewEncoder(w).Encode([]anvilmcp.SnapshotInfo{{
+				SnapshotID:   "snap-base-daemon",
+				SnapshotType: "full",
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer base.Close()
+
 	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/snapshots":
@@ -136,7 +152,7 @@ func TestNewMCPDaemonUsesRuntimeRouterWhenSchedulerConfigIsSet(t *testing.T) {
 	writeMainTestFile(t, hostsPath, `{"hosts":[{"name":"host-a","endpoint":"`+source.URL+`","healthy":true,"available_vms":1},{"name":"host-b","endpoint":"`+target.URL+`","healthy":true,"available_vms":1}]}`)
 
 	daemon, err := newMCPDaemon(anvilmcp.Config{
-		DaemonURL:               "http://127.0.0.1:3000",
+		DaemonURL:               base.URL,
 		SchedulerStatePath:      filepath.Join(dir, "scheduler.json"),
 		SchedulerHostsFile:      hostsPath,
 		SchedulerQuotaStorePath: filepath.Join(dir, "quotas.json"),
@@ -150,6 +166,14 @@ func TestNewMCPDaemonUsesRuntimeRouterWhenSchedulerConfigIsSet(t *testing.T) {
 	})
 	if !ok {
 		t.Fatalf("daemon type %T does not support snapshot replication", daemon)
+	}
+
+	snapshots, err := daemon.ListSnapshots(context.Background())
+	if err != nil {
+		t.Fatalf("ListSnapshots returned error: %v", err)
+	}
+	if len(snapshots) != 1 || snapshots[0].SnapshotID != "snap-base-daemon" {
+		t.Fatalf("ListSnapshots = %+v, want base daemon snapshot", snapshots)
 	}
 
 	resp, err := replicator.ReplicateSnapshot(context.Background(), anvilmcp.SnapshotReplicationRequest{

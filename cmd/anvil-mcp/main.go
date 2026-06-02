@@ -181,8 +181,9 @@ func main() {
 }
 
 func newMCPDaemon(cfg anvilmcp.Config, httpClient *http.Client) (anvilmcp.Daemon, error) {
+	base := anvilmcp.NewDaemonClient(cfg, httpClient)
 	if !mcpRouterConfigProvided(cfg) {
-		return anvilmcp.NewDaemonClient(cfg, httpClient), nil
+		return base, nil
 	}
 
 	store := anvilmcp.NewPlacementStore(cfg.SchedulerStatePath)
@@ -223,7 +224,7 @@ func newMCPDaemon(cfg anvilmcp.Config, httpClient *http.Client) (anvilmcp.Daemon
 		daemons,
 		anvilmcp.RuntimeRouterOptions{PlacementStore: store},
 	)
-	return anvilmcp.NewRuntimeRouterDaemon(router), nil
+	return anvilmcp.NewReplicatingDaemon(base, router), nil
 }
 
 func mcpRouterConfigProvided(cfg anvilmcp.Config) bool {
