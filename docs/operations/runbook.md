@@ -72,7 +72,8 @@ smoke-only host를 무시하는지 확인한다.
 `journalctl -u anvil-scheduler.service -n 100 --no-pager`를 확인한다.
 `health_failed`는 service bind/start 문제, `host_put_failed`는 state path 권한 또는
 JSON body 처리 문제, `schedule_spawn_failed`는 host inventory나 quota/usage 입력
-문제를 우선 의심한다.
+문제를 우선 의심한다. `metrics_failed`는 scheduler service가 `/metrics`를 제공하지
+않거나 smoke가 `anvil_scheduler_control_loop_running` line을 찾지 못한 상태다.
 
 ## Daemon API 확인
 
@@ -116,6 +117,16 @@ runtime scheduler control loop 상태:
 ```bash
 curl http://127.0.0.1:3010/control-loop/status
 ```
+
+runtime scheduler metrics:
+
+```bash
+curl http://127.0.0.1:3010/metrics
+```
+
+`anvil_scheduler_persistence_degraded 1`이면 state file 저장 경로 권한과 disk 상태를
+먼저 확인한다. `anvil_scheduler_host_status_count{status="unhealthy"}`가 0보다 크면
+`/control-loop/status`의 host observation과 daemon host `/health`를 함께 확인한다.
 
 `degraded`/`unhealthy` host는 신규 placement에서 제외되며, 기존 VM placement는
 `suspect_vm_placements`로 남는다. host가 다시 응답하면 reconciliation이 daemon

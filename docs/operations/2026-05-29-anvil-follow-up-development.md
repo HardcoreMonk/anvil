@@ -17,6 +17,10 @@
   `available_snapshot_bytes`, `egress_policies`를 항상 제공하지 않는다. scheduler는
   hosts file의 capacity를 source of truth로 유지하고, `/health`가 해당 필드를
   생략하면 기존 값을 보존한다.
+- 2026-06-02 scheduler operations hardening 범위에서 1-3번은 구현 검증 대상으로
+  승격됐다. full-process integration test, scheduler `/metrics`, smoke metrics check,
+  actual systemd `--start --verify` 결과는
+  `docs/operations/2026-06-02-scheduler-operations-hardening-handoff.md`에 기록한다.
 
 ## 1. Scheduler full-process integration test
 
