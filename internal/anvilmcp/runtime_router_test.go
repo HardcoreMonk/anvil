@@ -383,6 +383,101 @@ func TestRuntimeRouterReplicateDiffIncludesBaseFirst(t *testing.T) {
 	}
 }
 
+func TestRuntimeRouterReplicateDiffValidatesListedBaseImport(t *testing.T) {
+	t.Run("already present base is still imported and recorded", func(t *testing.T) {
+		source := &routerFakeDaemon{snapshotList: []SnapshotInfo{
+			{SnapshotID: "snap-base", SnapshotType: "full"},
+			{SnapshotID: "snap-diff", SnapshotType: "diff", BaseSnapshotID: "snap-base"},
+		}}
+		target := &routerFakeDaemon{
+			snapshotList:        []SnapshotInfo{{SnapshotID: "snap-base", SnapshotType: "full"}},
+			importStatusForBody: map[string]string{"bundle:snap-base": "already_present"},
+		}
+		store := NewPlacementStore("")
+		router := newSnapshotReplicationTestRouter(source, target, store, true, true)
+
+		resp, err := router.ReplicateSnapshot(context.Background(), SnapshotReplicationRequest{
+			SnapshotID:          "snap-diff",
+			SourceHost:          "host-a",
+			TargetHost:          "host-b",
+			IncludeDependencies: true,
+		})
+		if err != nil {
+			t.Fatalf("ReplicateSnapshot returned error: %v", err)
+		}
+		if got := strings.Join(source.exportCalls, ","); got != "snap-base,snap-diff" {
+			t.Fatalf("source export calls = %q, want snap-base,snap-diff", got)
+		}
+		if got := strings.Join(target.importCalls, ","); got != "bundle:snap-base,bundle:snap-diff" {
+			t.Fatalf("target import calls = %q, want bundle:snap-base,bundle:snap-diff", got)
+		}
+		if got := strings.Join(resp.Skipped, ","); got != "snap-base" {
+			t.Fatalf("skipped = %q, want snap-base", got)
+		}
+		if got := strings.Join(resp.Replicated, ","); got != "snap-diff" {
+			t.Fatalf("replicated = %q, want snap-diff", got)
+		}
+		if got := strings.Join(store.SnapshotHosts("snap-base"), ","); got != "host-b" {
+			t.Fatalf("base hosts = %q, want host-b", got)
+		}
+		if got := strings.Join(store.SnapshotHosts("snap-diff"), ","); got != "host-b" {
+			t.Fatalf("diff hosts = %q, want host-b", got)
+		}
+	})
+
+	t.Run("base conflict stops before diff transfer", func(t *testing.T) {
+		source := &routerFakeDaemon{snapshotList: []SnapshotInfo{
+			{SnapshotID: "snap-base", SnapshotType: "full"},
+			{SnapshotID: "snap-diff", SnapshotType: "diff", BaseSnapshotID: "snap-base"},
+		}}
+		target := &routerFakeDaemon{
+			snapshotList: []SnapshotInfo{{SnapshotID: "snap-base", SnapshotType: "full"}},
+			importErrForBody: map[string]error{
+				"bundle:snap-base": &DaemonError{StatusCode: 409, Body: "raw secret"},
+			},
+		}
+		store := NewPlacementStore("")
+		router := newSnapshotReplicationTestRouter(source, target, store, true, true)
+
+		resp, err := router.ReplicateSnapshot(context.Background(), SnapshotReplicationRequest{
+			SnapshotID:          "snap-diff",
+			SourceHost:          "host-a",
+			TargetHost:          "host-b",
+			IncludeDependencies: true,
+		})
+		if err != nil {
+			t.Fatalf("ReplicateSnapshot returned error: %v", err)
+		}
+		if resp.Status != "failed" {
+			t.Fatalf("status = %q, want failed", resp.Status)
+		}
+		if got := strings.Join(source.exportCalls, ","); got != "snap-base" {
+			t.Fatalf("source export calls = %q, want snap-base", got)
+		}
+		if got := strings.Join(target.importCalls, ","); got != "bundle:snap-base" {
+			t.Fatalf("target import calls = %q, want bundle:snap-base", got)
+		}
+		if len(resp.Errors) != 1 {
+			t.Fatalf("errors = %+v, want one safe import error", resp.Errors)
+		}
+		errText := resp.Errors[0]
+		for _, forbidden := range []string{"raw secret", "secret"} {
+			if strings.Contains(errText, forbidden) {
+				t.Fatalf("error %q contains forbidden raw body text %q", errText, forbidden)
+			}
+		}
+		if !strings.Contains(errText, "import_failed") || !strings.Contains(errText, "status_code=409") {
+			t.Fatalf("error = %q, want safe import failure with status code", errText)
+		}
+		if hosts := store.SnapshotHosts("snap-base"); len(hosts) != 0 {
+			t.Fatalf("base hosts = %+v, want empty", hosts)
+		}
+		if hosts := store.SnapshotHosts("snap-diff"); len(hosts) != 0 {
+			t.Fatalf("diff hosts = %+v, want empty", hosts)
+		}
+	})
+}
+
 func TestRuntimeRouterReplicateDiffWithoutDependencyFails(t *testing.T) {
 	source := &routerFakeDaemon{snapshotList: []SnapshotInfo{{SnapshotID: "snap-diff", SnapshotType: "diff", BaseSnapshotID: "snap-base"}}}
 	target := &routerFakeDaemon{}

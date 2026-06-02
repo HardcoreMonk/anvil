@@ -107,12 +107,13 @@ func (r *RuntimeRouter) ReplicateSnapshot(ctx context.Context, req SnapshotRepli
 	var transferOrder []SnapshotInfo
 	if isDiffSnapshot(requested) {
 		baseSnapshotID := strings.TrimSpace(requested.BaseSnapshotID)
-		if baseSnapshotID == "" || !targetSnapshotIDs[baseSnapshotID] {
-			if !req.IncludeDependencies {
+		if !req.IncludeDependencies {
+			if baseSnapshotID == "" || !targetSnapshotIDs[baseSnapshotID] {
 				resp.Status = "failed"
 				resp.Errors = append(resp.Errors, "diff_base_missing")
 				return resp, nil
 			}
+		} else {
 			base, ok := snapshotInfoByID(sourceSnapshots, baseSnapshotID)
 			if baseSnapshotID == "" || !ok {
 				resp.Status = "failed"
