@@ -271,6 +271,7 @@ type ControlPlane struct {
 	teardownDMSnapshot func(info *storage.DMSnapshotInfo)
 	setupBindMount     func(baseDiskPath, newDiskPath, mountTargetPath string) error
 	restoreMachine     func(ctx context.Context, cfg vm.VMConfig, memFilePath, snapshotPath string) (*firecracker.Machine, error)
+	setGuestAgentToken func(vsockPath, token string) error
 
 	stopCh chan struct{}
 	srv    *http.Server
@@ -1929,6 +1930,24 @@ func (cp *ControlPlane) restoreSnapshotMachine(ctx context.Context, cfg vm.VMCon
 	return vm.RestoreMachine(ctx, cfg, memFilePath, snapshotPath)
 }
 
+func (cp *ControlPlane) agentTokenForRestoredSnapshot(snapID string, meta storage.SnapshotMetadata) (string, error) {
+	if token := strings.TrimSpace(meta.AgentToken); token != "" {
+		return token, nil
+	}
+	token, err := generateAgentToken()
+	if err != nil {
+		return "", fmt.Errorf("generate restored agent token: %w", err)
+	}
+	setGuestAgentToken := vm.SetGuestAgentToken
+	if cp.setGuestAgentToken != nil {
+		setGuestAgentToken = cp.setGuestAgentToken
+	}
+	if err := setGuestAgentToken(meta.VsockPath, token); err != nil {
+		return "", fmt.Errorf("snapshot %s: %w", snapID, err)
+	}
+	return token, nil
+}
+
 // POST /snapshots/gc
 func (cp *ControlPlane) handleSnapshotGC(w http.ResponseWriter, r *http.Request) {
 	defer cp.observeLifecycle("snapshot_gc")()
@@ -2540,7 +2559,7 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 		MacAddress:     meta.MacAddr,
 		GuestIP:        newGuestIP,
 		GatewayIP:      "10.0.1.1",
-		// VsockUDSPath intentionally empty: snapshot state recreates vsock at meta.VsockPath
+		VsockUDSPath:   meta.VsockPath,
 	}, memFileToUse, meta.StatFilePath)
 
 	cp.restoreMu.Unlock()
@@ -2569,6 +2588,17 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 	}
 	slog.Warn("restore: guest ip reconfigured", "snapshot_id", snapID, "ip", newGuestIP, "cow_store", exceptionStorePath)
 
+	restoredAgentToken, err := cp.agentTokenForRestoredSnapshot(snapID, meta)
+	if err != nil {
+		slog.Warn("restore: agent token update failed", "snapshot_id", snapID, "err", err)
+		machine.StopVMM()
+		cp.cleanupEgressPolicy(newVMID)
+		cp.teardownRestoreDMSnapshot(dmInfo)
+		cp.releaseRestoreNetwork(tapDevice, newGuestIP)
+		writeRestoreError(w, http.StatusInternalServerError, "guest_reconfigure_failed", snapID, fmt.Sprintf("vsock agent token update failed: %v", err))
+		return
+	}
+
 	info := VMInfo{
 		VMID:         newVMID,
 		GuestIP:      newGuestIP,
@@ -2581,7 +2611,7 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 	cp.mu.Lock()
 	cp.vms[newVMID] = &runningVM{
 		VMInfo:     info,
-		agentToken: meta.AgentToken,
+		agentToken: restoredAgentToken,
 		startedAt:  time.Now().UTC(),
 		diskPath:   exceptionStorePath, // only the COW store needs cleanup (not a full disk copy)
 		dmSnapshot: dmInfo,
@@ -2666,6 +2696,7 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 		MacAddress:     meta.MacAddr,
 		GuestIP:        newGuestIP,
 		GatewayIP:      "10.0.1.1",
+		VsockUDSPath:   meta.VsockPath,
 	}, memFileToUse, meta.StatFilePath)
 	if mergedMemPath != "" {
 		os.Remove(mergedMemPath)
@@ -2687,6 +2718,16 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 		return
 	}
 
+	restoredAgentToken, err := cp.agentTokenForRestoredSnapshot(snapID, meta)
+	if err != nil {
+		machine.StopVMM()
+		cp.cleanupEgressPolicy(newVMID)
+		storage.TeardownBindMount(meta.DiskPath, newDiskPath)
+		cp.releaseRestoreNetwork(tapDevice, newGuestIP)
+		writeRestoreError(w, http.StatusInternalServerError, "guest_reconfigure_failed", snapID, fmt.Sprintf("vsock agent token update failed: %v", err))
+		return
+	}
+
 	info := VMInfo{
 		VMID:         newVMID,
 		GuestIP:      newGuestIP,
@@ -2698,7 +2739,7 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 	cp.mu.Lock()
 	cp.vms[newVMID] = &runningVM{
 		VMInfo:          info,
-		agentToken:      meta.AgentToken,
+		agentToken:      restoredAgentToken,
 		startedAt:       time.Now().UTC(),
 		diskPath:        newDiskPath,
 		bindMountTarget: meta.DiskPath,

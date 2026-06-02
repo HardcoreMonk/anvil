@@ -1569,6 +1569,9 @@ func TestRestoreSnapshotFirecrackerFailureCleansNetworkAndDMSnapshot(t *testing.
 		if cfg.RootfsPath != meta.DiskPath {
 			t.Fatalf("RootfsPath = %q, want %q", cfg.RootfsPath, meta.DiskPath)
 		}
+		if cfg.VsockUDSPath != meta.VsockPath {
+			t.Fatalf("VsockUDSPath = %q, want %q", cfg.VsockUDSPath, meta.VsockPath)
+		}
 		if cfg.TapDevice != "tap-restored" {
 			t.Fatalf("TapDevice = %q, want tap-restored", cfg.TapDevice)
 		}
@@ -1614,6 +1617,52 @@ func TestRestoreSnapshotFirecrackerFailureCleansNetworkAndDMSnapshot(t *testing.
 		t.Fatal("snapshotLifecycleMu remained locked after restore failure")
 	}
 	cp.snapshotLifecycleMu.Unlock()
+}
+
+func TestAgentTokenForRestoredSnapshotUsesExistingToken(t *testing.T) {
+	cp := newTestCP(t)
+	meta := testSnapshotMeta("snap-token", "vm-source", "full", time.Now().UTC())
+	meta.AgentToken = "existing-token"
+	cp.setGuestAgentToken = func(vsockPath, token string) error {
+		t.Fatal("setGuestAgentToken called for existing token")
+		return nil
+	}
+
+	token, err := cp.agentTokenForRestoredSnapshot("snap-token", meta)
+	if err != nil {
+		t.Fatalf("agentTokenForRestoredSnapshot returned error: %v", err)
+	}
+	if token != "existing-token" {
+		t.Fatalf("token = %q, want existing-token", token)
+	}
+}
+
+func TestAgentTokenForRestoredSnapshotInjectsNewTokenWhenMissing(t *testing.T) {
+	cp := newTestCP(t)
+	meta := testSnapshotMeta("snap-token", "vm-source", "full", time.Now().UTC())
+	meta.AgentToken = ""
+	meta.VsockPath = filepath.Join(t.TempDir(), "rebased.vsock")
+
+	var gotVsock, gotToken string
+	cp.setGuestAgentToken = func(vsockPath, token string) error {
+		gotVsock = vsockPath
+		gotToken = token
+		return nil
+	}
+
+	token, err := cp.agentTokenForRestoredSnapshot("snap-token", meta)
+	if err != nil {
+		t.Fatalf("agentTokenForRestoredSnapshot returned error: %v", err)
+	}
+	if token == "" {
+		t.Fatal("token is empty, want generated token")
+	}
+	if token != gotToken {
+		t.Fatalf("returned token = %q, injected token = %q", token, gotToken)
+	}
+	if gotVsock != meta.VsockPath {
+		t.Fatalf("vsockPath = %q, want %q", gotVsock, meta.VsockPath)
+	}
 }
 
 func TestRestoreSnapshotDMSnapshotFallbackReleasesNetworkOnlyAfterBindMountFailure(t *testing.T) {

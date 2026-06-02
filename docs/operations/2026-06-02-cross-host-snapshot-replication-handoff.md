@@ -51,6 +51,8 @@
   daemon raw body, raw `metadata.json` body를 넣지 않는다.
 - export bundle의 `metadata.json`은 raw local metadata가 아니라 token과 source host
   path를 제거한 portable metadata다.
+- 복제된 snapshot restore는 target daemon이 새 `agent_token`을 생성해 guest agent에
+  vsock으로 주입한다.
 - MCP production entrypoint는 기존 tool을 계속 `ANVIL_DAEMON_URL` base daemon에
   위임한다. scheduler/router config는 `anvil_replicate_snapshot`에만 적용된다.
 - host daemon client는 기존 `ANVIL_API_TOKEN`을 사용한다.

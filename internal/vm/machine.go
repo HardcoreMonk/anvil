@@ -313,6 +313,14 @@ func SetGuestCPToken(vsockUDSPath, token string) error {
 	return vsockSendCommand(vsockUDSPath, "SET_CP_TOKEN "+token, 20, 200*time.Millisecond)
 }
 
+// SetGuestAgentToken instructs the guest to update its in-memory agent bearer
+// token and atomically rewrite /root/.ephemera-agent-token. Restore uses this
+// for replicated snapshots whose exported metadata intentionally omits the
+// source host's agent token.
+func SetGuestAgentToken(vsockUDSPath, token string) error {
+	return vsockSendCommand(vsockUDSPath, "SET_AGENT_TOKEN "+token, 20, 200*time.Millisecond)
+}
+
 // vsockSendCommand performs the Firecracker vsock handshake, sends a single
 // newline-terminated command, and waits for an "OK" / "ERROR" reply.
 // Retries up to attempts times spaced by perAttempt; the first attempt is

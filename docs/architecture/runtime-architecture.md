@@ -293,7 +293,8 @@ export bundle의 `metadata.json`은 source host의 raw metadata file이 아니�
 `agent_token`, `disk_path`, `vsock_path`를 제거한 portable metadata다. target import는
 publish 전에 `disk_path`, `vsock_path`, `mem_file_path`, `state_file_path`,
 `disk_copy_path`를 target-local path로 다시 쓴 뒤 최종 metadata checksum을 manifest에
-기록한다.
+기록한다. 복제된 snapshot restore는 target daemon이 새 `agent_token`을 생성하고
+rebased `vsock_path`로 guest agent에 주입해 source host token을 재사용하지 않는다.
 operator-facing import/replication 결과는 raw `metadata.json`, `agent_token`,
 authorization header를 포함하지 않는다.
 

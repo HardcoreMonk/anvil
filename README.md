@@ -1595,7 +1595,9 @@ snapshot `metadata.json`은 restore 인증 계약을 보존하기 위해 `agent_
 단, `POST /snapshots/{id}/export` replication bundle 안의 `metadata.json`은 raw local
 metadata file이 아니라 `agent_token`, `disk_path`, `vsock_path`를 제거한 portable
 copy다. target daemon은 import 시 target-local `disk_path`, `vsock_path`,
-`mem_file_path`, `state_file_path`, `disk_copy_path`로 다시 기록한다.
+`mem_file_path`, `state_file_path`, `disk_copy_path`로 다시 기록한다. 복제된 snapshot을
+restore할 때는 target daemon이 새 `agent_token`을 생성해 vsock control channel로
+guest agent에 주입하므로 source host의 token을 bundle에 싣지 않는다.
 
 ```bash
 go run ./scripts/snapshot-metadata-scrub.go -input snapshots/snap-1778229000000/metadata.json > metadata.scrubbed.json

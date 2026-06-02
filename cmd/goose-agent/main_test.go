@@ -65,6 +65,37 @@ func TestAgentAuthMiddleware_MissingHeader_401(t *testing.T) {
 	}
 }
 
+func TestAgentAuthMiddlewareWithTokenProviderUsesUpdatedToken(t *testing.T) {
+	token := "first"
+	called := 0
+	handler := agentAuthMiddlewareWithTokenProvider(func() string { return token }, func(w http.ResponseWriter, r *http.Request) {
+		called++
+	})
+
+	firstReq := httptest.NewRequest(http.MethodPost, "/tasks", nil)
+	firstReq.Header.Set("Authorization", "Bearer first")
+	handler(httptest.NewRecorder(), firstReq)
+	if called != 1 {
+		t.Fatalf("called = %d, want 1 after first token", called)
+	}
+
+	token = "second"
+	oldReq := httptest.NewRequest(http.MethodPost, "/tasks", nil)
+	oldReq.Header.Set("Authorization", "Bearer first")
+	oldRR := httptest.NewRecorder()
+	handler(oldRR, oldReq)
+	if oldRR.Code != http.StatusUnauthorized {
+		t.Fatalf("old token status = %d, want 401", oldRR.Code)
+	}
+
+	nextReq := httptest.NewRequest(http.MethodPost, "/tasks", nil)
+	nextReq.Header.Set("Authorization", "Bearer second")
+	handler(httptest.NewRecorder(), nextReq)
+	if called != 2 {
+		t.Fatalf("called = %d, want 2 after updated token", called)
+	}
+}
+
 func TestLoadAgentToken_FileAbsent(t *testing.T) {
 	// /root/.ephemera-agent-token won't exist in test environments (non-VM hosts).
 	// Verify that loadAgentToken returns "" without panicking.
