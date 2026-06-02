@@ -1,23 +1,23 @@
-# Unreleased — Scheduler operations hardening
+# Unreleased — Scheduler 운영 강화
 
 ## 추가됨
 
-- scheduler service `GET /metrics` endpoint:
+- scheduler service 전용 `GET /metrics` endpoint:
   - `anvil_scheduler_control_loop_running`
   - `anvil_scheduler_persistence_degraded`
   - `anvil_scheduler_host_status_count`
   - `anvil_scheduler_suspect_vm_placements`
-  - last poll/reconcile timestamp gauges
-- `cmd/anvil-scheduler` full-process integration test coverage for hosts file bootstrap,
-  stale state override, fake daemon `/health`, `/control-loop/status`, `/schedule/spawn`,
-  and `/metrics`.
-- scheduler smoke harness `/metrics` verification.
+  - 마지막 poll/reconcile 완료 timestamp gauge
+- `cmd/anvil-scheduler` full-process integration test는 hosts file 기반 bootstrap,
+  오래된 state override, fake daemon `/health`, `/control-loop/status`,
+  `/schedule/spawn`, `/metrics` 경로를 검증한다.
+- scheduler smoke harness가 `/metrics`를 검증한다.
 
-## 보안/운영 hardening
+## 보안/운영 강화
 
-- scheduler metrics do not include `agent_token`, host endpoint, daemon raw response,
-  authorization header, or snapshot metadata.
-- actual systemd verification remains an explicit operator action:
+- scheduler metrics에는 `agent_token`, host endpoint, daemon raw response,
+  authorization header, snapshot metadata가 들어가지 않는다.
+- 실제 systemd 검증은 명시적 operator action으로 유지한다:
   `sudo bash scripts/install-anvil-scheduler-systemd.sh --start --verify`.
 
 ## 검증 예정
@@ -28,7 +28,7 @@
 - `go build ./cmd/anvil-scheduler`
 - `bash -n scripts/anvil-scheduler-smoke.sh`
 - `bash -n scripts/install-anvil-scheduler-systemd.sh`
-- approval-gated systemd `--start --verify`
+- 승인이 필요한 systemd `--start --verify`
 
 # anvil v0.3.1 — Scheduler control loop and operational roadmap
 
