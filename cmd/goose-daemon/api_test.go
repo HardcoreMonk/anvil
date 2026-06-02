@@ -511,6 +511,42 @@ func writeSnapshotFile(t *testing.T, cp *ControlPlane, snapshotID, name string, 
 	}
 }
 
+func writeSnapshotBundleFixture(t *testing.T, workDir string, meta storage.SnapshotMetadata) storage.SnapshotMetadata {
+	t.Helper()
+	snapDir := storage.SnapshotDir(workDir, meta.SnapshotID)
+	if err := os.MkdirAll(snapDir, 0755); err != nil {
+		t.Fatalf("create snapshot dir: %v", err)
+	}
+	meta.MemFilePath = filepath.Join(snapDir, "memory.bin")
+	meta.StatFilePath = filepath.Join(snapDir, "state.bin")
+	meta.DiskCopyPath = filepath.Join(snapDir, "rootfs.ext4")
+	if meta.Profile == "" {
+		meta.Profile = "dev"
+	}
+	for name, body := range map[string][]byte{
+		"memory.bin":  []byte("memory:" + meta.SnapshotID),
+		"state.bin":   []byte("state:" + meta.SnapshotID),
+		"rootfs.ext4": []byte("rootfs:" + meta.SnapshotID),
+	} {
+		if err := os.WriteFile(filepath.Join(snapDir, name), body, 0600); err != nil {
+			t.Fatalf("write snapshot fixture file %s: %v", name, err)
+		}
+	}
+	if err := storage.SaveMetadata(snapDir, meta); err != nil {
+		t.Fatalf("write snapshot metadata: %v", err)
+	}
+	return meta
+}
+
+func exportSnapshotBundleFixture(t *testing.T, workDir, snapshotID string) []byte {
+	t.Helper()
+	var bundle bytes.Buffer
+	if _, err := storage.ExportSnapshotBundle(workDir, snapshotID, &bundle); err != nil {
+		t.Fatalf("export snapshot bundle fixture: %v", err)
+	}
+	return bundle.Bytes()
+}
+
 func snapshotIDs(entries []SnapshotGCEntry) []string {
 	ids := make([]string, 0, len(entries))
 	for _, entry := range entries {
@@ -1122,6 +1158,117 @@ func TestHandleSnapshotGCApplyKeepsReferencedFullUntilNextRun(t *testing.T) {
 	}
 	if _, err := os.Stat(storage.SnapshotDir(cp.workDir, "snap-full")); err != nil {
 		t.Fatalf("referenced full snapshot directory missing: %v", err)
+	}
+}
+
+func TestHandleSnapshotExportStreamsBundle(t *testing.T) {
+	cp := newTestCP(t)
+	meta := testSnapshotMeta("snap-1", "vm-1", "full", time.Now().UTC())
+	meta = writeSnapshotBundleFixture(t, cp.workDir, meta)
+	cp.snapshots[meta.SnapshotID] = meta
+
+	req := httptest.NewRequest(http.MethodPost, "/snapshots/snap-1/export", nil)
+	rr := httptest.NewRecorder()
+	cp.handleSnapshotItem(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q; want 200", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("Content-Type"); got != storage.SnapshotBundleContentType {
+		t.Fatalf("content-type = %q, want %q", got, storage.SnapshotBundleContentType)
+	}
+	result, err := storage.ImportSnapshotBundle(t.TempDir(), bytes.NewReader(rr.Body.Bytes()))
+	if err != nil {
+		t.Fatalf("import streamed bundle: %v", err)
+	}
+	if result.SnapshotID != "snap-1" || result.Status != storage.SnapshotImportStatusImported {
+		t.Fatalf("import result = %+v, want snap-1 imported", result)
+	}
+}
+
+func TestHandleSnapshotImportPublishesSnapshot(t *testing.T) {
+	sourceDir := t.TempDir()
+	meta := testSnapshotMeta("snap-import", "vm-1", "full", time.Now().UTC())
+	writeSnapshotBundleFixture(t, sourceDir, meta)
+	bundle := exportSnapshotBundleFixture(t, sourceDir, "snap-import")
+
+	cp := newTestCP(t)
+	req := httptest.NewRequest(http.MethodPost, "/snapshots/import", bytes.NewReader(bundle))
+	req.Header.Set("Content-Type", storage.SnapshotBundleContentType)
+	rr := httptest.NewRecorder()
+	cp.handleSnapshotImport(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %q; want 201", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("content-type = %q, want application/json", got)
+	}
+	got, ok := cp.snapshots["snap-import"]
+	if !ok {
+		t.Fatal("imported snapshot was not added to cp.snapshots")
+	}
+	if got.SnapshotID != "snap-import" || got.SnapshotType != "full" {
+		t.Fatalf("snapshot metadata = %+v, want snap-import full", got)
+	}
+	if _, err := os.Stat(storage.SnapshotDir(cp.workDir, "snap-import")); err != nil {
+		t.Fatalf("imported snapshot directory missing: %v", err)
+	}
+}
+
+func TestHandleSnapshotImportRejectsDiffWithoutBase(t *testing.T) {
+	sourceDir := t.TempDir()
+	diff := testSnapshotMeta("snap-diff", "vm-1", "diff", time.Now().UTC())
+	diff.BaseSnapshotID = "snap-base"
+	writeSnapshotBundleFixture(t, sourceDir, diff)
+	bundle := exportSnapshotBundleFixture(t, sourceDir, "snap-diff")
+
+	cp := newTestCP(t)
+	req := httptest.NewRequest(http.MethodPost, "/snapshots/import", bytes.NewReader(bundle))
+	req.Header.Set("Content-Type", storage.SnapshotBundleContentType)
+	rr := httptest.NewRecorder()
+	cp.handleSnapshotImport(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, body = %q; want 409", rr.Code, rr.Body.String())
+	}
+	if _, ok := cp.snapshots["snap-diff"]; ok {
+		t.Fatal("diff snapshot was added to cp.snapshots without its base")
+	}
+	if _, err := os.Stat(storage.SnapshotDir(cp.workDir, "snap-diff")); !os.IsNotExist(err) {
+		t.Fatalf("diff snapshot directory stat err = %v, want not exist", err)
+	}
+}
+
+func TestImportedDiffProtectsBaseSnapshotDelete(t *testing.T) {
+	sourceDir := t.TempDir()
+	base := testSnapshotMeta("snap-base", "vm-1", "full", time.Now().UTC().Add(-time.Minute))
+	writeSnapshotBundleFixture(t, sourceDir, base)
+	diff := testSnapshotMeta("snap-diff", "vm-1", "diff", time.Now().UTC())
+	diff.BaseSnapshotID = "snap-base"
+	writeSnapshotBundleFixture(t, sourceDir, diff)
+	baseBundle := exportSnapshotBundleFixture(t, sourceDir, "snap-base")
+	diffBundle := exportSnapshotBundleFixture(t, sourceDir, "snap-diff")
+
+	cp := newTestCP(t)
+	for _, bundle := range [][]byte{baseBundle, diffBundle} {
+		req := httptest.NewRequest(http.MethodPost, "/snapshots/import", bytes.NewReader(bundle))
+		req.Header.Set("Content-Type", storage.SnapshotBundleContentType)
+		rr := httptest.NewRecorder()
+		cp.handleSnapshotImport(rr, req)
+		if rr.Code != http.StatusCreated {
+			t.Fatalf("import status = %d, body = %q; want 201", rr.Code, rr.Body.String())
+		}
+	}
+
+	rr := httptest.NewRecorder()
+	cp.deleteSnapshot(rr, "snap-base")
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("delete status = %d, body = %q; want 409", rr.Code, rr.Body.String())
+	}
+	if _, ok := cp.snapshots["snap-base"]; !ok {
+		t.Fatal("protected imported base snapshot was removed from map")
 	}
 }
 

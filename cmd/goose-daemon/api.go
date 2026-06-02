@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -374,6 +376,7 @@ func NewControlPlane(
 	internalMux.HandleFunc("/audit/runtime/prune", cp.handleRuntimeAuditPrune)
 	internalMux.HandleFunc("/snapshots", cp.handleSnapshots)
 	internalMux.HandleFunc("/snapshots/gc", cp.handleSnapshotGC)
+	internalMux.HandleFunc("/snapshots/import", cp.handleSnapshotImport)
 	internalMux.HandleFunc("/snapshots/", cp.handleSnapshotItem)
 	cp.registerOrchestratorRoutes(internalMux)
 
@@ -2018,7 +2021,84 @@ func (cp *ControlPlane) handleSnapshots(w http.ResponseWriter, r *http.Request) 
 	json.NewEncoder(w).Encode(list)
 }
 
-// handleSnapshotItem routes POST /snapshots/{id}/restore and DELETE /snapshots/{id}.
+func (cp *ControlPlane) handleSnapshotExport(w http.ResponseWriter, r *http.Request, snapID string) {
+	defer cp.observeLifecycle("snapshot_export")()
+	snapID = strings.TrimSpace(snapID)
+	if snapID == "" {
+		writeJSONError(w, http.StatusBadRequest, "snapshot_id is required")
+		return
+	}
+
+	cp.snapshotLifecycleMu.Lock()
+	defer cp.snapshotLifecycleMu.Unlock()
+
+	cp.snapshotsMu.RLock()
+	_, ok := cp.snapshots[snapID]
+	cp.snapshotsMu.RUnlock()
+	if !ok {
+		writeJSONError(w, http.StatusNotFound, "snapshot_not_found")
+		return
+	}
+
+	var bundle bytes.Buffer
+	if _, err := storage.ExportSnapshotBundle(cp.workDir, snapID, &bundle); err != nil {
+		slog.Warn("snapshot export failed", "snapshot_id", snapID, "err", err)
+		writeJSONError(w, http.StatusInternalServerError, "snapshot_export_failed")
+		return
+	}
+
+	w.Header().Set("Content-Type", storage.SnapshotBundleContentType)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(bundle.Bytes())
+}
+
+func (cp *ControlPlane) handleSnapshotImport(w http.ResponseWriter, r *http.Request) {
+	defer cp.observeLifecycle("snapshot_import")()
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	if ct := strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"), ";")[0]); ct != storage.SnapshotBundleContentType {
+		writeJSONError(w, http.StatusBadRequest, "invalid snapshot bundle content type")
+		return
+	}
+
+	cp.snapshotLifecycleMu.Lock()
+	defer cp.snapshotLifecycleMu.Unlock()
+
+	result, err := storage.ImportSnapshotBundle(cp.workDir, r.Body)
+	if err != nil {
+		status := http.StatusInternalServerError
+		msg := "snapshot_import_failed"
+		switch {
+		case errors.Is(err, storage.ErrSnapshotBundleInvalid):
+			status = http.StatusBadRequest
+			msg = "invalid_snapshot_bundle"
+		case errors.Is(err, storage.ErrDiffBaseMissing):
+			status = http.StatusConflict
+			msg = "diff_base_missing"
+		case errors.Is(err, storage.ErrSnapshotBundleConflict):
+			status = http.StatusConflict
+			msg = "snapshot_conflict"
+		}
+		writeJSONError(w, status, msg)
+		return
+	}
+
+	cp.snapshotsMu.Lock()
+	cp.snapshots[result.SnapshotID] = result.Metadata
+	cp.snapshotsMu.Unlock()
+
+	status := http.StatusCreated
+	if result.Status == storage.SnapshotImportStatusAlreadyPresent {
+		status = http.StatusOK
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(result)
+}
+
+// handleSnapshotItem routes POST /snapshots/{id}/restore, POST /snapshots/{id}/export, and DELETE /snapshots/{id}.
 func (cp *ControlPlane) handleSnapshotItem(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/snapshots/")
 
@@ -2029,6 +2109,16 @@ func (cp *ControlPlane) handleSnapshotItem(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		cp.restoreSnapshotFromRequest(w, r, snapID)
+		return
+	}
+
+	if strings.HasSuffix(path, "/export") {
+		snapID := strings.TrimSuffix(path, "/export")
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST required", http.StatusMethodNotAllowed)
+			return
+		}
+		cp.handleSnapshotExport(w, r, snapID)
 		return
 	}
 
