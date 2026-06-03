@@ -72,7 +72,8 @@ smoke-only host를 무시하는지 확인한다.
 `journalctl -u anvil-scheduler.service -n 100 --no-pager`를 확인한다.
 `health_failed`는 service bind/start 문제, `host_put_failed`는 state path 권한 또는
 JSON body 처리 문제, `schedule_spawn_failed`는 host inventory나 quota/usage 입력
-문제를 우선 의심한다.
+문제를 우선 의심한다. `metrics_failed`는 scheduler service가 `/metrics`를 제공하지
+않거나 smoke가 `anvil_scheduler_control_loop_running` line을 찾지 못한 상태다.
 
 ## Daemon API 확인
 
@@ -116,6 +117,16 @@ runtime scheduler control loop 상태:
 ```bash
 curl http://127.0.0.1:3010/control-loop/status
 ```
+
+runtime scheduler metrics:
+
+```bash
+curl http://127.0.0.1:3010/metrics
+```
+
+`anvil_scheduler_persistence_degraded 1`이면 state file 저장 경로 권한과 disk 상태를
+먼저 확인한다. `anvil_scheduler_host_status_count{status="unhealthy"}`가 0보다 크면
+`/control-loop/status`의 host observation과 daemon host `/health`를 함께 확인한다.
 
 `degraded`/`unhealthy` host는 신규 placement에서 제외되며, 기존 VM placement는
 `suspect_vm_placements`로 남는다. host가 다시 응답하면 reconciliation이 daemon
@@ -299,3 +310,37 @@ curl -X POST http://127.0.0.1:3000/snapshots/gc \
 
 `apply:true` 호출은 `snapshots/gc-audit.jsonl`에 count-only audit record를 append한다.
 이 audit record에는 snapshot metadata 전체나 `agent_token`이 들어가지 않는다.
+
+## Snapshot cross-host replication
+
+복제 전 source/target daemon과 scheduler 상태를 확인한다.
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" http://host-a:3000/health
+curl -H "Authorization: Bearer $TOKEN" http://host-b:3000/health
+curl http://127.0.0.1:3010/placements
+```
+
+diff snapshot은 target host에 base full snapshot이 있어야 restore할 수 있다. 운영자가
+base 존재를 확신하지 못하면 `include_dependencies=true`를 사용한다.
+
+```bash
+anvil_replicate_snapshot \
+  snapshot_id=snap-1 \
+  source_host=host-a \
+  target_host=host-b \
+  include_dependencies=true
+```
+
+성공 후 scheduler `/placements` 또는 state file의 `snapshot_locations`에서 target host가
+기록됐는지 확인한다.
+
+```bash
+curl http://127.0.0.1:3010/placements
+```
+
+target import가 실패하면 daemon log를 확인하고 target snapshot directory 아래
+`snapshots/.import-*` staging directory가 남아 있지 않은지 점검한다. 남아 있다면 즉시
+수동 삭제하기 전에 같은 import를 재시도할지, daemon이 해당 staging path를 사용 중인지
+확인한다. replication response, audit, 운영 기록에는 `agent_token`, authorization
+header, daemon raw body, raw `metadata.json` body를 남기지 않는다.

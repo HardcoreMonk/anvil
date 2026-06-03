@@ -1,5 +1,10 @@
 package anvilmcp
 
+import (
+	"fmt"
+	"strings"
+)
+
 type Scheduler struct {
 	hosts  []RuntimeHost
 	quotas map[string]TenantQuota
@@ -46,6 +51,19 @@ func NewScheduler(hosts []RuntimeHost, quotas map[string]TenantQuota, usage map[
 	}
 }
 
+func (s *Scheduler) RuntimeHost(name string) (RuntimeHost, bool) {
+	name = strings.TrimSpace(name)
+	if s == nil || name == "" {
+		return RuntimeHost{}, false
+	}
+	for _, host := range s.hosts {
+		if host.Name == name {
+			return cloneRuntimeHost(host), true
+		}
+	}
+	return RuntimeHost{}, false
+}
+
 func SummarizeHostStatuses(hosts []RuntimeHost, observations map[string]HostObservation) HostStatusSummary {
 	var summary HostStatusSummary
 	for _, host := range hosts {
@@ -81,6 +99,11 @@ func (s *Scheduler) Schedule(req ScheduleRequest, requested TenantUsage) (Schedu
 	if err != nil {
 		return ScheduleDecision{}, err
 	}
+	requestedActiveVMs, err := normalizeRequestedActiveVMs(req.RequestedActiveVMs, requested.ActiveVMs)
+	if err != nil {
+		return ScheduleDecision{}, err
+	}
+	requested.ActiveVMs = requestedActiveVMs
 	if requested.SnapshotBytes == 0 && req.RequestedSnapshotBytes > 0 {
 		requested.SnapshotBytes = req.RequestedSnapshotBytes
 	}
@@ -107,6 +130,7 @@ func (s *Scheduler) Schedule(req ScheduleRequest, requested TenantUsage) (Schedu
 
 	req.TenantID = tenantID
 	req.EgressPolicy = egressPolicy
+	req.RequestedActiveVMs = requested.ActiveVMs
 	host, err := SelectRuntimeHost(s.hosts, req)
 	if err != nil {
 		base.Allowed = false
@@ -117,4 +141,17 @@ func (s *Scheduler) Schedule(req ScheduleRequest, requested TenantUsage) (Schedu
 	base.Reason = "scheduled"
 	base.Host = host
 	return base, nil
+}
+
+func normalizeRequestedActiveVMs(requestActiveVMs int64, usageActiveVMs int64) (int64, error) {
+	if requestActiveVMs < 0 {
+		return 0, fmt.Errorf("requested_active_vms must be non-negative")
+	}
+	if usageActiveVMs != 0 {
+		return usageActiveVMs, nil
+	}
+	if requestActiveVMs > 0 {
+		return requestActiveVMs, nil
+	}
+	return 1, nil
 }

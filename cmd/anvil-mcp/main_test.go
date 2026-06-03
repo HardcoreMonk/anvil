@@ -1,6 +1,13 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"ephemera/internal/anvilmcp"
@@ -22,6 +29,7 @@ func TestToolRegistrationsIncludeSnapshotTools(t *testing.T) {
 		"anvil_list_snapshots":       "List snapshots known to the ephemera daemon.",
 		"anvil_restore_snapshot":     "Restore a new ephemera VM from a snapshot and optionally bind a session_name alias.",
 		"anvil_delete_snapshot":      "Delete a snapshot by snapshot_id through the ephemera daemon.",
+		"anvil_replicate_snapshot":   "Replicate a snapshot from one scheduler runtime host to another and update snapshot locality.",
 		"anvil_spawn_flock":          "Create a Goosetown flock of ephemera VMs and return its Town Wall endpoints.",
 		"anvil_list_flocks":          "List live Goosetown flocks known to the ephemera daemon.",
 		"anvil_get_flock":            "Return a Goosetown flock and its agent status by flock_id.",
@@ -69,5 +77,121 @@ func TestToolRegistrationsHaveIronClawInputSchemas(t *testing.T) {
 		if !schemaNames[registration.name] {
 			t.Fatalf("tool registration %q has no IronClaw input schema; schemas = %v", registration.name, schemaNames)
 		}
+	}
+}
+
+func TestNewMCPDaemonUsesRuntimeRouterWhenSchedulerConfigIsSet(t *testing.T) {
+	base := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/snapshots":
+			if r.Method != http.MethodGet {
+				t.Fatalf("base method for /snapshots = %s, want GET", r.Method)
+			}
+			_ = json.NewEncoder(w).Encode([]anvilmcp.SnapshotInfo{{
+				SnapshotID:   "snap-base-daemon",
+				SnapshotType: "full",
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer base.Close()
+
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/snapshots":
+			if r.Method != http.MethodGet {
+				t.Fatalf("source method for /snapshots = %s, want GET", r.Method)
+			}
+			_ = json.NewEncoder(w).Encode([]anvilmcp.SnapshotInfo{{
+				SnapshotID:   "snap-1",
+				SnapshotType: "full",
+			}})
+		case "/snapshots/snap-1/export":
+			if r.Method != http.MethodPost {
+				t.Fatalf("source method for export = %s, want POST", r.Method)
+			}
+			_, _ = w.Write([]byte("bundle:snap-1"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer source.Close()
+
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/snapshots":
+			if r.Method != http.MethodGet {
+				t.Fatalf("target method for /snapshots = %s, want GET", r.Method)
+			}
+			_ = json.NewEncoder(w).Encode([]anvilmcp.SnapshotInfo{})
+		case "/snapshots/import":
+			if r.Method != http.MethodPost {
+				t.Fatalf("target method for import = %s, want POST", r.Method)
+			}
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("read import body: %v", err)
+			}
+			if string(body) != "bundle:snap-1" {
+				t.Fatalf("import body = %q, want bundle:snap-1", string(body))
+			}
+			_ = json.NewEncoder(w).Encode(anvilmcp.SnapshotImportResponse{
+				SnapshotID:   "snap-1",
+				SnapshotType: "full",
+				Status:       "replicated",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer target.Close()
+
+	dir := t.TempDir()
+	hostsPath := filepath.Join(dir, "hosts.json")
+	writeMainTestFile(t, hostsPath, `{"hosts":[{"name":"host-a","endpoint":"`+source.URL+`","healthy":true,"available_vms":1},{"name":"host-b","endpoint":"`+target.URL+`","healthy":true,"available_vms":1}]}`)
+
+	daemon, err := newMCPDaemon(anvilmcp.Config{
+		DaemonURL:               base.URL,
+		SchedulerStatePath:      filepath.Join(dir, "scheduler.json"),
+		SchedulerHostsFile:      hostsPath,
+		SchedulerQuotaStorePath: filepath.Join(dir, "quotas.json"),
+	}, source.Client())
+	if err != nil {
+		t.Fatalf("newMCPDaemon returned error: %v", err)
+	}
+
+	replicator, ok := daemon.(interface {
+		ReplicateSnapshot(context.Context, anvilmcp.SnapshotReplicationRequest) (*anvilmcp.SnapshotReplicationResponse, error)
+	})
+	if !ok {
+		t.Fatalf("daemon type %T does not support snapshot replication", daemon)
+	}
+
+	snapshots, err := daemon.ListSnapshots(context.Background())
+	if err != nil {
+		t.Fatalf("ListSnapshots returned error: %v", err)
+	}
+	if len(snapshots) != 1 || snapshots[0].SnapshotID != "snap-base-daemon" {
+		t.Fatalf("ListSnapshots = %+v, want base daemon snapshot", snapshots)
+	}
+
+	resp, err := replicator.ReplicateSnapshot(context.Background(), anvilmcp.SnapshotReplicationRequest{
+		SnapshotID: "snap-1",
+		SourceHost: "host-a",
+		TargetHost: "host-b",
+	})
+	if err != nil {
+		t.Fatalf("ReplicateSnapshot returned error: %v", err)
+	}
+	if resp.Status != "replicated" {
+		t.Fatalf("Status = %q, want replicated", resp.Status)
+	}
+}
+
+func writeMainTestFile(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
 	}
 }

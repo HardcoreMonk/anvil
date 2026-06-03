@@ -1,3 +1,59 @@
+# Unreleased — Scheduler 운영 강화
+
+## 추가됨
+
+- manual cross-host snapshot replication:
+  - daemon `POST /snapshots/{id}/export`는
+    `application/vnd.anvil.snapshot-bundle` streamable bundle을 export한다.
+  - daemon `POST /snapshots/import`는 bundle을 staging/validation 후 atomic publish로
+    target snapshot directory에 반입한다.
+  - MCP `anvil_replicate_snapshot`은 `snapshot_id`, `source_host`, `target_host`,
+    `include_dependencies` 입력으로 source export stream을 target import로 전달한다.
+  - RuntimeRouter는 replication 성공 후 target host만 scheduler
+    `PlacementStoreState.SnapshotLocations`에 기록한다.
+- scheduler service 전용 `GET /metrics` endpoint:
+  - `anvil_scheduler_control_loop_running`
+  - `anvil_scheduler_persistence_degraded`
+  - `anvil_scheduler_host_status_count`
+  - `anvil_scheduler_suspect_vm_placements`
+  - 마지막 poll/reconcile 완료 timestamp gauge
+- `cmd/anvil-scheduler` full-process integration test는 hosts file 기반 bootstrap,
+  오래된 state override, fake daemon `/health`, scheduler `/control-loop/status`,
+  `/schedule/spawn`, `/metrics` 경로를 검증한다.
+- scheduler smoke harness가 `/metrics`를 검증한다.
+- MCP `anvil_spawn_flock` scheduler-aware single-host placement:
+  - scheduler router config가 있을 때 roles 수 기반 active VM quota/capacity로 host를
+    선택한다.
+  - 선택된 host의 기존 daemon `POST /flocks`를 호출하고, 반환된 member VM placement를
+    scheduler `PlacementStore`에 기록한다.
+  - daemon direct `POST /flocks` wire contract와 `agent_token` 비노출 조건은 유지한다.
+
+## 보안/운영 강화
+
+- replication response, audit, operator 문서는 `agent_token`, authorization header,
+  daemon raw body, raw `metadata.json` body를 노출하지 않는다.
+- `POST /snapshots/{id}/export` bundle의 `metadata.json`은 raw local metadata가 아니라
+  token을 제거한 portable metadata를 사용한다. `disk_path`와 `vsock_path`는
+  Firecracker restore 제약 때문에 safe path로 검증한 뒤 보존한다.
+- 복제된 snapshot restore는 target daemon이 새 `agent_token`을 생성해 guest agent에
+  vsock으로 주입하므로 source host token을 재사용하지 않는다.
+- diff snapshot replication은 target host에 base full snapshot이 필요하다.
+  `include_dependencies=true`이면 router가 base full을 먼저 복제하고 diff를 복제한다.
+- scheduler metrics에는 `agent_token`, host endpoint, daemon raw response,
+  authorization header, snapshot metadata가 들어가지 않는다.
+- 실제 systemd 검증은 명시적 operator action으로 유지한다:
+  `sudo bash scripts/install-anvil-scheduler-systemd.sh --start --verify`.
+
+## 검증됨
+
+- `go test ./... -count=1`
+- `go build ./cmd/goose-daemon`
+- `go build ./cmd/anvil-mcp`
+- `go build ./cmd/anvil-scheduler`
+- `bash -n scripts/anvil-scheduler-smoke.sh`
+- `bash -n scripts/install-anvil-scheduler-systemd.sh`
+- `sudo bash scripts/install-anvil-scheduler-systemd.sh --start --verify`
+
 # anvil v0.3.1 — Scheduler control loop and operational roadmap
 
 - Tag: `anvil-v0.3.1`

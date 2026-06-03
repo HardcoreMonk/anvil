@@ -23,15 +23,21 @@ const (
 	envSessionStore   = "ANVIL_MCP_SESSION_STORE"
 	envTenantID       = "ANVIL_MCP_TENANT_ID"
 	envAuditLog       = "ANVIL_MCP_AUDIT_LOG"
+	envSchedulerState = "ANVIL_MCP_SCHEDULER_STATE"
+	envSchedulerHosts = "ANVIL_MCP_SCHEDULER_HOSTS_FILE"
+	envSchedulerQuota = "ANVIL_MCP_SCHEDULER_QUOTA_STORE"
 )
 
 type Config struct {
-	DaemonURL             string `yaml:"daemon_url"`
-	APIToken              string `yaml:"api_token"`
-	DefaultTimeoutSeconds int    `yaml:"default_timeout_seconds"`
-	SessionStorePath      string `yaml:"session_store_path"`
-	DefaultTenantID       string `yaml:"default_tenant_id"`
-	AuditLogPath          string `yaml:"audit_log_path"`
+	DaemonURL               string `yaml:"daemon_url"`
+	APIToken                string `yaml:"api_token"`
+	DefaultTimeoutSeconds   int    `yaml:"default_timeout_seconds"`
+	SessionStorePath        string `yaml:"session_store_path"`
+	DefaultTenantID         string `yaml:"default_tenant_id"`
+	AuditLogPath            string `yaml:"audit_log_path"`
+	SchedulerStatePath      string `yaml:"scheduler_state_path"`
+	SchedulerHostsFile      string `yaml:"scheduler_hosts_file"`
+	SchedulerQuotaStorePath string `yaml:"scheduler_quota_store_path"`
 }
 
 type ConfigSource struct {
@@ -93,12 +99,24 @@ func LoadConfig(src ConfigSource) (Config, error) {
 	if v := getenv(envAuditLog); v != "" {
 		cfg.AuditLogPath = v
 	}
+	if v := getenv(envSchedulerState); v != "" {
+		cfg.SchedulerStatePath = v
+	}
+	if v := getenv(envSchedulerHosts); v != "" {
+		cfg.SchedulerHostsFile = v
+	}
+	if v := getenv(envSchedulerQuota); v != "" {
+		cfg.SchedulerQuotaStorePath = v
+	}
 	if cfg.DefaultTimeoutSeconds <= 0 {
 		return Config{}, fmt.Errorf("default_timeout_seconds must be positive")
 	}
 	cfg.SessionStorePath = strings.TrimSpace(cfg.SessionStorePath)
 	cfg.DefaultTenantID = strings.TrimSpace(cfg.DefaultTenantID)
 	cfg.AuditLogPath = strings.TrimSpace(cfg.AuditLogPath)
+	cfg.SchedulerStatePath = strings.TrimSpace(cfg.SchedulerStatePath)
+	cfg.SchedulerHostsFile = strings.TrimSpace(cfg.SchedulerHostsFile)
+	cfg.SchedulerQuotaStorePath = strings.TrimSpace(cfg.SchedulerQuotaStorePath)
 	if cfg.DefaultTenantID != "" {
 		label := "default_tenant_id"
 		if getenv(envTenantID) != "" {

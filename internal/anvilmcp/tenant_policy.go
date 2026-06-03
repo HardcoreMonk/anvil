@@ -61,6 +61,7 @@ type ScheduleRequest struct {
 	TenantID               string       `json:"tenant_id"`
 	Profile                string       `json:"profile,omitempty"`
 	RequestedSnapshotBytes int64        `json:"requested_snapshot_bytes,omitempty"`
+	RequestedActiveVMs     int64        `json:"requested_active_vms,omitempty"`
 	EgressPolicy           EgressPolicy `json:"egress_policy"`
 	PreferredHosts         []string     `json:"preferred_hosts,omitempty"`
 	ExcludedHosts          []string     `json:"excluded_hosts,omitempty"`
@@ -158,6 +159,13 @@ func SelectRuntimeHost(hosts []RuntimeHost, req ScheduleRequest) (RuntimeHost, e
 	if req.RequestedSnapshotBytes < 0 {
 		return RuntimeHost{}, fmt.Errorf("requested_snapshot_bytes must be non-negative")
 	}
+	if req.RequestedActiveVMs < 0 {
+		return RuntimeHost{}, fmt.Errorf("requested_active_vms must be non-negative")
+	}
+	requestedActiveVMs := req.RequestedActiveVMs
+	if requestedActiveVMs == 0 {
+		requestedActiveVMs = 1
+	}
 	policy, err := NormalizeEgressPolicy(string(req.EgressPolicy))
 	if err != nil {
 		return RuntimeHost{}, err
@@ -169,7 +177,7 @@ func SelectRuntimeHost(hosts []RuntimeHost, req ScheduleRequest) (RuntimeHost, e
 		if strings.TrimSpace(host.Name) == "" || strings.TrimSpace(host.Endpoint) == "" {
 			return false
 		}
-		if !host.Healthy || host.AvailableVMs <= 0 {
+		if !host.Healthy || host.AvailableVMs < requestedActiveVMs {
 			return false
 		}
 		if excluded[host.Name] {

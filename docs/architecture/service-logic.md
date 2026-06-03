@@ -35,6 +35,8 @@ control plane daemon은 하나의 HTTP service를 노출한다.
 | `/vms/{vm_id}/snapshot` | `cmd/goose-daemon/api.go` | full 또는 diff VM snapshot 생성 |
 | `/snapshots` | `cmd/goose-daemon/api.go` | 저장된 snapshot 목록 |
 | `/snapshots/gc` | `cmd/goose-daemon/api.go` | snapshot retention GC dry-run/apply |
+| `/snapshots/{id}/export` | `cmd/goose-daemon/api.go` | streamable snapshot bundle export |
+| `/snapshots/import` | `cmd/goose-daemon/api.go` | snapshot bundle staging/validation/import |
 | `/snapshots/{id}/restore` | `cmd/goose-daemon/api.go` | snapshot에서 VM restore |
 | `/snapshots/{id}` | `cmd/goose-daemon/api.go` | snapshot 삭제 |
 | `/flocks` | `cmd/goose-daemon/orchestrator_api.go` | Goosetown flock 생성과 live flock 목록 |
@@ -593,6 +595,51 @@ restore 실패는 `Content-Type: application/json`인 `RestoreErrorResponse`를
 
 이 fallback은 COW restore보다 느리고 disk를 더 많이 사용하지만,
 dm-snapshot을 사용할 수 없는 host에서도 restore 기능을 유지한다.
+
+## Cross-host snapshot replication
+
+MCP `anvil_replicate_snapshot`은 `snapshot_id`, `source_host`, `target_host`,
+`include_dependencies` 입력을 받아 RuntimeRouter를 통해 host 간 snapshot bundle을
+복제한다. 기존 MCP production config에서 일반 VM/snapshot tool은
+`ANVIL_DAEMON_URL` direct daemon 동작을 유지하고, replication만 scheduler state 또는
+hosts file config가 있을 때 router를 사용한다.
+
+흐름:
+
+```text
+anvil_replicate_snapshot
+  -> source_host와 target_host client 선택
+  -> snapshot metadata에서 full/diff와 base_snapshot_id 확인
+  -> diff이고 include_dependencies=true이면 base full을 먼저 같은 흐름으로 복제
+  -> source daemon POST /snapshots/{id}/export 호출
+       Content-Type: application/vnd.anvil.snapshot-bundle
+  -> export response body를 target daemon POST /snapshots/import로 stream 전달
+  -> target daemon이 staging, validation, atomic publish 수행
+  -> import 성공 후 scheduler PlacementStoreState.SnapshotLocations에 target_host 기록
+```
+
+artifact bundle 생성, staging directory, metadata validation, publish semantics는
+daemon이 소유한다. RuntimeRouter는 bundle body를 해석하거나 raw `metadata.json`을
+operator surface에 노출하지 않고 source export stream을 target import request로
+전달한다. scheduler state는 성공한 target host만 기록한다. source export 또는 target
+import가 실패하면 `SnapshotLocations`를 갱신하지 않는다.
+
+diff snapshot은 target host에 base full snapshot이 있어야 restore 가능하다.
+`include_dependencies=false`일 때 base full이 target에 없으면 replication 또는 이후
+restore가 dependency 오류로 실패할 수 있다. `include_dependencies=true`는 base full을
+먼저 복제한 뒤 diff를 복제하므로 restore scheduler가 target host를 안전하게 선택할 수
+있다.
+
+보안 불변 조건:
+
+- operator-facing replication response와 audit record는 `agent_token`을 포함하지 않는다.
+- authorization header와 `ANVIL_API_TOKEN` 값은 response/audit/log에 기록하지 않는다.
+- daemon raw body와 raw `metadata.json` body를 MCP output에 포함하지 않는다.
+- `POST /snapshots/{id}/export` bundle의 `metadata.json`은 raw local metadata가 아니라
+  token을 제거한 portable metadata다. Firecracker restore가 요구하는 `disk_path`와
+  `vsock_path`는 safe path로 검증한 뒤 보존한다.
+- 복제된 snapshot restore는 source host token을 재사용하지 않고 target daemon이 새
+  agent token을 vsock으로 주입한다.
 
 ## Snapshot 삭제 로직
 

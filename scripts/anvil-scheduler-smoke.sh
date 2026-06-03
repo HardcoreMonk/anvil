@@ -338,6 +338,21 @@ if not isinstance(value, dict) or key not in value:
 PY
 }
 
+require_text_contains() {
+  local path="$1"
+  local needle="$2"
+
+  python3 - "$path" "$needle" <<'PY'
+import sys
+
+path, needle = sys.argv[1:3]
+with open(path, encoding="utf-8", errors="replace") as handle:
+    data = handle.read()
+if needle not in data:
+    raise SystemExit(1)
+PY
+}
+
 require_deleted_true() {
   local path="$1"
 
@@ -525,6 +540,18 @@ if [[ "$CONTROL_LOOP_STATUS" != "200" ]]; then
 fi
 if ! require_json_key "$CONTROL_LOOP_BODY" "running" 2>/dev/null; then
   fail_step control_loop_status_failed "GET /control-loop/status response missing running"
+fi
+
+METRICS_BODY="$TMP_DIR/metrics.txt"
+METRICS_ERR="$TMP_DIR/metrics.err"
+if ! METRICS_STATUS="$(request_json GET /metrics "" "$METRICS_BODY" "$METRICS_ERR")"; then
+  fail_step metrics_failed "GET /metrics request failed: $(<"$METRICS_ERR")"
+fi
+if [[ "$METRICS_STATUS" != "200" ]]; then
+  fail_step metrics_failed "GET /metrics returned HTTP $METRICS_STATUS body=$(response_body_snippet "$METRICS_BODY")"
+fi
+if ! require_text_contains "$METRICS_BODY" "anvil_scheduler_control_loop_running" 2>/dev/null; then
+  fail_step metrics_failed "GET /metrics response missing anvil_scheduler_control_loop_running"
 fi
 
 if [[ "$SMOKE_HOST_REGISTERED" == "1" ]]; then

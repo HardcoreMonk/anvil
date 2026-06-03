@@ -47,6 +47,29 @@ func newTestCP(t *testing.T) *ControlPlane {
 	return cp
 }
 
+func newTestControlPlaneWithHandler(t *testing.T) *ControlPlane {
+	t.Helper()
+	tmp := t.TempDir()
+	defaultCfg := filepath.Join(tmp, "goose.yaml")
+	defaultSec := filepath.Join(tmp, "goose-secrets.yaml")
+	if err := os.WriteFile(defaultCfg, []byte("GOOSE_PROVIDER: default\n"), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(defaultSec, []byte("DEFAULT_KEY: x\n"), 0644); err != nil {
+		t.Fatalf("write secrets: %v", err)
+	}
+	cp := NewControlPlane(nil, nil, "", "", defaultCfg, defaultSec, tmp, filepath.Join(tmp, "snapshots"))
+	cp.clients = []APIClient{{Name: "operator", Token: "secret-token"}}
+	cp.agentHTTPClient = &http.Client{Timeout: time.Second}
+	return cp
+}
+
+func authorizedRequest(method, target string, body io.Reader) *http.Request {
+	req := httptest.NewRequest(method, target, body)
+	req.Header.Set("Authorization", "Bearer secret-token")
+	return req
+}
+
 func TestCreateFlockRejectsInvalidTenantBeforeRegistration(t *testing.T) {
 	cp := newTestCP(t)
 	cp.flockMgr = orchestrator.NewFlockManager(cp.workDir)
@@ -509,6 +532,63 @@ func writeSnapshotFile(t *testing.T, cp *ControlPlane, snapshotID, name string, 
 	if err := os.WriteFile(path, bytes.Repeat([]byte("x"), size), 0600); err != nil {
 		t.Fatalf("write snapshot file %s: %v", path, err)
 	}
+}
+
+func writeSnapshotBundleFixture(t *testing.T, workDir string, meta storage.SnapshotMetadata) storage.SnapshotMetadata {
+	t.Helper()
+	snapDir := storage.SnapshotDir(workDir, meta.SnapshotID)
+	if err := os.MkdirAll(snapDir, 0755); err != nil {
+		t.Fatalf("create snapshot dir: %v", err)
+	}
+	meta.MemFilePath = filepath.Join(snapDir, "memory.bin")
+	meta.StatFilePath = filepath.Join(snapDir, "state.bin")
+	meta.DiskCopyPath = filepath.Join(snapDir, "rootfs.ext4")
+	if meta.Profile == "" {
+		meta.Profile = "dev"
+	}
+	if meta.DiskPath == "" {
+		meta.DiskPath = filepath.Join(os.TempDir(), "goose-workspaces", meta.SnapshotID+".ext4")
+	}
+	if meta.VsockPath == "" {
+		meta.VsockPath = filepath.Join(os.TempDir(), "firecracker-vsock-"+meta.SnapshotID+".sock")
+	}
+	for name, body := range map[string][]byte{
+		"memory.bin":  []byte("memory:" + meta.SnapshotID),
+		"state.bin":   []byte("state:" + meta.SnapshotID),
+		"rootfs.ext4": []byte("rootfs:" + meta.SnapshotID),
+	} {
+		if err := os.WriteFile(filepath.Join(snapDir, name), body, 0600); err != nil {
+			t.Fatalf("write snapshot fixture file %s: %v", name, err)
+		}
+	}
+	if err := storage.SaveMetadata(snapDir, meta); err != nil {
+		t.Fatalf("write snapshot metadata: %v", err)
+	}
+	return meta
+}
+
+func exportSnapshotBundleFixture(t *testing.T, workDir, snapshotID string) []byte {
+	t.Helper()
+	var bundle bytes.Buffer
+	if _, err := storage.ExportSnapshotBundle(workDir, snapshotID, &bundle); err != nil {
+		t.Fatalf("export snapshot bundle fixture: %v", err)
+	}
+	return bundle.Bytes()
+}
+
+type snapshotExportLockCheckingRecorder struct {
+	*httptest.ResponseRecorder
+	cp                *ControlPlane
+	lockedDuringWrite bool
+}
+
+func (r *snapshotExportLockCheckingRecorder) Write(b []byte) (int, error) {
+	if r.cp.snapshotLifecycleMu.TryLock() {
+		r.cp.snapshotLifecycleMu.Unlock()
+	} else {
+		r.lockedDuringWrite = true
+	}
+	return r.ResponseRecorder.Write(b)
 }
 
 func snapshotIDs(entries []SnapshotGCEntry) []string {
@@ -1125,6 +1205,224 @@ func TestHandleSnapshotGCApplyKeepsReferencedFullUntilNextRun(t *testing.T) {
 	}
 }
 
+func TestHandleSnapshotExportStreamsBundle(t *testing.T) {
+	cp := newTestCP(t)
+	meta := testSnapshotMeta("snap-1", "vm-1", "full", time.Now().UTC())
+	meta = writeSnapshotBundleFixture(t, cp.workDir, meta)
+	cp.snapshots[meta.SnapshotID] = meta
+
+	req := httptest.NewRequest(http.MethodPost, "/snapshots/snap-1/export", nil)
+	rr := httptest.NewRecorder()
+	cp.handleSnapshotItem(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q; want 200", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("Content-Type"); got != storage.SnapshotBundleContentType {
+		t.Fatalf("content-type = %q, want %q", got, storage.SnapshotBundleContentType)
+	}
+	result, err := storage.ImportSnapshotBundle(t.TempDir(), bytes.NewReader(rr.Body.Bytes()))
+	if err != nil {
+		t.Fatalf("import streamed bundle: %v", err)
+	}
+	if result.SnapshotID != "snap-1" || result.Status != storage.SnapshotImportStatusImported {
+		t.Fatalf("import result = %+v, want snap-1 imported", result)
+	}
+}
+
+func TestHandleSnapshotExportDoesNotHoldLifecycleLockWhileWriting(t *testing.T) {
+	cp := newTestCP(t)
+	meta := testSnapshotMeta("snap-1", "vm-1", "full", time.Now().UTC())
+	meta = writeSnapshotBundleFixture(t, cp.workDir, meta)
+	cp.snapshots[meta.SnapshotID] = meta
+
+	req := httptest.NewRequest(http.MethodPost, "/snapshots/snap-1/export", nil)
+	rr := &snapshotExportLockCheckingRecorder{
+		ResponseRecorder: httptest.NewRecorder(),
+		cp:               cp,
+	}
+	cp.handleSnapshotItem(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q; want 200", rr.Code, rr.Body.String())
+	}
+	if rr.lockedDuringWrite {
+		t.Fatal("snapshotLifecycleMu was held while writing export response")
+	}
+}
+
+func TestHandleSnapshotExportFailureDoesNotReturnBundleResponse(t *testing.T) {
+	cp := newTestCP(t)
+	meta := testSnapshotMeta("snap-corrupt", "vm-1", "full", time.Now().UTC())
+	meta = writeSnapshotBundleFixture(t, cp.workDir, meta)
+	cp.snapshots[meta.SnapshotID] = meta
+	if err := os.Remove(filepath.Join(storage.SnapshotDir(cp.workDir, meta.SnapshotID), "rootfs.ext4")); err != nil {
+		t.Fatalf("remove rootfs fixture: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/snapshots/snap-corrupt/export", nil)
+	rr := httptest.NewRecorder()
+	cp.handleSnapshotItem(rr, req)
+
+	if rr.Code == http.StatusOK {
+		t.Fatalf("status = %d, body len = %d; want non-200", rr.Code, rr.Body.Len())
+	}
+	if got := rr.Header().Get("Content-Type"); strings.HasPrefix(got, storage.SnapshotBundleContentType) {
+		t.Fatalf("content-type = %q, want non-bundle error response", got)
+	}
+}
+
+func TestHandleSnapshotImportPublishesSnapshot(t *testing.T) {
+	sourceDir := t.TempDir()
+	meta := testSnapshotMeta("snap-import", "vm-1", "full", time.Now().UTC())
+	writeSnapshotBundleFixture(t, sourceDir, meta)
+	bundle := exportSnapshotBundleFixture(t, sourceDir, "snap-import")
+
+	cp := newTestCP(t)
+	req := httptest.NewRequest(http.MethodPost, "/snapshots/import", bytes.NewReader(bundle))
+	req.Header.Set("Content-Type", storage.SnapshotBundleContentType)
+	rr := httptest.NewRecorder()
+	cp.handleSnapshotImport(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %q; want 201", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("content-type = %q, want application/json", got)
+	}
+	got, ok := cp.snapshots["snap-import"]
+	if !ok {
+		t.Fatal("imported snapshot was not added to cp.snapshots")
+	}
+	if got.SnapshotID != "snap-import" || got.SnapshotType != "full" {
+		t.Fatalf("snapshot metadata = %+v, want snap-import full", got)
+	}
+	if _, err := os.Stat(storage.SnapshotDir(cp.workDir, "snap-import")); err != nil {
+		t.Fatalf("imported snapshot directory missing: %v", err)
+	}
+}
+
+func TestSnapshotBundleRoutesThroughControlPlaneHandler(t *testing.T) {
+	sourceDir := t.TempDir()
+	meta := testSnapshotMeta("snap-route", "vm-1", "full", time.Now().UTC())
+	writeSnapshotBundleFixture(t, sourceDir, meta)
+	bundle := exportSnapshotBundleFixture(t, sourceDir, "snap-route")
+
+	cp := newTestControlPlaneWithHandler(t)
+	importReq := authorizedRequest(http.MethodPost, "/snapshots/import", bytes.NewReader(bundle))
+	importReq.Header.Set("Content-Type", storage.SnapshotBundleContentType)
+	importRR := httptest.NewRecorder()
+	cp.srv.Handler.ServeHTTP(importRR, importReq)
+	if importRR.Code != http.StatusCreated {
+		t.Fatalf("import status = %d, body = %q; want 201", importRR.Code, importRR.Body.String())
+	}
+	if _, ok := cp.snapshots["snap-route"]; !ok {
+		t.Fatal("mux import route did not publish snapshot")
+	}
+
+	exportReq := authorizedRequest(http.MethodPost, "/snapshots/snap-route/export", nil)
+	exportRR := httptest.NewRecorder()
+	cp.srv.Handler.ServeHTTP(exportRR, exportReq)
+	if exportRR.Code != http.StatusOK {
+		t.Fatalf("export status = %d, body = %q; want 200", exportRR.Code, exportRR.Body.String())
+	}
+	if got := exportRR.Header().Get("Content-Type"); got != storage.SnapshotBundleContentType {
+		t.Fatalf("export content-type = %q, want %q", got, storage.SnapshotBundleContentType)
+	}
+}
+
+func TestHandleSnapshotImportAcceptsParameterizedContentType(t *testing.T) {
+	sourceDir := t.TempDir()
+	meta := testSnapshotMeta("snap-content-type", "vm-1", "full", time.Now().UTC())
+	writeSnapshotBundleFixture(t, sourceDir, meta)
+	bundle := exportSnapshotBundleFixture(t, sourceDir, "snap-content-type")
+
+	cp := newTestCP(t)
+	req := httptest.NewRequest(http.MethodPost, "/snapshots/import", bytes.NewReader(bundle))
+	req.Header.Set("Content-Type", "Application/Vnd.Anvil.Snapshot-Bundle; charset=binary")
+	rr := httptest.NewRecorder()
+	cp.handleSnapshotImport(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %q; want 201", rr.Code, rr.Body.String())
+	}
+	if _, ok := cp.snapshots["snap-content-type"]; !ok {
+		t.Fatal("imported snapshot was not added to cp.snapshots")
+	}
+}
+
+func TestHandleSnapshotImportRejectsInvalidContentType(t *testing.T) {
+	for _, contentType := range []string{"", "%", "application/octet-stream"} {
+		t.Run(contentType, func(t *testing.T) {
+			cp := newTestCP(t)
+			req := httptest.NewRequest(http.MethodPost, "/snapshots/import", strings.NewReader("not a bundle"))
+			req.Header.Set("Content-Type", contentType)
+			rr := httptest.NewRecorder()
+			cp.handleSnapshotImport(rr, req)
+
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, body = %q; want 400", rr.Code, rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestHandleSnapshotImportRejectsDiffWithoutBase(t *testing.T) {
+	sourceDir := t.TempDir()
+	diff := testSnapshotMeta("snap-diff", "vm-1", "diff", time.Now().UTC())
+	diff.BaseSnapshotID = "snap-base"
+	writeSnapshotBundleFixture(t, sourceDir, diff)
+	bundle := exportSnapshotBundleFixture(t, sourceDir, "snap-diff")
+
+	cp := newTestCP(t)
+	req := httptest.NewRequest(http.MethodPost, "/snapshots/import", bytes.NewReader(bundle))
+	req.Header.Set("Content-Type", storage.SnapshotBundleContentType)
+	rr := httptest.NewRecorder()
+	cp.handleSnapshotImport(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, body = %q; want 409", rr.Code, rr.Body.String())
+	}
+	if _, ok := cp.snapshots["snap-diff"]; ok {
+		t.Fatal("diff snapshot was added to cp.snapshots without its base")
+	}
+	if _, err := os.Stat(storage.SnapshotDir(cp.workDir, "snap-diff")); !os.IsNotExist(err) {
+		t.Fatalf("diff snapshot directory stat err = %v, want not exist", err)
+	}
+}
+
+func TestImportedDiffProtectsBaseSnapshotDelete(t *testing.T) {
+	sourceDir := t.TempDir()
+	base := testSnapshotMeta("snap-base", "vm-1", "full", time.Now().UTC().Add(-time.Minute))
+	writeSnapshotBundleFixture(t, sourceDir, base)
+	diff := testSnapshotMeta("snap-diff", "vm-1", "diff", time.Now().UTC())
+	diff.BaseSnapshotID = "snap-base"
+	writeSnapshotBundleFixture(t, sourceDir, diff)
+	baseBundle := exportSnapshotBundleFixture(t, sourceDir, "snap-base")
+	diffBundle := exportSnapshotBundleFixture(t, sourceDir, "snap-diff")
+
+	cp := newTestCP(t)
+	for _, bundle := range [][]byte{baseBundle, diffBundle} {
+		req := httptest.NewRequest(http.MethodPost, "/snapshots/import", bytes.NewReader(bundle))
+		req.Header.Set("Content-Type", storage.SnapshotBundleContentType)
+		rr := httptest.NewRecorder()
+		cp.handleSnapshotImport(rr, req)
+		if rr.Code != http.StatusCreated {
+			t.Fatalf("import status = %d, body = %q; want 201", rr.Code, rr.Body.String())
+		}
+	}
+
+	rr := httptest.NewRecorder()
+	cp.deleteSnapshot(rr, "snap-base")
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("delete status = %d, body = %q; want 409", rr.Code, rr.Body.String())
+	}
+	if _, ok := cp.snapshots["snap-base"]; !ok {
+		t.Fatal("protected imported base snapshot was removed from map")
+	}
+}
+
 func TestDeleteSnapshotStillProtectsDiffBase(t *testing.T) {
 	now := time.Now().UTC()
 	cp := newTestCP(t)
@@ -1277,6 +1575,9 @@ func TestRestoreSnapshotFirecrackerFailureCleansNetworkAndDMSnapshot(t *testing.
 		if cfg.RootfsPath != meta.DiskPath {
 			t.Fatalf("RootfsPath = %q, want %q", cfg.RootfsPath, meta.DiskPath)
 		}
+		if cfg.VsockUDSPath != meta.VsockPath {
+			t.Fatalf("VsockUDSPath = %q, want %q", cfg.VsockUDSPath, meta.VsockPath)
+		}
 		if cfg.TapDevice != "tap-restored" {
 			t.Fatalf("TapDevice = %q, want tap-restored", cfg.TapDevice)
 		}
@@ -1322,6 +1623,52 @@ func TestRestoreSnapshotFirecrackerFailureCleansNetworkAndDMSnapshot(t *testing.
 		t.Fatal("snapshotLifecycleMu remained locked after restore failure")
 	}
 	cp.snapshotLifecycleMu.Unlock()
+}
+
+func TestAgentTokenForRestoredSnapshotUsesExistingToken(t *testing.T) {
+	cp := newTestCP(t)
+	meta := testSnapshotMeta("snap-token", "vm-source", "full", time.Now().UTC())
+	meta.AgentToken = "existing-token"
+	cp.setGuestAgentToken = func(vsockPath, token string) error {
+		t.Fatal("setGuestAgentToken called for existing token")
+		return nil
+	}
+
+	token, err := cp.agentTokenForRestoredSnapshot("snap-token", meta)
+	if err != nil {
+		t.Fatalf("agentTokenForRestoredSnapshot returned error: %v", err)
+	}
+	if token != "existing-token" {
+		t.Fatalf("token = %q, want existing-token", token)
+	}
+}
+
+func TestAgentTokenForRestoredSnapshotInjectsNewTokenWhenMissing(t *testing.T) {
+	cp := newTestCP(t)
+	meta := testSnapshotMeta("snap-token", "vm-source", "full", time.Now().UTC())
+	meta.AgentToken = ""
+	meta.VsockPath = filepath.Join(t.TempDir(), "rebased.vsock")
+
+	var gotVsock, gotToken string
+	cp.setGuestAgentToken = func(vsockPath, token string) error {
+		gotVsock = vsockPath
+		gotToken = token
+		return nil
+	}
+
+	token, err := cp.agentTokenForRestoredSnapshot("snap-token", meta)
+	if err != nil {
+		t.Fatalf("agentTokenForRestoredSnapshot returned error: %v", err)
+	}
+	if token == "" {
+		t.Fatal("token is empty, want generated token")
+	}
+	if token != gotToken {
+		t.Fatalf("returned token = %q, injected token = %q", token, gotToken)
+	}
+	if gotVsock != meta.VsockPath {
+		t.Fatalf("vsockPath = %q, want %q", gotVsock, meta.VsockPath)
+	}
 }
 
 func TestRestoreSnapshotDMSnapshotFallbackReleasesNetworkOnlyAfterBindMountFailure(t *testing.T) {

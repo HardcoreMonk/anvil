@@ -6,10 +6,12 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"log/slog"
+	"mime"
 	"net/http"
 	"os"
 	"os/exec"
@@ -269,6 +271,7 @@ type ControlPlane struct {
 	teardownDMSnapshot func(info *storage.DMSnapshotInfo)
 	setupBindMount     func(baseDiskPath, newDiskPath, mountTargetPath string) error
 	restoreMachine     func(ctx context.Context, cfg vm.VMConfig, memFilePath, snapshotPath string) (*firecracker.Machine, error)
+	setGuestAgentToken func(vsockPath, token string) error
 
 	stopCh chan struct{}
 	srv    *http.Server
@@ -374,6 +377,7 @@ func NewControlPlane(
 	internalMux.HandleFunc("/audit/runtime/prune", cp.handleRuntimeAuditPrune)
 	internalMux.HandleFunc("/snapshots", cp.handleSnapshots)
 	internalMux.HandleFunc("/snapshots/gc", cp.handleSnapshotGC)
+	internalMux.HandleFunc("/snapshots/import", cp.handleSnapshotImport)
 	internalMux.HandleFunc("/snapshots/", cp.handleSnapshotItem)
 	cp.registerOrchestratorRoutes(internalMux)
 
@@ -512,6 +516,8 @@ func (cp *ControlPlane) Start() error {
 		"  GET    /snapshots                        — list snapshots\n" +
 		"  POST   /snapshots/gc                     — plan/apply snapshot retention GC\n" +
 		"  POST   /snapshots/{snapshot_id}/restore  — restore VM from snapshot\n" +
+		"  POST   /snapshots/{snapshot_id}/export   — export snapshot bundle\n" +
+		"  POST   /snapshots/import                 — import snapshot bundle\n" +
 		"  DELETE /snapshots/{snapshot_id}          — delete snapshot\n" +
 		"  POST   /flocks                           — create multi-agent flock\n" +
 		"  GET    /flocks                           — list flocks\n" +
@@ -1924,6 +1930,24 @@ func (cp *ControlPlane) restoreSnapshotMachine(ctx context.Context, cfg vm.VMCon
 	return vm.RestoreMachine(ctx, cfg, memFilePath, snapshotPath)
 }
 
+func (cp *ControlPlane) agentTokenForRestoredSnapshot(snapID string, meta storage.SnapshotMetadata) (string, error) {
+	if token := strings.TrimSpace(meta.AgentToken); token != "" {
+		return token, nil
+	}
+	token, err := generateAgentToken()
+	if err != nil {
+		return "", fmt.Errorf("generate restored agent token: %w", err)
+	}
+	setGuestAgentToken := vm.SetGuestAgentToken
+	if cp.setGuestAgentToken != nil {
+		setGuestAgentToken = cp.setGuestAgentToken
+	}
+	if err := setGuestAgentToken(meta.VsockPath, token); err != nil {
+		return "", fmt.Errorf("snapshot %s: %w", snapID, err)
+	}
+	return token, nil
+}
+
 // POST /snapshots/gc
 func (cp *ControlPlane) handleSnapshotGC(w http.ResponseWriter, r *http.Request) {
 	defer cp.observeLifecycle("snapshot_gc")()
@@ -2018,7 +2042,125 @@ func (cp *ControlPlane) handleSnapshots(w http.ResponseWriter, r *http.Request) 
 	json.NewEncoder(w).Encode(list)
 }
 
-// handleSnapshotItem routes POST /snapshots/{id}/restore and DELETE /snapshots/{id}.
+func (cp *ControlPlane) handleSnapshotExport(w http.ResponseWriter, r *http.Request, snapID string) {
+	defer cp.observeLifecycle("snapshot_export")()
+	snapID = strings.TrimSpace(snapID)
+	if snapID == "" {
+		writeJSONError(w, http.StatusBadRequest, "snapshot_id is required")
+		return
+	}
+
+	tmpDir := filepath.Join(cp.workDir, "tmp")
+	if err := os.MkdirAll(tmpDir, 0700); err != nil {
+		slog.Warn("snapshot export temp dir failed", "snapshot_id", snapID, "dir", tmpDir, "err", err)
+		writeJSONError(w, http.StatusInternalServerError, "snapshot_export_failed")
+		return
+	}
+
+	var tmpPath string
+	cp.snapshotLifecycleMu.Lock()
+	cp.snapshotsMu.RLock()
+	_, ok := cp.snapshots[snapID]
+	cp.snapshotsMu.RUnlock()
+	if !ok {
+		cp.snapshotLifecycleMu.Unlock()
+		writeJSONError(w, http.StatusNotFound, "snapshot_not_found")
+		return
+	}
+
+	tmp, err := os.CreateTemp(tmpDir, "snapshot-export-*.tar")
+	if err != nil {
+		cp.snapshotLifecycleMu.Unlock()
+		slog.Warn("snapshot export temp file failed", "snapshot_id", snapID, "dir", tmpDir, "err", err)
+		writeJSONError(w, http.StatusInternalServerError, "snapshot_export_failed")
+		return
+	}
+	tmpPath = tmp.Name()
+	_, exportErr := storage.ExportSnapshotBundle(cp.workDir, snapID, tmp)
+	closeErr := tmp.Close()
+	cp.snapshotLifecycleMu.Unlock()
+	defer os.Remove(tmpPath)
+
+	if exportErr != nil {
+		slog.Warn("snapshot export failed", "snapshot_id", snapID, "err", exportErr)
+		writeJSONError(w, http.StatusInternalServerError, "snapshot_export_failed")
+		return
+	}
+	if closeErr != nil {
+		slog.Warn("snapshot export temp close failed", "snapshot_id", snapID, "path", tmpPath, "err", closeErr)
+		writeJSONError(w, http.StatusInternalServerError, "snapshot_export_failed")
+		return
+	}
+
+	bundle, err := os.Open(tmpPath)
+	if err != nil {
+		slog.Warn("snapshot export failed", "snapshot_id", snapID, "err", err)
+		writeJSONError(w, http.StatusInternalServerError, "snapshot_export_failed")
+		return
+	}
+	defer bundle.Close()
+
+	w.Header().Set("Content-Type", storage.SnapshotBundleContentType)
+	w.WriteHeader(http.StatusOK)
+	if _, err := io.Copy(w, bundle); err != nil {
+		slog.Warn("snapshot export response write failed", "snapshot_id", snapID, "err", err)
+	}
+}
+
+func (cp *ControlPlane) handleSnapshotImport(w http.ResponseWriter, r *http.Request) {
+	defer cp.observeLifecycle("snapshot_import")()
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	ct, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || !strings.EqualFold(ct, storage.SnapshotBundleContentType) {
+		writeJSONError(w, http.StatusBadRequest, "invalid snapshot bundle content type")
+		return
+	}
+
+	cp.snapshotLifecycleMu.Lock()
+	defer cp.snapshotLifecycleMu.Unlock()
+
+	workspaceDir := ""
+	if cp.provisioner != nil {
+		workspaceDir = cp.provisioner.WorkspaceDir
+	}
+	result, err := storage.ImportSnapshotBundleWithOptions(cp.workDir, r.Body, storage.SnapshotImportOptions{
+		WorkspaceDir: workspaceDir,
+	})
+	if err != nil {
+		status := http.StatusInternalServerError
+		msg := "snapshot_import_failed"
+		switch {
+		case errors.Is(err, storage.ErrSnapshotBundleInvalid):
+			status = http.StatusBadRequest
+			msg = "invalid_snapshot_bundle"
+		case errors.Is(err, storage.ErrDiffBaseMissing):
+			status = http.StatusConflict
+			msg = "diff_base_missing"
+		case errors.Is(err, storage.ErrSnapshotBundleConflict):
+			status = http.StatusConflict
+			msg = "snapshot_conflict"
+		}
+		writeJSONError(w, status, msg)
+		return
+	}
+
+	cp.snapshotsMu.Lock()
+	cp.snapshots[result.SnapshotID] = result.Metadata
+	cp.snapshotsMu.Unlock()
+
+	status := http.StatusCreated
+	if result.Status == storage.SnapshotImportStatusAlreadyPresent {
+		status = http.StatusOK
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(result)
+}
+
+// handleSnapshotItem routes POST /snapshots/{id}/restore, POST /snapshots/{id}/export, and DELETE /snapshots/{id}.
 func (cp *ControlPlane) handleSnapshotItem(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/snapshots/")
 
@@ -2029,6 +2171,16 @@ func (cp *ControlPlane) handleSnapshotItem(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		cp.restoreSnapshotFromRequest(w, r, snapID)
+		return
+	}
+
+	if strings.HasSuffix(path, "/export") {
+		snapID := strings.TrimSuffix(path, "/export")
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST required", http.StatusMethodNotAllowed)
+			return
+		}
+		cp.handleSnapshotExport(w, r, snapID)
 		return
 	}
 
@@ -2407,7 +2559,7 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 		MacAddress:     meta.MacAddr,
 		GuestIP:        newGuestIP,
 		GatewayIP:      "10.0.1.1",
-		// VsockUDSPath intentionally empty: snapshot state recreates vsock at meta.VsockPath
+		VsockUDSPath:   meta.VsockPath,
 	}, memFileToUse, meta.StatFilePath)
 
 	cp.restoreMu.Unlock()
@@ -2436,6 +2588,17 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 	}
 	slog.Warn("restore: guest ip reconfigured", "snapshot_id", snapID, "ip", newGuestIP, "cow_store", exceptionStorePath)
 
+	restoredAgentToken, err := cp.agentTokenForRestoredSnapshot(snapID, meta)
+	if err != nil {
+		slog.Warn("restore: agent token update failed", "snapshot_id", snapID, "err", err)
+		machine.StopVMM()
+		cp.cleanupEgressPolicy(newVMID)
+		cp.teardownRestoreDMSnapshot(dmInfo)
+		cp.releaseRestoreNetwork(tapDevice, newGuestIP)
+		writeRestoreError(w, http.StatusInternalServerError, "guest_reconfigure_failed", snapID, fmt.Sprintf("vsock agent token update failed: %v", err))
+		return
+	}
+
 	info := VMInfo{
 		VMID:         newVMID,
 		GuestIP:      newGuestIP,
@@ -2448,7 +2611,7 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 	cp.mu.Lock()
 	cp.vms[newVMID] = &runningVM{
 		VMInfo:     info,
-		agentToken: meta.AgentToken,
+		agentToken: restoredAgentToken,
 		startedAt:  time.Now().UTC(),
 		diskPath:   exceptionStorePath, // only the COW store needs cleanup (not a full disk copy)
 		dmSnapshot: dmInfo,
@@ -2533,6 +2696,7 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 		MacAddress:     meta.MacAddr,
 		GuestIP:        newGuestIP,
 		GatewayIP:      "10.0.1.1",
+		VsockUDSPath:   meta.VsockPath,
 	}, memFileToUse, meta.StatFilePath)
 	if mergedMemPath != "" {
 		os.Remove(mergedMemPath)
@@ -2554,6 +2718,16 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 		return
 	}
 
+	restoredAgentToken, err := cp.agentTokenForRestoredSnapshot(snapID, meta)
+	if err != nil {
+		machine.StopVMM()
+		cp.cleanupEgressPolicy(newVMID)
+		storage.TeardownBindMount(meta.DiskPath, newDiskPath)
+		cp.releaseRestoreNetwork(tapDevice, newGuestIP)
+		writeRestoreError(w, http.StatusInternalServerError, "guest_reconfigure_failed", snapID, fmt.Sprintf("vsock agent token update failed: %v", err))
+		return
+	}
+
 	info := VMInfo{
 		VMID:         newVMID,
 		GuestIP:      newGuestIP,
@@ -2565,7 +2739,7 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 	cp.mu.Lock()
 	cp.vms[newVMID] = &runningVM{
 		VMInfo:          info,
-		agentToken:      meta.AgentToken,
+		agentToken:      restoredAgentToken,
 		startedAt:       time.Now().UTC(),
 		diskPath:        newDiskPath,
 		bindMountTarget: meta.DiskPath,

@@ -84,8 +84,10 @@ scheduler production automation을 포함하는 release candidate에서는 syste
 다음 검증을 수행한다. `--verify`는 host에 `curl`, `python3`가 있어야 실행된다.
 
 ```bash
+go test ./cmd/anvil-scheduler -run TestSchedulerProcessLoadsHostsPollsMetricsAndSchedules -count=1
 bash scripts/install-anvil-scheduler-systemd.sh --dry-run --verify
 sudo bash scripts/install-anvil-scheduler-systemd.sh --start --verify
+curl http://127.0.0.1:3010/metrics
 ```
 
 `--verify`는 `GET /health`, `PUT/GET /hosts`, `POST /schedule/spawn`,
@@ -94,6 +96,10 @@ sudo bash scripts/install-anvil-scheduler-systemd.sh --start --verify
 요청에서만 선택되고, `PreferredHosts` 없는 추가 `/schedule/spawn`에서는 제외되는지
 검증된다. scheduler는 기본적으로 `127.0.0.1:3010`에 bind하며, 외부 노출은 private
 network 또는 TLS 종료 reverse proxy policy 뒤에서만 수행한다.
+
+Scheduler release candidate는 `/control-loop/status`와 `/metrics`를 모두 smoke로
+검증해야 한다. `/metrics`에는 `agent_token`, daemon raw body, host endpoint가 나오면
+안 된다.
 
 ### 현재 upstream runtime baseline
 

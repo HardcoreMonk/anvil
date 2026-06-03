@@ -53,6 +53,7 @@ func LoadSchedulerHostsFile(path string) ([]RuntimeHost, error) {
 		hosts = append(hosts, RuntimeHost{
 			Name:                   host.Name,
 			Endpoint:               host.Endpoint,
+			Healthy:                host.Healthy,
 			AvailableVMs:           host.AvailableVMs,
 			AvailableSnapshotBytes: host.AvailableSnapshotBytes,
 			EgressPolicies:         egressPolicies,

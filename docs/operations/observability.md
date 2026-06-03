@@ -62,6 +62,30 @@ curl http://127.0.0.1:3010/health
 curl http://127.0.0.1:3010/placements
 ```
 
+## Scheduler metrics endpoint
+
+runtime scheduler service는 scheduler control-plane 상태를 Prometheus text 형식으로
+노출한다.
+
+```bash
+curl http://127.0.0.1:3010/metrics
+```
+
+현재 scheduler metric family:
+
+- `anvil_scheduler_control_loop_running`
+- `anvil_scheduler_persistence_degraded`
+- `anvil_scheduler_host_status_count{status="healthy|degraded|unhealthy|unknown"}`
+- `anvil_scheduler_suspect_vm_placements`
+- `anvil_scheduler_last_poll_completed_timestamp_seconds`
+- `anvil_scheduler_last_reconcile_completed_timestamp_seconds`
+- `anvil_scheduler_poll_interval_seconds`
+- `anvil_scheduler_reconcile_interval_seconds`
+
+metric label에는 host name, endpoint, raw daemon response, authorization header,
+`agent_token`을 넣지 않는다. scheduler service에는 자체 인증 계층이 없으므로
+loopback/private network 또는 reverse proxy policy 뒤에서만 scrape한다.
+
 ## Goosetown 상태 확인
 
 Goosetown flock은 live registry와 Town Wall log를 함께 본다.

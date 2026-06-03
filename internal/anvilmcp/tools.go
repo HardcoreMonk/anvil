@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +39,10 @@ type Daemon interface {
 	DeleteFlock(ctx context.Context, flockID string) (*RawDaemonResponse, error)
 	PostTownWall(ctx context.Context, flockID string, req TownWallPostRequest) (*TownWallMessage, error)
 	TownWallHistory(ctx context.Context, flockID string) ([]TownWallMessage, error)
+}
+
+type snapshotReplicator interface {
+	ReplicateSnapshot(context.Context, SnapshotReplicationRequest) (*SnapshotReplicationResponse, error)
 }
 
 type sessionStore interface {
@@ -137,6 +142,13 @@ type RestoreSnapshotInput struct {
 	SessionName  string `json:"session_name,omitempty"`
 	TenantID     string `json:"tenant_id,omitempty"`
 	EgressPolicy string `json:"egress_policy,omitempty"`
+}
+
+type ReplicateSnapshotInput struct {
+	SnapshotID          string `json:"snapshot_id"`
+	SourceHost          string `json:"source_host"`
+	TargetHost          string `json:"target_host"`
+	IncludeDependencies bool   `json:"include_dependencies,omitempty"`
 }
 
 type RestoreSnapshotOutput struct {
@@ -761,6 +773,120 @@ func (t *Tools) MCPDeleteSnapshot(ctx context.Context, req *mcp.CallToolRequest,
 		return nil, RawDaemonResponse{}, err
 	}
 	return nil, *out, nil
+}
+
+func (t *Tools) ReplicateSnapshot(ctx context.Context, input ReplicateSnapshotInput) (*SnapshotReplicationResponse, error) {
+	tenantID, err := t.resolveTenantID("")
+	if err != nil {
+		return nil, err
+	}
+	snapshotID := strings.TrimSpace(input.SnapshotID)
+	if snapshotID == "" {
+		return nil, fmt.Errorf("snapshot_id is required")
+	}
+	sourceHost := strings.TrimSpace(input.SourceHost)
+	if sourceHost == "" {
+		return nil, fmt.Errorf("source_host is required")
+	}
+	targetHost := strings.TrimSpace(input.TargetHost)
+	if targetHost == "" {
+		return nil, fmt.Errorf("target_host is required")
+	}
+
+	replicator, ok := t.daemon.(snapshotReplicator)
+	if !ok {
+		err := fmt.Errorf("configured daemon does not support snapshot replication")
+		return nil, t.auditFailureAndReturn(tenantID, "", "", "anvil_replicate_snapshot", "POST /snapshots/{snapshot_id}/export -> POST /snapshots/import", err)
+	}
+
+	out, err := replicator.ReplicateSnapshot(ctx, SnapshotReplicationRequest{
+		SnapshotID:          snapshotID,
+		SourceHost:          sourceHost,
+		TargetHost:          targetHost,
+		IncludeDependencies: input.IncludeDependencies,
+	})
+	if err != nil {
+		return nil, t.auditFailureAndReturn(tenantID, "", "", "anvil_replicate_snapshot", "POST /snapshots/{snapshot_id}/export -> POST /snapshots/import", err)
+	}
+	if out == nil {
+		err := fmt.Errorf("snapshot replication returned nil response")
+		return nil, t.auditFailureAndReturn(tenantID, "", "", "anvil_replicate_snapshot", "POST /snapshots/{snapshot_id}/export -> POST /snapshots/import", err)
+	}
+	out = sanitizeSnapshotReplicationResponse(out)
+	if !snapshotReplicationStatusSucceeded(out.Status) {
+		err := fmt.Errorf("snapshot replication status %q", out.Status)
+		if auditErr := t.auditFailure(tenantID, "", "", "anvil_replicate_snapshot", "POST /snapshots/{snapshot_id}/export -> POST /snapshots/import", err); auditErr != nil {
+			return out, fmt.Errorf("%w; failed to append runtime audit: %v", err, auditErr)
+		}
+		return out, nil
+	}
+	if err := t.auditSuccess(tenantID, "", "", "anvil_replicate_snapshot", "POST /snapshots/{snapshot_id}/export -> POST /snapshots/import"); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (t *Tools) MCPReplicateSnapshot(ctx context.Context, req *mcp.CallToolRequest, input ReplicateSnapshotInput) (*mcp.CallToolResult, SnapshotReplicationResponse, error) {
+	out, err := t.ReplicateSnapshot(ctx, input)
+	if err != nil || out == nil {
+		return nil, SnapshotReplicationResponse{}, err
+	}
+	return nil, *out, nil
+}
+
+func snapshotReplicationStatusSucceeded(status string) bool {
+	switch strings.TrimSpace(status) {
+	case "replicated", "already_present":
+		return true
+	default:
+		return false
+	}
+}
+
+func sanitizeSnapshotReplicationResponse(in *SnapshotReplicationResponse) *SnapshotReplicationResponse {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.Replicated = append([]string(nil), in.Replicated...)
+	out.Skipped = append([]string(nil), in.Skipped...)
+	out.Errors = make([]string, 0, len(in.Errors))
+	for _, item := range in.Errors {
+		out.Errors = append(out.Errors, sanitizeSnapshotReplicationError(item))
+	}
+	return &out
+}
+
+var (
+	snapshotReplicationHTTPURLPattern  = regexp.MustCompile(`https?://[^\s,"']+`)
+	snapshotReplicationPathPattern     = regexp.MustCompile(`(^|[\s=:"'])(/(?:data|home|tmp|var|etc|run|mnt|artifacts|snapshots)[^\s,"']*)`)
+	snapshotReplicationSecretKVPattern = regexp.MustCompile(`(?i)(agent_token|authorization)["']?\s*[:=]\s*["']?(?:bearer\s+)?[^",}\s]+["']?`)
+	snapshotReplicationBearerPattern   = regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._~+/=-]+`)
+)
+
+func sanitizeSnapshotReplicationError(value string) string {
+	out := strings.TrimSpace(value)
+	if out == "" {
+		return ""
+	}
+	out = snapshotReplicationHTTPURLPattern.ReplaceAllString(out, "[redacted_url]")
+	out = snapshotReplicationPathPattern.ReplaceAllString(out, "${1}[redacted_path]")
+	out = snapshotReplicationSecretKVPattern.ReplaceAllString(out, "[redacted_value]")
+	out = snapshotReplicationBearerPattern.ReplaceAllString(out, "[redacted_value]")
+	for _, item := range []struct {
+		needle      string
+		replacement string
+	}{
+		{"agent_token", "[redacted_key]"},
+		{"Authorization", "[redacted_header]"},
+		{"authorization", "[redacted_header]"},
+		{"Bearer", "[redacted_value]"},
+		{"bearer", "[redacted_value]"},
+		{"metadata.json", "[redacted_metadata]"},
+	} {
+		out = strings.ReplaceAll(out, item.needle, item.replacement)
+	}
+	return out
 }
 
 func (t *Tools) SpawnFlock(ctx context.Context, input SpawnFlockInput) (*SpawnFlockOutput, error) {

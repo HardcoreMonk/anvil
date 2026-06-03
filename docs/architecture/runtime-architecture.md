@@ -282,6 +282,23 @@ Snapshot type 선택:
 Diff snapshot은 sparse dirty memory page만 저장하고, `base_snapshot_id`로 full
 base snapshot을 참조한다. rootfs는 full/diff 모두 현재는 전체 copy한다.
 
+Cross-host snapshot import는 target host에서 bundle을 곧바로 최종 경로에 풀지 않는다.
+daemon은 `snapshots/.import-*` staging directory에 bundle payload를 먼저 기록하고,
+`metadata.json`, `memory.bin`, `state.bin`, `rootfs.ext4`와 diff
+`base_snapshot_id` dependency를 validation한다. validation이 끝나면 bundle 안의 host
+local path를 target daemon의 work directory 기준으로 rebase하고 최종
+`snapshots/<snapshot_id>/` directory로 atomic rename한다. publish 전 실패는 staging
+directory만 정리하며, 이미 존재하는 최종 snapshot directory를 부분 갱신하지 않는다.
+export bundle의 `metadata.json`은 source host의 raw metadata file이 아니라
+`agent_token`을 제거한 portable metadata다. Firecracker snapshot state는 original
+`disk_path`와 `vsock_path`를 요구하므로 target import는 두 path가 safe workspace/tmp
+pattern인지 검증한 뒤 보존한다. `mem_file_path`, `state_file_path`, `disk_copy_path`는
+target snapshot directory로 다시 쓴 뒤 최종 metadata checksum을 manifest에 기록한다.
+복제된 snapshot restore는 target daemon이 새 `agent_token`을 생성하고 validated
+`vsock_path`로 guest agent에 주입해 source host token을 재사용하지 않는다.
+operator-facing import/replication 결과는 raw `metadata.json`, `agent_token`,
+authorization header를 포함하지 않는다.
+
 Restore는 Linux device-mapper snapshot COW를 우선 사용한다.
 
 ```text

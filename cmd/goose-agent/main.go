@@ -52,9 +52,11 @@ type WorkloadRunResult struct {
 }
 
 var (
-	mu   sync.Mutex
-	busy bool
-	srv  *http.Server
+	mu           sync.Mutex
+	busy         bool
+	srv          *http.Server
+	agentTokenMu sync.RWMutex
+	agentToken   string
 )
 
 func agentListenAddr() string {
@@ -97,6 +99,18 @@ func loadAgentToken() string {
 		return ""
 	}
 	return strings.TrimSpace(string(b))
+}
+
+func currentAgentToken() string {
+	agentTokenMu.RLock()
+	defer agentTokenMu.RUnlock()
+	return agentToken
+}
+
+func setCurrentAgentToken(token string) {
+	agentTokenMu.Lock()
+	agentToken = strings.TrimSpace(token)
+	agentTokenMu.Unlock()
 }
 
 // loadFlockMeta parses /root/.ephemera-flock if present. Returns ("", "") when
@@ -157,7 +171,15 @@ func controlPlaneAddr() string {
 // If token is empty, auth is disabled. /health is never wrapped with this middleware
 // so the control plane's waitForAgent poller can reach it without a token.
 func agentAuthMiddleware(token string, next http.HandlerFunc) http.HandlerFunc {
+	return agentAuthMiddlewareWithTokenProvider(func() string { return token }, next)
+}
+
+func agentAuthMiddlewareWithTokenProvider(tokenProvider func() string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		token := ""
+		if tokenProvider != nil {
+			token = tokenProvider()
+		}
 		if token == "" {
 			next(w, r)
 			return
@@ -175,6 +197,7 @@ func agentAuthMiddleware(token string, next http.HandlerFunc) http.HandlerFunc {
 
 func main() {
 	token := loadAgentToken()
+	setCurrentAgentToken(token)
 	if token == "" {
 		log.Println("Warning: no agent token found — authentication disabled")
 	} else {
@@ -184,11 +207,11 @@ func main() {
 	startVsockListener()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/tasks", agentAuthMiddleware(token, handleTask))
-	mux.HandleFunc("/workspace", agentAuthMiddleware(token, workspaceHandler(workspaceRoot)))
-	mux.HandleFunc("/workloads/run", agentAuthMiddleware(token, workloadRunHandler(workspaceRoot)))
-	mux.HandleFunc("/stop", agentAuthMiddleware(token, handleStop))
-	mux.HandleFunc("/townwall/post", agentAuthMiddleware(token, handleTownWallPost))
+	mux.HandleFunc("/tasks", agentAuthMiddlewareWithTokenProvider(currentAgentToken, handleTask))
+	mux.HandleFunc("/workspace", agentAuthMiddlewareWithTokenProvider(currentAgentToken, workspaceHandler(workspaceRoot)))
+	mux.HandleFunc("/workloads/run", agentAuthMiddlewareWithTokenProvider(currentAgentToken, workloadRunHandler(workspaceRoot)))
+	mux.HandleFunc("/stop", agentAuthMiddlewareWithTokenProvider(currentAgentToken, handleStop))
+	mux.HandleFunc("/townwall/post", agentAuthMiddlewareWithTokenProvider(currentAgentToken, handleTownWallPost))
 	mux.HandleFunc("/health", handleHealth) // always unauthenticated
 
 	addr := agentListenAddr()
@@ -237,6 +260,7 @@ func startVsockListener() {
 // Supported commands:
 //   - CHANGE_IP <cidr_ip> <gateway>     — reconfigure eth0 after snapshot restore
 //   - SET_CP_TOKEN <token>              — atomically rewrite /root/.ephemera-cp-token (v0.3.4)
+//   - SET_AGENT_TOKEN <token>           — update HTTP bearer after replicated snapshot restore
 func handleVsockConn(fd int) {
 	defer unix.Close(fd)
 	f := os.NewFile(uintptr(fd), "vsock-conn")
@@ -281,9 +305,35 @@ func handleVsockConn(fd int) {
 		fmt.Fprintf(f, "OK\n")
 		log.Printf("CP token updated via vsock")
 
+	case "SET_AGENT_TOKEN":
+		if len(parts) != 2 {
+			fmt.Fprintf(f, "ERROR: expected SET_AGENT_TOKEN <token>\n")
+			return
+		}
+		if err := writeAgentTokenAtomic(parts[1]); err != nil {
+			fmt.Fprintf(f, "ERROR: %v\n", err)
+			log.Printf("vsock SET_AGENT_TOKEN failed: %v", err)
+			return
+		}
+		setCurrentAgentToken(parts[1])
+		fmt.Fprintf(f, "OK\n")
+		log.Printf("agent token updated via vsock")
+
 	default:
 		fmt.Fprintf(f, "ERROR: unknown command %q\n", parts[0])
 	}
+}
+
+func writeAgentTokenAtomic(token string) error {
+	tmp := agentTokenPath + ".tmp"
+	if err := os.WriteFile(tmp, []byte(token), 0600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, agentTokenPath); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // writeCPTokenAtomic rewrites /root/.ephemera-cp-token with the supplied bearer.

@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"ephemera/internal/storage"
 )
 
 type DaemonClient struct {
@@ -52,6 +54,19 @@ type SnapshotInfo struct {
 	SnapshotType   string    `json:"snapshot_type"`
 	BaseSnapshotID string    `json:"base_snapshot_id,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
+}
+
+type SnapshotExportStream struct {
+	Body        io.ReadCloser
+	ContentType string
+}
+
+type SnapshotImportResponse struct {
+	SnapshotID     string `json:"snapshot_id"`
+	SnapshotType   string `json:"snapshot_type"`
+	BaseSnapshotID string `json:"base_snapshot_id,omitempty"`
+	Status         string `json:"status"`
+	Skipped        bool   `json:"skipped"`
 }
 
 type CreateSnapshotRequest struct {
@@ -256,6 +271,55 @@ func (c *DaemonClient) RestoreSnapshot(ctx context.Context, snapshotID string, r
 
 func (c *DaemonClient) DeleteSnapshot(ctx context.Context, snapshotID string) (*RawDaemonResponse, error) {
 	return c.raw(ctx, http.MethodDelete, "/snapshots/"+snapshotID, nil)
+}
+
+func (c *DaemonClient) ExportSnapshot(ctx context.Context, snapshotID string) (*SnapshotExportStream, error) {
+	snapshotID = strings.TrimSpace(snapshotID)
+	if snapshotID == "" {
+		return nil, fmt.Errorf("snapshot id is required")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/snapshots/"+url.PathEscape(snapshotID)+"/export", nil)
+	if err != nil {
+		return nil, fmt.Errorf("create daemon request: %w", err)
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("send daemon request: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		data, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("read daemon response: %w", readErr)
+		}
+		return nil, &DaemonError{
+			StatusCode: resp.StatusCode,
+			Body:       string(data),
+		}
+	}
+
+	return &SnapshotExportStream{
+		Body:        resp.Body,
+		ContentType: resp.Header.Get("Content-Type"),
+	}, nil
+}
+
+func (c *DaemonClient) ImportSnapshot(ctx context.Context, body io.Reader) (*SnapshotImportResponse, error) {
+	_, responseBody, err := c.doRaw(ctx, http.MethodPost, "/snapshots/import", body, storage.SnapshotBundleContentType)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp SnapshotImportResponse
+	if err := json.Unmarshal([]byte(responseBody), &resp); err != nil {
+		return nil, fmt.Errorf("decode import snapshot response: %w", err)
+	}
+	return &resp, nil
 }
 
 func (c *DaemonClient) CreateFlock(ctx context.Context, req FlockCreateRequest) (*FlockCreateResponse, error) {

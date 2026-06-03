@@ -135,6 +135,11 @@ flock 단위 cross-host placement와 tenant별 multi-VM quota reservation은 아
 scheduler가 소유하지 않는다. 운영자는 flock spawn을 single-host runtime capacity
 안에서 다뤄야 한다.
 
+2026-06-03 작은 시작 범위에서 MCP `anvil_spawn_flock`은 scheduler-aware single-host
+placement를 사용하도록 확장됐다. 이 v1은 roles 수 기반 active VM quota/capacity를
+확인하고 선택된 하나의 daemon host에 기존 `POST /flocks`를 위임한다. member별
+cross-host 분산 배치와 cross-host Town Wall/`gtcall`은 계속 후속 후보로 남는다.
+
 ## Scheduler 책임
 
 Scheduler는 host selection을 소유한다. 요청의 tenant, profile, quota 상태, host
