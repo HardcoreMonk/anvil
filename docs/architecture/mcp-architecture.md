@@ -146,9 +146,12 @@ anvil downstream은 upstream `v0.3.1`의 `agent_tokens` flock response를 MCP ou
 
 Town Wall의 `GET /flocks/{flock_id}/wall` SSE stream은 MCP tool로 노출하지 않는다.
 stdio-compatible smoke와 inspection에는 `anvil_get_townwall_history`가 사용하는
-history endpoint를 쓴다. 현재 MCP surface에는 flock snapshot/restore와
-scheduler-aware cross-host flock placement가 없다. tenant와 audit 동작은 기존 MCP
-runtime audit 정책을 따르며, 별도 flock 전용 audit 의미를 만들지 않는다.
+history endpoint를 쓴다. 현재 MCP surface에는 flock snapshot/restore가 없다.
+MCP router config가 있을 때 `anvil_spawn_flock`은 scheduler-aware single-host
+placement를 사용할 수 있다. flock member를 여러 runtime host에 분산하는 true
+cross-host flock placement, cross-host Town Wall forwarding, cross-host `gtcall`은
+아직 제외 범위다. tenant와 audit 동작은 기존 MCP runtime audit 정책을 따르며,
+별도 flock 전용 audit 의미를 만들지 않는다.
 
 ### IronClaw schema compatibility
 

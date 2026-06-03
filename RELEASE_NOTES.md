@@ -21,6 +21,12 @@
   오래된 state override, fake daemon `/health`, scheduler `/control-loop/status`,
   `/schedule/spawn`, `/metrics` 경로를 검증한다.
 - scheduler smoke harness가 `/metrics`를 검증한다.
+- MCP `anvil_spawn_flock` scheduler-aware single-host placement:
+  - scheduler router config가 있을 때 roles 수 기반 active VM quota/capacity로 host를
+    선택한다.
+  - 선택된 host의 기존 daemon `POST /flocks`를 호출하고, 반환된 member VM placement를
+    scheduler `PlacementStore`에 기록한다.
+  - daemon direct `POST /flocks` wire contract와 `agent_token` 비노출 조건은 유지한다.
 
 ## 보안/운영 강화
 
