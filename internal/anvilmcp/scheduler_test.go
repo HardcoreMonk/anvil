@@ -233,9 +233,10 @@ func TestSchedulerRequiresEnoughAvailableVMsForRequestedActiveVMs(t *testing.T) 
 	)
 
 	decision, err := scheduler.Schedule(ScheduleRequest{
-		TenantID:     "tenant-1",
-		EgressPolicy: EgressPolicyProfile,
-	}, TenantUsage{ActiveVMs: 2})
+		TenantID:           "tenant-1",
+		RequestedActiveVMs: 2,
+		EgressPolicy:       EgressPolicyProfile,
+	}, TenantUsage{})
 	if err != nil {
 		t.Fatalf("Schedule() error = %v", err)
 	}
@@ -244,6 +245,58 @@ func TestSchedulerRequiresEnoughAvailableVMsForRequestedActiveVMs(t *testing.T) 
 	}
 	if decision.Host.Name != "host-b" {
 		t.Fatalf("selected host = %q, want host-b because host-a has only 1 available VM", decision.Host.Name)
+	}
+	if decision.Requested.ActiveVMs != 2 {
+		t.Fatalf("decision requested active VMs = %d, want 2", decision.Requested.ActiveVMs)
+	}
+
+	if _, err := scheduler.Schedule(ScheduleRequest{
+		TenantID:           "tenant-1",
+		RequestedActiveVMs: -1,
+		EgressPolicy:       EgressPolicyProfile,
+	}, TenantUsage{}); err == nil {
+		t.Fatal("Schedule() error = nil, want requested_active_vms validation error")
+	}
+
+	if _, err := SelectRuntimeHost([]RuntimeHost{
+		{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 1, AvailableSnapshotBytes: 1 << 20, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+	}, ScheduleRequest{
+		TenantID:           "tenant-1",
+		RequestedActiveVMs: -1,
+		EgressPolicy:       EgressPolicyProfile,
+	}); err == nil {
+		t.Fatal("SelectRuntimeHost() error = nil, want requested_active_vms validation error")
+	}
+}
+
+func TestSchedulerRejectsDefaultActiveVMWhenQuotaFull(t *testing.T) {
+	scheduler := NewScheduler(
+		[]RuntimeHost{
+			{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 1, AvailableSnapshotBytes: 1 << 20, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+		},
+		map[string]TenantQuota{
+			"tenant-1": {ActiveVMs: 1},
+		},
+		map[string]TenantUsage{
+			"tenant-1": {ActiveVMs: 1},
+		},
+	)
+
+	decision, err := scheduler.Schedule(ScheduleRequest{
+		TenantID:     "tenant-1",
+		EgressPolicy: EgressPolicyProfile,
+	}, TenantUsage{})
+	if err != nil {
+		t.Fatalf("Schedule() error = %v", err)
+	}
+	if decision.Allowed {
+		t.Fatal("Schedule() allowed = true, want quota denial for default active VM")
+	}
+	if decision.Reason != "quota_exceeded" || decision.Quota.Resource != "active_vms" {
+		t.Fatalf("decision = %+v, want active_vms quota_exceeded", decision)
+	}
+	if decision.Requested.ActiveVMs != 1 {
+		t.Fatalf("decision requested active VMs = %d, want default 1", decision.Requested.ActiveVMs)
 	}
 }
 

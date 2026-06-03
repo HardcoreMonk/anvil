@@ -1,6 +1,9 @@
 package anvilmcp
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 type Scheduler struct {
 	hosts  []RuntimeHost
@@ -96,6 +99,11 @@ func (s *Scheduler) Schedule(req ScheduleRequest, requested TenantUsage) (Schedu
 	if err != nil {
 		return ScheduleDecision{}, err
 	}
+	requestedActiveVMs, err := normalizeRequestedActiveVMs(req.RequestedActiveVMs, requested.ActiveVMs)
+	if err != nil {
+		return ScheduleDecision{}, err
+	}
+	requested.ActiveVMs = requestedActiveVMs
 	if requested.SnapshotBytes == 0 && req.RequestedSnapshotBytes > 0 {
 		requested.SnapshotBytes = req.RequestedSnapshotBytes
 	}
@@ -133,4 +141,17 @@ func (s *Scheduler) Schedule(req ScheduleRequest, requested TenantUsage) (Schedu
 	base.Reason = "scheduled"
 	base.Host = host
 	return base, nil
+}
+
+func normalizeRequestedActiveVMs(requestActiveVMs int64, usageActiveVMs int64) (int64, error) {
+	if requestActiveVMs < 0 {
+		return 0, fmt.Errorf("requested_active_vms must be non-negative")
+	}
+	if usageActiveVMs != 0 {
+		return usageActiveVMs, nil
+	}
+	if requestActiveVMs > 0 {
+		return requestActiveVMs, nil
+	}
+	return 1, nil
 }
