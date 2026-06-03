@@ -128,6 +128,36 @@ func (r *RuntimeRouter) RestoreSnapshot(ctx context.Context, snapshotID string, 
 	return nil, lastErr
 }
 
+func (r *RuntimeRouter) CreateFlock(ctx context.Context, req FlockCreateRequest) (*FlockCreateResponse, error) {
+	requestedActiveVMs := int64(len(req.Roles))
+	if requestedActiveVMs == 0 {
+		requestedActiveVMs = 1
+	}
+	scheduleReq := ScheduleRequest{
+		TenantID:           req.TenantID,
+		RequestedActiveVMs: requestedActiveVMs,
+		EgressPolicy:       EgressPolicy(req.EgressPolicy),
+	}
+	decision, daemon, err := r.scheduleDaemon(scheduleReq, TenantUsage{ActiveVMs: requestedActiveVMs})
+	if err != nil {
+		return nil, err
+	}
+	req.TenantID = decision.TenantID
+	req.EgressPolicy = string(decision.EgressPolicy)
+	resp, err := daemon.CreateFlock(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil {
+		return nil, fmt.Errorf("runtime daemon CreateFlock returned nil response")
+	}
+	if err := r.recordFlockPlacements(resp, decision.Host.Name); err != nil {
+		flockID := strings.TrimSpace(resp.FlockID)
+		return nil, fmt.Errorf("flock created but placement save failed: flock_id=%q: %w", flockID, err)
+	}
+	return resp, nil
+}
+
 func (r *RuntimeRouter) RunTask(ctx context.Context, vmID, prompt string) (*RawDaemonResponse, error) {
 	daemon, err := r.daemonForVM(vmID)
 	if err != nil {
@@ -254,6 +284,37 @@ func (r *RuntimeRouter) recordPlacement(vmID, hostName string) {
 		_ = r.placementStore.SetVMPlacement(vmID, hostName)
 		_ = r.placementStore.Save()
 	}
+}
+
+func (r *RuntimeRouter) recordFlockPlacements(resp *FlockCreateResponse, hostName string) error {
+	hostName = strings.TrimSpace(hostName)
+	if resp == nil || hostName == "" {
+		return nil
+	}
+	vmIDs := make([]string, 0, len(resp.Agents))
+	for _, agent := range resp.Agents {
+		vmID := strings.TrimSpace(agent.VMID)
+		if vmID != "" {
+			vmIDs = append(vmIDs, vmID)
+		}
+	}
+	if len(vmIDs) == 0 {
+		return nil
+	}
+	r.mu.Lock()
+	for _, vmID := range vmIDs {
+		r.placement[vmID] = hostName
+	}
+	r.mu.Unlock()
+	if r.placementStore == nil {
+		return nil
+	}
+	for _, vmID := range vmIDs {
+		if err := r.placementStore.SetVMPlacement(vmID, hostName); err != nil {
+			return err
+		}
+	}
+	return r.placementStore.Save()
 }
 
 func (r *RuntimeRouter) removePlacement(vmID string) {

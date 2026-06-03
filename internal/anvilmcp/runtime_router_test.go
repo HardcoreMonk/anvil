@@ -153,6 +153,26 @@ func (f *routerFakeDaemon) ListVMs(context.Context) ([]VMInfo, error) {
 	return f.listVMResp, nil
 }
 
+type routerFlockFakeDaemon struct {
+	routerFakeDaemon
+	createFlockCalls int
+	createFlockReq   FlockCreateRequest
+	createFlockResp  *FlockCreateResponse
+	createFlockErr   error
+}
+
+func (f *routerFlockFakeDaemon) CreateFlock(_ context.Context, req FlockCreateRequest) (*FlockCreateResponse, error) {
+	f.createFlockCalls++
+	f.createFlockReq = req
+	if f.createFlockErr != nil {
+		return nil, f.createFlockErr
+	}
+	if f.createFlockResp != nil {
+		return f.createFlockResp, nil
+	}
+	return &FlockCreateResponse{FlockID: "flock-1", Agents: []FlockAgentInfo{}}, nil
+}
+
 func TestRuntimeRouterRejectsQuotaBeforeDaemonCall(t *testing.T) {
 	daemon := &routerFakeDaemon{}
 	router := NewRuntimeRouter(
@@ -173,6 +193,133 @@ func TestRuntimeRouterRejectsQuotaBeforeDaemonCall(t *testing.T) {
 	}
 	if daemon.spawnCalls != 0 {
 		t.Fatalf("daemon spawn calls = %d, want 0", daemon.spawnCalls)
+	}
+}
+
+func TestRuntimeRouterCreateFlockSchedulesByRoleCountAndRecordsPlacements(t *testing.T) {
+	hostA := &routerFlockFakeDaemon{}
+	hostB := &routerFlockFakeDaemon{createFlockResp: &FlockCreateResponse{
+		FlockID: "flock-1",
+		Agents: []FlockAgentInfo{
+			{AgentID: "agent-worker", Role: "worker", VMID: "vm-worker-1", Status: "running"},
+			{AgentID: "agent-reviewer", Role: "reviewer", VMID: "vm-reviewer-1", Status: "running"},
+		},
+	}}
+	router := NewRuntimeRouter(
+		NewScheduler(
+			[]RuntimeHost{
+				{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+				{Name: "host-b", Endpoint: "http://host-b", Healthy: true, AvailableVMs: 2, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+			},
+			nil,
+			nil,
+		),
+		map[string]Daemon{"host-a": hostA, "host-b": hostB},
+	)
+
+	resp, err := router.CreateFlock(context.Background(), FlockCreateRequest{
+		Task:         "review worker output",
+		Roles:        []string{"worker", "reviewer"},
+		TenantID:     " tenant-1 ",
+		EgressPolicy: " PROFILE ",
+	})
+	if err != nil {
+		t.Fatalf("CreateFlock returned error: %v", err)
+	}
+	if resp.FlockID != "flock-1" {
+		t.Fatalf("flock id = %q, want flock-1", resp.FlockID)
+	}
+	if hostA.createFlockCalls != 0 || hostB.createFlockCalls != 1 {
+		t.Fatalf("CreateFlock calls hostA/hostB = %d/%d, want 0/1", hostA.createFlockCalls, hostB.createFlockCalls)
+	}
+	if hostB.createFlockReq.TenantID != "tenant-1" {
+		t.Fatalf("daemon tenant = %q, want tenant-1", hostB.createFlockReq.TenantID)
+	}
+	if hostB.createFlockReq.EgressPolicy != "profile" {
+		t.Fatalf("daemon egress policy = %q, want profile", hostB.createFlockReq.EgressPolicy)
+	}
+	for _, vmID := range []string{"vm-worker-1", "vm-reviewer-1"} {
+		if host, ok := router.Placement(vmID); !ok || host != "host-b" {
+			t.Fatalf("placement for %s = %q,%v want host-b,true", vmID, host, ok)
+		}
+	}
+}
+
+func TestRuntimeRouterCreateFlockRejectsQuotaBeforeDaemonCall(t *testing.T) {
+	daemon := &routerFlockFakeDaemon{}
+	router := NewRuntimeRouter(
+		NewScheduler(
+			[]RuntimeHost{{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 2, EgressPolicies: []EgressPolicy{EgressPolicyProfile}}},
+			map[string]TenantQuota{"tenant-1": {ActiveVMs: 1}},
+			map[string]TenantUsage{"tenant-1": {ActiveVMs: 0}},
+		),
+		map[string]Daemon{"host-a": daemon},
+	)
+
+	_, err := router.CreateFlock(context.Background(), FlockCreateRequest{
+		Task:         "review worker output",
+		Roles:        []string{"worker", "reviewer"},
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+	})
+	if err == nil {
+		t.Fatal("CreateFlock error = nil, want quota denial")
+	}
+	var denied *ScheduleDeniedError
+	if !errors.As(err, &denied) {
+		t.Fatalf("error type = %T, want ScheduleDeniedError", err)
+	}
+	if denied.Decision.Reason != "quota_exceeded" {
+		t.Fatalf("denial reason = %q, want quota_exceeded", denied.Decision.Reason)
+	}
+	if daemon.createFlockCalls != 0 {
+		t.Fatalf("daemon CreateFlock calls = %d, want 0", daemon.createFlockCalls)
+	}
+}
+
+func TestRuntimeRouterCreateFlockReportsPlacementSaveFailureWithoutSecrets(t *testing.T) {
+	store := NewPlacementStore(t.TempDir())
+	daemon := &routerFlockFakeDaemon{createFlockResp: &FlockCreateResponse{
+		FlockID: "flock-save-failure",
+		Agents: []FlockAgentInfo{
+			{AgentID: "agent-worker", Role: "worker", VMID: "vm-worker-1", AgentURL: "http://secret-token.example/agent", Status: "running"},
+		},
+		TownWallURL: "http://secret-token.example/townwall",
+		PostURL:     "http://secret-token.example/post",
+	}}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(
+			[]RuntimeHost{{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}}},
+			nil,
+			nil,
+		),
+		map[string]Daemon{"host-a": daemon},
+		RuntimeRouterOptions{PlacementStore: store},
+	)
+
+	_, err := router.CreateFlock(context.Background(), FlockCreateRequest{
+		Task:         "review worker output",
+		Roles:        []string{"worker"},
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+	})
+	if err == nil {
+		t.Fatal("CreateFlock error = nil, want placement save failure")
+	}
+	text := err.Error()
+	if !strings.Contains(text, "flock created but placement save failed") {
+		t.Fatalf("error = %q, want placement save failure context", text)
+	}
+	if !strings.Contains(text, "flock-save-failure") {
+		t.Fatalf("error = %q, want flock id", text)
+	}
+	for _, forbidden := range []string{"agent_token", "Authorization", "Bearer", "secret-token"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("error contains forbidden secret marker %q: %q", forbidden, text)
+		}
+	}
+	if daemon.createFlockCalls != 1 {
+		t.Fatalf("daemon CreateFlock calls = %d, want 1", daemon.createFlockCalls)
 	}
 }
 
