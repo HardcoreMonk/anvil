@@ -32,7 +32,8 @@
 ## 보안 조건
 
 - `anvil_spawn_flock` 응답은 `agent_token` 또는 `agent_tokens`를 노출하지 않는다.
-- scheduler placement state에는 VM ID와 host name만 저장한다.
+- `anvil_spawn_flock`이 새로 기록하는 `PlacementStore.VMPlacements` entry는
+  member VM ID와 선택된 host name만 추가한다.
 - host endpoint, authorization header, bearer token, daemon raw body는 MCP output에
   넣지 않는다.
 
