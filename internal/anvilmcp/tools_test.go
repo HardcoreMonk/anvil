@@ -1981,6 +1981,45 @@ func TestToolsSpawnFlockForwardsTenantEgressAndRoles(t *testing.T) {
 	}
 }
 
+func TestToolsMCPSpawnFlockOutputOmitsSecretsAndHostEndpoints(t *testing.T) {
+	daemon := &fakeDaemon{
+		createFlockResp: &FlockCreateResponse{
+			FlockID:      "flock-1",
+			Task:         "build town",
+			TenantID:     "tenant-1",
+			EgressPolicy: "profile",
+			Agents: []FlockAgentInfo{
+				{AgentID: "worker-1", Role: "worker", VMID: "vm-1", AgentURL: "http://10.0.1.10:8080", Status: "ready"},
+			},
+			TownWallURL: "http://127.0.0.1:3000/flocks/flock-1/wall",
+			PostURL:     "http://127.0.0.1:3000/flocks/flock-1/post",
+		},
+	}
+	tools := NewToolsWithOptions(daemon, nil, time.Second, ToolsOptions{DefaultTenantID: "tenant-1"})
+
+	_, out, err := tools.MCPSpawnFlock(context.Background(), nil, SpawnFlockInput{
+		Task:         "build town",
+		Roles:        []string{"worker"},
+		EgressPolicy: "profile",
+	})
+	if err != nil {
+		t.Fatalf("MCPSpawnFlock returned error: %v", err)
+	}
+	data, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal output: %v", err)
+	}
+	text := string(data)
+	for _, forbidden := range []string{"agent_token", "agent_tokens", "Authorization", "Bearer", "http://host-a", "secret-token"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("MCP spawn flock output leaked %q: %s", forbidden, text)
+		}
+	}
+	if !strings.Contains(text, "flock-1") || !strings.Contains(text, "vm-1") {
+		t.Fatalf("MCP spawn flock output = %s, want flock and VM identity", text)
+	}
+}
+
 func TestToolsSpawnFlockRejectsInvalidInputBeforeDaemonCall(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
