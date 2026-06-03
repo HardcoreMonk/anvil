@@ -122,6 +122,7 @@ func (s *Scheduler) Schedule(req ScheduleRequest, requested TenantUsage) (Schedu
 
 	req.TenantID = tenantID
 	req.EgressPolicy = egressPolicy
+	req.RequestedActiveVMs = requested.ActiveVMs
 	host, err := SelectRuntimeHost(s.hosts, req)
 	if err != nil {
 		base.Allowed = false

@@ -222,6 +222,31 @@ func TestSchedulerSkipsExcludedHostsForFailover(t *testing.T) {
 	}
 }
 
+func TestSchedulerRequiresEnoughAvailableVMsForRequestedActiveVMs(t *testing.T) {
+	scheduler := NewScheduler(
+		[]RuntimeHost{
+			{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 1, AvailableSnapshotBytes: 1 << 20, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+			{Name: "host-b", Endpoint: "http://host-b", Healthy: true, AvailableVMs: 3, AvailableSnapshotBytes: 1 << 20, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+		},
+		nil,
+		nil,
+	)
+
+	decision, err := scheduler.Schedule(ScheduleRequest{
+		TenantID:     "tenant-1",
+		EgressPolicy: EgressPolicyProfile,
+	}, TenantUsage{ActiveVMs: 2})
+	if err != nil {
+		t.Fatalf("Schedule() error = %v", err)
+	}
+	if !decision.Allowed {
+		t.Fatalf("Schedule() denied: %+v", decision)
+	}
+	if decision.Host.Name != "host-b" {
+		t.Fatalf("selected host = %q, want host-b because host-a has only 1 available VM", decision.Host.Name)
+	}
+}
+
 func runtimeHostFromJSON(t *testing.T, body string) RuntimeHost {
 	t.Helper()
 	var host RuntimeHost
