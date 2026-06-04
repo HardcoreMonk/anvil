@@ -18,7 +18,7 @@
   persisted `metadata.json`에 보존한다.
 - scheduler 운영 검증 자동화: `scripts/anvil-scheduler-smoke.sh`와
   `scripts/install-anvil-scheduler-systemd.sh --verify`는 `GET /health`,
-  `PUT/GET /hosts`, `POST /schedule/spawn`, `GET /placements`,
+  `PUT/GET /hosts`, `POST /schedule/spawn`, `POST /schedule/flock`, `GET /placements`,
   `GET /control-loop/status`, `DELETE /hosts/{name}` cleanup을 제공한다.
 - 비구현 범위: multi-node HA, migration, cross-host snapshot replication,
   실제 cross-host flock VM 생성과 coordinator Town Wall, L7 egress proxy, billing, UI.

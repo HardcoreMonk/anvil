@@ -1293,7 +1293,18 @@ smoke harness는 기본 host id를 `anvil-scheduler-smoke-*`로 생성하고,
 성공으로 취급하지 않는다. smoke harness가 등록하는 fake host는 `smoke_only: true`이며,
 `PreferredHosts`에 해당 host id를 명시한 smoke 요청에서만 선택된다. smoke harness는
 `PreferredHosts`가 없는 추가 `/schedule/spawn`도 실행해 smoke-only host가 일반
-fallback placement 후보로 선택되지 않는지 확인한다.
+fallback placement 후보로 선택되지 않는지 확인한다. `POST /schedule/flock`도
+dry-run으로 호출해 planner response가 `agents`, `requested`,
+`host_status_summary` 계약을 유지하는지 확인한다.
+
+`POST /schedule/flock`을 수동 확인할 때는 다음처럼 dry-run 요청을 보낸다. 이 요청은
+VM을 생성하지 않는다.
+
+```bash
+curl -sS -X POST http://127.0.0.1:3010/schedule/flock \
+  -H 'Content-Type: application/json' \
+  --data '{"tenant_id":"tenant-1","egress_policy":"profile","roles":["worker","reviewer"]}'
+```
 
 Scheduler service API는 operator가 host inventory와 placement 상태를 관리하는
 얇은 control-plane surface다.

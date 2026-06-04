@@ -91,11 +91,13 @@ curl http://127.0.0.1:3010/metrics
 ```
 
 `--verify`는 `GET /health`, `PUT/GET /hosts`, `POST /schedule/spawn`,
-`GET /placements`, `GET /control-loop/status`, `DELETE /hosts/{name}` cleanup을
+`POST /schedule/flock`, `GET /placements`, `GET /control-loop/status`,
+`DELETE /hosts/{name}` cleanup을
 확인한다. smoke host는 `smoke_only: true`로 등록되어 `PreferredHosts`에 명시된 smoke
 요청에서만 선택되고, `PreferredHosts` 없는 추가 `/schedule/spawn`에서는 제외되는지
-검증된다. scheduler는 기본적으로 `127.0.0.1:3010`에 bind하며, 외부 노출은 private
-network 또는 TLS 종료 reverse proxy policy 뒤에서만 수행한다.
+검증된다. `POST /schedule/flock`은 dry-run planner response 계약만 확인하며 VM을
+생성하지 않는다. scheduler는 기본적으로 `127.0.0.1:3010`에 bind하며, 외부 노출은
+private network 또는 TLS 종료 reverse proxy policy 뒤에서만 수행한다.
 
 Scheduler release candidate는 `/control-loop/status`와 `/metrics`를 모두 smoke로
 검증해야 한다. `/metrics`에는 `agent_token`, daemon raw body, host endpoint가 나오면

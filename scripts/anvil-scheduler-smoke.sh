@@ -381,16 +381,51 @@ if not isinstance(value, dict) or value.get("allowed") is not False:
 PY
 }
 
+require_flock_plan() {
+  local path="$1"
+
+  python3 - "$path" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    value = json.load(handle)
+if not isinstance(value, dict):
+    raise SystemExit(1)
+if not isinstance(value.get("allowed"), bool):
+    raise SystemExit(1)
+if value.get("tenant_id") != "smoke-tenant":
+    raise SystemExit(1)
+agents = value.get("agents")
+if not isinstance(agents, list):
+    raise SystemExit(1)
+summary = value.get("host_status_summary")
+if not isinstance(summary, dict):
+    raise SystemExit(1)
+requested = value.get("requested")
+if not isinstance(requested, dict) or requested.get("active_vms") != 2:
+    raise SystemExit(1)
+if value["allowed"]:
+    if len(agents) != 2:
+        raise SystemExit(1)
+else:
+    reason = str(value.get("reason") or "").strip()
+    if not reason:
+        raise SystemExit(1)
+PY
+}
+
 write_request_bodies() {
   local host_body="$1"
   local schedule_body="$2"
   local smoke_only_body="$3"
+  local flock_body="$4"
 
-  python3 - "$host_body" "$schedule_body" "$smoke_only_body" "$HOST_ID" <<'PY'
+  python3 - "$host_body" "$schedule_body" "$smoke_only_body" "$flock_body" "$HOST_ID" <<'PY'
 import json
 import sys
 
-host_body, schedule_body, smoke_only_body, host_id = sys.argv[1:5]
+host_body, schedule_body, smoke_only_body, flock_body, host_id = sys.argv[1:6]
 host = {
     "name": host_id,
     "endpoint": "http://127.0.0.1:0",
@@ -411,12 +446,19 @@ smoke_only_schedule = {
     "egress_policy": "profile",
     "requested": {"active_vms": 1},
 }
+flock_schedule = {
+    "tenant_id": "smoke-tenant",
+    "egress_policy": "profile",
+    "roles": ["worker", "reviewer"],
+}
 with open(host_body, "w", encoding="utf-8") as handle:
     json.dump(host, handle)
 with open(schedule_body, "w", encoding="utf-8") as handle:
     json.dump(schedule, handle)
 with open(smoke_only_body, "w", encoding="utf-8") as handle:
     json.dump(smoke_only_schedule, handle)
+with open(flock_body, "w", encoding="utf-8") as handle:
+    json.dump(flock_schedule, handle)
 PY
 }
 
@@ -427,7 +469,8 @@ TMP_DIR="$(mktemp -d)"
 HOST_BODY="$TMP_DIR/host.json"
 SCHEDULE_BODY="$TMP_DIR/schedule.json"
 SMOKE_ONLY_SCHEDULE_BODY="$TMP_DIR/smoke_only_schedule.json"
-write_request_bodies "$HOST_BODY" "$SCHEDULE_BODY" "$SMOKE_ONLY_SCHEDULE_BODY"
+FLOCK_BODY="$TMP_DIR/flock_schedule.json"
+write_request_bodies "$HOST_BODY" "$SCHEDULE_BODY" "$SMOKE_ONLY_SCHEDULE_BODY" "$FLOCK_BODY"
 
 HEALTH_BODY="$TMP_DIR/health.json"
 HEALTH_ERR="$TMP_DIR/health.err"
@@ -517,6 +560,18 @@ case "$SMOKE_ONLY_STATUS" in
     fail_step smoke_only_failed "POST /schedule/spawn without preferred_hosts returned HTTP $SMOKE_ONLY_STATUS body=$(response_body_snippet "$SMOKE_ONLY_BODY_OUT")"
     ;;
 esac
+
+FLOCK_BODY_OUT="$TMP_DIR/schedule_flock.json"
+FLOCK_ERR="$TMP_DIR/schedule_flock.err"
+if ! FLOCK_STATUS="$(request_json POST /schedule/flock "$FLOCK_BODY" "$FLOCK_BODY_OUT" "$FLOCK_ERR")"; then
+  fail_step schedule_flock_failed "POST /schedule/flock request failed: $(<"$FLOCK_ERR")"
+fi
+if [[ "$FLOCK_STATUS" != "200" ]]; then
+  fail_step schedule_flock_failed "POST /schedule/flock returned HTTP $FLOCK_STATUS body=$(response_body_snippet "$FLOCK_BODY_OUT")"
+fi
+if ! require_flock_plan "$FLOCK_BODY_OUT" 2>/dev/null; then
+  fail_step schedule_flock_failed 'POST /schedule/flock did not return a valid flock placement plan'
+fi
 
 PLACEMENTS_BODY="$TMP_DIR/placements.json"
 PLACEMENTS_ERR="$TMP_DIR/placements.err"

@@ -50,6 +50,20 @@ func TestAnvilSchedulerSmokePassesAgainstFakeScheduler(t *testing.T) {
 	if !server.metricsChecked() {
 		t.Fatalf("smoke script did not call GET /metrics")
 	}
+	if !server.flockScheduleChecked() {
+		t.Fatalf("smoke script did not call POST /schedule/flock")
+	}
+	flockSchedules := server.flockScheduleSnapshots()
+	if len(flockSchedules) == 0 {
+		t.Fatalf("fake scheduler did not receive POST /schedule/flock body")
+	}
+	if flockSchedules[0]["tenant_id"] != "smoke-tenant" {
+		t.Fatalf("POST /schedule/flock tenant_id = %v, want smoke-tenant; body=%+v", flockSchedules[0]["tenant_id"], flockSchedules[0])
+	}
+	roles, ok := flockSchedules[0]["roles"].([]any)
+	if !ok || len(roles) != 2 || roles[0] != "worker" || roles[1] != "reviewer" {
+		t.Fatalf("POST /schedule/flock roles = %+v, want worker/reviewer; body=%+v", flockSchedules[0]["roles"], flockSchedules[0])
+	}
 }
 
 func TestAnvilSchedulerSmokeGeneratesDefaultHostID(t *testing.T) {
@@ -342,11 +356,43 @@ func TestAnvilSchedulerSmokeFailsMetricsWithSummary(t *testing.T) {
 	}
 }
 
+func TestAnvilSchedulerSmokeFailsFlockScheduleWithSummary(t *testing.T) {
+	server := newAnvilSchedulerSmokeFakeServer(t, 0)
+	server.failFlockSchedule("flock planner unavailable")
+	defer server.Close()
+
+	outPath := filepath.Join(t.TempDir(), "summary.json")
+	cmd := exec.Command("bash", "anvil-scheduler-smoke.sh", "--base-url", server.URL, "--host-id", "smoke-test-host", "--json-out", outPath)
+	cmd.Dir = scriptsDir(t)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("smoke script unexpectedly succeeded:\n%s", output)
+	}
+	if !strings.Contains(string(output), "schedule_flock_failed") {
+		t.Fatalf("output = %s, want schedule_flock_failed", output)
+	}
+	if !strings.Contains(string(output), "flock planner unavailable") {
+		t.Fatalf("output = %s, want flock planner unavailable", output)
+	}
+
+	summary := readSmokeSummary(t, outPath)
+	if summary.OK {
+		t.Fatalf("summary ok = true, want false")
+	}
+	if summary.FailedStep != "schedule_flock_failed" {
+		t.Fatalf("failed_step = %q, want schedule_flock_failed", summary.FailedStep)
+	}
+	if server.hasHost("smoke-test-host") {
+		t.Fatalf("fake scheduler still has smoke host after flock schedule failure cleanup:\n%s", output)
+	}
+}
+
 type anvilSchedulerSmokeFakeServer struct {
 	*httptest.Server
 	mu                      sync.Mutex
 	host                    map[string]any
 	hostPutBodies           []map[string]any
+	flockScheduleBodies     []map[string]any
 	hostPutFailureResponses []string
 	hostDeleteFailures      []string
 	retainHostOnDeleteFlag  bool
@@ -355,6 +401,8 @@ type anvilSchedulerSmokeFakeServer struct {
 	controlLoopStatusCalls  int
 	metricsCalls            int
 	metricsFailure          string
+	flockScheduleCalls      int
+	flockScheduleFailure    string
 }
 
 func (s *anvilSchedulerSmokeFakeServer) hasHost(hostID string) bool {
@@ -401,10 +449,32 @@ func (s *anvilSchedulerSmokeFakeServer) metricsChecked() bool {
 	return s.metricsCalls > 0
 }
 
+func (s *anvilSchedulerSmokeFakeServer) flockScheduleChecked() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.flockScheduleCalls > 0
+}
+
+func (s *anvilSchedulerSmokeFakeServer) flockScheduleSnapshots() []map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]map[string]any, 0, len(s.flockScheduleBodies))
+	for _, body := range s.flockScheduleBodies {
+		out = append(out, cloneSmokeTestMap(body))
+	}
+	return out
+}
+
 func (s *anvilSchedulerSmokeFakeServer) failMetrics(message string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.metricsFailure = message
+}
+
+func (s *anvilSchedulerSmokeFakeServer) failFlockSchedule(message string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.flockScheduleFailure = message
 }
 
 func (s *anvilSchedulerSmokeFakeServer) failHostPutAfterStore(message string) {
@@ -547,6 +617,44 @@ func newAnvilSchedulerSmokeFakeServerWithHost(t *testing.T, healthDelay time.Dur
 				"host":          selected,
 				"egress_policy": "profile",
 				"requested":     map[string]any{"active_vms": 1},
+			})
+		case "/schedule/flock":
+			if r.Method != http.MethodPost {
+				http.Error(w, "POST required", http.StatusMethodNotAllowed)
+				return
+			}
+			fake.mu.Lock()
+			current := fake.host
+			fake.mu.Unlock()
+			if current == nil {
+				http.Error(w, "host missing", http.StatusBadRequest)
+				return
+			}
+			var flockReq map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&flockReq); err != nil {
+				http.Error(w, "invalid flock schedule body", http.StatusBadRequest)
+				return
+			}
+			fake.mu.Lock()
+			fake.flockScheduleCalls++
+			fake.flockScheduleBodies = append(fake.flockScheduleBodies, cloneSmokeTestMap(flockReq))
+			flockScheduleFailure := fake.flockScheduleFailure
+			fake.mu.Unlock()
+			if flockScheduleFailure != "" {
+				http.Error(w, flockScheduleFailure, http.StatusInternalServerError)
+				return
+			}
+			writeSmokeTestJSON(t, w, map[string]any{
+				"allowed":       true,
+				"reason":        "scheduled",
+				"tenant_id":     "smoke-tenant",
+				"egress_policy": "profile",
+				"agents": []map[string]any{
+					{"agent_id": "worker-1", "role": "worker", "host": current},
+					{"agent_id": "reviewer-1", "role": "reviewer", "host": otherHost},
+				},
+				"host_status_summary": map[string]any{"healthy": 2},
+				"requested":           map[string]any{"active_vms": 2},
 			})
 		case "/placements":
 			if r.Method != http.MethodGet {

@@ -6,6 +6,8 @@
   flock roles를 host별 agent placement plan으로 계산하지만 VM을 생성하지 않는다.
 - cross-host planner는 tenant quota를 roles 수 기준으로 한 번 검증하고, host capacity는
   agent slot별 reservation으로 초과하지 않게 계산한다.
+- `scripts/anvil-scheduler-smoke.sh`가 `POST /schedule/flock` dry-run response의
+  `agents`, `requested`, `host_status_summary` 계약을 확인한다.
 - scheduler `/metrics`에 `anvil_scheduler_flock_placement_*` aggregate metrics를
   추가한다.
   - `anvil_scheduler_flock_placement_attempts_total`
@@ -27,6 +29,7 @@
 - `go test ./internal/anvilmcp -count=1`
 - `go test ./cmd/anvil-scheduler -count=1`
 - `go test ./cmd/anvil-mcp -count=1`
+- `go test ./scripts -count=1`
 - `go test ./... -count=1`
 - `go build ./cmd/anvil-scheduler`
 - `go build ./cmd/anvil-mcp`
