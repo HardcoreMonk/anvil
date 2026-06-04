@@ -1,3 +1,33 @@
+# Unreleased — Scheduler flock placement metrics
+
+## 추가됨
+
+- scheduler `/metrics`에 `anvil_scheduler_flock_placement_*` aggregate metrics를
+  추가한다.
+  - `anvil_scheduler_flock_placement_attempts_total`
+  - `anvil_scheduler_flock_placement_latency_seconds`
+  - `anvil_scheduler_flock_placement_last_success_timestamp_seconds`
+  - `anvil_scheduler_flock_placement_last_failure_timestamp_seconds`
+- `RuntimeRouter.CreateFlock` scheduler-aware path는 schedule, daemon create,
+  placement save, total latency를 bounded phase histogram으로 기록한다.
+
+## 보안/운영 강화
+
+- flock placement metrics label은 `outcome`, `reason`, `phase` bounded enum만
+  사용한다.
+- `tenant_id`, `flock_id`, `vm_id`, host endpoint, authorization header,
+  `agent_token`, daemon raw body는 metrics state와 exposition에 저장하지 않는다.
+
+## 검증 예정
+
+- `go test ./internal/anvilmcp -count=1`
+- `go test ./cmd/anvil-scheduler -count=1`
+- `go test ./cmd/anvil-mcp -count=1`
+- `go test ./... -count=1`
+- `go build ./cmd/anvil-scheduler`
+- `go build ./cmd/anvil-mcp`
+- `go build ./cmd/goose-daemon`
+
 # anvil v0.3.2 — Scheduler replication and flock placement
 
 - Tag: `anvil-v0.3.2`

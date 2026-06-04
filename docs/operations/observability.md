@@ -81,10 +81,34 @@ curl http://127.0.0.1:3010/metrics
 - `anvil_scheduler_last_reconcile_completed_timestamp_seconds`
 - `anvil_scheduler_poll_interval_seconds`
 - `anvil_scheduler_reconcile_interval_seconds`
+- `anvil_scheduler_flock_placement_attempts_total{outcome,reason}`
+- `anvil_scheduler_flock_placement_latency_seconds{phase}`
+- `anvil_scheduler_flock_placement_last_success_timestamp_seconds`
+- `anvil_scheduler_flock_placement_last_failure_timestamp_seconds`
 
 metric label에는 host name, endpoint, raw daemon response, authorization header,
 `agent_token`을 넣지 않는다. scheduler service에는 자체 인증 계층이 없으므로
 loopback/private network 또는 reverse proxy policy 뒤에서만 scrape한다.
+
+### Scheduler flock placement metrics
+
+MCP router의 scheduler-aware `anvil_spawn_flock` path는 flock placement 결과와 단계별
+latency를 scheduler state에 aggregate로 기록한다. scheduler service는 같은 state를
+읽어 `/metrics`에 노출한다.
+
+- `anvil_scheduler_flock_placement_attempts_total{outcome,reason}`은 bounded outcome과
+  reason별 placement 시도 수를 센다.
+- `anvil_scheduler_flock_placement_latency_seconds{phase}`는 `schedule`,
+  `daemon_create`, `placement_save`, `total` phase latency를 persisted histogram
+  aggregate로 기록한다.
+- `anvil_scheduler_flock_placement_last_success_timestamp_seconds`는 scheduler decision,
+  daemon create, placement save가 모두 완료된 마지막 성공 시각이다.
+- `anvil_scheduler_flock_placement_last_failure_timestamp_seconds`는 scheduler denial
+  또는 error outcome이 발생한 마지막 시각이다.
+
+flock placement metrics label은 의도적으로 bounded enum만 사용한다. `tenant_id`,
+`flock_id`, `vm_id`, host endpoint, daemon raw error text, authorization header,
+`agent_token` 같은 값은 label이나 state에 넣지 않는다.
 
 ## Goosetown 상태 확인
 
