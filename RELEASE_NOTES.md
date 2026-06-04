@@ -1,4 +1,14 @@
-# Unreleased — Scheduler 운영 강화
+# anvil v0.3.2 — Scheduler replication and flock placement
+
+- Tag: `anvil-v0.3.2`
+- GitHub Release:
+  <https://github.com/HardcoreMonk/anvil/releases/tag/anvil-v0.3.2>
+- Published: 2026-06-04 14:22:49 KST
+- Target commit: `18b4506204a68a8fd9e3608976727953869f94a6`
+
+`anvil-v0.3.2`는 `anvil-v0.3.1` 이후 scheduler 기반 runtime 운영성을 확장한
+release다. upstream ephemera runtime baseline은 계속 `v0.3.6`이다. upstream
+`v0.4.0` PR-A storage/recovery 변경은 포함하지 않는다.
 
 ## 추가됨
 
