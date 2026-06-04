@@ -88,6 +88,9 @@ func normalizeFlockPlacementMetricsState(state *FlockPlacementMetricsState) {
 			existing.Buckets = make(map[string]int64)
 		}
 		for bucket, count := range hist.Buckets {
+			if !isAllowedFlockPlacementBucket(bucket) {
+				continue
+			}
 			existing.Buckets[bucket] += count
 		}
 		existing.SumSeconds += hist.SumSeconds
@@ -113,6 +116,9 @@ func cloneFlockPlacementMetricsState(state FlockPlacementMetricsState) FlockPlac
 			existing.Buckets = make(map[string]int64)
 		}
 		for bucket, count := range hist.Buckets {
+			if !isAllowedFlockPlacementBucket(bucket) {
+				continue
+			}
 			existing.Buckets[bucket] += count
 		}
 		existing.SumSeconds += hist.SumSeconds
@@ -138,6 +144,7 @@ func (s *PlacementStore) RecordFlockPlacementMetrics(obs FlockPlacementMetricObs
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ensureMaps()
+	previous := clonePlacementStoreState(s.state)
 	metrics := &s.state.FlockPlacementMetrics
 	normalizeFlockPlacementMetricsState(metrics)
 	metrics.AttemptsByOutcomeReason[flockPlacementAttemptKey(outcome, reason)]++
@@ -155,7 +162,11 @@ func (s *PlacementStore) RecordFlockPlacementMetrics(obs FlockPlacementMetricObs
 	} else {
 		metrics.LastFailureAt = obs.At
 	}
-	return s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		s.state = previous
+		return err
+	}
+	return nil
 }
 
 func recordLatencyHistogramObservation(hist *LatencyHistogramState, duration time.Duration) {
@@ -242,6 +253,18 @@ func isAllowedFlockPlacementPhase(value string) bool {
 	default:
 		return false
 	}
+}
+
+func isAllowedFlockPlacementBucket(value string) bool {
+	if value == "+Inf" {
+		return true
+	}
+	for _, upper := range flockPlacementLatencyBuckets {
+		if value == formatFlockPlacementBucket(upper) {
+			return true
+		}
+	}
+	return false
 }
 
 func formatFlockPlacementBucket(value float64) string {

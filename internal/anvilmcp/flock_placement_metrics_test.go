@@ -91,3 +91,83 @@ func TestPlacementStoreClonesFlockPlacementMetrics(t *testing.T) {
 		t.Fatalf("stored LastFailureAt was mutated through clone")
 	}
 }
+
+func TestPlacementStoreRollsBackFlockPlacementMetricsOnSaveFailure(t *testing.T) {
+	store := NewPlacementStore(t.TempDir())
+	at := time.Date(2026, 6, 4, 1, 2, 3, 0, time.UTC)
+
+	err := store.RecordFlockPlacementMetrics(FlockPlacementMetricObservation{
+		Outcome: FlockPlacementOutcomeSuccess,
+		Reason:  FlockPlacementReasonScheduled,
+		At:      at,
+		Latencies: map[string]time.Duration{
+			FlockPlacementPhaseSchedule: 7 * time.Millisecond,
+		},
+	})
+	if err == nil {
+		t.Fatal("RecordFlockPlacementMetrics unexpectedly succeeded with directory path")
+	}
+
+	state := store.State().FlockPlacementMetrics
+	key := flockPlacementAttemptKey(FlockPlacementOutcomeSuccess, FlockPlacementReasonScheduled)
+	if got := state.AttemptsByOutcomeReason[key]; got != 0 {
+		t.Fatalf("attempt count after failed save = %d, want rollback to 0", got)
+	}
+	if !state.LastSuccessAt.IsZero() {
+		t.Fatalf("LastSuccessAt after failed save = %v, want zero", state.LastSuccessAt)
+	}
+	if len(state.LatencyByPhase) != 0 {
+		t.Fatalf("LatencyByPhase after failed save = %+v, want rollback to empty", state.LatencyByPhase)
+	}
+}
+
+func TestPlacementStoreFiltersFlockPlacementMetricsHistogramBuckets(t *testing.T) {
+	state := FlockPlacementMetricsState{
+		LatencyByPhase: map[string]LatencyHistogramState{
+			FlockPlacementPhaseSchedule: {
+				Buckets: map[string]int64{
+					"0.005":         1,
+					"0.01":          2,
+					"+Inf":          2,
+					"agent_token":   99,
+					"http://host-a": 42,
+				},
+				SumSeconds: 0.012,
+				Count:      2,
+			},
+		},
+	}
+
+	normalizeFlockPlacementMetricsState(&state)
+	assertFlockPlacementHistogramBucketsFiltered(t, state.LatencyByPhase[FlockPlacementPhaseSchedule])
+
+	cloned := cloneFlockPlacementMetricsState(FlockPlacementMetricsState{
+		LatencyByPhase: map[string]LatencyHistogramState{
+			FlockPlacementPhaseSchedule: {
+				Buckets: map[string]int64{
+					"0.005":         1,
+					"0.01":          2,
+					"+Inf":          2,
+					"agent_token":   99,
+					"http://host-a": 42,
+				},
+				SumSeconds: 0.012,
+				Count:      2,
+			},
+		},
+	})
+	assertFlockPlacementHistogramBucketsFiltered(t, cloned.LatencyByPhase[FlockPlacementPhaseSchedule])
+}
+
+func assertFlockPlacementHistogramBucketsFiltered(t *testing.T, hist LatencyHistogramState) {
+	t.Helper()
+	if hist.Buckets["0.005"] != 1 || hist.Buckets["0.01"] != 2 || hist.Buckets["+Inf"] != 2 {
+		t.Fatalf("allowed buckets = %+v, want 0.005=1 0.01=2 +Inf=2", hist.Buckets)
+	}
+	if _, ok := hist.Buckets["agent_token"]; ok {
+		t.Fatalf("histogram buckets retained token-like key: %+v", hist.Buckets)
+	}
+	if _, ok := hist.Buckets["http://host-a"]; ok {
+		t.Fatalf("histogram buckets retained endpoint-like key: %+v", hist.Buckets)
+	}
+}
