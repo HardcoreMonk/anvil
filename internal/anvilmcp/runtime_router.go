@@ -2,9 +2,11 @@ package anvilmcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 )
 
 type ScheduleDeniedError struct {
@@ -129,6 +131,7 @@ func (r *RuntimeRouter) RestoreSnapshot(ctx context.Context, snapshotID string, 
 }
 
 func (r *RuntimeRouter) CreateFlock(ctx context.Context, req FlockCreateRequest) (*FlockCreateResponse, error) {
+	totalStart := time.Now()
 	requestedActiveVMs := int64(len(req.Roles))
 	if requestedActiveVMs == 0 {
 		requestedActiveVMs = 1
@@ -138,23 +141,77 @@ func (r *RuntimeRouter) CreateFlock(ctx context.Context, req FlockCreateRequest)
 		RequestedActiveVMs: requestedActiveVMs,
 		EgressPolicy:       EgressPolicy(req.EgressPolicy),
 	}
+	scheduleStart := time.Now()
 	decision, daemon, err := r.scheduleDaemon(scheduleReq, TenantUsage{ActiveVMs: requestedActiveVMs})
+	scheduleLatency := time.Since(scheduleStart)
 	if err != nil {
+		r.recordFlockPlacementMetric(FlockPlacementMetricObservation{
+			Outcome: flockPlacementOutcomeForScheduleError(err),
+			Reason:  flockPlacementReasonForScheduleError(err),
+			Latencies: map[string]time.Duration{
+				FlockPlacementPhaseSchedule: scheduleLatency,
+				FlockPlacementPhaseTotal:    time.Since(totalStart),
+			},
+		})
 		return nil, err
 	}
 	req.TenantID = decision.TenantID
 	req.EgressPolicy = string(decision.EgressPolicy)
+	daemonCreateStart := time.Now()
 	resp, err := daemon.CreateFlock(ctx, req)
+	daemonCreateLatency := time.Since(daemonCreateStart)
 	if err != nil {
+		r.recordFlockPlacementMetric(FlockPlacementMetricObservation{
+			Outcome: FlockPlacementOutcomeDaemonError,
+			Reason:  FlockPlacementReasonDaemonCreateFailed,
+			Latencies: map[string]time.Duration{
+				FlockPlacementPhaseSchedule:     scheduleLatency,
+				FlockPlacementPhaseDaemonCreate: daemonCreateLatency,
+				FlockPlacementPhaseTotal:        time.Since(totalStart),
+			},
+		})
 		return nil, err
 	}
 	if resp == nil {
-		return nil, fmt.Errorf("runtime daemon CreateFlock returned nil response")
+		nilResponseErr := fmt.Errorf("runtime daemon CreateFlock returned nil response")
+		r.recordFlockPlacementMetric(FlockPlacementMetricObservation{
+			Outcome: FlockPlacementOutcomeDaemonNilResponse,
+			Reason:  FlockPlacementReasonDaemonNilResponse,
+			Latencies: map[string]time.Duration{
+				FlockPlacementPhaseSchedule:     scheduleLatency,
+				FlockPlacementPhaseDaemonCreate: daemonCreateLatency,
+				FlockPlacementPhaseTotal:        time.Since(totalStart),
+			},
+		})
+		return nil, nilResponseErr
 	}
-	if err := r.recordFlockPlacements(resp, decision.Host.Name); err != nil {
+	placementSaveStart := time.Now()
+	err = r.recordFlockPlacements(resp, decision.Host.Name)
+	placementSaveLatency := time.Since(placementSaveStart)
+	if err != nil {
+		r.recordFlockPlacementMetric(FlockPlacementMetricObservation{
+			Outcome: FlockPlacementOutcomePlacementSaveError,
+			Reason:  FlockPlacementReasonPlacementSaveFailed,
+			Latencies: map[string]time.Duration{
+				FlockPlacementPhaseSchedule:      scheduleLatency,
+				FlockPlacementPhaseDaemonCreate:  daemonCreateLatency,
+				FlockPlacementPhasePlacementSave: placementSaveLatency,
+				FlockPlacementPhaseTotal:         time.Since(totalStart),
+			},
+		})
 		flockID := strings.TrimSpace(resp.FlockID)
 		return nil, fmt.Errorf("flock created but placement save failed: flock_id=%q: %w", flockID, err)
 	}
+	r.recordFlockPlacementMetric(FlockPlacementMetricObservation{
+		Outcome: FlockPlacementOutcomeSuccess,
+		Reason:  FlockPlacementReasonScheduled,
+		Latencies: map[string]time.Duration{
+			FlockPlacementPhaseSchedule:      scheduleLatency,
+			FlockPlacementPhaseDaemonCreate:  daemonCreateLatency,
+			FlockPlacementPhasePlacementSave: placementSaveLatency,
+			FlockPlacementPhaseTotal:         time.Since(totalStart),
+		},
+	})
 	return resp, nil
 }
 
@@ -256,6 +313,33 @@ func (r *RuntimeRouter) scheduleDaemon(req ScheduleRequest, requested TenantUsag
 	return decision, daemon, nil
 }
 
+func flockPlacementOutcomeForScheduleError(err error) string {
+	var denied *ScheduleDeniedError
+	if errors.As(err, &denied) {
+		return FlockPlacementOutcomeDenied
+	}
+	return FlockPlacementOutcomeSchedulerError
+}
+
+func flockPlacementReasonForScheduleError(err error) string {
+	var denied *ScheduleDeniedError
+	if errors.As(err, &denied) {
+		return normalizeScheduleDecisionReason(denied.Decision.Reason)
+	}
+	return FlockPlacementReasonInvalidRequest
+}
+
+func normalizeScheduleDecisionReason(reason string) string {
+	switch strings.TrimSpace(reason) {
+	case FlockPlacementReasonQuotaExceeded:
+		return FlockPlacementReasonQuotaExceeded
+	case FlockPlacementReasonNoEligibleHost:
+		return FlockPlacementReasonNoEligibleHost
+	default:
+		return FlockPlacementReasonUnknown
+	}
+}
+
 func (r *RuntimeRouter) daemonForVM(vmID string) (Daemon, error) {
 	vmID = strings.TrimSpace(vmID)
 	r.mu.RLock()
@@ -315,6 +399,13 @@ func (r *RuntimeRouter) recordFlockPlacements(resp *FlockCreateResponse, hostNam
 		}
 	}
 	return r.placementStore.Save()
+}
+
+func (r *RuntimeRouter) recordFlockPlacementMetric(obs FlockPlacementMetricObservation) {
+	if r == nil || r.placementStore == nil {
+		return
+	}
+	_ = r.placementStore.RecordFlockPlacementMetrics(obs)
 }
 
 func (r *RuntimeRouter) removePlacement(vmID string) {

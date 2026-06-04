@@ -159,6 +159,7 @@ type routerFlockFakeDaemon struct {
 	createFlockReq   FlockCreateRequest
 	createFlockResp  *FlockCreateResponse
 	createFlockErr   error
+	createFlockNil   bool
 }
 
 func (f *routerFlockFakeDaemon) CreateFlock(_ context.Context, req FlockCreateRequest) (*FlockCreateResponse, error) {
@@ -167,10 +168,32 @@ func (f *routerFlockFakeDaemon) CreateFlock(_ context.Context, req FlockCreateRe
 	if f.createFlockErr != nil {
 		return nil, f.createFlockErr
 	}
+	if f.createFlockNil {
+		return nil, nil
+	}
 	if f.createFlockResp != nil {
 		return f.createFlockResp, nil
 	}
 	return &FlockCreateResponse{FlockID: "flock-1", Agents: []FlockAgentInfo{}}, nil
+}
+
+func requireFlockPlacementMetricAttempt(t *testing.T, state FlockPlacementMetricsState, outcome, reason string, want int64) {
+	t.Helper()
+	key := flockPlacementAttemptKey(outcome, reason)
+	if got := state.AttemptsByOutcomeReason[key]; got != want {
+		t.Fatalf("flock placement attempts[%q] = %d, want %d", key, got, want)
+	}
+}
+
+func requireFlockPlacementMetricPhaseCount(t *testing.T, state FlockPlacementMetricsState, phase string, want int64) {
+	t.Helper()
+	hist := state.LatencyByPhase[phase]
+	if hist.Count != want {
+		t.Fatalf("flock placement latency count phase=%q = %d, want %d", phase, hist.Count, want)
+	}
+	if got := hist.Buckets["+Inf"]; got != want {
+		t.Fatalf("flock placement +Inf bucket phase=%q = %d, want %d", phase, got, want)
+	}
 }
 
 func TestRuntimeRouterRejectsQuotaBeforeDaemonCall(t *testing.T) {
@@ -321,6 +344,169 @@ func TestRuntimeRouterCreateFlockReportsPlacementSaveFailureWithoutSecrets(t *te
 	if daemon.createFlockCalls != 1 {
 		t.Fatalf("daemon CreateFlock calls = %d, want 1", daemon.createFlockCalls)
 	}
+}
+
+func TestRuntimeRouterCreateFlockRecordsSuccessMetrics(t *testing.T) {
+	store := NewPlacementStore("")
+	daemon := &routerFlockFakeDaemon{createFlockResp: &FlockCreateResponse{
+		FlockID: "flock-metrics-success",
+		Agents: []FlockAgentInfo{
+			{AgentID: "agent-worker", Role: "worker", VMID: "vm-worker-1", Status: "running"},
+			{AgentID: "agent-reviewer", Role: "reviewer", VMID: "vm-reviewer-1", Status: "running"},
+		},
+	}}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(
+			[]RuntimeHost{{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 2, EgressPolicies: []EgressPolicy{EgressPolicyProfile}}},
+			nil,
+			nil,
+		),
+		map[string]Daemon{"host-a": daemon},
+		RuntimeRouterOptions{PlacementStore: store},
+	)
+
+	resp, err := router.CreateFlock(context.Background(), FlockCreateRequest{
+		Task:         "review worker output",
+		Roles:        []string{"worker", "reviewer"},
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+	})
+	if err != nil {
+		t.Fatalf("CreateFlock returned error: %v", err)
+	}
+	if resp.FlockID != "flock-metrics-success" {
+		t.Fatalf("flock id = %q, want flock-metrics-success", resp.FlockID)
+	}
+
+	state := store.State().FlockPlacementMetrics
+	requireFlockPlacementMetricAttempt(t, state, FlockPlacementOutcomeSuccess, FlockPlacementReasonScheduled, 1)
+	for _, phase := range []string{
+		FlockPlacementPhaseSchedule,
+		FlockPlacementPhaseDaemonCreate,
+		FlockPlacementPhasePlacementSave,
+		FlockPlacementPhaseTotal,
+	} {
+		requireFlockPlacementMetricPhaseCount(t, state, phase, 1)
+	}
+	if state.LastSuccessAt.IsZero() {
+		t.Fatal("LastSuccessAt is zero, want success timestamp")
+	}
+}
+
+func TestRuntimeRouterCreateFlockRecordsQuotaDeniedMetrics(t *testing.T) {
+	store := NewPlacementStore("")
+	daemon := &routerFlockFakeDaemon{}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(
+			[]RuntimeHost{{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 2, EgressPolicies: []EgressPolicy{EgressPolicyProfile}}},
+			map[string]TenantQuota{"tenant-1": {ActiveVMs: 1}},
+			map[string]TenantUsage{"tenant-1": {ActiveVMs: 0}},
+		),
+		map[string]Daemon{"host-a": daemon},
+		RuntimeRouterOptions{PlacementStore: store},
+	)
+
+	_, err := router.CreateFlock(context.Background(), FlockCreateRequest{
+		Task:         "review worker output",
+		Roles:        []string{"worker", "reviewer"},
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+	})
+	if err == nil {
+		t.Fatal("CreateFlock error = nil, want quota denial")
+	}
+	var denied *ScheduleDeniedError
+	if !errors.As(err, &denied) {
+		t.Fatalf("error type = %T, want ScheduleDeniedError", err)
+	}
+	if daemon.createFlockCalls != 0 {
+		t.Fatalf("daemon CreateFlock calls = %d, want 0", daemon.createFlockCalls)
+	}
+
+	state := store.State().FlockPlacementMetrics
+	requireFlockPlacementMetricAttempt(t, state, FlockPlacementOutcomeDenied, FlockPlacementReasonQuotaExceeded, 1)
+	requireFlockPlacementMetricPhaseCount(t, state, FlockPlacementPhaseSchedule, 1)
+	requireFlockPlacementMetricPhaseCount(t, state, FlockPlacementPhaseTotal, 1)
+	requireFlockPlacementMetricPhaseCount(t, state, FlockPlacementPhaseDaemonCreate, 0)
+	if state.LastFailureAt.IsZero() {
+		t.Fatal("LastFailureAt is zero, want failure timestamp")
+	}
+}
+
+func TestRuntimeRouterCreateFlockRecordsDaemonErrorMetrics(t *testing.T) {
+	store := NewPlacementStore("")
+	daemonErr := errors.New("daemon CreateFlock failed: agent_token")
+	daemon := &routerFlockFakeDaemon{createFlockErr: daemonErr}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(
+			[]RuntimeHost{{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}}},
+			nil,
+			nil,
+		),
+		map[string]Daemon{"host-a": daemon},
+		RuntimeRouterOptions{PlacementStore: store},
+	)
+
+	_, err := router.CreateFlock(context.Background(), FlockCreateRequest{
+		Task:         "review worker output",
+		Roles:        []string{"worker"},
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+	})
+	if !errors.Is(err, daemonErr) {
+		t.Fatalf("CreateFlock error = %v, want daemon error", err)
+	}
+	if daemon.createFlockCalls != 1 {
+		t.Fatalf("daemon CreateFlock calls = %d, want 1", daemon.createFlockCalls)
+	}
+
+	state := store.State().FlockPlacementMetrics
+	requireFlockPlacementMetricAttempt(t, state, FlockPlacementOutcomeDaemonError, FlockPlacementReasonDaemonCreateFailed, 1)
+	requireFlockPlacementMetricPhaseCount(t, state, FlockPlacementPhaseSchedule, 1)
+	requireFlockPlacementMetricPhaseCount(t, state, FlockPlacementPhaseDaemonCreate, 1)
+	requireFlockPlacementMetricPhaseCount(t, state, FlockPlacementPhaseTotal, 1)
+	requireFlockPlacementMetricPhaseCount(t, state, FlockPlacementPhasePlacementSave, 0)
+	output := RenderSchedulerMetrics(store.State())
+	if strings.Contains(output, "agent_token") {
+		t.Fatalf("metrics output leaked daemon error token marker:\n%s", output)
+	}
+}
+
+func TestRuntimeRouterCreateFlockRecordsNilResponseMetrics(t *testing.T) {
+	store := NewPlacementStore("")
+	daemon := &routerFlockFakeDaemon{createFlockNil: true}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(
+			[]RuntimeHost{{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}}},
+			nil,
+			nil,
+		),
+		map[string]Daemon{"host-a": daemon},
+		RuntimeRouterOptions{PlacementStore: store},
+	)
+
+	_, err := router.CreateFlock(context.Background(), FlockCreateRequest{
+		Task:         "review worker output",
+		Roles:        []string{"worker"},
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+	})
+	if err == nil {
+		t.Fatal("CreateFlock error = nil, want nil response error")
+	}
+	if !strings.Contains(err.Error(), "runtime daemon CreateFlock returned nil response") {
+		t.Fatalf("CreateFlock error = %q, want nil response context", err.Error())
+	}
+	if daemon.createFlockCalls != 1 {
+		t.Fatalf("daemon CreateFlock calls = %d, want 1", daemon.createFlockCalls)
+	}
+
+	state := store.State().FlockPlacementMetrics
+	requireFlockPlacementMetricAttempt(t, state, FlockPlacementOutcomeDaemonNilResponse, FlockPlacementReasonDaemonNilResponse, 1)
+	requireFlockPlacementMetricPhaseCount(t, state, FlockPlacementPhaseSchedule, 1)
+	requireFlockPlacementMetricPhaseCount(t, state, FlockPlacementPhaseDaemonCreate, 1)
+	requireFlockPlacementMetricPhaseCount(t, state, FlockPlacementPhaseTotal, 1)
+	requireFlockPlacementMetricPhaseCount(t, state, FlockPlacementPhasePlacementSave, 0)
 }
 
 func TestRuntimeRouterSpawnRecordsPlacementAndRoutesVMCalls(t *testing.T) {
