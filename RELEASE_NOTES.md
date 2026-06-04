@@ -1,7 +1,11 @@
-# Unreleased — Scheduler flock placement metrics
+# Unreleased — Scheduler flock placement planner and metrics
 
 ## 추가됨
 
+- scheduler service에 `POST /schedule/flock` dry-run endpoint를 추가한다. 이 endpoint는
+  flock roles를 host별 agent placement plan으로 계산하지만 VM을 생성하지 않는다.
+- cross-host planner는 tenant quota를 roles 수 기준으로 한 번 검증하고, host capacity는
+  agent slot별 reservation으로 초과하지 않게 계산한다.
 - scheduler `/metrics`에 `anvil_scheduler_flock_placement_*` aggregate metrics를
   추가한다.
   - `anvil_scheduler_flock_placement_attempts_total`

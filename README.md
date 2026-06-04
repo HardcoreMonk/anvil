@@ -1223,8 +1223,11 @@ MCP production config에서 기존 VM/snapshot tool은 `ANVIL_DAEMON_URL` direct
 `ANVIL_MCP_SCHEDULER_HOSTS_FILE`로 router config가 제공되면 `anvil_spawn_flock`은
 scheduler-aware single-host placement를 사용한다. roles 수만큼 active VM
 capacity/quota를 확인한 뒤 하나의 healthy host를 선택하고, daemon
-`POST /flocks`는 그 host에서 기존 single-host 의미로 실행한다. true cross-host
-flock member 분산, cross-host Town Wall, cross-host `gtcall`은 후속 범위다.
+`POST /flocks`는 그 host에서 기존 single-host 의미로 실행한다.
+`POST /schedule/flock`은 cross-host agent placement plan을 dry-run으로 반환하지만,
+`anvil_spawn_flock` runtime create path는 아직 scheduler-aware single-host placement를
+사용한다. true cross-host member VM 생성, coordinator Town Wall, cross-host `gtcall`은
+후속 범위다.
 `scheduler_quota_store_path` 또는 `ANVIL_MCP_SCHEDULER_QUOTA_STORE`는 scheduler quota
 store를 함께 지정할 때 사용한다. host daemon client 인증에는 `ANVIL_API_TOKEN`을
 사용한다.
@@ -1304,6 +1307,7 @@ Scheduler service API는 operator가 host inventory와 placement 상태를 관�
 | `GET /control-loop/status` | scheduler control loop 실행 상태, host observation, degraded/unhealthy 판단 조회 |
 | `POST /reconcile` | 현재 placement state 반환. router reconciliation은 daemon `GET /vms` 기반 helper가 수행 |
 | `POST /schedule/spawn` | spawn 요청의 host decision 반환 |
+| `POST /schedule/flock` | flock roles를 host별 agent placement plan으로 dry-run한다. VM은 생성하지 않는다. |
 | `POST /schedule/restore?snapshot_id=...` | snapshot locality를 반영한 restore host decision 반환 |
 
 Scheduler service는 operator JSON endpoint와 별도로 scheduler 전용 Prometheus text

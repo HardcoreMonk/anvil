@@ -148,10 +148,12 @@ Town Wall의 `GET /flocks/{flock_id}/wall` SSE stream은 MCP tool로 노출하�
 stdio-compatible smoke와 inspection에는 `anvil_get_townwall_history`가 사용하는
 history endpoint를 쓴다. 현재 MCP surface에는 flock snapshot/restore가 없다.
 MCP router config가 있을 때 `anvil_spawn_flock`은 scheduler-aware single-host
-placement를 사용할 수 있다. flock member를 여러 runtime host에 분산하는 true
-cross-host flock placement, cross-host Town Wall forwarding, cross-host `gtcall`은
-아직 제외 범위다. tenant와 audit 동작은 기존 MCP runtime audit 정책을 따르며,
-별도 flock 전용 audit 의미를 만들지 않는다.
+placement를 사용할 수 있다. Scheduler service `POST /schedule/flock`은 cross-host
+flock placement plan을 dry-run으로 계산한다. 이 endpoint는 operator planning
+surface이며 VM을 만들지 않는다. MCP `anvil_spawn_flock`은 cross-host create slice가
+구현되기 전까지 기존 scheduler-aware single-host create path를 유지한다. tenant와
+audit 동작은 기존 MCP runtime audit 정책을 따르며, 별도 flock 전용 audit 의미를
+만들지 않는다.
 
 ### IronClaw schema compatibility
 
@@ -687,7 +689,7 @@ HTTP MCP transport도 이 작업 범위 밖이다. v2 후보 논의에서는 다
 - Town Wall SSE stream의 MCP tool 노출
 - flock snapshot/restore
 - flock alias 또는 `session_name` 재사용
-- scheduler-aware cross-host flock placement
+- true cross-host member VM creation, coordinator Town Wall, cross-host `gtcall`
 
 위 항목은 v1의 숨은 동작이 아니라 향후 MCP v2 설계 후보로 남긴다.
 

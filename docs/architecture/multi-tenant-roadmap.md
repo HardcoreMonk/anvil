@@ -21,7 +21,7 @@
   `PUT/GET /hosts`, `POST /schedule/spawn`, `GET /placements`,
   `GET /control-loop/status`, `DELETE /hosts/{name}` cleanup을 제공한다.
 - 비구현 범위: multi-node HA, migration, cross-host snapshot replication,
-  scheduler-aware cross-host flock placement, L7 egress proxy, billing, UI.
+  실제 cross-host flock VM 생성과 coordinator Town Wall, L7 egress proxy, billing, UI.
 
 이 문서는 anvil이 IronClaw와 ephemera runtime을 multi-tenant 실행 기반으로
 확장할 때 필요한 경계를 정리한다. 현재 ephemera daemon의 단일 호스트 VM
@@ -37,6 +37,9 @@ daemon 계약 확장을 필요로 한다.
   retained audit records 기준 quota decision
 - `Scheduler.Schedule`: quota를 host selection 전에 평가하고 `quota_exceeded` 또는
   `no_eligible_host` 같은 deterministic decision 반환
+- `POST /schedule/flock` dry-run planner는 role별 agent slot을 host capacity에 맞춰
+  분산 배치할 수 있는지 계산한다. 실제 cross-host VM 생성과 coordinator Town Wall은
+  별도 create slice로 남아 있다.
 - `SelectRuntimeHost`: healthy host, VM capacity, snapshot bytes, egress policy를
   기준으로 첫 eligible host 선택
 - `HostInventory.PollOnce`: daemon `/health` polling으로 scheduler host 상태 갱신
@@ -81,9 +84,9 @@ Multi-tenant runtime의 설계 범위는 다음이다.
 이 문서는 위 구성 요소의 책임 경계를 정의한다. 현재 구현은 in-process scheduler
 decision helper, host inventory polling, runtime router, scheduler service binary,
 tenant API, `deny_all`/`profile` host enforcement, scheduler smoke harness,
-systemd installer `--verify`까지 포함한다. multi-node HA, migration,
-cross-host snapshot replication, scheduler-aware cross-host flock placement는 포함하지
-않는다.
+systemd installer `--verify`, `POST /schedule/flock` dry-run planner까지 포함한다.
+multi-node HA, migration, cross-host snapshot replication, 실제 cross-host flock VM
+생성과 coordinator Town Wall은 포함하지 않는다.
 
 ## Tenant 식별자
 
@@ -131,14 +134,16 @@ selection보다 먼저 평가해 quota 초과 요청이 daemon host 선택이나
 
 현재 Goosetown flock 생성은 단일 daemon host에서 여러 VM을 순차 생성한다.
 `tenant_id`와 `egress_policy`는 각 member VM과 flock metadata에 보존되지만,
-flock 단위 cross-host placement와 tenant별 multi-VM quota reservation은 아직
-scheduler가 소유하지 않는다. 운영자는 flock spawn을 single-host runtime capacity
-안에서 다뤄야 한다.
+scheduler service `POST /schedule/flock` dry-run planner는 roles 수 기준 tenant quota를
+한 번 검증하고 agent slot별 host capacity reservation으로 host별 placement plan을
+계산한다. 이 plan은 VM을 만들지 않는다.
 
 2026-06-03 작은 시작 범위에서 MCP `anvil_spawn_flock`은 scheduler-aware single-host
 placement를 사용하도록 확장됐다. 이 v1은 roles 수 기반 active VM quota/capacity를
-확인하고 선택된 하나의 daemon host에 기존 `POST /flocks`를 위임한다. member별
-cross-host 분산 배치와 cross-host Town Wall/`gtcall`은 계속 후속 후보로 남는다.
+확인하고 선택된 하나의 daemon host에 기존 `POST /flocks`를 위임한다.
+`POST /schedule/flock` dry-run planner가 operator planning surface를 제공하지만,
+runtime create path는 아직 single-host placement다. member별 cross-host VM 생성과
+coordinator Town Wall/cross-host `gtcall`은 계속 후속 후보로 남는다.
 
 ## Scheduler 책임
 
@@ -169,7 +174,7 @@ placement를 교체한다.
 `ANVIL_SCHEDULER_STATE`, `ANVIL_SCHEDULER_QUOTA_STORE`를 읽는다. HTTP surface는
 `GET /health`, `GET/PUT /hosts`, `DELETE /hosts/{name}`, `GET /placements`,
 `GET /control-loop/status`, `POST /reconcile`, `POST /schedule/spawn`,
-`POST /schedule/restore`다.
+`POST /schedule/flock`, `POST /schedule/restore`다.
 
 운영 배포 자동화는 `deploy/systemd/anvil-scheduler.service`,
 `deploy/systemd/anvil-scheduler.env.example`,
@@ -254,7 +259,7 @@ restore 경로의 direct token exposure는 제거됐다. 새로운 audit record,
 
 - 완전한 multi-tenant runtime 즉시 구현
 - cross-host snapshot replication
-- scheduler-aware cross-host flock placement
+- 실제 cross-host flock VM 생성과 coordinator Town Wall
 - L7 egress proxy 또는 full HTTP CONNECT/SNI gateway
 - billing
 - UI
