@@ -96,23 +96,16 @@ func (s *PlacementStore) Load() error {
 	if strings.TrimSpace(s.path) == "" {
 		return nil
 	}
-	data, err := os.ReadFile(s.path)
+	state, exists, err := readPlacementStoreState(s.path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			s.mu.Lock()
-			s.ensureMaps()
-			s.mu.Unlock()
-			return nil
-		}
-		return fmt.Errorf("read placement store: %w", err)
+		return err
 	}
-	var state PlacementStoreState
-	if err := json.Unmarshal(data, &state); err != nil {
-		return fmt.Errorf("parse placement store: %w", err)
-	}
-	normalizePlacementStoreState(&state)
 	s.mu.Lock()
-	s.state = state
+	if exists {
+		s.state = state
+	} else {
+		s.ensureMaps()
+	}
 	s.mu.Unlock()
 	return nil
 }
@@ -124,7 +117,45 @@ func (s *PlacementStore) Save() error {
 	s.mu.RLock()
 	state := clonePlacementStoreState(s.state)
 	s.mu.RUnlock()
-	return writePlacementStoreState(s.path, state)
+	return savePlacementStoreStatePreserveFlockMetrics(s.path, state)
+}
+
+func readPlacementStoreState(path string) (PlacementStoreState, bool, error) {
+	var state PlacementStoreState
+	if strings.TrimSpace(path) == "" {
+		return state, false, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return state, false, nil
+		}
+		return state, false, fmt.Errorf("read placement store: %w", err)
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return state, true, fmt.Errorf("parse placement store: %w", err)
+	}
+	normalizePlacementStoreState(&state)
+	return state, true, nil
+}
+
+func mergePersistedFlockPlacementMetrics(path string, state *PlacementStoreState) error {
+	persisted, exists, err := readPlacementStoreState(path)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	state.FlockPlacementMetrics = cloneFlockPlacementMetricsState(persisted.FlockPlacementMetrics)
+	return nil
+}
+
+func savePlacementStoreStatePreserveFlockMetrics(path string, state PlacementStoreState) error {
+	if err := mergePersistedFlockPlacementMetrics(path, &state); err != nil {
+		return err
+	}
+	return writePlacementStoreState(path, state)
 }
 
 func writePlacementStoreState(path string, state PlacementStoreState) error {
@@ -165,6 +196,18 @@ func writePlacementStoreState(path string, state PlacementStoreState) error {
 }
 
 func (s *PlacementStore) saveLocked() error {
+	return s.saveLockedPreserveFlockMetrics()
+}
+
+func (s *PlacementStore) saveLockedPreserveFlockMetrics() error {
+	if strings.TrimSpace(s.path) == "" {
+		return nil
+	}
+	state := clonePlacementStoreState(s.state)
+	return savePlacementStoreStatePreserveFlockMetrics(s.path, state)
+}
+
+func (s *PlacementStore) saveLockedRaw() error {
 	if strings.TrimSpace(s.path) == "" {
 		return nil
 	}

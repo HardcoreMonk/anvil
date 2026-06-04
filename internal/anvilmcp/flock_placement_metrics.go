@@ -144,6 +144,15 @@ func (s *PlacementStore) RecordFlockPlacementMetrics(obs FlockPlacementMetricObs
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ensureMaps()
+	if strings.TrimSpace(s.path) != "" {
+		persisted, exists, err := readPlacementStoreState(s.path)
+		if err != nil {
+			return err
+		}
+		if exists {
+			s.state.FlockPlacementMetrics = cloneFlockPlacementMetricsState(persisted.FlockPlacementMetrics)
+		}
+	}
 	previous := clonePlacementStoreState(s.state)
 	metrics := &s.state.FlockPlacementMetrics
 	normalizeFlockPlacementMetricsState(metrics)
@@ -162,7 +171,7 @@ func (s *PlacementStore) RecordFlockPlacementMetrics(obs FlockPlacementMetricObs
 	} else {
 		metrics.LastFailureAt = obs.At
 	}
-	if err := s.saveLocked(); err != nil {
+	if err := s.saveLockedRaw(); err != nil {
 		s.state = previous
 		return err
 	}

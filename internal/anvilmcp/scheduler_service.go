@@ -64,6 +64,7 @@ func (s *SchedulerService) handleMetrics(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "GET required", http.StatusMethodNotAllowed)
 		return
 	}
+	_ = s.placements.Load()
 	w.Header().Set("Content-Type", schedulerMetricsContentType)
 	_, _ = w.Write([]byte(RenderSchedulerMetrics(s.placements.State())))
 }

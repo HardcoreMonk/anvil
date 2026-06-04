@@ -1,6 +1,7 @@
 package anvilmcp
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -121,6 +122,68 @@ func TestPlacementStoreRollsBackFlockPlacementMetricsOnSaveFailure(t *testing.T)
 	}
 }
 
+func TestPlacementStoreSavePreservesExternallyPersistedFlockPlacementMetrics(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "scheduler", "placements.json")
+	schedulerStore := NewPlacementStore(path)
+	if err := schedulerStore.SetHostAndSave(RuntimeHost{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 1}); err != nil {
+		t.Fatalf("SetHostAndSave initial host: %v", err)
+	}
+
+	mcpStore := NewPlacementStore(path)
+	if err := mcpStore.Load(); err != nil {
+		t.Fatalf("mcp Load: %v", err)
+	}
+	if err := mcpStore.RecordFlockPlacementMetrics(FlockPlacementMetricObservation{
+		Outcome: FlockPlacementOutcomeSuccess,
+		Reason:  FlockPlacementReasonScheduled,
+		At:      time.Date(2026, 6, 4, 1, 2, 3, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("RecordFlockPlacementMetrics: %v", err)
+	}
+
+	if err := schedulerStore.SetHostAndSave(RuntimeHost{Name: "host-b", Endpoint: "http://host-b", Healthy: true, AvailableVMs: 2}); err != nil {
+		t.Fatalf("stale SetHostAndSave: %v", err)
+	}
+
+	reloaded := NewPlacementStore(path)
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("reload placement store: %v", err)
+	}
+	requireStoredFlockPlacementAttempt(t, reloaded.State().FlockPlacementMetrics, FlockPlacementOutcomeSuccess, FlockPlacementReasonScheduled, 1)
+}
+
+func TestPlacementStoreStaleFlockPlacementMetricsRecorderPreservesPersistedMetricsBeforeIncrement(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "scheduler", "placements.json")
+	storeA := NewPlacementStore(path)
+	storeB := NewPlacementStore(path)
+	if err := storeB.Load(); err != nil {
+		t.Fatalf("storeB Load: %v", err)
+	}
+
+	if err := storeA.RecordFlockPlacementMetrics(FlockPlacementMetricObservation{
+		Outcome: FlockPlacementOutcomeSuccess,
+		Reason:  FlockPlacementReasonScheduled,
+		At:      time.Date(2026, 6, 4, 1, 2, 3, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("storeA RecordFlockPlacementMetrics: %v", err)
+	}
+	if err := storeB.RecordFlockPlacementMetrics(FlockPlacementMetricObservation{
+		Outcome: FlockPlacementOutcomeDenied,
+		Reason:  FlockPlacementReasonNoEligibleHost,
+		At:      time.Date(2026, 6, 4, 1, 3, 3, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("storeB RecordFlockPlacementMetrics: %v", err)
+	}
+
+	reloaded := NewPlacementStore(path)
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("reload placement store: %v", err)
+	}
+	metrics := reloaded.State().FlockPlacementMetrics
+	requireStoredFlockPlacementAttempt(t, metrics, FlockPlacementOutcomeSuccess, FlockPlacementReasonScheduled, 1)
+	requireStoredFlockPlacementAttempt(t, metrics, FlockPlacementOutcomeDenied, FlockPlacementReasonNoEligibleHost, 1)
+}
+
 func TestPlacementStoreFiltersFlockPlacementMetricsHistogramBuckets(t *testing.T) {
 	state := FlockPlacementMetricsState{
 		LatencyByPhase: map[string]LatencyHistogramState{
@@ -157,6 +220,14 @@ func TestPlacementStoreFiltersFlockPlacementMetricsHistogramBuckets(t *testing.T
 		},
 	})
 	assertFlockPlacementHistogramBucketsFiltered(t, cloned.LatencyByPhase[FlockPlacementPhaseSchedule])
+}
+
+func requireStoredFlockPlacementAttempt(t *testing.T, state FlockPlacementMetricsState, outcome, reason string, want int64) {
+	t.Helper()
+	key := flockPlacementAttemptKey(outcome, reason)
+	if got := state.AttemptsByOutcomeReason[key]; got != want {
+		t.Fatalf("attempt %s = %d, want %d", key, got, want)
+	}
 }
 
 func assertFlockPlacementHistogramBucketsFiltered(t *testing.T, hist LatencyHistogramState) {

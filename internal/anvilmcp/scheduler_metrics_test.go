@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -141,6 +142,35 @@ func TestSchedulerServiceMetricsEndpoint(t *testing.T) {
 	}
 	requireMetricLine(t, rr.Body.String(), "anvil_scheduler_control_loop_running 1")
 	requireMetricLine(t, rr.Body.String(), "anvil_scheduler_host_status_count{status=\"healthy\"} 1")
+}
+
+func TestSchedulerServiceMetricsEndpointReloadsPersistedFlockPlacementMetrics(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "scheduler", "placements.json")
+	schedulerStore := NewPlacementStore(path)
+	if err := schedulerStore.SetHostAndSave(RuntimeHost{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 1}); err != nil {
+		t.Fatalf("SetHostAndSave: %v", err)
+	}
+	service := NewSchedulerService(SchedulerServiceOptions{PlacementStore: schedulerStore})
+
+	mcpStore := NewPlacementStore(path)
+	if err := mcpStore.Load(); err != nil {
+		t.Fatalf("mcp Load: %v", err)
+	}
+	if err := mcpStore.RecordFlockPlacementMetrics(FlockPlacementMetricObservation{
+		Outcome: FlockPlacementOutcomeSuccess,
+		Reason:  FlockPlacementReasonScheduled,
+		At:      time.Date(2026, 6, 4, 1, 2, 3, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("RecordFlockPlacementMetrics: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rr := httptest.NewRecorder()
+	service.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /metrics status = %d body=%s, want 200", rr.Code, rr.Body.String())
+	}
+	requireMetricLine(t, rr.Body.String(), "anvil_scheduler_flock_placement_attempts_total{outcome=\"success\",reason=\"scheduled\"} 1")
 }
 
 func TestSchedulerServiceMetricsRejectsNonGET(t *testing.T) {
