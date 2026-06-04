@@ -66,6 +66,63 @@ func TestRenderSchedulerMetricsHandlesZeroState(t *testing.T) {
 	requireMetricLine(t, output, "anvil_scheduler_last_reconcile_completed_timestamp_seconds 0")
 }
 
+func TestRenderSchedulerMetricsIncludesFlockPlacementMetrics(t *testing.T) {
+	lastSuccess := time.Date(2026, 6, 4, 1, 2, 3, 0, time.UTC)
+	lastFailure := time.Date(2026, 6, 4, 2, 3, 4, 0, time.UTC)
+	state := PlacementStoreState{
+		Hosts: map[string]RuntimeHost{
+			"host-a": {Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 1},
+		},
+		VMPlacements: map[string]string{
+			"vm-1": "host-a",
+		},
+		SuspectVMPlacements: map[string]SuspectVMPlacement{
+			"vm-1": {Host: "host-a", Reason: "agent_token"},
+		},
+		FlockPlacementMetrics: FlockPlacementMetricsState{
+			AttemptsByOutcomeReason: map[string]int64{
+				flockPlacementAttemptKey(FlockPlacementOutcomeDenied, FlockPlacementReasonQuotaExceeded): 1,
+				flockPlacementAttemptKey(FlockPlacementOutcomeSuccess, FlockPlacementReasonScheduled):    2,
+				"tenant-1|flock-1": 1,
+			},
+			LatencyByPhase: map[string]LatencyHistogramState{
+				FlockPlacementPhaseSchedule: {
+					Buckets: map[string]int64{
+						"0.005":       1,
+						"0.01":        2,
+						"+Inf":        2,
+						"agent_token": 99,
+					},
+					SumSeconds: 0.012,
+					Count:      2,
+				},
+				"vm-1": {
+					Buckets: map[string]int64{"0.005": 1},
+					Count:   1,
+				},
+			},
+			LastSuccessAt: lastSuccess,
+			LastFailureAt: lastFailure,
+		},
+	}
+
+	output := RenderSchedulerMetrics(state)
+	requireMetricLine(t, output, "anvil_scheduler_flock_placement_attempts_total{outcome=\"denied\",reason=\"quota_exceeded\"} 1")
+	requireMetricLine(t, output, "anvil_scheduler_flock_placement_attempts_total{outcome=\"success\",reason=\"scheduled\"} 2")
+	requireMetricLine(t, output, "anvil_scheduler_flock_placement_latency_seconds_bucket{phase=\"schedule\",le=\"0.005\"} 1")
+	requireMetricLine(t, output, "anvil_scheduler_flock_placement_latency_seconds_bucket{phase=\"schedule\",le=\"0.01\"} 2")
+	requireMetricLine(t, output, "anvil_scheduler_flock_placement_latency_seconds_bucket{phase=\"schedule\",le=\"+Inf\"} 2")
+	requireMetricLine(t, output, "anvil_scheduler_flock_placement_latency_seconds_sum{phase=\"schedule\"} 0.012")
+	requireMetricLine(t, output, "anvil_scheduler_flock_placement_latency_seconds_count{phase=\"schedule\"} 2")
+	requireMetricLine(t, output, fmt.Sprintf("anvil_scheduler_flock_placement_last_success_timestamp_seconds %d", lastSuccess.Unix()))
+	requireMetricLine(t, output, fmt.Sprintf("anvil_scheduler_flock_placement_last_failure_timestamp_seconds %d", lastFailure.Unix()))
+	for _, leaked := range []string{"http://host-a", "tenant-1", "flock-1", "vm-1", "agent_token"} {
+		if strings.Contains(output, leaked) {
+			t.Fatalf("metrics output leaked %q:\n%s", leaked, output)
+		}
+	}
+}
+
 func TestSchedulerServiceMetricsEndpoint(t *testing.T) {
 	store := NewPlacementStore("")
 	_ = store.SetHost(RuntimeHost{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 1})
