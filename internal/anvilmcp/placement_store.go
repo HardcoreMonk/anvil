@@ -58,13 +58,14 @@ type ControlLoopStatus struct {
 }
 
 type PlacementStoreState struct {
-	Hosts               map[string]RuntimeHost        `json:"hosts"`
-	VMPlacements        map[string]string             `json:"vm_placements"`
-	SnapshotLocations   map[string][]string           `json:"snapshot_locations"`
-	ConfigManagedHosts  map[string]bool               `json:"config_managed_hosts,omitempty"`
-	HostObservations    map[string]HostObservation    `json:"host_observations,omitempty"`
-	SuspectVMPlacements map[string]SuspectVMPlacement `json:"suspect_vm_placements,omitempty"`
-	ControlLoopStatus   ControlLoopStatus             `json:"control_loop_status,omitempty"`
+	Hosts                 map[string]RuntimeHost        `json:"hosts"`
+	VMPlacements          map[string]string             `json:"vm_placements"`
+	SnapshotLocations     map[string][]string           `json:"snapshot_locations"`
+	ConfigManagedHosts    map[string]bool               `json:"config_managed_hosts,omitempty"`
+	HostObservations      map[string]HostObservation    `json:"host_observations,omitempty"`
+	SuspectVMPlacements   map[string]SuspectVMPlacement `json:"suspect_vm_placements,omitempty"`
+	ControlLoopStatus     ControlLoopStatus             `json:"control_loop_status,omitempty"`
+	FlockPlacementMetrics FlockPlacementMetricsState    `json:"flock_placement_metrics,omitempty"`
 }
 
 type PlacementStore struct {
@@ -86,6 +87,7 @@ func NewPlacementStore(path string) *PlacementStore {
 			ControlLoopStatus: ControlLoopStatus{
 				Hosts: make(map[string]HostObservation),
 			},
+			FlockPlacementMetrics: newFlockPlacementMetricsState(),
 		},
 	}
 }
@@ -599,6 +601,7 @@ func normalizePlacementStoreState(state *PlacementStoreState) {
 	if state.ControlLoopStatus.Hosts == nil {
 		state.ControlLoopStatus.Hosts = make(map[string]HostObservation)
 	}
+	normalizeFlockPlacementMetricsState(&state.FlockPlacementMetrics)
 }
 
 func normalizeVMPlacements(placements map[string]string) map[string]string {
@@ -646,6 +649,7 @@ func clonePlacementStoreState(state PlacementStoreState) PlacementStoreState {
 	for host, obs := range state.ControlLoopStatus.Hosts {
 		out.ControlLoopStatus.Hosts[host] = obs
 	}
+	out.FlockPlacementMetrics = cloneFlockPlacementMetricsState(state.FlockPlacementMetrics)
 	return out
 }
 
