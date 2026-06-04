@@ -37,9 +37,12 @@
 
 ## 잔여 위험
 
-- metrics aggregate는 `PlacementStoreState` JSON file에 저장된다. 기존 placement store의
-  multi-process write 모델은 이번 작업에서 바꾸지 않았다.
+- metrics aggregate는 `PlacementStoreState` JSON file에 저장된다. scheduler `/metrics`는
+  render 직전에 persisted state를 reload하고, scheduler/control-loop save는 persisted
+  flock metrics aggregate를 보존한다.
 - placement save failure metric은 같은 failing `PlacementStore`에 best-effort로 기록된다.
   persistence 자체가 degraded 상태면 해당 failure counter도 저장되지 않을 수 있다.
+- true simultaneous cross-process writes는 아직 file lock이나 compare-and-swap 없이 기존
+  last-writer-wins file persistence 모델에 의존한다.
 - host별 placement 편향은 아직 직접 노출하지 않는다.
 - true cross-host flock placement는 별도 설계 범위다.
