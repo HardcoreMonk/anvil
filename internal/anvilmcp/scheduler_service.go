@@ -25,6 +25,12 @@ type schedulerRequest struct {
 	Requested TenantUsage `json:"requested"`
 }
 
+type schedulerFlockRequest struct {
+	TenantID     string       `json:"tenant_id"`
+	EgressPolicy EgressPolicy `json:"egress_policy"`
+	Roles        []string     `json:"roles"`
+}
+
 func NewSchedulerService(opts SchedulerServiceOptions) *SchedulerService {
 	placements := opts.PlacementStore
 	if placements == nil {
@@ -48,6 +54,7 @@ func (s *SchedulerService) Handler() http.Handler {
 	mux.HandleFunc("/reconcile", s.handleReconcile)
 	mux.HandleFunc("/schedule/spawn", s.handleSchedule)
 	mux.HandleFunc("/schedule/restore", s.handleSchedule)
+	mux.HandleFunc("/schedule/flock", s.handleScheduleFlock)
 	return mux
 }
 
@@ -168,6 +175,36 @@ func (s *SchedulerService) handleSchedule(w http.ResponseWriter, r *http.Request
 	}
 	decision.HostStatusSummary = SummarizeHostStatuses(hosts, state.HostObservations)
 	writeSchedulerJSON(w, decision)
+}
+
+func (s *SchedulerService) handleScheduleFlock(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.requirePersistence && s.placements.State().ControlLoopStatus.PersistenceDegraded {
+		http.Error(w, "scheduler persistence degraded", http.StatusServiceUnavailable)
+		return
+	}
+	var req schedulerFlockRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid flock schedule body", http.StatusBadRequest)
+		return
+	}
+	state := s.placements.State()
+	hosts := runtimeHostsFromPlacementState(state)
+	quotas, usage := s.quotas.SchedulerInputs()
+	plan, err := NewScheduler(hosts, quotas, usage).ScheduleFlock(FlockPlacementPlanRequest{
+		TenantID:     req.TenantID,
+		EgressPolicy: req.EgressPolicy,
+		Roles:        req.Roles,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	plan.HostStatusSummary = SummarizeHostStatuses(hosts, state.HostObservations)
+	writeSchedulerJSON(w, plan)
 }
 
 func runtimeHostsFromPlacementState(state PlacementStoreState) []RuntimeHost {

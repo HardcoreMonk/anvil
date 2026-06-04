@@ -415,6 +415,103 @@ func TestSchedulerServicePersistenceGateDoesNotBlockControlLoopStatus(t *testing
 	}
 }
 
+func TestSchedulerServiceSchedulesFlockAcrossHosts(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "scheduler.json"))
+	_ = store.SetHost(RuntimeHost{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}})
+	_ = store.SetHost(RuntimeHost{Name: "host-b", Endpoint: "http://host-b", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}})
+	_ = store.SetHostObservation("host-a", HostObservation{Status: HostStatusHealthy})
+	_ = store.SetHostObservation("host-b", HostObservation{Status: HostStatusHealthy})
+	quota := NewQuotaStore(filepath.Join(t.TempDir(), "tenants.json"))
+	if err := quota.SetTenantQuota("tenant-1", TenantQuota{ActiveVMs: 2}); err != nil {
+		t.Fatalf("SetTenantQuota: %v", err)
+	}
+	service := NewSchedulerService(SchedulerServiceOptions{PlacementStore: store, QuotaStore: quota})
+
+	req := httptest.NewRequest(http.MethodPost, "/schedule/flock", strings.NewReader(`{"tenant_id":"tenant-1","egress_policy":"profile","roles":["worker","reviewer"]}`))
+	rr := httptest.NewRecorder()
+	service.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("POST /schedule/flock status = %d body=%s, want 200", rr.Code, rr.Body.String())
+	}
+	var plan FlockPlacementPlan
+	if err := json.Unmarshal(rr.Body.Bytes(), &plan); err != nil {
+		t.Fatalf("decode plan: %v", err)
+	}
+	if !plan.Allowed || len(plan.Agents) != 2 {
+		t.Fatalf("plan = %+v, want allowed two-agent plan", plan)
+	}
+	if plan.Agents[0].Host.Name != "host-a" || plan.Agents[1].Host.Name != "host-b" {
+		t.Fatalf("agent hosts = %q/%q, want host-a/host-b", plan.Agents[0].Host.Name, plan.Agents[1].Host.Name)
+	}
+	if plan.HostStatusSummary.Healthy != 2 {
+		t.Fatalf("host status summary = %+v, want two healthy hosts", plan.HostStatusSummary)
+	}
+}
+
+func TestSchedulerServiceFlockScheduleDeniesQuota(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "scheduler.json"))
+	_ = store.SetHost(RuntimeHost{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 2, EgressPolicies: []EgressPolicy{EgressPolicyProfile}})
+	quota := NewQuotaStore(filepath.Join(t.TempDir(), "tenants.json"))
+	if err := quota.SetTenantQuota("tenant-1", TenantQuota{ActiveVMs: 1}); err != nil {
+		t.Fatalf("SetTenantQuota: %v", err)
+	}
+	service := NewSchedulerService(SchedulerServiceOptions{PlacementStore: store, QuotaStore: quota})
+
+	req := httptest.NewRequest(http.MethodPost, "/schedule/flock", strings.NewReader(`{"tenant_id":"tenant-1","egress_policy":"profile","roles":["worker","reviewer"]}`))
+	rr := httptest.NewRecorder()
+	service.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("POST /schedule/flock status = %d body=%s, want 200", rr.Code, rr.Body.String())
+	}
+	var plan FlockPlacementPlan
+	if err := json.Unmarshal(rr.Body.Bytes(), &plan); err != nil {
+		t.Fatalf("decode plan: %v", err)
+	}
+	if plan.Allowed || plan.Reason != FlockPlacementReasonQuotaExceeded {
+		t.Fatalf("plan = %+v, want quota denial", plan)
+	}
+}
+
+func TestSchedulerServiceFlockScheduleRejectsWrongMethodBeforePersistenceGate(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "scheduler.json"))
+	_ = store.SetControlLoopStatus(ControlLoopStatus{PersistenceDegraded: true})
+	service := NewSchedulerService(SchedulerServiceOptions{PlacementStore: store, RequirePersistence: true})
+
+	req := httptest.NewRequest(http.MethodGet, "/schedule/flock", nil)
+	rr := httptest.NewRecorder()
+	service.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET /schedule/flock status = %d body=%s, want 405", rr.Code, rr.Body.String())
+	}
+}
+
+func TestSchedulerServiceFlockScheduleRequiresPersistenceWhenConfigured(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "scheduler.json"))
+	_ = store.SetControlLoopStatus(ControlLoopStatus{PersistenceDegraded: true, LastError: "save failed"})
+	service := NewSchedulerService(SchedulerServiceOptions{PlacementStore: store, RequirePersistence: true})
+
+	req := httptest.NewRequest(http.MethodPost, "/schedule/flock", strings.NewReader(`{"tenant_id":"tenant-1","egress_policy":"profile","roles":["worker"]}`))
+	rr := httptest.NewRecorder()
+	service.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("POST /schedule/flock status = %d body=%s, want 503", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "scheduler persistence degraded") {
+		t.Fatalf("body = %q, want persistence degraded message", rr.Body.String())
+	}
+}
+
+func TestSchedulerServiceFlockScheduleRejectsInvalidBody(t *testing.T) {
+	service := NewSchedulerService(SchedulerServiceOptions{})
+
+	req := httptest.NewRequest(http.MethodPost, "/schedule/flock", strings.NewReader(`{`))
+	rr := httptest.NewRecorder()
+	service.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("POST /schedule/flock invalid body status = %d body=%s, want 400", rr.Code, rr.Body.String())
+	}
+}
+
 func schedulerServiceListHosts(t *testing.T, service *SchedulerService) []RuntimeHost {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/hosts", nil)
