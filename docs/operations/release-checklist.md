@@ -133,6 +133,88 @@ v0.3.6 기반 upstream E2E는 `/metrics`, `/stats`, real-LLM smoke, in-VM helper
 `webdev_demo.sh` 검증은 paid-tier Gemini key와 충분한 host memory가 필요하므로
 release blocker가 아니라 operator demo 검증으로 별도 기록한다.
 
+## `anvil-v0.3.2` GitHub Release 후보 본문
+
+- Tag: `anvil-v0.3.2`
+- Target commit:
+  `18b4506204a68a8fd9e3608976727953869f94a6`
+- Publication status: 사용자 명시 승인 대기
+- Release source: scheduler snapshot replication, scheduler metrics,
+  scheduler-aware flock placement
+
+```markdown
+# anvil-v0.3.2 - Scheduler replication and flock placement
+
+`anvil-v0.3.2`는 `anvil-v0.3.1` 이후 scheduler 기반 runtime 운영성을 확장한
+release다. upstream ephemera runtime baseline은 계속 `v0.3.6`이다. upstream
+`v0.4.0` PR-A storage/recovery 변경은 포함하지 않는다.
+
+## 포함 내용
+
+- manual cross-host snapshot replication:
+  - daemon `POST /snapshots/{id}/export`가 streamable snapshot bundle을 export
+  - daemon `POST /snapshots/import`가 bundle을 staging/validation 후 atomic publish
+  - MCP `anvil_replicate_snapshot`이 source export stream을 target import로 전달
+  - RuntimeRouter가 replication 성공 후 scheduler `SnapshotLocations`를 갱신
+- scheduler service metrics:
+  - `GET /metrics`
+  - `anvil_scheduler_control_loop_running`
+  - `anvil_scheduler_persistence_degraded`
+  - `anvil_scheduler_host_status_count`
+  - `anvil_scheduler_suspect_vm_placements`
+  - 마지막 poll/reconcile 완료 timestamp gauge
+- scheduler process integration coverage:
+  - hosts file bootstrap
+  - stale state override
+  - fake daemon `/health`
+  - `/control-loop/status`, `/schedule/spawn`, `/metrics`
+- MCP `anvil_spawn_flock` scheduler-aware single-host placement:
+  - scheduler router config가 있을 때 roles 수 기반 active VM quota/capacity로 host 선택
+  - 선택된 host의 기존 daemon `POST /flocks` 호출
+  - 반환된 member VM placement를 scheduler `PlacementStore`에 기록
+  - daemon direct `POST /flocks` wire contract 유지
+
+## 보안/운영 주의
+
+- `agent_token`, authorization header, daemon raw response, raw `metadata.json` body는
+  replication response, audit, metrics, operator 문서에 노출하지 않는다.
+- 복제된 snapshot restore는 target daemon이 새 `agent_token`을 생성해 guest agent에
+  vsock으로 주입하므로 source host token을 재사용하지 않는다.
+- diff snapshot replication은 target host에 base full snapshot이 필요하다.
+  `include_dependencies=true`이면 router가 base full을 먼저 복제한다.
+- scheduler metrics에는 token, host endpoint, daemon raw response, snapshot metadata를
+  넣지 않는다.
+- scheduler-aware flock placement는 이번 release에서 single-host placement다.
+  true cross-host member placement는 후속 설계 범위다.
+
+## 검증
+
+- `go test ./... -count=1`
+- `go build ./cmd/goose-daemon`
+- `go build ./cmd/anvil-mcp`
+- `go build ./cmd/anvil-scheduler`
+- `bash -n scripts/anvil-scheduler-smoke.sh`
+- `bash -n scripts/install-anvil-scheduler-systemd.sh`
+- `sudo bash scripts/install-anvil-scheduler-systemd.sh --start --verify`
+- GitHub Actions `CI` on `main`:
+  - run `26879303599`
+  - commit `18b4506204a68a8fd9e3608976727953869f94a6`
+  - conclusion `success`
+- 2026-06-04 KST local scheduler smoke:
+  - `scripts/anvil-scheduler-smoke.sh --base-url http://127.0.0.1:3010 --json-out /tmp/anvil-scheduler-smoke-20260604.json`
+  - result: pass
+- 2026-06-04 KST daemon-backed MCP flock smoke:
+  - `scripts/anvil-mcp-e2e.sh flock`
+  - result: pass
+- 2026-06-04 KST scheduler-router MCP flock smoke:
+  - `ANVIL_MCP_TENANT_ID=tenant-1`
+  - `ANVIL_MCP_SCHEDULER_HOSTS_FILE=/tmp/anvil-mcp-router-hosts-20260604.json`
+  - `ANVIL_MCP_SCHEDULER_STATE=/tmp/anvil-mcp-router-state-20260604.json`
+  - result: pass
+  - placement state recorded two flock member VMs on `host-a`
+  - daemon cleanup verified with empty `/vms` and `/flocks`
+```
+
 ## `anvil-v0.3.1` GitHub Release 게시 기록과 본문
 
 - Tag: `anvil-v0.3.1`
