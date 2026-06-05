@@ -124,6 +124,11 @@ type fakeReplicatingDaemon struct {
 	replicateSnapshotResp  *SnapshotReplicationResponse
 	replicateSnapshotNil   bool
 	replicateSnapshotErr   error
+
+	createRoutedFlockMembersCalls int
+	createRoutedFlockMembersReq   FlockCreateRequest
+	createRoutedFlockMembersResp  *RoutedFlockCreateOutput
+	createRoutedFlockMembersErr   error
 }
 
 func (f *fakeReplicatingDaemon) ReplicateSnapshot(_ context.Context, req SnapshotReplicationRequest) (*SnapshotReplicationResponse, error) {
@@ -144,6 +149,34 @@ func (f *fakeReplicatingDaemon) ReplicateSnapshot(_ context.Context, req Snapsho
 		TargetHost: req.TargetHost,
 		Status:     "replicated",
 		Replicated: []string{req.SnapshotID},
+	}, nil
+}
+
+func (f *fakeReplicatingDaemon) CreateRoutedFlockMembers(_ context.Context, req FlockCreateRequest) (*RoutedFlockCreateOutput, error) {
+	f.createRoutedFlockMembersCalls++
+	f.createRoutedFlockMembersReq = req
+	if f.createRoutedFlockMembersErr != nil {
+		return nil, f.createRoutedFlockMembersErr
+	}
+	if f.createRoutedFlockMembersResp != nil {
+		return f.createRoutedFlockMembersResp, nil
+	}
+	return &RoutedFlockCreateOutput{
+		FlockID:         "routed-flock-1",
+		Task:            req.Task,
+		TenantID:        req.TenantID,
+		EgressPolicy:    req.EgressPolicy,
+		Mode:            RoutedFlockModeCrossHostMembersOnly,
+		Status:          RoutedFlockStatusReady,
+		TownWallEnabled: false,
+		Agents: []RoutedFlockAgent{{
+			AgentID:  "planner-1",
+			Role:     "planner",
+			VMID:     "vm-planner",
+			AgentURL: "http://10.0.1.10:3000",
+			Host:     "host-a",
+			Status:   "running",
+		}},
 	}, nil
 }
 
@@ -2050,6 +2083,120 @@ func TestToolsSpawnFlockRejectsInvalidInputBeforeDaemonCall(t *testing.T) {
 				t.Fatalf("CreateFlock calls = %d, want 0", daemon.createFlockCalls)
 			}
 		})
+	}
+}
+
+func TestToolsCreateRoutedFlockMembersDisabledDaemonAuditsFailure(t *testing.T) {
+	daemon := &fakeDaemon{}
+	auditPath := filepath.Join(t.TempDir(), "runtime-audit.jsonl")
+	tools := NewToolsWithOptions(daemon, NewSessionStore(), time.Second, ToolsOptions{
+		DefaultTenantID: "tenant-1",
+		AuditLogPath:    auditPath,
+	})
+
+	_, err := tools.CreateRoutedFlockMembers(context.Background(), SpawnFlockInput{
+		Task:  "build town",
+		Roles: []string{"worker"},
+	})
+	if err == nil {
+		t.Fatal("CreateRoutedFlockMembers error = nil, want disabled error")
+	}
+	if !strings.Contains(err.Error(), "routed flock members create is disabled") {
+		t.Fatalf("CreateRoutedFlockMembers error = %q, want disabled message", err.Error())
+	}
+
+	records, err := ReadRuntimeAudit(auditPath)
+	if err != nil {
+		t.Fatalf("ReadRuntimeAudit() error = %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("audit record count = %d, want 1", len(records))
+	}
+	record := records[0]
+	if record.ToolName != "anvil_create_routed_flock_members" || record.DaemonOperation != "POST /vms routed flock members" || record.ResultCode != "error" {
+		t.Fatalf("audit record = %+v, want routed members create failure", record)
+	}
+}
+
+func TestToolsCreateRoutedFlockMembersMembersOnlyOutput(t *testing.T) {
+	daemon := &fakeReplicatingDaemon{fakeDaemon: &fakeDaemon{}}
+	auditPath := filepath.Join(t.TempDir(), "runtime-audit.jsonl")
+	tools := NewToolsWithOptions(daemon, NewSessionStore(), time.Second, ToolsOptions{
+		DefaultTenantID: "tenant-1",
+		AuditLogPath:    auditPath,
+	})
+
+	out, err := tools.CreateRoutedFlockMembers(context.Background(), SpawnFlockInput{
+		Task:         "  build town  ",
+		Roles:        []string{" planner ", "worker"},
+		EgressPolicy: "deny_all",
+	})
+	if err != nil {
+		t.Fatalf("CreateRoutedFlockMembers returned error: %v", err)
+	}
+	if daemon.createRoutedFlockMembersCalls != 1 {
+		t.Fatalf("CreateRoutedFlockMembers calls = %d, want 1", daemon.createRoutedFlockMembersCalls)
+	}
+	if daemon.createRoutedFlockMembersReq.Task != "build town" {
+		t.Fatalf("Task = %q, want build town", daemon.createRoutedFlockMembersReq.Task)
+	}
+	if got, want := daemon.createRoutedFlockMembersReq.Roles, []string{"planner", "worker"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("Roles = %#v, want %#v", got, want)
+	}
+	if daemon.createRoutedFlockMembersReq.TenantID != "tenant-1" || daemon.createRoutedFlockMembersReq.EgressPolicy != "deny_all" {
+		t.Fatalf("tenant/egress = %q/%q, want tenant-1/deny_all", daemon.createRoutedFlockMembersReq.TenantID, daemon.createRoutedFlockMembersReq.EgressPolicy)
+	}
+	if out.FlockID != "routed-flock-1" || out.Mode != RoutedFlockModeCrossHostMembersOnly || out.TownWallEnabled {
+		t.Fatalf("output = %+v, want routed members-only without Town Wall", out)
+	}
+
+	data, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal output: %v", err)
+	}
+	text := string(data)
+	for _, forbidden := range []string{"townwall_url", "post_url", "agent_token"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("routed members output JSON exposes %q: %s", forbidden, text)
+		}
+	}
+
+	records, err := ReadRuntimeAudit(auditPath)
+	if err != nil {
+		t.Fatalf("ReadRuntimeAudit() error = %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("audit record count = %d, want 1", len(records))
+	}
+	record := records[0]
+	if record.ToolName != "anvil_create_routed_flock_members" || record.DaemonOperation != "POST /vms routed flock members" || record.ResultCode != "success" {
+		t.Fatalf("audit record = %+v, want routed members create success", record)
+	}
+}
+
+func TestToolsMCPCreateRoutedFlockMembersOutputOmitsTownWallAndSecrets(t *testing.T) {
+	daemon := &fakeReplicatingDaemon{fakeDaemon: &fakeDaemon{}}
+	tools := NewTools(daemon, NewSessionStore(), time.Second)
+
+	_, out, err := tools.MCPCreateRoutedFlockMembers(context.Background(), nil, SpawnFlockInput{
+		Task:  "build town",
+		Roles: []string{"worker"},
+	})
+	if err != nil {
+		t.Fatalf("MCPCreateRoutedFlockMembers returned error: %v", err)
+	}
+	data, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal output: %v", err)
+	}
+	text := string(data)
+	for _, forbidden := range []string{"townwall_url", "post_url", "agent_token"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("MCP routed members output leaked %q: %s", forbidden, text)
+		}
+	}
+	if !strings.Contains(text, "routed-flock-1") || !strings.Contains(text, "vm-planner") {
+		t.Fatalf("MCP routed members output = %s, want flock and VM identity", text)
 	}
 }
 

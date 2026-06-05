@@ -26,29 +26,43 @@ const (
 	envSchedulerState = "ANVIL_MCP_SCHEDULER_STATE"
 	envSchedulerHosts = "ANVIL_MCP_SCHEDULER_HOSTS_FILE"
 	envSchedulerQuota = "ANVIL_MCP_SCHEDULER_QUOTA_STORE"
+	envCrossHostFlock = "ANVIL_MCP_CROSS_HOST_FLOCK_CREATE"
 )
 
 type Config struct {
-	DaemonURL               string `yaml:"daemon_url"`
-	APIToken                string `yaml:"api_token"`
-	DefaultTimeoutSeconds   int    `yaml:"default_timeout_seconds"`
-	SessionStorePath        string `yaml:"session_store_path"`
-	DefaultTenantID         string `yaml:"default_tenant_id"`
-	AuditLogPath            string `yaml:"audit_log_path"`
-	SchedulerStatePath      string `yaml:"scheduler_state_path"`
-	SchedulerHostsFile      string `yaml:"scheduler_hosts_file"`
-	SchedulerQuotaStorePath string `yaml:"scheduler_quota_store_path"`
+	DaemonURL                string `yaml:"daemon_url"`
+	APIToken                 string `yaml:"api_token"`
+	DefaultTimeoutSeconds    int    `yaml:"default_timeout_seconds"`
+	SessionStorePath         string `yaml:"session_store_path"`
+	DefaultTenantID          string `yaml:"default_tenant_id"`
+	AuditLogPath             string `yaml:"audit_log_path"`
+	SchedulerStatePath       string `yaml:"scheduler_state_path"`
+	SchedulerHostsFile       string `yaml:"scheduler_hosts_file"`
+	SchedulerQuotaStorePath  string `yaml:"scheduler_quota_store_path"`
+	CrossHostFlockCreateMode string `yaml:"cross_host_flock_create_mode"`
 }
 
 type ConfigSource struct {
-	Getenv   func(string) string
-	ReadFile func(string) ([]byte, error)
+	Getenv    func(string) string
+	LookupEnv func(string) (string, bool)
+	ReadFile  func(string) ([]byte, error)
 }
 
 func LoadConfig(src ConfigSource) (Config, error) {
 	getenv := src.Getenv
 	if getenv == nil {
 		getenv = os.Getenv
+	}
+	lookupEnv := src.LookupEnv
+	if lookupEnv == nil {
+		if src.Getenv == nil {
+			lookupEnv = os.LookupEnv
+		} else {
+			lookupEnv = func(key string) (string, bool) {
+				value := getenv(key)
+				return value, value != ""
+			}
+		}
 	}
 	readFile := src.ReadFile
 	if readFile == nil {
@@ -108,6 +122,11 @@ func LoadConfig(src ConfigSource) (Config, error) {
 	if v := getenv(envSchedulerQuota); v != "" {
 		cfg.SchedulerQuotaStorePath = v
 	}
+	crossHostFlockEnvValue, crossHostFlockEnvSet := lookupEnv(envCrossHostFlock)
+	if crossHostFlockEnvSet {
+		v := crossHostFlockEnvValue
+		cfg.CrossHostFlockCreateMode = v
+	}
 	if cfg.DefaultTimeoutSeconds <= 0 {
 		return Config{}, fmt.Errorf("default_timeout_seconds must be positive")
 	}
@@ -117,6 +136,14 @@ func LoadConfig(src ConfigSource) (Config, error) {
 	cfg.SchedulerStatePath = strings.TrimSpace(cfg.SchedulerStatePath)
 	cfg.SchedulerHostsFile = strings.TrimSpace(cfg.SchedulerHostsFile)
 	cfg.SchedulerQuotaStorePath = strings.TrimSpace(cfg.SchedulerQuotaStorePath)
+	cfg.CrossHostFlockCreateMode = strings.TrimSpace(cfg.CrossHostFlockCreateMode)
+	crossHostFlockLabel := "cross_host_flock_create_mode"
+	if crossHostFlockEnvSet {
+		crossHostFlockLabel = envCrossHostFlock
+	}
+	if err := validateCrossHostFlockCreateMode(cfg.CrossHostFlockCreateMode, crossHostFlockLabel); err != nil {
+		return Config{}, err
+	}
 	if cfg.DefaultTenantID != "" {
 		label := "default_tenant_id"
 		if getenv(envTenantID) != "" {
@@ -140,6 +167,15 @@ func LoadConfig(src ConfigSource) (Config, error) {
 	cfg.DaemonURL = daemonURL
 
 	return cfg, nil
+}
+
+func validateCrossHostFlockCreateMode(mode string, label string) error {
+	switch mode {
+	case "", "members_only":
+		return nil
+	default:
+		return fmt.Errorf("%s must be empty or members_only", label)
+	}
 }
 
 func normalizeDaemonURL(raw string, label string) (string, error) {

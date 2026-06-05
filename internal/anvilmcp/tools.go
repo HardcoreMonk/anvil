@@ -45,6 +45,10 @@ type snapshotReplicator interface {
 	ReplicateSnapshot(context.Context, SnapshotReplicationRequest) (*SnapshotReplicationResponse, error)
 }
 
+type routedFlockMembersCreator interface {
+	CreateRoutedFlockMembers(context.Context, FlockCreateRequest) (*RoutedFlockCreateOutput, error)
+}
+
 type sessionStore interface {
 	Exists(sessionName string) bool
 	Bind(sessionName, vmID string) error
@@ -890,29 +894,12 @@ func sanitizeSnapshotReplicationError(value string) string {
 }
 
 func (t *Tools) SpawnFlock(ctx context.Context, input SpawnFlockInput) (*SpawnFlockOutput, error) {
-	tenantID, err := t.resolveTenantID(input.TenantID)
-	if err != nil {
-		return nil, err
-	}
-	egressPolicy, err := NormalizeEgressPolicy(input.EgressPolicy)
-	if err != nil {
-		return nil, err
-	}
-	task := strings.TrimSpace(input.Task)
-	if task == "" {
-		return nil, fmt.Errorf("task must be non-empty")
-	}
-	roles, err := normalizeFlockRoles(input.Roles)
+	tenantID, req, err := t.normalizedFlockCreateRequest(input)
 	if err != nil {
 		return nil, err
 	}
 
-	res, err := t.daemon.CreateFlock(ctx, FlockCreateRequest{
-		Task:         task,
-		Roles:        roles,
-		TenantID:     tenantID,
-		EgressPolicy: string(egressPolicy),
-	})
+	res, err := t.daemon.CreateFlock(ctx, req)
 	if err != nil {
 		return nil, t.auditFailureAndReturn(tenantID, "", "", "anvil_spawn_flock", "POST /flocks", err)
 	}
@@ -939,6 +926,34 @@ func (t *Tools) MCPSpawnFlock(ctx context.Context, req *mcp.CallToolRequest, inp
 	out, err := t.SpawnFlock(ctx, input)
 	if err != nil || out == nil {
 		return nil, SpawnFlockOutput{}, err
+	}
+	return nil, *out, nil
+}
+
+func (t *Tools) CreateRoutedFlockMembers(ctx context.Context, input SpawnFlockInput) (*RoutedFlockCreateOutput, error) {
+	tenantID, req, err := t.normalizedFlockCreateRequest(input)
+	if err != nil {
+		return nil, err
+	}
+	creator, ok := t.daemon.(routedFlockMembersCreator)
+	if !ok {
+		err := fmt.Errorf("routed flock members create is disabled")
+		return nil, t.auditFailureAndReturn(tenantID, "", "", "anvil_create_routed_flock_members", "POST /vms routed flock members", err)
+	}
+	out, err := creator.CreateRoutedFlockMembers(ctx, req)
+	if err != nil {
+		return nil, t.auditFailureAndReturn(tenantID, "", "", "anvil_create_routed_flock_members", "POST /vms routed flock members", err)
+	}
+	if err := t.auditSuccess(tenantID, "", "", "anvil_create_routed_flock_members", "POST /vms routed flock members"); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (t *Tools) MCPCreateRoutedFlockMembers(ctx context.Context, req *mcp.CallToolRequest, input SpawnFlockInput) (*mcp.CallToolResult, RoutedFlockCreateOutput, error) {
+	out, err := t.CreateRoutedFlockMembers(ctx, input)
+	if err != nil || out == nil {
+		return nil, RoutedFlockCreateOutput{}, err
 	}
 	return nil, *out, nil
 }
@@ -1088,6 +1103,31 @@ func (t *Tools) MCPTownWallHistory(ctx context.Context, req *mcp.CallToolRequest
 		return nil, TownWallHistoryOutput{}, err
 	}
 	return nil, *out, nil
+}
+
+func (t *Tools) normalizedFlockCreateRequest(input SpawnFlockInput) (string, FlockCreateRequest, error) {
+	tenantID, err := t.resolveTenantID(input.TenantID)
+	if err != nil {
+		return "", FlockCreateRequest{}, err
+	}
+	egressPolicy, err := NormalizeEgressPolicy(input.EgressPolicy)
+	if err != nil {
+		return "", FlockCreateRequest{}, err
+	}
+	task := strings.TrimSpace(input.Task)
+	if task == "" {
+		return "", FlockCreateRequest{}, fmt.Errorf("task must be non-empty")
+	}
+	roles, err := normalizeFlockRoles(input.Roles)
+	if err != nil {
+		return "", FlockCreateRequest{}, err
+	}
+	return tenantID, FlockCreateRequest{
+		Task:         task,
+		Roles:        roles,
+		TenantID:     tenantID,
+		EgressPolicy: string(egressPolicy),
+	}, nil
 }
 
 func normalizeSnapshotType(value string) (string, error) {

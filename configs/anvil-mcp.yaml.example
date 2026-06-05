@@ -26,3 +26,10 @@ default_timeout_seconds: 300
 # result code, timestamp, sanitized error만 저장하고 agent_token이나 daemon raw body는 저장하지 않는다.
 # 이 값을 켜면 tool input tenant_id 또는 default_tenant_id가 필요하다.
 # audit_log_path: /var/lib/anvil-mcp/runtime-audit.jsonl
+
+# 선택 사항: scheduler/router 기반 snapshot replication과 routed flock 실험에 사용할 상태.
+# cross-host routed flock create는 persistent scheduler_state_path가 있을 때만 켤 수 있다.
+# scheduler_state_path: /var/lib/anvil-mcp/scheduler.json
+# scheduler_hosts_file: /etc/anvil-mcp/hosts.json
+# scheduler_quota_store_path: /var/lib/anvil-mcp/quotas.json
+# cross_host_flock_create_mode: members_only

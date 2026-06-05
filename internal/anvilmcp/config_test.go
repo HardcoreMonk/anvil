@@ -44,6 +44,7 @@ func TestLoadConfigFile(t *testing.T) {
 			"scheduler_state_path: /var/lib/anvil-mcp/scheduler.json",
 			"scheduler_hosts_file: /etc/anvil-mcp/hosts.json",
 			"scheduler_quota_store_path: /var/lib/anvil-mcp/quotas.json",
+			"cross_host_flock_create_mode: members_only",
 			"",
 		}, "\n"),
 	}
@@ -83,6 +84,9 @@ func TestLoadConfigFile(t *testing.T) {
 	if cfg.SchedulerQuotaStorePath != "/var/lib/anvil-mcp/quotas.json" {
 		t.Errorf("SchedulerQuotaStorePath = %q, want %q", cfg.SchedulerQuotaStorePath, "/var/lib/anvil-mcp/quotas.json")
 	}
+	if cfg.CrossHostFlockCreateMode != "members_only" {
+		t.Errorf("CrossHostFlockCreateMode = %q, want members_only", cfg.CrossHostFlockCreateMode)
+	}
 }
 
 func TestLoadConfigEnvOverridesFile(t *testing.T) {
@@ -97,20 +101,22 @@ func TestLoadConfigEnvOverridesFile(t *testing.T) {
 			"scheduler_state_path: /var/lib/anvil-mcp/file-scheduler.json",
 			"scheduler_hosts_file: /etc/anvil-mcp/file-hosts.json",
 			"scheduler_quota_store_path: /var/lib/anvil-mcp/file-quotas.json",
+			"cross_host_flock_create_mode: members_only",
 			"",
 		}, "\n"),
 	}
 	env := map[string]string{
-		"ANVIL_MCP_CONFIG":                "/tmp/anvil-mcp.yaml",
-		"ANVIL_DAEMON_URL":                "http://env.example.com/",
-		"ANVIL_API_TOKEN":                 "env-token",
-		"ANVIL_MCP_DEFAULT_TIMEOUT":       "90",
-		"ANVIL_MCP_SESSION_STORE":         "/var/lib/anvil-mcp/env-sessions.json",
-		"ANVIL_MCP_TENANT_ID":             "tenant.env",
-		"ANVIL_MCP_AUDIT_LOG":             "/var/log/anvil-mcp/env-audit.jsonl",
-		"ANVIL_MCP_SCHEDULER_STATE":       "/var/lib/anvil-mcp/env-scheduler.json",
-		"ANVIL_MCP_SCHEDULER_HOSTS_FILE":  "/etc/anvil-mcp/env-hosts.json",
-		"ANVIL_MCP_SCHEDULER_QUOTA_STORE": "/var/lib/anvil-mcp/env-quotas.json",
+		"ANVIL_MCP_CONFIG":                  "/tmp/anvil-mcp.yaml",
+		"ANVIL_DAEMON_URL":                  "http://env.example.com/",
+		"ANVIL_API_TOKEN":                   "env-token",
+		"ANVIL_MCP_DEFAULT_TIMEOUT":         "90",
+		"ANVIL_MCP_SESSION_STORE":           "/var/lib/anvil-mcp/env-sessions.json",
+		"ANVIL_MCP_TENANT_ID":               "tenant.env",
+		"ANVIL_MCP_AUDIT_LOG":               "/var/log/anvil-mcp/env-audit.jsonl",
+		"ANVIL_MCP_SCHEDULER_STATE":         "/var/lib/anvil-mcp/env-scheduler.json",
+		"ANVIL_MCP_SCHEDULER_HOSTS_FILE":    "/etc/anvil-mcp/env-hosts.json",
+		"ANVIL_MCP_SCHEDULER_QUOTA_STORE":   "/var/lib/anvil-mcp/env-quotas.json",
+		"ANVIL_MCP_CROSS_HOST_FLOCK_CREATE": "members_only",
 	}
 
 	cfg, err := LoadConfig(testConfigSource(env, files))
@@ -144,6 +150,85 @@ func TestLoadConfigEnvOverridesFile(t *testing.T) {
 	}
 	if cfg.SchedulerQuotaStorePath != "/var/lib/anvil-mcp/env-quotas.json" {
 		t.Errorf("SchedulerQuotaStorePath = %q, want %q", cfg.SchedulerQuotaStorePath, "/var/lib/anvil-mcp/env-quotas.json")
+	}
+	if cfg.CrossHostFlockCreateMode != "members_only" {
+		t.Errorf("CrossHostFlockCreateMode = %q, want members_only", cfg.CrossHostFlockCreateMode)
+	}
+}
+
+func TestLoadConfigEnvCrossHostFlockCreateOverridesFile(t *testing.T) {
+	files := map[string]string{
+		"/tmp/anvil-mcp.yaml": strings.Join([]string{
+			"cross_host_flock_create_mode: ''",
+			"",
+		}, "\n"),
+	}
+	env := map[string]string{
+		"ANVIL_MCP_CONFIG":                  "/tmp/anvil-mcp.yaml",
+		"ANVIL_MCP_CROSS_HOST_FLOCK_CREATE": "members_only",
+	}
+
+	cfg, err := LoadConfig(testConfigSource(env, files))
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if cfg.CrossHostFlockCreateMode != "members_only" {
+		t.Fatalf("CrossHostFlockCreateMode = %q, want members_only", cfg.CrossHostFlockCreateMode)
+	}
+}
+
+func TestLoadConfigEmptyEnvCrossHostFlockCreateOverridesFile(t *testing.T) {
+	files := map[string]string{
+		"/tmp/anvil-mcp.yaml": strings.Join([]string{
+			"cross_host_flock_create_mode: members_only",
+			"",
+		}, "\n"),
+	}
+	env := map[string]string{
+		"ANVIL_MCP_CONFIG":                  "/tmp/anvil-mcp.yaml",
+		"ANVIL_MCP_CROSS_HOST_FLOCK_CREATE": "",
+	}
+
+	cfg, err := LoadConfig(testConfigSource(env, files))
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if cfg.CrossHostFlockCreateMode != "" {
+		t.Fatalf("CrossHostFlockCreateMode = %q, want empty env override", cfg.CrossHostFlockCreateMode)
+	}
+}
+
+func TestLoadConfigRejectsInvalidCrossHostFlockCreateMode(t *testing.T) {
+	files := map[string]string{
+		"/tmp/anvil-mcp.yaml": strings.Join([]string{
+			"cross_host_flock_create_mode: full",
+			"",
+		}, "\n"),
+	}
+	env := map[string]string{
+		"ANVIL_MCP_CONFIG": "/tmp/anvil-mcp.yaml",
+	}
+
+	_, err := LoadConfig(testConfigSource(env, files))
+	if err == nil {
+		t.Fatal("LoadConfig() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "cross_host_flock_create_mode") {
+		t.Fatalf("LoadConfig() error = %q, want cross_host_flock_create_mode", err)
+	}
+}
+
+func TestLoadConfigRejectsInvalidCrossHostFlockCreateEnv(t *testing.T) {
+	env := map[string]string{
+		"ANVIL_MCP_CROSS_HOST_FLOCK_CREATE": "full",
+	}
+
+	_, err := LoadConfig(testConfigSource(env, nil))
+	if err == nil {
+		t.Fatal("LoadConfig() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "ANVIL_MCP_CROSS_HOST_FLOCK_CREATE") {
+		t.Fatalf("LoadConfig() error = %q, want ANVIL_MCP_CROSS_HOST_FLOCK_CREATE", err)
 	}
 }
 
@@ -259,6 +344,10 @@ func testConfigSource(env map[string]string, files map[string]string) ConfigSour
 	return ConfigSource{
 		Getenv: func(key string) string {
 			return env[key]
+		},
+		LookupEnv: func(key string) (string, bool) {
+			value, ok := env[key]
+			return value, ok
 		},
 		ReadFile: func(path string) ([]byte, error) {
 			content, ok := files[path]

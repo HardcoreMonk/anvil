@@ -37,6 +37,7 @@ func TestCurrentIronClawSchemasIncludeGoosetownTools(t *testing.T) {
 
 	for _, name := range []string{
 		"anvil_spawn_flock",
+		"anvil_create_routed_flock_members",
 		"anvil_list_flocks",
 		"anvil_get_flock",
 		"anvil_delete_flock",
@@ -94,26 +95,39 @@ func TestReplicateSnapshotSchemaRequiresHostAndSnapshotInputs(t *testing.T) {
 }
 
 func TestSpawnFlockRolesSchemaDescribesStringItems(t *testing.T) {
-	var rolesField *IronClawToolInputField
+	var spawnRolesField *IronClawToolInputField
+	var routedRolesField *IronClawToolInputField
 	for _, schema := range CurrentIronClawToolInputSchemas() {
-		if schema.ToolName != "anvil_spawn_flock" {
+		if schema.ToolName != "anvil_spawn_flock" && schema.ToolName != "anvil_create_routed_flock_members" {
 			continue
 		}
 		for idx := range schema.Fields {
 			if schema.Fields[idx].Name == "roles" {
-				rolesField = &schema.Fields[idx]
+				if schema.ToolName == "anvil_spawn_flock" {
+					spawnRolesField = &schema.Fields[idx]
+				} else {
+					routedRolesField = &schema.Fields[idx]
+				}
 				break
 			}
 		}
 	}
 
-	if rolesField == nil {
+	if spawnRolesField == nil {
 		t.Fatal("anvil_spawn_flock roles field not found")
 	}
-	if rolesField.GeminiType != "ARRAY" {
-		t.Fatalf("roles GeminiType = %q, want ARRAY", rolesField.GeminiType)
+	if routedRolesField == nil {
+		t.Fatal("anvil_create_routed_flock_members roles field not found")
 	}
-	if rolesField.GeminiItemsType != "STRING" {
-		t.Fatalf("roles GeminiItemsType = %q, want STRING", rolesField.GeminiItemsType)
+	for toolName, field := range map[string]*IronClawToolInputField{
+		"anvil_spawn_flock":                 spawnRolesField,
+		"anvil_create_routed_flock_members": routedRolesField,
+	} {
+		if field.GeminiType != "ARRAY" {
+			t.Fatalf("%s roles GeminiType = %q, want ARRAY", toolName, field.GeminiType)
+		}
+		if field.GeminiItemsType != "STRING" {
+			t.Fatalf("%s roles GeminiItemsType = %q, want STRING", toolName, field.GeminiItemsType)
+		}
 	}
 }

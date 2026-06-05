@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"ephemera/internal/anvilmcp"
@@ -113,6 +114,13 @@ func toolRegistrations() []toolRegistration {
 			},
 		},
 		{
+			name:        "anvil_create_routed_flock_members",
+			description: "Create an experimental members-only routed flock by spawning role VMs across scheduler runtime hosts without Town Wall.",
+			register: func(server *mcp.Server, tool *mcp.Tool, tools *anvilmcp.Tools) {
+				mcp.AddTool(server, tool, tools.MCPCreateRoutedFlockMembers)
+			},
+		},
+		{
 			name:        "anvil_list_flocks",
 			description: "List live Goosetown flocks known to the ephemera daemon.",
 			register: func(server *mcp.Server, tool *mcp.Tool, tools *anvilmcp.Tools) {
@@ -182,6 +190,9 @@ func main() {
 
 func newMCPDaemon(cfg anvilmcp.Config, httpClient *http.Client) (anvilmcp.Daemon, error) {
 	base := anvilmcp.NewDaemonClient(cfg, httpClient)
+	if cfg.CrossHostFlockCreateMode == "members_only" && strings.TrimSpace(cfg.SchedulerStatePath) == "" {
+		return nil, fmt.Errorf("scheduler_state_path is required when cross_host_flock_create_mode is members_only")
+	}
 	if !mcpRouterConfigProvided(cfg) {
 		return base, nil
 	}
@@ -224,6 +235,9 @@ func newMCPDaemon(cfg anvilmcp.Config, httpClient *http.Client) (anvilmcp.Daemon
 		daemons,
 		anvilmcp.RuntimeRouterOptions{PlacementStore: store},
 	)
+	if cfg.CrossHostFlockCreateMode == "members_only" {
+		return anvilmcp.NewReplicatingDaemonWithOptions(base, router, anvilmcp.ReplicatingDaemonOptions{RoutedFlocks: router}), nil
+	}
 	return anvilmcp.NewReplicatingDaemon(base, router), nil
 }
 
