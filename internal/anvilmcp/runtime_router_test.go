@@ -29,6 +29,9 @@ type routerFakeDaemon struct {
 	restoreErr           error
 	deleteCalls          int
 	deleteVMID           string
+	deleteVMIDs          []string
+	deleteErr            error
+	deleteErrForVMID     map[string]error
 	listVMResp           []VMInfo
 	snapshotList         []SnapshotInfo
 	listSnapshotErr      error
@@ -86,6 +89,15 @@ func (f *routerFakeDaemon) Stop(context.Context, string) (*RawDaemonResponse, er
 func (f *routerFakeDaemon) Delete(_ context.Context, vmID string) (*RawDaemonResponse, error) {
 	f.deleteCalls++
 	f.deleteVMID = vmID
+	f.deleteVMIDs = append(f.deleteVMIDs, vmID)
+	if f.deleteErrForVMID != nil {
+		if err, ok := f.deleteErrForVMID[vmID]; ok {
+			return nil, err
+		}
+	}
+	if f.deleteErr != nil {
+		return nil, f.deleteErr
+	}
 	return &RawDaemonResponse{StatusCode: 200, Body: "{}"}, nil
 }
 
@@ -192,6 +204,18 @@ func requireFlockPlacementMetricAttempt(t *testing.T, state FlockPlacementMetric
 	key := flockPlacementAttemptKey(outcome, reason)
 	if got := state.AttemptsByOutcomeReason[key]; got != want {
 		t.Fatalf("flock placement attempts[%q] = %d, want %d", key, got, want)
+	}
+}
+
+func requireOnlyFlockPlacementMetricAttempt(t *testing.T, state FlockPlacementMetricsState, outcome, reason string) {
+	t.Helper()
+	requireFlockPlacementMetricAttempt(t, state, outcome, reason, 1)
+	var total int64
+	for _, count := range state.AttemptsByOutcomeReason {
+		total += count
+	}
+	if total != 1 {
+		t.Fatalf("flock placement total attempts = %d, want exactly 1: %+v", total, state.AttemptsByOutcomeReason)
 	}
 }
 
@@ -652,6 +676,201 @@ func TestRuntimeRouterCreateRoutedFlockMembersSpawnsAcrossHosts(t *testing.T) {
 	}
 }
 
+func TestRuntimeRouterCreateRoutedFlockMembersDeniedBeforeDaemonCall(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
+	daemon := &routerFakeDaemon{}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(
+			[]RuntimeHost{{Name: "host-a", Endpoint: "http://host-a.internal/secret-endpoint", Healthy: true, AvailableVMs: 2, EgressPolicies: []EgressPolicy{EgressPolicyProfile}}},
+			map[string]TenantQuota{"tenant-1": {ActiveVMs: 1}},
+			map[string]TenantUsage{"tenant-1": {ActiveVMs: 0}},
+		),
+		map[string]Daemon{"host-a": daemon},
+		RuntimeRouterOptions{PlacementStore: store},
+	)
+
+	_, err := router.CreateRoutedFlockMembers(context.Background(), FlockCreateRequest{
+		Task:         "review worker output",
+		Roles:        []string{"worker", "reviewer"},
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+	})
+	if err == nil {
+		t.Fatal("CreateRoutedFlockMembers error = nil, want quota denial")
+	}
+	var denied *ScheduleDeniedError
+	if !errors.As(err, &denied) {
+		t.Fatalf("error type = %T, want ScheduleDeniedError", err)
+	}
+	if denied.Decision.Reason != FlockPlacementReasonQuotaExceeded {
+		t.Fatalf("denial reason = %q, want %q", denied.Decision.Reason, FlockPlacementReasonQuotaExceeded)
+	}
+	if daemon.spawnCalls != 0 {
+		t.Fatalf("daemon spawn calls = %d, want 0", daemon.spawnCalls)
+	}
+
+	state := store.State().FlockPlacementMetrics
+	requireOnlyFlockPlacementMetricAttempt(t, state, FlockPlacementOutcomeCrossHostDenied, FlockPlacementReasonQuotaExceeded)
+	requireFlockPlacementMetricPhaseCount(t, state, FlockPlacementPhasePlan, 1)
+	requireFlockPlacementMetricPhaseCount(t, state, FlockPlacementPhaseTotal, 1)
+}
+
+func TestRuntimeRouterCreateRoutedFlockMembersRollsBackOnSecondSpawnFailure(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
+	hostA := &routerFakeDaemon{spawnResponses: []*SpawnVMResponse{{
+		VMID:         "vm-worker",
+		GuestIP:      "10.0.1.10",
+		AgentURL:     "http://10.0.1.10:8080",
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+		AgentToken:   "agent-token-worker",
+	}}}
+	hostB := &routerFakeDaemon{
+		spawnErr: errors.New("daemon http://host-b.internal/secret-endpoint failed: agent_token=secret-token Authorization: Bearer secret-token"),
+	}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(
+			[]RuntimeHost{
+				{Name: "host-a", Endpoint: "http://host-a.internal/secret-endpoint", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+				{Name: "host-b", Endpoint: "http://host-b.internal/secret-endpoint", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+			},
+			nil,
+			nil,
+		),
+		map[string]Daemon{"host-a": hostA, "host-b": hostB},
+		RuntimeRouterOptions{PlacementStore: store},
+	)
+
+	out, err := router.CreateRoutedFlockMembers(context.Background(), FlockCreateRequest{
+		Task:         "review worker output",
+		Roles:        []string{"worker", "reviewer"},
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+	})
+	if err == nil {
+		t.Fatal("CreateRoutedFlockMembers error = nil, want second spawn failure")
+	}
+	if out != nil {
+		t.Fatalf("CreateRoutedFlockMembers output = %+v, want nil on rollback", out)
+	}
+	if hostA.spawnCalls != 1 || hostB.spawnCalls != 1 {
+		t.Fatalf("spawn calls hostA/hostB = %d/%d, want 1/1", hostA.spawnCalls, hostB.spawnCalls)
+	}
+	if hostA.deleteCalls != 1 || strings.Join(hostA.deleteVMIDs, ",") != "vm-worker" {
+		t.Fatalf("host-a delete calls/vmids = %d/%q, want 1/vm-worker", hostA.deleteCalls, strings.Join(hostA.deleteVMIDs, ","))
+	}
+	if hostB.deleteCalls != 0 {
+		t.Fatalf("host-b delete calls = %d, want 0", hostB.deleteCalls)
+	}
+	if _, ok := router.Placement("vm-worker"); ok {
+		t.Fatal("router placement for vm-worker still exists after rollback")
+	}
+	if _, ok := store.VMHost("vm-worker"); ok {
+		t.Fatal("store placement for vm-worker still exists after rollback")
+	}
+	records := store.ListRoutedFlocks()
+	if len(records) != 1 {
+		t.Fatalf("routed records len = %d, want 1", len(records))
+	}
+	if records[0].Status != RoutedFlockStatusDeleted {
+		t.Fatalf("routed record status = %q, want %q", records[0].Status, RoutedFlockStatusDeleted)
+	}
+	if len(records[0].Agents) != 0 {
+		t.Fatalf("routed record agents = %+v, want none after successful rollback", records[0].Agents)
+	}
+
+	text := err.Error()
+	for _, forbidden := range []string{"agent_token", "secret-token", "Authorization", "Bearer", "host-a.internal", "host-b.internal", "secret-endpoint", "http://"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("CreateRoutedFlockMembers error leaked forbidden marker %q: %q", forbidden, text)
+		}
+	}
+	if !strings.Contains(text, FlockPlacementReasonDaemonCreateFailed) {
+		t.Fatalf("CreateRoutedFlockMembers error = %q, want bounded daemon_create_failed reason", text)
+	}
+
+	state := store.State().FlockPlacementMetrics
+	requireOnlyFlockPlacementMetricAttempt(t, state, FlockPlacementOutcomeCrossHostSpawnError, FlockPlacementReasonDaemonCreateFailed)
+	requireFlockPlacementMetricPhaseCount(t, state, FlockPlacementPhaseRollback, 1)
+}
+
+func TestRuntimeRouterCreateRoutedFlockMembersLeavesCleanupPendingOnRollbackDeleteFailure(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
+	hostA := &routerFakeDaemon{
+		spawnResponses: []*SpawnVMResponse{{
+			VMID:         "vm-worker",
+			GuestIP:      "10.0.1.10",
+			AgentURL:     "http://10.0.1.10:8080",
+			TenantID:     "tenant-1",
+			EgressPolicy: "profile",
+		}},
+		deleteErrForVMID: map[string]error{
+			"vm-worker": errors.New("delete failed: agent_token=secret-token Authorization: Bearer secret-token"),
+		},
+	}
+	hostB := &routerFakeDaemon{
+		spawnErr: errors.New("daemon http://host-b.internal/secret-endpoint failed: agent_token=secret-token"),
+	}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(
+			[]RuntimeHost{
+				{Name: "host-a", Endpoint: "http://host-a.internal/secret-endpoint", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+				{Name: "host-b", Endpoint: "http://host-b.internal/secret-endpoint", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+			},
+			nil,
+			nil,
+		),
+		map[string]Daemon{"host-a": hostA, "host-b": hostB},
+		RuntimeRouterOptions{PlacementStore: store},
+	)
+
+	_, err := router.CreateRoutedFlockMembers(context.Background(), FlockCreateRequest{
+		Task:         "review worker output",
+		Roles:        []string{"worker", "reviewer"},
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+	})
+	if err == nil {
+		t.Fatal("CreateRoutedFlockMembers error = nil, want cleanup pending error")
+	}
+	if hostA.deleteCalls != 1 || strings.Join(hostA.deleteVMIDs, ",") != "vm-worker" {
+		t.Fatalf("host-a delete calls/vmids = %d/%q, want 1/vm-worker", hostA.deleteCalls, strings.Join(hostA.deleteVMIDs, ","))
+	}
+	records := store.ListRoutedFlocks()
+	if len(records) != 1 {
+		t.Fatalf("routed records len = %d, want 1", len(records))
+	}
+	if records[0].Status != RoutedFlockStatusFailedCleanupPending {
+		t.Fatalf("routed record status = %q, want %q", records[0].Status, RoutedFlockStatusFailedCleanupPending)
+	}
+	if len(records[0].Agents) != 1 {
+		t.Fatalf("routed record agents = %+v, want one cleanup-pending agent", records[0].Agents)
+	}
+	if records[0].Agents[0].VMID != "vm-worker" || records[0].Agents[0].Status != "cleanup_pending" {
+		t.Fatalf("cleanup-pending agent = %+v, want vm-worker cleanup_pending", records[0].Agents[0])
+	}
+	if host, ok := router.Placement("vm-worker"); !ok || host != "host-a" {
+		t.Fatalf("router placement for vm-worker = %q,%v want host-a,true", host, ok)
+	}
+	if host, ok := store.VMHost("vm-worker"); !ok || host != "host-a" {
+		t.Fatalf("store placement for vm-worker = %q,%v want host-a,true", host, ok)
+	}
+
+	text := err.Error()
+	for _, forbidden := range []string{"agent_token", "secret-token", "Authorization", "Bearer", "host-a.internal", "host-b.internal", "secret-endpoint", "http://"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("CreateRoutedFlockMembers cleanup error leaked forbidden marker %q: %q", forbidden, text)
+		}
+	}
+	if !strings.Contains(text, FlockPlacementReasonDaemonCreateFailed) {
+		t.Fatalf("CreateRoutedFlockMembers cleanup error = %q, want bounded daemon_create_failed reason", text)
+	}
+
+	state := store.State().FlockPlacementMetrics
+	requireOnlyFlockPlacementMetricAttempt(t, state, FlockPlacementOutcomeCrossHostRollbackError, FlockPlacementReasonDaemonCreateFailed)
+	requireFlockPlacementMetricPhaseCount(t, state, FlockPlacementPhaseRollback, 1)
+}
+
 func TestRuntimeRouterCreateRoutedFlockMembersRejectsEmptySpawnVMID(t *testing.T) {
 	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
 	daemon := &routerFakeDaemon{spawnResponses: []*SpawnVMResponse{{
@@ -683,29 +902,200 @@ func TestRuntimeRouterCreateRoutedFlockMembersRejectsEmptySpawnVMID(t *testing.T
 	if out != nil {
 		t.Fatalf("CreateRoutedFlockMembers output = %+v, want nil on empty vm_id", out)
 	}
-	if !strings.Contains(err.Error(), "vm_id") {
-		t.Fatalf("CreateRoutedFlockMembers error = %q, want vm_id context", err.Error())
+	if !strings.Contains(err.Error(), FlockPlacementReasonDaemonInvalidResponse) {
+		t.Fatalf("CreateRoutedFlockMembers error = %q, want bounded daemon_invalid_response reason", err.Error())
 	}
 	if daemon.spawnCalls != 1 {
 		t.Fatalf("spawn calls = %d, want 1", daemon.spawnCalls)
 	}
+	if daemon.deleteCalls != 0 {
+		t.Fatalf("delete calls = %d, want 0 for invalid empty vm_id response", daemon.deleteCalls)
+	}
 
 	records := store.ListRoutedFlocks()
 	if len(records) != 1 {
-		t.Fatalf("routed records len = %d, want creating record only", len(records))
+		t.Fatalf("routed records len = %d, want 1", len(records))
 	}
-	if records[0].Status != RoutedFlockStatusCreating {
-		t.Fatalf("routed record status = %q, want %q", records[0].Status, RoutedFlockStatusCreating)
+	if records[0].Status != RoutedFlockStatusDeleted {
+		t.Fatalf("routed record status = %q, want %q", records[0].Status, RoutedFlockStatusDeleted)
 	}
 	if len(records[0].Agents) != 0 {
 		t.Fatalf("routed record agents = %+v, want none for empty vm_id", records[0].Agents)
 	}
 
 	state := store.State().FlockPlacementMetrics
-	requireFlockPlacementMetricAttempt(t, state, FlockPlacementOutcomeCrossHostSpawnError, FlockPlacementReasonDaemonInvalidResponse, 1)
+	requireOnlyFlockPlacementMetricAttempt(t, state, FlockPlacementOutcomeCrossHostSpawnError, FlockPlacementReasonDaemonInvalidResponse)
 	requireFlockPlacementMetricPhaseCount(t, state, FlockPlacementPhaseAgentSpawn, 1)
 	if state.LastFailureAt.IsZero() {
 		t.Fatal("LastFailureAt is zero, want failure timestamp")
+	}
+}
+
+func TestRuntimeRouterDeleteRoutedFlockDeletesMemberVMs(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
+	if err := store.SaveRoutedFlockAndPlacements(RoutedFlockRecord{
+		FlockID:      "routed-flock-delete",
+		Task:         "review worker output",
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+		Mode:         RoutedFlockModeCrossHostMembersOnly,
+		Status:       RoutedFlockStatusReady,
+		Agents: []RoutedFlockAgent{
+			{AgentID: "worker-1", Role: "worker", VMID: "vm-worker", Host: "host-a", Status: "running"},
+			{AgentID: "reviewer-1", Role: "reviewer", VMID: "vm-reviewer", Host: "host-b", Status: "running"},
+		},
+	}, nil); err != nil {
+		t.Fatalf("SaveRoutedFlockAndPlacements: %v", err)
+	}
+	hostA := &routerFakeDaemon{}
+	hostB := &routerFakeDaemon{}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(nil, nil, nil),
+		map[string]Daemon{"host-a": hostA, "host-b": hostB},
+		RuntimeRouterOptions{PlacementStore: store},
+	)
+
+	resp, err := router.DeleteRoutedFlock(context.Background(), " routed-flock-delete ")
+	if err != nil {
+		t.Fatalf("DeleteRoutedFlock returned error: %v", err)
+	}
+	if resp == nil || resp.StatusCode != 200 {
+		t.Fatalf("DeleteRoutedFlock resp = %+v, want status 200", resp)
+	}
+	if !strings.Contains(resp.Body, `"status":"deleted"`) || !strings.Contains(resp.Body, `"flock_id":"routed-flock-delete"`) {
+		t.Fatalf("DeleteRoutedFlock body = %q, want deleted status and flock id", resp.Body)
+	}
+	if hostA.deleteCalls != 1 || strings.Join(hostA.deleteVMIDs, ",") != "vm-worker" {
+		t.Fatalf("host-a delete calls/vmids = %d/%q, want 1/vm-worker", hostA.deleteCalls, strings.Join(hostA.deleteVMIDs, ","))
+	}
+	if hostB.deleteCalls != 1 || strings.Join(hostB.deleteVMIDs, ",") != "vm-reviewer" {
+		t.Fatalf("host-b delete calls/vmids = %d/%q, want 1/vm-reviewer", hostB.deleteCalls, strings.Join(hostB.deleteVMIDs, ","))
+	}
+	for _, vmID := range []string{"vm-worker", "vm-reviewer"} {
+		if _, ok := router.Placement(vmID); ok {
+			t.Fatalf("router placement for %s still exists after delete", vmID)
+		}
+		if _, ok := store.VMHost(vmID); ok {
+			t.Fatalf("store placement for %s still exists after delete", vmID)
+		}
+	}
+	record, ok := store.RoutedFlock("routed-flock-delete")
+	if !ok {
+		t.Fatal("routed-flock-delete missing after delete")
+	}
+	if record.Status != RoutedFlockStatusDeleted {
+		t.Fatalf("routed record status = %q, want %q", record.Status, RoutedFlockStatusDeleted)
+	}
+	if len(record.Agents) != 0 {
+		t.Fatalf("routed record agents = %+v, want none after delete", record.Agents)
+	}
+}
+
+func TestRuntimeRouterDeleteRoutedFlockLeavesCleanupPendingOnPartialFailure(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
+	if err := store.SaveRoutedFlockAndPlacements(RoutedFlockRecord{
+		FlockID:      "routed-flock-partial-delete",
+		Task:         "review worker output",
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+		Mode:         RoutedFlockModeCrossHostMembersOnly,
+		Status:       RoutedFlockStatusReady,
+		Agents: []RoutedFlockAgent{
+			{AgentID: "worker-1", Role: "worker", VMID: "vm-worker", Host: "host-a", Status: "running"},
+			{AgentID: "reviewer-1", Role: "reviewer", VMID: "vm-reviewer", Host: "host-b", Status: "running"},
+		},
+	}, nil); err != nil {
+		t.Fatalf("SaveRoutedFlockAndPlacements: %v", err)
+	}
+	hostA := &routerFakeDaemon{}
+	hostB := &routerFakeDaemon{deleteErrForVMID: map[string]error{
+		"vm-reviewer": errors.New("delete failed: agent_token=secret-token Authorization: Bearer secret-token"),
+	}}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(nil, nil, nil),
+		map[string]Daemon{"host-a": hostA, "host-b": hostB},
+		RuntimeRouterOptions{PlacementStore: store},
+	)
+
+	resp, err := router.DeleteRoutedFlock(context.Background(), "routed-flock-partial-delete")
+	if err == nil {
+		t.Fatal("DeleteRoutedFlock error = nil, want cleanup pending error")
+	}
+	if resp != nil {
+		t.Fatalf("DeleteRoutedFlock resp = %+v, want nil on partial failure", resp)
+	}
+	if hostA.deleteCalls != 1 || strings.Join(hostA.deleteVMIDs, ",") != "vm-worker" {
+		t.Fatalf("host-a delete calls/vmids = %d/%q, want 1/vm-worker", hostA.deleteCalls, strings.Join(hostA.deleteVMIDs, ","))
+	}
+	if hostB.deleteCalls != 1 || strings.Join(hostB.deleteVMIDs, ",") != "vm-reviewer" {
+		t.Fatalf("host-b delete calls/vmids = %d/%q, want 1/vm-reviewer", hostB.deleteCalls, strings.Join(hostB.deleteVMIDs, ","))
+	}
+	if _, ok := router.Placement("vm-worker"); ok {
+		t.Fatal("router placement for vm-worker still exists after successful delete")
+	}
+	if _, ok := store.VMHost("vm-worker"); ok {
+		t.Fatal("store placement for vm-worker still exists after successful delete")
+	}
+	if host, ok := router.Placement("vm-reviewer"); !ok || host != "host-b" {
+		t.Fatalf("router placement for vm-reviewer = %q,%v want host-b,true", host, ok)
+	}
+	if host, ok := store.VMHost("vm-reviewer"); !ok || host != "host-b" {
+		t.Fatalf("store placement for vm-reviewer = %q,%v want host-b,true", host, ok)
+	}
+	record, ok := store.RoutedFlock("routed-flock-partial-delete")
+	if !ok {
+		t.Fatal("routed-flock-partial-delete missing after partial delete")
+	}
+	if record.Status != RoutedFlockStatusFailedCleanupPending {
+		t.Fatalf("routed record status = %q, want %q", record.Status, RoutedFlockStatusFailedCleanupPending)
+	}
+	if len(record.Agents) != 1 {
+		t.Fatalf("routed record agents = %+v, want one cleanup-pending agent", record.Agents)
+	}
+	if record.Agents[0].VMID != "vm-reviewer" || record.Agents[0].Status != "cleanup_pending" {
+		t.Fatalf("cleanup-pending agent = %+v, want vm-reviewer cleanup_pending", record.Agents[0])
+	}
+	text := err.Error()
+	for _, forbidden := range []string{"agent_token", "secret-token", "Authorization", "Bearer"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("DeleteRoutedFlock error leaked forbidden marker %q: %q", forbidden, text)
+		}
+	}
+}
+
+func TestRuntimeRouterRoutedFlockTownWallUnsupported(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
+	if err := store.SaveRoutedFlockAndPlacements(RoutedFlockRecord{
+		FlockID:      "routed-flock-wall",
+		Task:         "review worker output",
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+		Mode:         RoutedFlockModeCrossHostMembersOnly,
+		Status:       RoutedFlockStatusReady,
+		Agents:       []RoutedFlockAgent{{AgentID: "worker-1", Role: "worker", VMID: "vm-worker", Host: "host-a", Status: "running"}},
+	}, nil); err != nil {
+		t.Fatalf("SaveRoutedFlockAndPlacements: %v", err)
+	}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(nil, nil, nil),
+		map[string]Daemon{"host-a": &routerFakeDaemon{}},
+		RuntimeRouterOptions{PlacementStore: store},
+	)
+
+	_, postErr := router.PostRoutedTownWall(context.Background(), "routed-flock-wall", TownWallPostRequest{AgentID: "worker-1", Body: "hello wall"})
+	if postErr == nil {
+		t.Fatal("PostRoutedTownWall error = nil, want unsupported error")
+	}
+	if !strings.Contains(postErr.Error(), "Town Wall is not supported for routed members-only flock") {
+		t.Fatalf("PostRoutedTownWall error = %q, want unsupported routed Town Wall phrase", postErr.Error())
+	}
+
+	_, historyErr := router.RoutedTownWallHistory(context.Background(), "routed-flock-wall")
+	if historyErr == nil {
+		t.Fatal("RoutedTownWallHistory error = nil, want unsupported error")
+	}
+	if !strings.Contains(historyErr.Error(), "Town Wall is not supported for routed members-only flock") {
+		t.Fatalf("RoutedTownWallHistory error = %q, want unsupported routed Town Wall phrase", historyErr.Error())
 	}
 }
 
