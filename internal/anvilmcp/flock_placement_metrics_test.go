@@ -45,6 +45,35 @@ func TestPlacementStoreRecordsFlockPlacementMetrics(t *testing.T) {
 	}
 }
 
+func TestFlockPlacementRecordsCrossHostSuccessAsSuccessTimestamp(t *testing.T) {
+	store := NewPlacementStore("")
+	at := time.Date(2026, 6, 4, 1, 2, 3, 0, time.UTC)
+
+	if err := store.RecordFlockPlacementMetrics(FlockPlacementMetricObservation{
+		Outcome: FlockPlacementOutcomeCrossHostSuccess,
+		Reason:  FlockPlacementReasonScheduled,
+		At:      at,
+		Latencies: map[string]time.Duration{
+			FlockPlacementPhasePlan:       7 * time.Millisecond,
+			FlockPlacementPhaseAgentSpawn: 120 * time.Millisecond,
+		},
+	}); err != nil {
+		t.Fatalf("RecordFlockPlacementMetrics() error = %v", err)
+	}
+
+	state := store.State().FlockPlacementMetrics
+	requireStoredFlockPlacementAttempt(t, state, FlockPlacementOutcomeCrossHostSuccess, FlockPlacementReasonScheduled, 1)
+	if !state.LastSuccessAt.Equal(at) {
+		t.Fatalf("LastSuccessAt = %v, want %v", state.LastSuccessAt, at)
+	}
+	if !state.LastFailureAt.IsZero() {
+		t.Fatalf("LastFailureAt = %v, want zero", state.LastFailureAt)
+	}
+	if state.LatencyByPhase[FlockPlacementPhaseAgentSpawn].Count != 1 {
+		t.Fatalf("agent_spawn histogram = %+v, want one observation", state.LatencyByPhase[FlockPlacementPhaseAgentSpawn])
+	}
+}
+
 func TestPlacementStoreSanitizesFlockPlacementMetricLabels(t *testing.T) {
 	store := NewPlacementStore("")
 

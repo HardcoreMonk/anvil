@@ -146,11 +146,26 @@ func (r *RuntimeRouter) CreateRoutedFlockMembers(ctx context.Context, req FlockC
 			})
 			return nil, rollbackRoutedFlockCreate(ctx, r, record, err)
 		}
+		vmID := strings.TrimSpace(resp.VMID)
+		if vmID == "" {
+			err := fmt.Errorf("runtime daemon SpawnVM returned empty vm_id for routed flock agent %q", planned.AgentID)
+			r.recordRoutedFlockMetric(FlockPlacementMetricObservation{
+				Outcome: FlockPlacementOutcomeCrossHostSpawnError,
+				Reason:  FlockPlacementReasonDaemonInvalidResponse,
+				Latencies: map[string]time.Duration{
+					FlockPlacementPhasePlan:         planLatency,
+					FlockPlacementPhaseAgentSpawn:   agentSpawnLatency,
+					FlockPlacementPhaseRegistrySave: registrySaveLatency,
+					FlockPlacementPhaseTotal:        time.Since(totalStart),
+				},
+			})
+			return nil, rollbackRoutedFlockCreate(ctx, r, record, err)
+		}
 
 		record.Agents = append(record.Agents, RoutedFlockAgent{
 			AgentID:  planned.AgentID,
 			Role:     planned.Role,
-			VMID:     strings.TrimSpace(resp.VMID),
+			VMID:     vmID,
 			AgentURL: strings.TrimSpace(resp.AgentURL),
 			Host:     hostName,
 			Status:   "running",

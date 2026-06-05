@@ -652,6 +652,63 @@ func TestRuntimeRouterCreateRoutedFlockMembersSpawnsAcrossHosts(t *testing.T) {
 	}
 }
 
+func TestRuntimeRouterCreateRoutedFlockMembersRejectsEmptySpawnVMID(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
+	daemon := &routerFakeDaemon{spawnResponses: []*SpawnVMResponse{{
+		VMID:         "  ",
+		GuestIP:      "10.0.1.10",
+		AgentURL:     "http://10.0.1.10:8080",
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+	}}}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(
+			[]RuntimeHost{{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}}},
+			nil,
+			nil,
+		),
+		map[string]Daemon{"host-a": daemon},
+		RuntimeRouterOptions{PlacementStore: store},
+	)
+
+	out, err := router.CreateRoutedFlockMembers(context.Background(), FlockCreateRequest{
+		Task:         "review worker output",
+		Roles:        []string{"worker"},
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+	})
+	if err == nil {
+		t.Fatal("CreateRoutedFlockMembers error = nil, want empty vm_id error")
+	}
+	if out != nil {
+		t.Fatalf("CreateRoutedFlockMembers output = %+v, want nil on empty vm_id", out)
+	}
+	if !strings.Contains(err.Error(), "vm_id") {
+		t.Fatalf("CreateRoutedFlockMembers error = %q, want vm_id context", err.Error())
+	}
+	if daemon.spawnCalls != 1 {
+		t.Fatalf("spawn calls = %d, want 1", daemon.spawnCalls)
+	}
+
+	records := store.ListRoutedFlocks()
+	if len(records) != 1 {
+		t.Fatalf("routed records len = %d, want creating record only", len(records))
+	}
+	if records[0].Status != RoutedFlockStatusCreating {
+		t.Fatalf("routed record status = %q, want %q", records[0].Status, RoutedFlockStatusCreating)
+	}
+	if len(records[0].Agents) != 0 {
+		t.Fatalf("routed record agents = %+v, want none for empty vm_id", records[0].Agents)
+	}
+
+	state := store.State().FlockPlacementMetrics
+	requireFlockPlacementMetricAttempt(t, state, FlockPlacementOutcomeCrossHostSpawnError, FlockPlacementReasonDaemonInvalidResponse, 1)
+	requireFlockPlacementMetricPhaseCount(t, state, FlockPlacementPhaseAgentSpawn, 1)
+	if state.LastFailureAt.IsZero() {
+		t.Fatal("LastFailureAt is zero, want failure timestamp")
+	}
+}
+
 func TestRuntimeRouterSpawnRecordsPlacementAndRoutesVMCalls(t *testing.T) {
 	hostA := &routerFakeDaemon{}
 	hostB := &routerFakeDaemon{}

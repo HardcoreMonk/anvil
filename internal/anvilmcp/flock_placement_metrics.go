@@ -20,14 +20,15 @@ const (
 	FlockPlacementOutcomeCrossHostRollbackError = "cross_host_rollback_error"
 	FlockPlacementOutcomeCrossHostRegistryError = "cross_host_registry_error"
 
-	FlockPlacementReasonScheduled           = "scheduled"
-	FlockPlacementReasonQuotaExceeded       = "quota_exceeded"
-	FlockPlacementReasonNoEligibleHost      = "no_eligible_host"
-	FlockPlacementReasonInvalidRequest      = "invalid_request"
-	FlockPlacementReasonDaemonCreateFailed  = "daemon_create_failed"
-	FlockPlacementReasonDaemonNilResponse   = "daemon_nil_response"
-	FlockPlacementReasonPlacementSaveFailed = "placement_save_failed"
-	FlockPlacementReasonUnknown             = "unknown"
+	FlockPlacementReasonScheduled             = "scheduled"
+	FlockPlacementReasonQuotaExceeded         = "quota_exceeded"
+	FlockPlacementReasonNoEligibleHost        = "no_eligible_host"
+	FlockPlacementReasonInvalidRequest        = "invalid_request"
+	FlockPlacementReasonDaemonCreateFailed    = "daemon_create_failed"
+	FlockPlacementReasonDaemonNilResponse     = "daemon_nil_response"
+	FlockPlacementReasonDaemonInvalidResponse = "daemon_invalid_response"
+	FlockPlacementReasonPlacementSaveFailed   = "placement_save_failed"
+	FlockPlacementReasonUnknown               = "unknown"
 
 	FlockPlacementPhaseSchedule      = "schedule"
 	FlockPlacementPhaseDaemonCreate  = "daemon_create"
@@ -175,7 +176,7 @@ func (s *PlacementStore) RecordFlockPlacementMetrics(obs FlockPlacementMetricObs
 		recordLatencyHistogramObservation(&hist, duration)
 		metrics.LatencyByPhase[phase] = hist
 	}
-	if outcome == FlockPlacementOutcomeSuccess {
+	if isFlockPlacementSuccessOutcome(outcome) {
 		metrics.LastSuccessAt = obs.At
 	} else {
 		metrics.LastFailureAt = obs.At
@@ -257,12 +258,23 @@ func normalizeFlockPlacementReason(value string) string {
 		return FlockPlacementReasonDaemonCreateFailed
 	case FlockPlacementReasonDaemonNilResponse:
 		return FlockPlacementReasonDaemonNilResponse
+	case FlockPlacementReasonDaemonInvalidResponse:
+		return FlockPlacementReasonDaemonInvalidResponse
 	case FlockPlacementReasonPlacementSaveFailed:
 		return FlockPlacementReasonPlacementSaveFailed
 	case FlockPlacementReasonUnknown:
 		return FlockPlacementReasonUnknown
 	default:
 		return FlockPlacementReasonUnknown
+	}
+}
+
+func isFlockPlacementSuccessOutcome(outcome string) bool {
+	switch normalizeFlockPlacementOutcome(outcome) {
+	case FlockPlacementOutcomeSuccess, FlockPlacementOutcomeCrossHostSuccess:
+		return true
+	default:
+		return false
 	}
 }
 
