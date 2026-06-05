@@ -108,7 +108,9 @@ latency를 scheduler state에 aggregate로 기록한다. scheduler service는 �
 
 Members-only routed flock create는 같은 metric family에 cross-host 전용 bounded enum을
 추가로 기록한다. 이 path는 `ANVIL_MCP_CROSS_HOST_FLOCK_CREATE=members_only`가 켜진
-MCP router에서 `anvil_create_routed_flock_members`를 호출할 때만 사용된다.
+MCP router에서 `anvil_create_routed_flock_members`를 호출할 때만 사용된다. invalid
+request처럼 scheduler 단계에서 공통 처리되는 오류는 기존 `scheduler_error` outcome을
+그대로 사용할 수 있다.
 
 - outcome enum: `cross_host_success`, `cross_host_denied`,
   `cross_host_spawn_error`, `cross_host_rollback_error`,

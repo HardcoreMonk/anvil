@@ -41,6 +41,10 @@
 필요한 상태다. operator는 routed registry의 남은 member VM을 확인하고 해당 host
 daemon에서 VM 삭제 상태를 점검해야 한다.
 
+error reason이 `placement_save_failed`이면 persistent `scheduler_state_path`가 최신
+cleanup 상태를 반영하지 못했을 수 있다. 이 경우 반환된 `flock_id`, 직전 operation
+log, host daemon `/vms` 상태를 대조해 이미 삭제된 VM과 남은 VM을 직접 확인한다.
+
 output, registry, audit, metrics에는 authorization header, host endpoint, daemon raw
 body, `agent_token`을 저장하지 않는다. routed member의 `agent_url`은 VM 접근 정보로
 반환될 수 있지만 daemon raw response나 bearer token을 포함하면 안 된다.

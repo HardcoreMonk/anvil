@@ -1174,8 +1174,10 @@ MCP tool:
   plan으로 role별 host를 고른 뒤 host daemon `POST /vms`로 member VM만 생성한다.
 
 - `anvil_list_flocks` / `anvil_get_flock` / `anvil_delete_flock`:
-  live flock 목록, 단일 flock metadata와 agent 상태 조회, flock 소속 VM 삭제를
-  daemon에 위임한다.
+  live flock 목록, 단일 flock metadata와 agent 상태 조회, flock 소속 VM 삭제를 처리한다.
+  일반 Goosetown flock은 daemon `GET/DELETE /flocks` 의미를 따른다. members-only
+  routed flock은 `scheduler_state_path` registry의 visible record를 list/get에 합치고,
+  delete는 registry의 member placement를 따라 host별 daemon `DELETE /vms`로 라우팅한다.
 
 - `anvil_post_townwall` / `anvil_get_townwall_history`:
   flock Town Wall에 message를 append하고 stdio-compatible history를 조회한다.

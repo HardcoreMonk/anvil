@@ -109,7 +109,9 @@ members-only routed flock create slice를 포함하는 release candidate에서�
 `anvil_spawn_flock`이 계속 scheduler-aware single-host path이며,
 `anvil_create_routed_flock_members`는 opt-in experimental tool임을 확인한다.
 활성화 조건은 `ANVIL_MCP_CROSS_HOST_FLOCK_CREATE=members_only`와 persistent
-`scheduler_state_path`다.
+`scheduler_state_path`, runtime host inventory다. host inventory는
+`scheduler_hosts_file` / `ANVIL_MCP_SCHEDULER_HOSTS_FILE` 또는 이미 persistent state에
+저장된 runtime host list로 제공되어야 한다.
 
 필수 검증:
 

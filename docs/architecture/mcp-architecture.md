@@ -119,9 +119,9 @@ Validation:
 | `anvil_delete_snapshot` | `DELETE /snapshots/{snapshot_id}` | snapshot 삭제 |
 | `anvil_spawn_flock` | `POST /flocks` | 역할 목록으로 Goosetown flock 생성 |
 | `anvil_create_routed_flock_members` | `POST /vms` routed members | experimental members-only routed flock 생성 |
-| `anvil_list_flocks` | `GET /flocks` | live flock 목록 조회 |
-| `anvil_get_flock` | `GET /flocks/{flock_id}` | flock metadata와 agent 상태 조회 |
-| `anvil_delete_flock` | `DELETE /flocks/{flock_id}` | flock 소속 VM 삭제를 daemon에 위임 |
+| `anvil_list_flocks` | `GET /flocks` + routed registry | live Goosetown flock과 visible routed flock 목록 조회 |
+| `anvil_get_flock` | `GET /flocks/{flock_id}` 또는 routed registry | Goosetown flock metadata 또는 routed member 상태 조회 |
+| `anvil_delete_flock` | `DELETE /flocks/{flock_id}` 또는 routed member `DELETE /vms` | Goosetown flock 삭제 또는 routed member VM 정리 |
 | `anvil_post_townwall` | `POST /flocks/{flock_id}/post` | Town Wall message append |
 | `anvil_get_townwall_history` | `GET /flocks/{flock_id}/wall/history` | Town Wall history 조회 |
 
