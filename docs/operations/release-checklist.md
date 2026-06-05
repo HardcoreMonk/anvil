@@ -103,6 +103,34 @@ Scheduler release candidate는 `/control-loop/status`와 `/metrics`를 모두 sm
 검증해야 한다. `/metrics`에는 `agent_token`, daemon raw body, host endpoint가 나오면
 안 된다.
 
+### Routed flock members create release-candidate gate
+
+members-only routed flock create slice를 포함하는 release candidate에서는 기본
+`anvil_spawn_flock`이 계속 scheduler-aware single-host path이며,
+`anvil_create_routed_flock_members`는 opt-in experimental tool임을 확인한다.
+활성화 조건은 `ANVIL_MCP_CROSS_HOST_FLOCK_CREATE=members_only`와 persistent
+`scheduler_state_path`다.
+
+필수 검증:
+
+```bash
+go test ./internal/anvilmcp -count=1
+go test ./cmd/anvil-mcp -count=1
+go test ./cmd/goose-daemon -count=1
+go test ./... -count=1
+go build ./cmd/anvil-mcp
+go build ./cmd/anvil-scheduler
+go build ./cmd/goose-daemon
+git diff --check
+```
+
+KVM, daemon, LLM API key 등 flock smoke 전제 조건이 있는 host에서는 다음을 추가로
+실행해 default single-host flock 동작이 바뀌지 않았는지 확인한다.
+
+```bash
+scripts/anvil-mcp-e2e.sh flock
+```
+
 ### 현재 upstream runtime baseline
 
 2026-05-26 기준 `sync/ephemera-v0.3.6`은 upstream ephemera `v0.3.6`까지 병합된

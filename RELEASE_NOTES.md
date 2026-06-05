@@ -16,6 +16,10 @@
   - `anvil_scheduler_flock_placement_last_failure_timestamp_seconds`
 - `RuntimeRouter.CreateFlock` scheduler-aware path는 schedule, daemon create,
   placement save, total latency를 bounded phase histogram으로 기록한다.
+- experimental MCP `anvil_create_routed_flock_members`를 추가한다.
+  `ANVIL_MCP_CROSS_HOST_FLOCK_CREATE=members_only`와 persistent scheduler state가 있을
+  때 `POST /schedule/flock` plan을 사용해 role VM을 host daemon `POST /vms`로
+  cross-host 생성하고 `cross_host_members_only` output을 반환한다.
 
 ## 보안/운영 강화
 
@@ -23,6 +27,9 @@
   사용한다.
 - `tenant_id`, `flock_id`, `vm_id`, host endpoint, authorization header,
   `agent_token`, daemon raw body는 metrics state와 exposition에 저장하지 않는다.
+- routed members-only flock delete는 downstream registry의 member VM placement를 따라
+  host별 daemon delete를 호출하고, 일부 cleanup 실패 시 성공한 VM placement만 제거한
+  뒤 `failed_cleanup_pending` 상태를 남겨 수동 확인이 가능하게 한다.
 
 ## 검증 예정
 

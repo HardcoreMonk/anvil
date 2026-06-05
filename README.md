@@ -1168,6 +1168,11 @@ MCP tool:
   flock을 생성한다. blank `task`, empty role, `/` 또는 `\`가 포함된 role은
   daemon VM spawn 전에 거부된다.
 
+- `anvil_create_routed_flock_members`:
+  `ANVIL_MCP_CROSS_HOST_FLOCK_CREATE=members_only`와 persistent scheduler state가
+  설정된 경우에만 활성화되는 experimental tool이다. scheduler `POST /schedule/flock`
+  plan으로 role별 host를 고른 뒤 host daemon `POST /vms`로 member VM만 생성한다.
+
 - `anvil_list_flocks` / `anvil_get_flock` / `anvil_delete_flock`:
   live flock 목록, 단일 flock metadata와 agent 상태 조회, flock 소속 VM 삭제를
   daemon에 위임한다.
@@ -1221,16 +1226,29 @@ MCP production config에서 기존 VM/snapshot tool은 `ANVIL_DAEMON_URL` direct
 `scheduler_hosts_file` 또는 `ANVIL_MCP_SCHEDULER_HOSTS_FILE`이 설정된 경우
 활성화된다. `ANVIL_MCP_SCHEDULER_STATE` 또는
 `ANVIL_MCP_SCHEDULER_HOSTS_FILE`로 router config가 제공되면 `anvil_spawn_flock`은
-scheduler-aware single-host placement를 사용한다. roles 수만큼 active VM
+기존 scheduler-aware single-host placement를 계속 사용한다. roles 수만큼 active VM
 capacity/quota를 확인한 뒤 하나의 healthy host를 선택하고, daemon
 `POST /flocks`는 그 host에서 기존 single-host 의미로 실행한다.
-`POST /schedule/flock`은 cross-host agent placement plan을 dry-run으로 반환하지만,
-`anvil_spawn_flock` runtime create path는 아직 scheduler-aware single-host placement를
-사용한다. true cross-host member VM 생성, coordinator Town Wall, cross-host `gtcall`은
-후속 범위다.
+`ANVIL_MCP_CROSS_HOST_FLOCK_CREATE=members_only`와 persistent
+`scheduler_state_path`가 함께 설정되면 experimental
+`anvil_create_routed_flock_members`도 사용할 수 있다. 이 tool은
+`POST /schedule/flock` plan으로 role별 host를 정하고, 각 host daemon의 `POST /vms`를
+호출해 role VM을 생성한 뒤 member placement를 `scheduler_state_path`의 routed flock
+registry에 기록한다. 반환 `mode`는 `cross_host_members_only`,
+`town_wall_enabled=false`이며 `townwall_url`과 `post_url`은 없다. 이 첫 slice는
+Town Wall, cross-host `gtcall`, guest flock context injection을 지원하지 않는다.
 `scheduler_quota_store_path` 또는 `ANVIL_MCP_SCHEDULER_QUOTA_STORE`는 scheduler quota
 store를 함께 지정할 때 사용한다. host daemon client 인증에는 `ANVIL_API_TOKEN`을
 사용한다.
+
+MCP router 관련 설정:
+
+| 설정 | 의미 |
+|---|---|
+| `scheduler_state_path` / `ANVIL_MCP_SCHEDULER_STATE` | router placement, snapshot locality, routed flock registry를 저장하는 persistent JSON path |
+| `scheduler_hosts_file` / `ANVIL_MCP_SCHEDULER_HOSTS_FILE` | router가 사용할 runtime host inventory JSON path |
+| `scheduler_quota_store_path` / `ANVIL_MCP_SCHEDULER_QUOTA_STORE` | optional tenant quota JSON path |
+| `cross_host_flock_create_mode` / `ANVIL_MCP_CROSS_HOST_FLOCK_CREATE=members_only` | members-only routed flock create opt-in. persistent `scheduler_state_path`가 필요하며 기본 `anvil_spawn_flock`을 대체하지 않는다 |
 
 예시:
 

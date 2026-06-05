@@ -87,6 +87,10 @@ defaults
 | `ANVIL_MCP_SESSION_STORE` | session alias 영속 JSON file path override |
 | `ANVIL_MCP_TENANT_ID` | optional 기본 tenant identifier |
 | `ANVIL_MCP_AUDIT_LOG` | optional runtime audit JSONL file path |
+| `ANVIL_MCP_SCHEDULER_STATE` | scheduler/router placement, snapshot locality, routed flock registry JSON path |
+| `ANVIL_MCP_SCHEDULER_HOSTS_FILE` | scheduler/router runtime host inventory JSON path |
+| `ANVIL_MCP_SCHEDULER_QUOTA_STORE` | optional scheduler quota store JSON path |
+| `ANVIL_MCP_CROSS_HOST_FLOCK_CREATE` | `members_only`이면 experimental routed flock members create 활성화 |
 
 Validation:
 
@@ -114,6 +118,7 @@ Validation:
 | `anvil_restore_snapshot` | `POST /snapshots/{snapshot_id}/restore` | snapshot에서 새 VM restore 및 optional alias binding |
 | `anvil_delete_snapshot` | `DELETE /snapshots/{snapshot_id}` | snapshot 삭제 |
 | `anvil_spawn_flock` | `POST /flocks` | 역할 목록으로 Goosetown flock 생성 |
+| `anvil_create_routed_flock_members` | `POST /vms` routed members | experimental members-only routed flock 생성 |
 | `anvil_list_flocks` | `GET /flocks` | live flock 목록 조회 |
 | `anvil_get_flock` | `GET /flocks/{flock_id}` | flock metadata와 agent 상태 조회 |
 | `anvil_delete_flock` | `DELETE /flocks/{flock_id}` | flock 소속 VM 삭제를 daemon에 위임 |
@@ -150,10 +155,15 @@ history endpoint를 쓴다. 현재 MCP surface에는 flock snapshot/restore가 �
 MCP router config가 있을 때 `anvil_spawn_flock`은 scheduler-aware single-host
 placement를 사용할 수 있다. Scheduler service `POST /schedule/flock`은 cross-host
 flock placement plan을 dry-run으로 계산한다. 이 endpoint는 operator planning
-surface이며 VM을 만들지 않는다. MCP `anvil_spawn_flock`은 cross-host create slice가
-구현되기 전까지 기존 scheduler-aware single-host create path를 유지한다. tenant와
-audit 동작은 기존 MCP runtime audit 정책을 따르며, 별도 flock 전용 audit 의미를
-만들지 않는다.
+surface이며 VM을 만들지 않는다. MCP `anvil_spawn_flock`은 기존 scheduler-aware
+single-host create path를 유지한다. router config와
+`ANVIL_MCP_CROSS_HOST_FLOCK_CREATE=members_only`가 함께 설정되면
+`anvil_create_routed_flock_members`가 cross-host members-only create를 수행한다. 이
+path는 daemon `POST /flocks`가 아니라 scheduler plan에 포함된 host daemon
+`POST /vms`를 role별로 호출한다. routed registry는 delete routing과 inspection을 위한
+downstream `scheduler_state_path` state이며 daemon `FlockManager` 또는 Town Wall
+state가 아니다. tenant와 audit 동작은 기존 MCP runtime audit 정책을 따르며, 별도
+flock 전용 audit 의미를 만들지 않는다.
 
 ### IronClaw schema compatibility
 
@@ -689,7 +699,8 @@ HTTP MCP transport도 이 작업 범위 밖이다. v2 후보 논의에서는 다
 - Town Wall SSE stream의 MCP tool 노출
 - flock snapshot/restore
 - flock alias 또는 `session_name` 재사용
-- true cross-host member VM creation, coordinator Town Wall, cross-host `gtcall`
+- routed members-only flock의 Town Wall, cross-host `gtcall`, guest flock context
+  injection, daemon `FlockManager` registration
 
 위 항목은 v1의 숨은 동작이 아니라 향후 MCP v2 설계 후보로 남긴다.
 

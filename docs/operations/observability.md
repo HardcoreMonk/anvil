@@ -106,9 +106,18 @@ latency를 scheduler state에 aggregate로 기록한다. scheduler service는 �
 - `anvil_scheduler_flock_placement_last_failure_timestamp_seconds`는 scheduler denial
   또는 error outcome이 발생한 마지막 시각이다.
 
+Members-only routed flock create는 같은 metric family에 cross-host 전용 bounded enum을
+추가로 기록한다. 이 path는 `ANVIL_MCP_CROSS_HOST_FLOCK_CREATE=members_only`가 켜진
+MCP router에서 `anvil_create_routed_flock_members`를 호출할 때만 사용된다.
+
+- outcome enum: `cross_host_success`, `cross_host_denied`,
+  `cross_host_spawn_error`, `cross_host_rollback_error`,
+  `cross_host_registry_error`
+- phase enum: `plan`, `agent_spawn`, `registry_save`, `rollback`, `total`
+
 flock placement metrics label은 의도적으로 bounded enum만 사용한다. `tenant_id`,
-`flock_id`, `vm_id`, host endpoint, daemon raw error text, authorization header,
-`agent_token` 같은 값은 label이나 state에 넣지 않는다.
+`flock_id`, `vm_id`, host name, host endpoint, daemon raw error text, authorization
+header, `agent_token` 같은 값은 label이나 state에 넣지 않는다.
 
 ## Goosetown 상태 확인
 
