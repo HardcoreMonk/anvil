@@ -566,6 +566,9 @@ func TestPlacementStoreRoutedFlockRegistrySurvivesStaleUnrelatedSave(t *testing.
 	if record.Agents[0].Host != "host-a" {
 		t.Fatalf("routed flock agent host = %q, want host-a", record.Agents[0].Host)
 	}
+	if host, ok := reloaded.VMHost("vm-worker"); !ok || host != "host-a" {
+		t.Fatalf("routed flock VM placement = %q,%v want host-a,true", host, ok)
+	}
 	if host, ok := reloaded.Host("host-b"); !ok || host.Endpoint != "http://host-b" {
 		t.Fatalf("unrelated host = %+v,%v want persisted host-b", host, ok)
 	}
@@ -637,6 +640,9 @@ func TestPlacementStoreSaveRoutedFlockAndPlacementsPreservesOtherPersistedFlocks
 	}, nil); err != nil {
 		t.Fatalf("stale SaveRoutedFlockAndPlacements current: %v", err)
 	}
+	if host, ok := stale.VMHost("vm-other"); !ok || host != "host-other" {
+		t.Fatalf("in-memory other routed flock VM placement = %q,%v want host-other,true", host, ok)
+	}
 
 	reloaded := NewPlacementStore(path)
 	if err := reloaded.Load(); err != nil {
@@ -646,10 +652,46 @@ func TestPlacementStoreSaveRoutedFlockAndPlacementsPreservesOtherPersistedFlocks
 	if !ok || other.Agents[0].Host != "host-other" {
 		t.Fatalf("other routed flock = %+v,%v want host-other,true", other, ok)
 	}
+	if host, ok := reloaded.VMHost("vm-other"); !ok || host != "host-other" {
+		t.Fatalf("other routed flock VM placement = %q,%v want host-other,true", host, ok)
+	}
 	current, ok := reloaded.RoutedFlock("routed-flock-current")
 	if !ok || current.Agents[0].VMID != "vm-current-new" || current.Agents[0].Host != "host-new" {
 		t.Fatalf("current routed flock = %+v,%v want new current record", current, ok)
 	}
+}
+
+func TestPlacementStoreSaveRoutedFlockAndPlacementsPreservesExternallyPersistedFlockPlacementMetrics(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "scheduler.json")
+	stale := NewPlacementStore(path)
+	if err := stale.Load(); err != nil {
+		t.Fatalf("stale Load: %v", err)
+	}
+
+	metricsStore := NewPlacementStore(path)
+	if err := metricsStore.RecordFlockPlacementMetrics(FlockPlacementMetricObservation{
+		Outcome: FlockPlacementOutcomeSuccess,
+		Reason:  FlockPlacementReasonScheduled,
+		At:      time.Date(2026, 6, 6, 2, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("RecordFlockPlacementMetrics: %v", err)
+	}
+
+	if err := stale.SaveRoutedFlockAndPlacements(RoutedFlockRecord{
+		FlockID: "routed-flock-current",
+		Mode:    RoutedFlockModeCrossHostMembersOnly,
+		Status:  RoutedFlockStatusReady,
+		Agents:  []RoutedFlockAgent{{AgentID: "worker-current", Role: "worker", VMID: "vm-current", Host: "host-current", Status: "running"}},
+	}, nil); err != nil {
+		t.Fatalf("stale SaveRoutedFlockAndPlacements: %v", err)
+	}
+	requireStoredFlockPlacementAttempt(t, stale.State().FlockPlacementMetrics, FlockPlacementOutcomeSuccess, FlockPlacementReasonScheduled, 1)
+
+	reloaded := NewPlacementStore(path)
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("reloaded Load: %v", err)
+	}
+	requireStoredFlockPlacementAttempt(t, reloaded.State().FlockPlacementMetrics, FlockPlacementOutcomeSuccess, FlockPlacementReasonScheduled, 1)
 }
 
 func TestPlacementStoreSaveRoutedFlockAndPlacementsRollsBackOnFailure(t *testing.T) {

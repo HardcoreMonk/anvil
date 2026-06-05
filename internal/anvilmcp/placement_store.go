@@ -172,7 +172,7 @@ func readPlacementStoreState(path string) (PlacementStoreState, bool, error) {
 	return state, true, nil
 }
 
-func mergePersistedPlacementStoreFields(path string, state *PlacementStoreState, updatedRoutedFlockIDs map[string]bool, preserveMetrics bool) error {
+func mergePersistedPlacementStoreFields(path string, state *PlacementStoreState, preserveMetrics bool) error {
 	persisted, exists, err := readPlacementStoreState(path)
 	if err != nil {
 		return err
@@ -183,54 +183,39 @@ func mergePersistedPlacementStoreFields(path string, state *PlacementStoreState,
 	if preserveMetrics {
 		state.FlockPlacementMetrics = cloneFlockPlacementMetricsState(persisted.FlockPlacementMetrics)
 	}
-	mergePersistedRoutedFlocks(persisted.RoutedFlocks, state, updatedRoutedFlockIDs)
+	mergePersistedRoutedFlocks(persisted.RoutedFlocks, state)
 	return nil
 }
 
 func savePlacementStoreStatePreserveFlockMetrics(path string, state PlacementStoreState) error {
-	if err := mergePersistedPlacementStoreFields(path, &state, nil, true); err != nil {
-		return err
-	}
-	return writePlacementStoreState(path, state)
-}
-
-func savePlacementStoreStatePreserveRoutedFlockUpdates(path string, state PlacementStoreState, updatedRoutedFlockIDs map[string]bool) error {
-	if err := mergePersistedPlacementStoreFields(path, &state, updatedRoutedFlockIDs, true); err != nil {
+	if err := mergePersistedPlacementStoreFields(path, &state, true); err != nil {
 		return err
 	}
 	return writePlacementStoreState(path, state)
 }
 
 func savePlacementStoreStatePreserveRoutedFlocks(path string, state PlacementStoreState) error {
-	if err := mergePersistedPlacementStoreFields(path, &state, nil, false); err != nil {
+	if err := mergePersistedPlacementStoreFields(path, &state, false); err != nil {
 		return err
 	}
 	return writePlacementStoreState(path, state)
 }
 
-func mergePersistedRoutedFlocks(persisted map[string]RoutedFlockRecord, state *PlacementStoreState, updatedRoutedFlockIDs map[string]bool) {
-	next := make(map[string]RoutedFlockRecord, len(persisted)+len(updatedRoutedFlockIDs))
+func mergePersistedRoutedFlocks(persisted map[string]RoutedFlockRecord, state *PlacementStoreState) {
+	next := make(map[string]RoutedFlockRecord, len(persisted))
 	for _, record := range persisted {
 		record = normalizeRoutedFlockRecord(record)
 		if record.FlockID == "" {
 			continue
 		}
 		next[record.FlockID] = cloneRoutedFlockRecord(record)
-	}
-	for flockID := range updatedRoutedFlockIDs {
-		flockID = strings.TrimSpace(flockID)
-		if flockID == "" {
-			continue
+		for _, agent := range record.Agents {
+			vmID := strings.TrimSpace(agent.VMID)
+			host := strings.TrimSpace(agent.Host)
+			if vmID != "" && host != "" && agent.Status != "deleted" {
+				state.VMPlacements[vmID] = host
+			}
 		}
-		record, ok := state.RoutedFlocks[flockID]
-		if !ok {
-			continue
-		}
-		record = normalizeRoutedFlockRecord(record)
-		if record.FlockID == "" {
-			continue
-		}
-		next[record.FlockID] = cloneRoutedFlockRecord(record)
 	}
 	state.RoutedFlocks = next
 }
@@ -282,14 +267,6 @@ func (s *PlacementStore) saveLockedPreserveFlockMetrics() error {
 	}
 	state := clonePlacementStoreState(s.state)
 	return savePlacementStoreStatePreserveFlockMetrics(s.path, state)
-}
-
-func (s *PlacementStore) saveLockedPreserveRoutedFlockUpdates(updatedRoutedFlockIDs map[string]bool) error {
-	if strings.TrimSpace(s.path) == "" {
-		return nil
-	}
-	state := clonePlacementStoreState(s.state)
-	return savePlacementStoreStatePreserveRoutedFlockUpdates(s.path, state, updatedRoutedFlockIDs)
 }
 
 func (s *PlacementStore) saveLockedRaw() error {
@@ -812,23 +789,43 @@ func (s *PlacementStore) SaveRoutedFlockAndPlacements(record RoutedFlockRecord, 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ensureMaps()
+
+	if strings.TrimSpace(s.path) == "" {
+		applyRoutedFlockAndPlacements(&s.state, record, removeVMIDs)
+		return nil
+	}
+
 	previous := clonePlacementStoreState(s.state)
-	s.state.RoutedFlocks[record.FlockID] = record
+	base := clonePlacementStoreState(s.state)
+	persisted, exists, err := readPlacementStoreState(s.path)
+	if err != nil {
+		return err
+	}
+	if exists {
+		base = persisted
+	}
+	applyRoutedFlockAndPlacements(&base, record, removeVMIDs)
+	if err := writePlacementStoreState(s.path, base); err != nil {
+		s.state = previous
+		return err
+	}
+	s.state = clonePlacementStoreState(base)
+	return nil
+}
+
+func applyRoutedFlockAndPlacements(state *PlacementStoreState, record RoutedFlockRecord, removeVMIDs []string) {
+	normalizePlacementStoreState(state)
+	state.RoutedFlocks[record.FlockID] = cloneRoutedFlockRecord(record)
 	for _, vmID := range removeVMIDs {
-		delete(s.state.VMPlacements, strings.TrimSpace(vmID))
+		delete(state.VMPlacements, strings.TrimSpace(vmID))
 	}
 	for _, agent := range record.Agents {
 		vmID := strings.TrimSpace(agent.VMID)
 		host := strings.TrimSpace(agent.Host)
 		if vmID != "" && host != "" && agent.Status != "deleted" {
-			s.state.VMPlacements[vmID] = host
+			state.VMPlacements[vmID] = host
 		}
 	}
-	if err := s.saveLockedPreserveRoutedFlockUpdates(map[string]bool{record.FlockID: true}); err != nil {
-		s.state = previous
-		return err
-	}
-	return nil
 }
 
 func (s *PlacementStore) RoutedFlock(flockID string) (RoutedFlockRecord, bool) {
