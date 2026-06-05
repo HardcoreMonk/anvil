@@ -276,6 +276,7 @@ func rollbackRoutedFlockCreate(ctx context.Context, r *RuntimeRouter, record Rou
 		record.Agents = []RoutedFlockAgent{}
 		record.UpdatedAt = time.Now().UTC()
 		if err := r.placementStore.SaveRoutedFlockAndPlacements(record, removeVMIDs); err != nil {
+			preserveRoutedFlockCleanupStateInMemory(r.placementStore, record, removeVMIDs)
 			r.recordRoutedFlockMetric(metric.observation(FlockPlacementOutcomeCrossHostRollbackError, reason, rollbackLatency))
 			return sanitizedRoutedFlockCreateError(record.FlockID, reason, true)
 		}
@@ -287,6 +288,7 @@ func rollbackRoutedFlockCreate(ctx context.Context, r *RuntimeRouter, record Rou
 	record.Agents = pendingAgents
 	record.UpdatedAt = time.Now().UTC()
 	if err := r.placementStore.SaveRoutedFlockAndPlacements(record, removeVMIDs); err != nil {
+		preserveRoutedFlockCleanupStateInMemory(r.placementStore, record, removeVMIDs)
 		r.recordRoutedFlockMetric(metric.observation(FlockPlacementOutcomeCrossHostRollbackError, reason, rollbackLatency))
 		return sanitizedRoutedFlockCreateError(record.FlockID, reason, true)
 	}

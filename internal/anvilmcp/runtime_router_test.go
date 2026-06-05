@@ -802,6 +802,177 @@ func TestRuntimeRouterCreateRoutedFlockMembersRollsBackOnSecondSpawnFailure(t *t
 	requireFlockPlacementMetricPhaseCount(t, state, FlockPlacementPhaseRollback, 1)
 }
 
+func TestRuntimeRouterCreateRoutedFlockMembersPreservesDeletedRollbackInMemoryWhenFinalSaveFails(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
+	hostA := &routerFakeDaemon{
+		spawnResponses: []*SpawnVMResponse{{
+			VMID:         "vm-worker",
+			GuestIP:      "10.0.1.10",
+			AgentURL:     "http://10.0.1.10:8080",
+			TenantID:     "tenant-1",
+			EgressPolicy: "profile",
+		}},
+		afterDelete: func() {
+			store.path = t.TempDir()
+		},
+	}
+	hostB := &routerFakeDaemon{
+		spawnErr: errors.New("daemon http://host-b.internal/secret-endpoint failed: agent_token=secret-token"),
+	}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(
+			[]RuntimeHost{
+				{Name: "host-a", Endpoint: "http://host-a.internal/secret-endpoint", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+				{Name: "host-b", Endpoint: "http://host-b.internal/secret-endpoint", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+			},
+			nil,
+			nil,
+		),
+		map[string]Daemon{"host-a": hostA, "host-b": hostB},
+		RuntimeRouterOptions{PlacementStore: store},
+	)
+
+	out, err := router.CreateRoutedFlockMembers(context.Background(), FlockCreateRequest{
+		Task:         "review worker output",
+		Roles:        []string{"worker", "reviewer"},
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+	})
+	if err == nil {
+		t.Fatal("CreateRoutedFlockMembers error = nil, want rollback save failure")
+	}
+	if out != nil {
+		t.Fatalf("CreateRoutedFlockMembers output = %+v, want nil on rollback", out)
+	}
+	if hostA.deleteCalls != 1 || strings.Join(hostA.deleteVMIDs, ",") != "vm-worker" {
+		t.Fatalf("host-a delete calls/vmids = %d/%q, want 1/vm-worker", hostA.deleteCalls, strings.Join(hostA.deleteVMIDs, ","))
+	}
+	if _, ok := router.Placement("vm-worker"); ok {
+		t.Fatal("router placement for vm-worker still exists after rollback cleanup")
+	}
+	if _, ok := store.VMHost("vm-worker"); ok {
+		t.Fatal("store placement for vm-worker still exists after rollback save failure")
+	}
+	records := store.ListRoutedFlocks()
+	if len(records) != 1 {
+		t.Fatalf("routed records len = %d, want 1", len(records))
+	}
+	if records[0].Status != RoutedFlockStatusDeleted {
+		t.Fatalf("routed record status = %q, want %q", records[0].Status, RoutedFlockStatusDeleted)
+	}
+	if len(records[0].Agents) != 0 {
+		t.Fatalf("routed record agents = %+v, want none after successful cleanup", records[0].Agents)
+	}
+
+	text := err.Error()
+	if !strings.Contains(text, "routed flock create cleanup pending") || !strings.Contains(text, FlockPlacementReasonDaemonCreateFailed) {
+		t.Fatalf("CreateRoutedFlockMembers error = %q, want cleanup pending daemon_create_failed", text)
+	}
+	for _, forbidden := range []string{"agent_token", "secret-token", "Authorization", "Bearer", "host-a.internal", "host-b.internal", "secret-endpoint", "http://"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("CreateRoutedFlockMembers error leaked forbidden marker %q: %q", forbidden, text)
+		}
+	}
+}
+
+func TestRuntimeRouterCreateRoutedFlockMembersPreservesPartialRollbackInMemoryWhenFinalSaveFails(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
+	hostA := &routerFakeDaemon{
+		spawnResponses: []*SpawnVMResponse{{
+			VMID:         "vm-worker",
+			GuestIP:      "10.0.1.10",
+			AgentURL:     "http://10.0.1.10:8080",
+			TenantID:     "tenant-1",
+			EgressPolicy: "profile",
+		}},
+		afterDelete: func() {
+			store.path = t.TempDir()
+		},
+	}
+	hostB := &routerFakeDaemon{
+		spawnResponses: []*SpawnVMResponse{{
+			VMID:         "vm-reviewer",
+			GuestIP:      "10.0.2.10",
+			AgentURL:     "http://10.0.2.10:8080",
+			TenantID:     "tenant-1",
+			EgressPolicy: "profile",
+		}},
+		deleteErrForVMID: map[string]error{
+			"vm-reviewer": errors.New("delete failed: agent_token=secret-token Authorization: Bearer secret-token"),
+		},
+	}
+	hostC := &routerFakeDaemon{
+		spawnErr: errors.New("daemon http://host-c.internal/secret-endpoint failed: agent_token=secret-token"),
+	}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(
+			[]RuntimeHost{
+				{Name: "host-a", Endpoint: "http://host-a.internal/secret-endpoint", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+				{Name: "host-b", Endpoint: "http://host-b.internal/secret-endpoint", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+				{Name: "host-c", Endpoint: "http://host-c.internal/secret-endpoint", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+			},
+			nil,
+			nil,
+		),
+		map[string]Daemon{"host-a": hostA, "host-b": hostB, "host-c": hostC},
+		RuntimeRouterOptions{PlacementStore: store},
+	)
+
+	out, err := router.CreateRoutedFlockMembers(context.Background(), FlockCreateRequest{
+		Task:         "review worker output",
+		Roles:        []string{"worker", "reviewer", "critic"},
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+	})
+	if err == nil {
+		t.Fatal("CreateRoutedFlockMembers error = nil, want rollback cleanup pending")
+	}
+	if out != nil {
+		t.Fatalf("CreateRoutedFlockMembers output = %+v, want nil on rollback", out)
+	}
+	if hostA.deleteCalls != 1 || strings.Join(hostA.deleteVMIDs, ",") != "vm-worker" {
+		t.Fatalf("host-a delete calls/vmids = %d/%q, want 1/vm-worker", hostA.deleteCalls, strings.Join(hostA.deleteVMIDs, ","))
+	}
+	if hostB.deleteCalls != 1 || strings.Join(hostB.deleteVMIDs, ",") != "vm-reviewer" {
+		t.Fatalf("host-b delete calls/vmids = %d/%q, want 1/vm-reviewer", hostB.deleteCalls, strings.Join(hostB.deleteVMIDs, ","))
+	}
+	if _, ok := router.Placement("vm-worker"); ok {
+		t.Fatal("router placement for vm-worker still exists after successful rollback cleanup")
+	}
+	if _, ok := store.VMHost("vm-worker"); ok {
+		t.Fatal("store placement for vm-worker still exists after partial rollback save failure")
+	}
+	if host, ok := router.Placement("vm-reviewer"); !ok || host != "host-b" {
+		t.Fatalf("router placement for vm-reviewer = %q,%v want host-b,true", host, ok)
+	}
+	if host, ok := store.VMHost("vm-reviewer"); !ok || host != "host-b" {
+		t.Fatalf("store placement for vm-reviewer = %q,%v want host-b,true", host, ok)
+	}
+	records := store.ListRoutedFlocks()
+	if len(records) != 1 {
+		t.Fatalf("routed records len = %d, want 1", len(records))
+	}
+	if records[0].Status != RoutedFlockStatusFailedCleanupPending {
+		t.Fatalf("routed record status = %q, want %q", records[0].Status, RoutedFlockStatusFailedCleanupPending)
+	}
+	if len(records[0].Agents) != 1 {
+		t.Fatalf("routed record agents = %+v, want one cleanup-pending agent", records[0].Agents)
+	}
+	if records[0].Agents[0].VMID != "vm-reviewer" || records[0].Agents[0].Status != "cleanup_pending" {
+		t.Fatalf("cleanup-pending agent = %+v, want vm-reviewer cleanup_pending", records[0].Agents[0])
+	}
+
+	text := err.Error()
+	if !strings.Contains(text, "routed flock create cleanup pending") || !strings.Contains(text, FlockPlacementReasonDaemonCreateFailed) {
+		t.Fatalf("CreateRoutedFlockMembers error = %q, want cleanup pending daemon_create_failed", text)
+	}
+	for _, forbidden := range []string{"agent_token", "secret-token", "Authorization", "Bearer", "host-a.internal", "host-b.internal", "host-c.internal", "secret-endpoint", "http://"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("CreateRoutedFlockMembers error leaked forbidden marker %q: %q", forbidden, text)
+		}
+	}
+}
+
 func TestRuntimeRouterCreateRoutedFlockMembersLeavesCleanupPendingOnRollbackDeleteFailure(t *testing.T) {
 	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
 	hostA := &routerFakeDaemon{
