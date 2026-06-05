@@ -128,6 +128,7 @@ type fakeReplicatingDaemon struct {
 	createRoutedFlockMembersCalls int
 	createRoutedFlockMembersReq   FlockCreateRequest
 	createRoutedFlockMembersResp  *RoutedFlockCreateOutput
+	createRoutedFlockMembersNil   bool
 	createRoutedFlockMembersErr   error
 }
 
@@ -157,6 +158,9 @@ func (f *fakeReplicatingDaemon) CreateRoutedFlockMembers(_ context.Context, req 
 	f.createRoutedFlockMembersReq = req
 	if f.createRoutedFlockMembersErr != nil {
 		return nil, f.createRoutedFlockMembersErr
+	}
+	if f.createRoutedFlockMembersNil {
+		return nil, nil
 	}
 	if f.createRoutedFlockMembersResp != nil {
 		return f.createRoutedFlockMembersResp, nil
@@ -2115,6 +2119,41 @@ func TestToolsCreateRoutedFlockMembersDisabledDaemonAuditsFailure(t *testing.T) 
 	record := records[0]
 	if record.ToolName != "anvil_create_routed_flock_members" || record.DaemonOperation != "POST /vms routed flock members" || record.ResultCode != "error" {
 		t.Fatalf("audit record = %+v, want routed members create failure", record)
+	}
+}
+
+func TestToolsCreateRoutedFlockMembersNilOutputAuditsFailure(t *testing.T) {
+	daemon := &fakeReplicatingDaemon{
+		fakeDaemon:                  &fakeDaemon{},
+		createRoutedFlockMembersNil: true,
+	}
+	auditPath := filepath.Join(t.TempDir(), "runtime-audit.jsonl")
+	tools := NewToolsWithOptions(daemon, NewSessionStore(), time.Second, ToolsOptions{
+		DefaultTenantID: "tenant-1",
+		AuditLogPath:    auditPath,
+	})
+
+	out, err := tools.CreateRoutedFlockMembers(context.Background(), SpawnFlockInput{
+		Task:  "build town",
+		Roles: []string{"worker"},
+	})
+	if err == nil {
+		t.Fatal("CreateRoutedFlockMembers error = nil, want nil-output error")
+	}
+	if out != nil {
+		t.Fatalf("CreateRoutedFlockMembers output = %+v, want nil", out)
+	}
+
+	records, err := ReadRuntimeAudit(auditPath)
+	if err != nil {
+		t.Fatalf("ReadRuntimeAudit() error = %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("audit record count = %d, want 1", len(records))
+	}
+	record := records[0]
+	if record.ToolName != "anvil_create_routed_flock_members" || record.DaemonOperation != "POST /vms routed flock members" || record.ResultCode != "error" {
+		t.Fatalf("audit record = %+v, want routed members create nil-output failure", record)
 	}
 }
 

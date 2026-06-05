@@ -944,6 +944,10 @@ func (t *Tools) CreateRoutedFlockMembers(ctx context.Context, input SpawnFlockIn
 	if err != nil {
 		return nil, t.auditFailureAndReturn(tenantID, "", "", "anvil_create_routed_flock_members", "POST /vms routed flock members", err)
 	}
+	if out == nil {
+		err := fmt.Errorf("routed flock members create returned nil response")
+		return nil, t.auditFailureAndReturn(tenantID, "", "", "anvil_create_routed_flock_members", "POST /vms routed flock members", err)
+	}
 	if err := t.auditSuccess(tenantID, "", "", "anvil_create_routed_flock_members", "POST /vms routed flock members"); err != nil {
 		return nil, err
 	}
