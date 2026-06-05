@@ -43,6 +43,37 @@ type SuspectVMPlacement struct {
 	Reason string `json:"reason"`
 }
 
+const (
+	RoutedFlockModeCrossHostMembersOnly = "cross_host_members_only"
+
+	RoutedFlockStatusCreating             = "creating"
+	RoutedFlockStatusReady                = "ready"
+	RoutedFlockStatusDeleting             = "deleting"
+	RoutedFlockStatusDeleted              = "deleted"
+	RoutedFlockStatusFailedCleanupPending = "failed_cleanup_pending"
+)
+
+type RoutedFlockRecord struct {
+	FlockID      string             `json:"flock_id"`
+	Task         string             `json:"task"`
+	TenantID     string             `json:"tenant_id,omitempty"`
+	EgressPolicy string             `json:"egress_policy,omitempty"`
+	Mode         string             `json:"mode"`
+	Status       string             `json:"status"`
+	Agents       []RoutedFlockAgent `json:"agents"`
+	CreatedAt    time.Time          `json:"created_at"`
+	UpdatedAt    time.Time          `json:"updated_at"`
+}
+
+type RoutedFlockAgent struct {
+	AgentID  string `json:"agent_id"`
+	Role     string `json:"role"`
+	VMID     string `json:"vm_id"`
+	AgentURL string `json:"agent_url"`
+	Host     string `json:"host"`
+	Status   string `json:"status"`
+}
+
 type ControlLoopStatus struct {
 	Running                  bool                       `json:"running"`
 	PollIntervalSeconds      int64                      `json:"poll_interval_seconds"`
@@ -66,6 +97,7 @@ type PlacementStoreState struct {
 	SuspectVMPlacements   map[string]SuspectVMPlacement `json:"suspect_vm_placements,omitempty"`
 	ControlLoopStatus     ControlLoopStatus             `json:"control_loop_status,omitempty"`
 	FlockPlacementMetrics FlockPlacementMetricsState    `json:"flock_placement_metrics,omitempty"`
+	RoutedFlocks          map[string]RoutedFlockRecord  `json:"routed_flocks,omitempty"`
 }
 
 type PlacementStore struct {
@@ -88,6 +120,7 @@ func NewPlacementStore(path string) *PlacementStore {
 				Hosts: make(map[string]HostObservation),
 			},
 			FlockPlacementMetrics: newFlockPlacementMetricsState(),
+			RoutedFlocks:          make(map[string]RoutedFlockRecord),
 		},
 	}
 }
@@ -645,6 +678,20 @@ func normalizePlacementStoreState(state *PlacementStoreState) {
 		state.ControlLoopStatus.Hosts = make(map[string]HostObservation)
 	}
 	normalizeFlockPlacementMetricsState(&state.FlockPlacementMetrics)
+	if state.RoutedFlocks == nil {
+		state.RoutedFlocks = make(map[string]RoutedFlockRecord)
+	}
+	for flockID, record := range state.RoutedFlocks {
+		normalized := normalizeRoutedFlockRecord(record)
+		if normalized.FlockID == "" {
+			delete(state.RoutedFlocks, flockID)
+			continue
+		}
+		state.RoutedFlocks[normalized.FlockID] = normalized
+		if normalized.FlockID != flockID {
+			delete(state.RoutedFlocks, flockID)
+		}
+	}
 }
 
 func normalizeVMPlacements(placements map[string]string) map[string]string {
@@ -668,6 +715,7 @@ func clonePlacementStoreState(state PlacementStoreState) PlacementStoreState {
 		ConfigManagedHosts:  make(map[string]bool, len(state.ConfigManagedHosts)),
 		HostObservations:    make(map[string]HostObservation, len(state.HostObservations)),
 		SuspectVMPlacements: make(map[string]SuspectVMPlacement, len(state.SuspectVMPlacements)),
+		RoutedFlocks:        make(map[string]RoutedFlockRecord, len(state.RoutedFlocks)),
 	}
 	for name, host := range state.Hosts {
 		out.Hosts[name] = cloneRuntimeHost(host)
@@ -687,6 +735,9 @@ func clonePlacementStoreState(state PlacementStoreState) PlacementStoreState {
 	for vmID, suspect := range state.SuspectVMPlacements {
 		out.SuspectVMPlacements[vmID] = suspect
 	}
+	for flockID, record := range state.RoutedFlocks {
+		out.RoutedFlocks[flockID] = cloneRoutedFlockRecord(record)
+	}
 	out.ControlLoopStatus = state.ControlLoopStatus
 	out.ControlLoopStatus.Hosts = make(map[string]HostObservation, len(state.ControlLoopStatus.Hosts))
 	for host, obs := range state.ControlLoopStatus.Hosts {
@@ -699,4 +750,103 @@ func clonePlacementStoreState(state PlacementStoreState) PlacementStoreState {
 func cloneRuntimeHost(host RuntimeHost) RuntimeHost {
 	host.EgressPolicies = append([]EgressPolicy(nil), host.EgressPolicies...)
 	return host
+}
+
+func (s *PlacementStore) SaveRoutedFlockAndPlacements(record RoutedFlockRecord, removeVMIDs []string) error {
+	record = normalizeRoutedFlockRecord(record)
+	if record.FlockID == "" {
+		return fmt.Errorf("flock_id must be non-empty")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensureMaps()
+	previous := clonePlacementStoreState(s.state)
+	s.state.RoutedFlocks[record.FlockID] = record
+	for _, vmID := range removeVMIDs {
+		delete(s.state.VMPlacements, strings.TrimSpace(vmID))
+	}
+	for _, agent := range record.Agents {
+		vmID := strings.TrimSpace(agent.VMID)
+		host := strings.TrimSpace(agent.Host)
+		if vmID != "" && host != "" && agent.Status != "deleted" {
+			s.state.VMPlacements[vmID] = host
+		}
+	}
+	if err := s.saveLocked(); err != nil {
+		s.state = previous
+		return err
+	}
+	return nil
+}
+
+func (s *PlacementStore) RoutedFlock(flockID string) (RoutedFlockRecord, bool) {
+	flockID = strings.TrimSpace(flockID)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	record, ok := s.state.RoutedFlocks[flockID]
+	return cloneRoutedFlockRecord(record), ok
+}
+
+func (s *PlacementStore) ListRoutedFlocks() []RoutedFlockRecord {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	names := make([]string, 0, len(s.state.RoutedFlocks))
+	for flockID := range s.state.RoutedFlocks {
+		names = append(names, flockID)
+	}
+	sort.Strings(names)
+	out := make([]RoutedFlockRecord, 0, len(names))
+	for _, flockID := range names {
+		out = append(out, cloneRoutedFlockRecord(s.state.RoutedFlocks[flockID]))
+	}
+	return out
+}
+
+func normalizeRoutedFlockRecord(record RoutedFlockRecord) RoutedFlockRecord {
+	record.FlockID = strings.TrimSpace(record.FlockID)
+	record.Task = strings.TrimSpace(record.Task)
+	record.TenantID = strings.TrimSpace(record.TenantID)
+	record.EgressPolicy = strings.TrimSpace(record.EgressPolicy)
+	record.Mode = strings.TrimSpace(record.Mode)
+	if record.Mode == "" {
+		record.Mode = RoutedFlockModeCrossHostMembersOnly
+	}
+	record.Status = normalizeRoutedFlockStatus(record.Status)
+	agents := make([]RoutedFlockAgent, 0, len(record.Agents))
+	for _, agent := range record.Agents {
+		agent.AgentID = strings.TrimSpace(agent.AgentID)
+		agent.Role = strings.TrimSpace(agent.Role)
+		agent.VMID = strings.TrimSpace(agent.VMID)
+		agent.AgentURL = strings.TrimSpace(agent.AgentURL)
+		agent.Host = strings.TrimSpace(agent.Host)
+		agent.Status = strings.TrimSpace(agent.Status)
+		if agent.AgentID == "" || agent.Role == "" {
+			continue
+		}
+		agents = append(agents, agent)
+	}
+	record.Agents = agents
+	return record
+}
+
+func normalizeRoutedFlockStatus(status string) string {
+	switch strings.TrimSpace(status) {
+	case RoutedFlockStatusCreating:
+		return RoutedFlockStatusCreating
+	case RoutedFlockStatusReady:
+		return RoutedFlockStatusReady
+	case RoutedFlockStatusDeleting:
+		return RoutedFlockStatusDeleting
+	case RoutedFlockStatusDeleted:
+		return RoutedFlockStatusDeleted
+	case RoutedFlockStatusFailedCleanupPending:
+		return RoutedFlockStatusFailedCleanupPending
+	default:
+		return RoutedFlockStatusCreating
+	}
+}
+
+func cloneRoutedFlockRecord(record RoutedFlockRecord) RoutedFlockRecord {
+	record.Agents = append([]RoutedFlockAgent(nil), record.Agents...)
+	return record
 }

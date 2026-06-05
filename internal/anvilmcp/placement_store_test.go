@@ -452,3 +452,78 @@ func TestPlacementStorePersistsControlLoopState(t *testing.T) {
 		t.Fatalf("ControlLoopStatus.Hosts[host-a] = %+v, want cloned degraded observation", statusObs)
 	}
 }
+
+func TestPlacementStoreRoutedFlockRegistryPersistsAndClones(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "scheduler.json")
+	store := NewPlacementStore(path)
+	record := RoutedFlockRecord{
+		FlockID:      "routed-flock-1",
+		Task:         "review changes",
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+		Mode:         RoutedFlockModeCrossHostMembersOnly,
+		Status:       RoutedFlockStatusReady,
+		Agents: []RoutedFlockAgent{{
+			AgentID:  "worker-1",
+			Role:     "worker",
+			VMID:     "vm-worker",
+			AgentURL: "http://10.0.0.2:3000",
+			Host:     "host-a",
+			Status:   "running",
+		}},
+		CreatedAt: time.Date(2026, 6, 6, 1, 0, 0, 0, time.UTC),
+		UpdatedAt: time.Date(2026, 6, 6, 1, 1, 0, 0, time.UTC),
+	}
+
+	if err := store.SaveRoutedFlockAndPlacements(record, nil); err != nil {
+		t.Fatalf("SaveRoutedFlockAndPlacements: %v", err)
+	}
+	record.Agents[0].AgentURL = "mutated"
+
+	reloaded := NewPlacementStore(path)
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got, ok := reloaded.RoutedFlock("routed-flock-1")
+	if !ok {
+		t.Fatal("RoutedFlock ok = false, want true")
+	}
+	if got.Agents[0].AgentURL != "http://10.0.0.2:3000" {
+		t.Fatalf("stored agent URL = %q, want original", got.Agents[0].AgentURL)
+	}
+	if host, ok := reloaded.VMHost("vm-worker"); !ok || host != "host-a" {
+		t.Fatalf("vm placement = %q,%v want host-a,true", host, ok)
+	}
+	got.Agents[0].Host = "mutated"
+	again, _ := reloaded.RoutedFlock("routed-flock-1")
+	if again.Agents[0].Host != "host-a" {
+		t.Fatalf("RoutedFlock returned mutable state: %+v", again.Agents[0])
+	}
+}
+
+func TestPlacementStoreRoutedFlockCleanupRemovesOnlyRequestedPlacements(t *testing.T) {
+	store := NewPlacementStore("")
+	record := RoutedFlockRecord{
+		FlockID: "routed-flock-cleanup",
+		Mode:    RoutedFlockModeCrossHostMembersOnly,
+		Status:  RoutedFlockStatusReady,
+		Agents: []RoutedFlockAgent{
+			{AgentID: "worker-1", Role: "worker", VMID: "vm-ok", Host: "host-a", Status: "running"},
+			{AgentID: "worker-2", Role: "worker", VMID: "vm-failed", Host: "host-b", Status: "running"},
+		},
+	}
+	if err := store.SaveRoutedFlockAndPlacements(record, nil); err != nil {
+		t.Fatalf("SaveRoutedFlockAndPlacements: %v", err)
+	}
+	record.Status = RoutedFlockStatusFailedCleanupPending
+	record.Agents = []RoutedFlockAgent{{AgentID: "worker-2", Role: "worker", VMID: "vm-failed", Host: "host-b", Status: "cleanup_pending"}}
+	if err := store.SaveRoutedFlockAndPlacements(record, []string{"vm-ok"}); err != nil {
+		t.Fatalf("cleanup SaveRoutedFlockAndPlacements: %v", err)
+	}
+	if _, ok := store.VMHost("vm-ok"); ok {
+		t.Fatal("vm-ok placement still exists, want removed")
+	}
+	if host, ok := store.VMHost("vm-failed"); !ok || host != "host-b" {
+		t.Fatalf("vm-failed placement = %q,%v want host-b,true", host, ok)
+	}
+}
