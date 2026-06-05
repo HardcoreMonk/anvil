@@ -527,3 +527,153 @@ func TestPlacementStoreRoutedFlockCleanupRemovesOnlyRequestedPlacements(t *testi
 		t.Fatalf("vm-failed placement = %q,%v want host-b,true", host, ok)
 	}
 }
+
+func TestPlacementStoreRoutedFlockRegistrySurvivesStaleUnrelatedSave(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "scheduler.json")
+	stale := NewPlacementStore(path)
+	if err := stale.Load(); err != nil {
+		t.Fatalf("stale Load: %v", err)
+	}
+
+	fresh := NewPlacementStore(path)
+	if err := fresh.SaveRoutedFlockAndPlacements(RoutedFlockRecord{
+		FlockID: "routed-flock-survive",
+		Mode:    RoutedFlockModeCrossHostMembersOnly,
+		Status:  RoutedFlockStatusReady,
+		Agents: []RoutedFlockAgent{{
+			AgentID: "worker-1",
+			Role:    "worker",
+			VMID:    "vm-worker",
+			Host:    "host-a",
+			Status:  "running",
+		}},
+	}, nil); err != nil {
+		t.Fatalf("fresh SaveRoutedFlockAndPlacements: %v", err)
+	}
+
+	if err := stale.SetHostAndSave(RuntimeHost{Name: "host-b", Endpoint: "http://host-b", Healthy: true, AvailableVMs: 1}); err != nil {
+		t.Fatalf("stale SetHostAndSave: %v", err)
+	}
+
+	reloaded := NewPlacementStore(path)
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("reloaded Load: %v", err)
+	}
+	record, ok := reloaded.RoutedFlock("routed-flock-survive")
+	if !ok {
+		t.Fatal("stale unrelated save erased routed flock")
+	}
+	if record.Agents[0].Host != "host-a" {
+		t.Fatalf("routed flock agent host = %q, want host-a", record.Agents[0].Host)
+	}
+	if host, ok := reloaded.Host("host-b"); !ok || host.Endpoint != "http://host-b" {
+		t.Fatalf("unrelated host = %+v,%v want persisted host-b", host, ok)
+	}
+}
+
+func TestPlacementStoreListRoutedFlocksSortsAndClones(t *testing.T) {
+	store := NewPlacementStore("")
+	if err := store.SaveRoutedFlockAndPlacements(RoutedFlockRecord{
+		FlockID: "routed-flock-b",
+		Mode:    RoutedFlockModeCrossHostMembersOnly,
+		Status:  RoutedFlockStatusReady,
+		Agents:  []RoutedFlockAgent{{AgentID: "worker-b", Role: "worker", VMID: "vm-b", Host: "host-b", Status: "running"}},
+	}, nil); err != nil {
+		t.Fatalf("SaveRoutedFlockAndPlacements b: %v", err)
+	}
+	if err := store.SaveRoutedFlockAndPlacements(RoutedFlockRecord{
+		FlockID: "routed-flock-a",
+		Mode:    RoutedFlockModeCrossHostMembersOnly,
+		Status:  RoutedFlockStatusReady,
+		Agents:  []RoutedFlockAgent{{AgentID: "worker-a", Role: "worker", VMID: "vm-a", Host: "host-a", Status: "running"}},
+	}, nil); err != nil {
+		t.Fatalf("SaveRoutedFlockAndPlacements a: %v", err)
+	}
+
+	records := store.ListRoutedFlocks()
+	if len(records) != 2 {
+		t.Fatalf("ListRoutedFlocks len = %d, want 2", len(records))
+	}
+	if records[0].FlockID != "routed-flock-a" || records[1].FlockID != "routed-flock-b" {
+		t.Fatalf("ListRoutedFlocks order = %+v, want routed-flock-a,routed-flock-b", records)
+	}
+	records[0].Agents[0].Host = "mutated"
+	again := store.ListRoutedFlocks()
+	if again[0].Agents[0].Host != "host-a" {
+		t.Fatalf("ListRoutedFlocks returned mutable state: %+v", again[0].Agents[0])
+	}
+}
+
+func TestPlacementStoreSaveRoutedFlockAndPlacementsPreservesOtherPersistedFlocks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "scheduler.json")
+	stale := NewPlacementStore(path)
+	if err := stale.Load(); err != nil {
+		t.Fatalf("stale Load: %v", err)
+	}
+
+	fresh := NewPlacementStore(path)
+	if err := fresh.SaveRoutedFlockAndPlacements(RoutedFlockRecord{
+		FlockID: "routed-flock-other",
+		Mode:    RoutedFlockModeCrossHostMembersOnly,
+		Status:  RoutedFlockStatusReady,
+		Agents:  []RoutedFlockAgent{{AgentID: "worker-other", Role: "worker", VMID: "vm-other", Host: "host-other", Status: "running"}},
+	}, nil); err != nil {
+		t.Fatalf("fresh SaveRoutedFlockAndPlacements other: %v", err)
+	}
+	if err := fresh.SaveRoutedFlockAndPlacements(RoutedFlockRecord{
+		FlockID: "routed-flock-current",
+		Mode:    RoutedFlockModeCrossHostMembersOnly,
+		Status:  RoutedFlockStatusReady,
+		Agents:  []RoutedFlockAgent{{AgentID: "worker-current", Role: "worker", VMID: "vm-current-old", Host: "host-old", Status: "running"}},
+	}, nil); err != nil {
+		t.Fatalf("fresh SaveRoutedFlockAndPlacements current: %v", err)
+	}
+
+	if err := stale.SaveRoutedFlockAndPlacements(RoutedFlockRecord{
+		FlockID: "routed-flock-current",
+		Mode:    RoutedFlockModeCrossHostMembersOnly,
+		Status:  RoutedFlockStatusReady,
+		Agents:  []RoutedFlockAgent{{AgentID: "worker-current", Role: "worker", VMID: "vm-current-new", Host: "host-new", Status: "running"}},
+	}, nil); err != nil {
+		t.Fatalf("stale SaveRoutedFlockAndPlacements current: %v", err)
+	}
+
+	reloaded := NewPlacementStore(path)
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("reloaded Load: %v", err)
+	}
+	other, ok := reloaded.RoutedFlock("routed-flock-other")
+	if !ok || other.Agents[0].Host != "host-other" {
+		t.Fatalf("other routed flock = %+v,%v want host-other,true", other, ok)
+	}
+	current, ok := reloaded.RoutedFlock("routed-flock-current")
+	if !ok || current.Agents[0].VMID != "vm-current-new" || current.Agents[0].Host != "host-new" {
+		t.Fatalf("current routed flock = %+v,%v want new current record", current, ok)
+	}
+}
+
+func TestPlacementStoreSaveRoutedFlockAndPlacementsRollsBackOnFailure(t *testing.T) {
+	store := NewPlacementStore(t.TempDir())
+	if err := store.SetVMPlacement("vm-old", "host-old"); err != nil {
+		t.Fatalf("SetVMPlacement vm-old: %v", err)
+	}
+
+	err := store.SaveRoutedFlockAndPlacements(RoutedFlockRecord{
+		FlockID: "routed-flock-failed-save",
+		Mode:    RoutedFlockModeCrossHostMembersOnly,
+		Status:  RoutedFlockStatusReady,
+		Agents:  []RoutedFlockAgent{{AgentID: "worker-new", Role: "worker", VMID: "vm-new", Host: "host-new", Status: "running"}},
+	}, []string{"vm-old"})
+	if err == nil {
+		t.Fatal("SaveRoutedFlockAndPlacements unexpectedly succeeded with directory path")
+	}
+	if _, ok := store.RoutedFlock("routed-flock-failed-save"); ok {
+		t.Fatal("routed flock retained after failed save")
+	}
+	if _, ok := store.VMHost("vm-new"); ok {
+		t.Fatal("new VM placement retained after failed save")
+	}
+	if host, ok := store.VMHost("vm-old"); !ok || host != "host-old" {
+		t.Fatalf("old VM placement = %q,%v want host-old,true", host, ok)
+	}
+}

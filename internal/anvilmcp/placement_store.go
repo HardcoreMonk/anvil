@@ -172,7 +172,7 @@ func readPlacementStoreState(path string) (PlacementStoreState, bool, error) {
 	return state, true, nil
 }
 
-func mergePersistedFlockPlacementMetrics(path string, state *PlacementStoreState) error {
+func mergePersistedPlacementStoreFields(path string, state *PlacementStoreState, updatedRoutedFlockIDs map[string]bool, preserveMetrics bool) error {
 	persisted, exists, err := readPlacementStoreState(path)
 	if err != nil {
 		return err
@@ -180,15 +180,59 @@ func mergePersistedFlockPlacementMetrics(path string, state *PlacementStoreState
 	if !exists {
 		return nil
 	}
-	state.FlockPlacementMetrics = cloneFlockPlacementMetricsState(persisted.FlockPlacementMetrics)
+	if preserveMetrics {
+		state.FlockPlacementMetrics = cloneFlockPlacementMetricsState(persisted.FlockPlacementMetrics)
+	}
+	mergePersistedRoutedFlocks(persisted.RoutedFlocks, state, updatedRoutedFlockIDs)
 	return nil
 }
 
 func savePlacementStoreStatePreserveFlockMetrics(path string, state PlacementStoreState) error {
-	if err := mergePersistedFlockPlacementMetrics(path, &state); err != nil {
+	if err := mergePersistedPlacementStoreFields(path, &state, nil, true); err != nil {
 		return err
 	}
 	return writePlacementStoreState(path, state)
+}
+
+func savePlacementStoreStatePreserveRoutedFlockUpdates(path string, state PlacementStoreState, updatedRoutedFlockIDs map[string]bool) error {
+	if err := mergePersistedPlacementStoreFields(path, &state, updatedRoutedFlockIDs, true); err != nil {
+		return err
+	}
+	return writePlacementStoreState(path, state)
+}
+
+func savePlacementStoreStatePreserveRoutedFlocks(path string, state PlacementStoreState) error {
+	if err := mergePersistedPlacementStoreFields(path, &state, nil, false); err != nil {
+		return err
+	}
+	return writePlacementStoreState(path, state)
+}
+
+func mergePersistedRoutedFlocks(persisted map[string]RoutedFlockRecord, state *PlacementStoreState, updatedRoutedFlockIDs map[string]bool) {
+	next := make(map[string]RoutedFlockRecord, len(persisted)+len(updatedRoutedFlockIDs))
+	for _, record := range persisted {
+		record = normalizeRoutedFlockRecord(record)
+		if record.FlockID == "" {
+			continue
+		}
+		next[record.FlockID] = cloneRoutedFlockRecord(record)
+	}
+	for flockID := range updatedRoutedFlockIDs {
+		flockID = strings.TrimSpace(flockID)
+		if flockID == "" {
+			continue
+		}
+		record, ok := state.RoutedFlocks[flockID]
+		if !ok {
+			continue
+		}
+		record = normalizeRoutedFlockRecord(record)
+		if record.FlockID == "" {
+			continue
+		}
+		next[record.FlockID] = cloneRoutedFlockRecord(record)
+	}
+	state.RoutedFlocks = next
 }
 
 func writePlacementStoreState(path string, state PlacementStoreState) error {
@@ -240,11 +284,19 @@ func (s *PlacementStore) saveLockedPreserveFlockMetrics() error {
 	return savePlacementStoreStatePreserveFlockMetrics(s.path, state)
 }
 
+func (s *PlacementStore) saveLockedPreserveRoutedFlockUpdates(updatedRoutedFlockIDs map[string]bool) error {
+	if strings.TrimSpace(s.path) == "" {
+		return nil
+	}
+	state := clonePlacementStoreState(s.state)
+	return savePlacementStoreStatePreserveRoutedFlockUpdates(s.path, state, updatedRoutedFlockIDs)
+}
+
 func (s *PlacementStore) saveLockedRaw() error {
 	if strings.TrimSpace(s.path) == "" {
 		return nil
 	}
-	return writePlacementStoreState(s.path, clonePlacementStoreState(s.state))
+	return savePlacementStoreStatePreserveRoutedFlocks(s.path, clonePlacementStoreState(s.state))
 }
 
 func (s *PlacementStore) SetHost(host RuntimeHost) error {
@@ -772,7 +824,7 @@ func (s *PlacementStore) SaveRoutedFlockAndPlacements(record RoutedFlockRecord, 
 			s.state.VMPlacements[vmID] = host
 		}
 	}
-	if err := s.saveLocked(); err != nil {
+	if err := s.saveLockedPreserveRoutedFlockUpdates(map[string]bool{record.FlockID: true}); err != nil {
 		s.state = previous
 		return err
 	}
