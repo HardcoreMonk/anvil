@@ -41,6 +41,6 @@
 필요한 상태다. operator는 routed registry의 남은 member VM을 확인하고 해당 host
 daemon에서 VM 삭제 상태를 점검해야 한다.
 
-output, registry, audit, metrics에는 token/header/endpoint/raw body를 저장하지 않는다.
-특히 authorization header, host endpoint, daemon raw body, `agent_token`은 남기지
-않는다.
+output, registry, audit, metrics에는 authorization header, host endpoint, daemon raw
+body, `agent_token`을 저장하지 않는다. routed member의 `agent_url`은 VM 접근 정보로
+반환될 수 있지만 daemon raw response나 bearer token을 포함하면 안 된다.
