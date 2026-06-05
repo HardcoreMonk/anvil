@@ -97,6 +97,14 @@ func TestRenderSchedulerMetricsIncludesFlockPlacementMetrics(t *testing.T) {
 					SumSeconds: 0.012,
 					Count:      2,
 				},
+				FlockPlacementPhaseAgentSpawn: {
+					Buckets: map[string]int64{
+						"0.25": 1,
+						"+Inf": 1,
+					},
+					SumSeconds: 0.2,
+					Count:      1,
+				},
 				"vm-1": {
 					Buckets: map[string]int64{"0.005": 1},
 					Count:   1,
@@ -115,6 +123,10 @@ func TestRenderSchedulerMetricsIncludesFlockPlacementMetrics(t *testing.T) {
 	requireMetricLine(t, output, "anvil_scheduler_flock_placement_latency_seconds_bucket{phase=\"schedule\",le=\"+Inf\"} 2")
 	requireMetricLine(t, output, "anvil_scheduler_flock_placement_latency_seconds_sum{phase=\"schedule\"} 0.012")
 	requireMetricLine(t, output, "anvil_scheduler_flock_placement_latency_seconds_count{phase=\"schedule\"} 2")
+	requireMetricLine(t, output, "anvil_scheduler_flock_placement_latency_seconds_bucket{phase=\"agent_spawn\",le=\"0.25\"} 1")
+	requireMetricLine(t, output, "anvil_scheduler_flock_placement_latency_seconds_bucket{phase=\"agent_spawn\",le=\"+Inf\"} 1")
+	requireMetricLine(t, output, "anvil_scheduler_flock_placement_latency_seconds_sum{phase=\"agent_spawn\"} 0.2")
+	requireMetricLine(t, output, "anvil_scheduler_flock_placement_latency_seconds_count{phase=\"agent_spawn\"} 1")
 	requireMetricLine(t, output, fmt.Sprintf("anvil_scheduler_flock_placement_last_success_timestamp_seconds %d", lastSuccess.Unix()))
 	requireMetricLine(t, output, fmt.Sprintf("anvil_scheduler_flock_placement_last_failure_timestamp_seconds %d", lastFailure.Unix()))
 	for _, leaked := range []string{"http://host-a", "tenant-1", "flock-1", "vm-1", "agent_token"} {

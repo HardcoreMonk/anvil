@@ -202,6 +202,17 @@ func savePlacementStoreStatePreserveRoutedFlocks(path string, state PlacementSto
 }
 
 func mergePersistedRoutedFlocks(persisted map[string]RoutedFlockRecord, state *PlacementStoreState) {
+	if state.VMPlacements == nil {
+		state.VMPlacements = make(map[string]string)
+	}
+	for _, record := range state.RoutedFlocks {
+		for _, agent := range record.Agents {
+			if vmID := strings.TrimSpace(agent.VMID); vmID != "" {
+				delete(state.VMPlacements, vmID)
+			}
+		}
+	}
+
 	next := make(map[string]RoutedFlockRecord, len(persisted))
 	for _, record := range persisted {
 		record = normalizeRoutedFlockRecord(record)

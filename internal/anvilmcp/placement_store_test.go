@@ -530,13 +530,8 @@ func TestPlacementStoreRoutedFlockCleanupRemovesOnlyRequestedPlacements(t *testi
 
 func TestPlacementStoreRoutedFlockRegistrySurvivesStaleUnrelatedSave(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "scheduler.json")
-	stale := NewPlacementStore(path)
-	if err := stale.Load(); err != nil {
-		t.Fatalf("stale Load: %v", err)
-	}
-
-	fresh := NewPlacementStore(path)
-	if err := fresh.SaveRoutedFlockAndPlacements(RoutedFlockRecord{
+	initial := NewPlacementStore(path)
+	if err := initial.SaveRoutedFlockAndPlacements(RoutedFlockRecord{
 		FlockID: "routed-flock-survive",
 		Mode:    RoutedFlockModeCrossHostMembersOnly,
 		Status:  RoutedFlockStatusReady,
@@ -548,7 +543,17 @@ func TestPlacementStoreRoutedFlockRegistrySurvivesStaleUnrelatedSave(t *testing.
 			Status:  "running",
 		}},
 	}, nil); err != nil {
-		t.Fatalf("fresh SaveRoutedFlockAndPlacements: %v", err)
+		t.Fatalf("initial SaveRoutedFlockAndPlacements: %v", err)
+	}
+
+	stale := NewPlacementStore(path)
+	if err := stale.Load(); err != nil {
+		t.Fatalf("stale Load: %v", err)
+	}
+
+	fresh := NewPlacementStore(path)
+	if err := fresh.Load(); err != nil {
+		t.Fatalf("fresh Load: %v", err)
 	}
 
 	if err := stale.SetHostAndSave(RuntimeHost{Name: "host-b", Endpoint: "http://host-b", Healthy: true, AvailableVMs: 1}); err != nil {
@@ -571,6 +576,118 @@ func TestPlacementStoreRoutedFlockRegistrySurvivesStaleUnrelatedSave(t *testing.
 	}
 	if host, ok := reloaded.Host("host-b"); !ok || host.Endpoint != "http://host-b" {
 		t.Fatalf("unrelated host = %+v,%v want persisted host-b", host, ok)
+	}
+}
+
+func TestPlacementStoreRoutedFlockDeletedPlacementsSurviveStaleGenericSave(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "scheduler.json")
+	initial := NewPlacementStore(path)
+	ready := RoutedFlockRecord{
+		FlockID: "routed-flock-delete",
+		Mode:    RoutedFlockModeCrossHostMembersOnly,
+		Status:  RoutedFlockStatusReady,
+		Agents: []RoutedFlockAgent{
+			{AgentID: "worker-1", Role: "worker", VMID: "vm-worker-1", Host: "host-a", Status: "running"},
+			{AgentID: "worker-2", Role: "worker", VMID: "vm-worker-2", Host: "host-b", Status: "running"},
+		},
+	}
+	if err := initial.SaveRoutedFlockAndPlacements(ready, nil); err != nil {
+		t.Fatalf("initial SaveRoutedFlockAndPlacements: %v", err)
+	}
+
+	stale := NewPlacementStore(path)
+	if err := stale.Load(); err != nil {
+		t.Fatalf("stale Load: %v", err)
+	}
+
+	fresh := NewPlacementStore(path)
+	if err := fresh.Load(); err != nil {
+		t.Fatalf("fresh Load: %v", err)
+	}
+	deleted := ready
+	deleted.Status = RoutedFlockStatusDeleted
+	deleted.Agents = []RoutedFlockAgent{
+		{AgentID: "worker-1", Role: "worker", VMID: "vm-worker-1", Host: "host-a", Status: "deleted"},
+		{AgentID: "worker-2", Role: "worker", VMID: "vm-worker-2", Host: "host-b", Status: "deleted"},
+	}
+	if err := fresh.SaveRoutedFlockAndPlacements(deleted, []string{"vm-worker-1", "vm-worker-2"}); err != nil {
+		t.Fatalf("fresh cleanup SaveRoutedFlockAndPlacements: %v", err)
+	}
+
+	if err := stale.SetHostAndSave(RuntimeHost{Name: "host-c", Endpoint: "http://host-c", Healthy: true, AvailableVMs: 1}); err != nil {
+		t.Fatalf("stale SetHostAndSave: %v", err)
+	}
+
+	reloaded := NewPlacementStore(path)
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("reloaded Load: %v", err)
+	}
+	record, ok := reloaded.RoutedFlock("routed-flock-delete")
+	if !ok || record.Status != RoutedFlockStatusDeleted {
+		t.Fatalf("routed flock = %+v,%v want deleted record", record, ok)
+	}
+	for _, vmID := range []string{"vm-worker-1", "vm-worker-2"} {
+		if host, ok := reloaded.VMHost(vmID); ok {
+			t.Fatalf("%s placement resurrected on %q after stale generic save", vmID, host)
+		}
+	}
+}
+
+func TestPlacementStoreRoutedFlockPartialCleanupSurvivesStaleGenericSave(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "scheduler.json")
+	initial := NewPlacementStore(path)
+	ready := RoutedFlockRecord{
+		FlockID: "routed-flock-partial-cleanup",
+		Mode:    RoutedFlockModeCrossHostMembersOnly,
+		Status:  RoutedFlockStatusReady,
+		Agents: []RoutedFlockAgent{
+			{AgentID: "worker-ok", Role: "worker", VMID: "vm-ok", Host: "host-a", Status: "running"},
+			{AgentID: "worker-failed", Role: "worker", VMID: "vm-failed", Host: "host-b", Status: "running"},
+		},
+	}
+	if err := initial.SaveRoutedFlockAndPlacements(ready, nil); err != nil {
+		t.Fatalf("initial SaveRoutedFlockAndPlacements: %v", err)
+	}
+
+	stale := NewPlacementStore(path)
+	if err := stale.Load(); err != nil {
+		t.Fatalf("stale Load: %v", err)
+	}
+
+	fresh := NewPlacementStore(path)
+	if err := fresh.Load(); err != nil {
+		t.Fatalf("fresh Load: %v", err)
+	}
+	cleanupPending := ready
+	cleanupPending.Status = RoutedFlockStatusFailedCleanupPending
+	cleanupPending.Agents = []RoutedFlockAgent{{
+		AgentID: "worker-failed",
+		Role:    "worker",
+		VMID:    "vm-failed",
+		Host:    "host-b",
+		Status:  "cleanup_pending",
+	}}
+	if err := fresh.SaveRoutedFlockAndPlacements(cleanupPending, []string{"vm-ok"}); err != nil {
+		t.Fatalf("fresh cleanup SaveRoutedFlockAndPlacements: %v", err)
+	}
+
+	if err := stale.SetHostAndSave(RuntimeHost{Name: "host-c", Endpoint: "http://host-c", Healthy: true, AvailableVMs: 1}); err != nil {
+		t.Fatalf("stale SetHostAndSave: %v", err)
+	}
+
+	reloaded := NewPlacementStore(path)
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("reloaded Load: %v", err)
+	}
+	record, ok := reloaded.RoutedFlock("routed-flock-partial-cleanup")
+	if !ok || record.Status != RoutedFlockStatusFailedCleanupPending {
+		t.Fatalf("routed flock = %+v,%v want failed_cleanup_pending record", record, ok)
+	}
+	if host, ok := reloaded.VMHost("vm-ok"); ok {
+		t.Fatalf("vm-ok placement resurrected on %q after stale generic save", host)
+	}
+	if host, ok := reloaded.VMHost("vm-failed"); !ok || host != "host-b" {
+		t.Fatalf("vm-failed placement = %q,%v want host-b,true", host, ok)
 	}
 }
 

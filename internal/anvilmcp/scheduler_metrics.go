@@ -50,6 +50,10 @@ func renderFlockPlacementMetrics(out *strings.Builder, state FlockPlacementMetri
 		FlockPlacementPhaseSchedule,
 		FlockPlacementPhaseDaemonCreate,
 		FlockPlacementPhasePlacementSave,
+		FlockPlacementPhasePlan,
+		FlockPlacementPhaseAgentSpawn,
+		FlockPlacementPhaseRegistrySave,
+		FlockPlacementPhaseRollback,
 		FlockPlacementPhaseTotal,
 	} {
 		hist := state.LatencyByPhase[phase]
