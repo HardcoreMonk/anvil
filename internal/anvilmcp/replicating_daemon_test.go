@@ -3,6 +3,7 @@ package anvilmcp
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -91,6 +92,37 @@ func TestReplicatingDaemonDeleteFlockRoutesRoutedFlock(t *testing.T) {
 	}
 }
 
+func TestReplicatingDaemonDirectRoutedOperationsTrimFlockID(t *testing.T) {
+	base := &replicatingDaemonBaseFake{}
+	router := &replicatingDaemonRoutedFake{
+		routed:     map[string]bool{"routed-flock-1": true},
+		deleteResp: &RawDaemonResponse{StatusCode: 200, Body: `{"status":"deleted"}`},
+	}
+	daemon := NewReplicatingDaemonWithOptions(base, nil, ReplicatingDaemonOptions{RoutedFlocks: router})
+
+	resp, err := daemon.DeleteFlock(context.Background(), " routed-flock-1 ")
+	if err != nil {
+		t.Fatalf("DeleteFlock returned error: %v", err)
+	}
+	if resp.StatusCode != 200 || router.deleteCalls != 1 || router.deleteFlockID != "routed-flock-1" {
+		t.Fatalf("resp/delete calls/id = %+v/%d/%q, want routed delete with trimmed id", resp, router.deleteCalls, router.deleteFlockID)
+	}
+	if base.deleteFlockCalls != 0 {
+		t.Fatalf("base delete calls = %d, want 0", base.deleteFlockCalls)
+	}
+
+	_, err = daemon.PostTownWall(context.Background(), " routed-flock-1 ", TownWallPostRequest{AgentID: "worker-1", Body: "hello"})
+	if err == nil {
+		t.Fatal("PostTownWall error = nil, want unsupported")
+	}
+	if got := err.Error(); got != `Town Wall is not supported for routed members-only flock "routed-flock-1"` {
+		t.Fatalf("PostTownWall error = %q", got)
+	}
+	if base.postTownWallCalls != 0 {
+		t.Fatalf("base post calls = %d, want 0", base.postTownWallCalls)
+	}
+}
+
 func TestReplicatingDaemonTownWallRejectsRoutedFlockWithoutBaseFallback(t *testing.T) {
 	base := &replicatingDaemonBaseFake{}
 	router := &replicatingDaemonRoutedFake{routed: map[string]bool{"routed-flock-1": true}}
@@ -116,6 +148,30 @@ func TestReplicatingDaemonTownWallRejectsRoutedFlockWithoutBaseFallback(t *testi
 	}
 	if base.townWallHistoryCalls != 0 {
 		t.Fatalf("base history calls = %d, want 0", base.townWallHistoryCalls)
+	}
+}
+
+func TestReplicatingDaemonGetFlockFallsBackToBaseForDeletedRoutedRecord(t *testing.T) {
+	base := &replicatingDaemonBaseFake{getFlockResp: &FlockInfo{
+		FlockID: "routed-flock-1",
+		Task:    "base flock",
+		Agents:  map[string]FlockAgentInfo{"base-agent": {AgentID: "base-agent", VMID: "base-vm"}},
+	}}
+	router := &replicatingDaemonRoutedFake{records: []RoutedFlockRecord{{
+		FlockID: "routed-flock-1",
+		Status:  RoutedFlockStatusDeleted,
+	}}}
+	daemon := NewReplicatingDaemonWithOptions(base, nil, ReplicatingDaemonOptions{RoutedFlocks: router})
+
+	info, err := daemon.GetFlock(context.Background(), "routed-flock-1")
+	if err != nil {
+		t.Fatalf("GetFlock returned error: %v", err)
+	}
+	if base.getFlockCalls != 1 || base.getFlockID != "routed-flock-1" {
+		t.Fatalf("base get calls/id = %d/%q, want fallback to base", base.getFlockCalls, base.getFlockID)
+	}
+	if info.Task != "base flock" || info.Agents["base-agent"].VMID != "base-vm" {
+		t.Fatalf("flock info = %+v, want base response", info)
 	}
 }
 
@@ -172,6 +228,20 @@ func TestReplicatingDaemonListFlocksIncludesBaseFlocksAndRoutedRecords(t *testin
 			AgentURL: "http://10.0.0.2:3000",
 			Status:   "running",
 		}},
+	}, {
+		FlockID: "cleanup-flock",
+		Task:    "cleanup failed members",
+		Status:  RoutedFlockStatusFailedCleanupPending,
+		Agents: []RoutedFlockAgent{{
+			AgentID: "worker-2",
+			Role:    "worker",
+			VMID:    "vm-cleanup",
+			Status:  "cleanup_pending",
+		}},
+	}, {
+		FlockID: "deleted-flock",
+		Task:    "deleted members",
+		Status:  RoutedFlockStatusDeleted,
 	}}}
 	daemon := NewReplicatingDaemonWithOptions(base, nil, ReplicatingDaemonOptions{RoutedFlocks: router})
 
@@ -179,8 +249,8 @@ func TestReplicatingDaemonListFlocksIncludesBaseFlocksAndRoutedRecords(t *testin
 	if err != nil {
 		t.Fatalf("ListFlocks returned error: %v", err)
 	}
-	if len(flocks) != 2 {
-		t.Fatalf("flocks = %+v, want base+routed", flocks)
+	if len(flocks) != 3 {
+		t.Fatalf("flocks = %+v, want base+visible routed records", flocks)
 	}
 	if flocks[0].FlockID != "base-flock" {
 		t.Fatalf("base flock = %+v", flocks[0])
@@ -190,6 +260,14 @@ func TestReplicatingDaemonListFlocksIncludesBaseFlocksAndRoutedRecords(t *testin
 	}
 	if flocks[1].Agents["worker-1"].VMID != "vm-worker" {
 		t.Fatalf("routed flock agents = %+v", flocks[1].Agents)
+	}
+	if flocks[2].FlockID != "cleanup-flock" || flocks[2].Agents["worker-2"].Status != "cleanup_pending" {
+		t.Fatalf("cleanup pending flock = %+v", flocks[2])
+	}
+	for _, flock := range flocks {
+		if flock.FlockID == "deleted-flock" {
+			t.Fatalf("deleted routed flock was listed: %+v", flock)
+		}
 	}
 }
 
@@ -334,6 +412,7 @@ func (f *replicatingDaemonRoutedFake) CreateRoutedFlockMembers(context.Context, 
 }
 
 func (f *replicatingDaemonRoutedFake) IsRoutedFlock(flockID string) bool {
+	flockID = strings.TrimSpace(flockID)
 	if f.routed != nil {
 		return f.routed[flockID]
 	}
@@ -355,6 +434,7 @@ func (f *replicatingDaemonRoutedFake) DeleteRoutedFlock(_ context.Context, flock
 }
 
 func (f *replicatingDaemonRoutedFake) GetRoutedFlock(flockID string) (RoutedFlockRecord, bool) {
+	flockID = strings.TrimSpace(flockID)
 	for _, record := range f.records {
 		if record.FlockID == flockID {
 			return record, true

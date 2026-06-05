@@ -3,6 +3,7 @@ package anvilmcp
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 type ReplicatingDaemon struct {
@@ -66,15 +67,17 @@ func (d *ReplicatingDaemon) CreateRoutedFlockMembers(ctx context.Context, req Fl
 }
 
 func (d *ReplicatingDaemon) DeleteFlock(ctx context.Context, flockID string) (*RawDaemonResponse, error) {
-	if d != nil && d.routedFlocks != nil && d.routedFlocks.IsRoutedFlock(flockID) {
-		return d.routedFlocks.DeleteRoutedFlock(ctx, flockID)
+	routedFlockID := strings.TrimSpace(flockID)
+	if d != nil && d.routedFlocks != nil && d.routedFlocks.IsRoutedFlock(routedFlockID) {
+		return d.routedFlocks.DeleteRoutedFlock(ctx, routedFlockID)
 	}
 	return d.Daemon.DeleteFlock(ctx, flockID)
 }
 
 func (d *ReplicatingDaemon) GetFlock(ctx context.Context, flockID string) (*FlockInfo, error) {
+	routedFlockID := strings.TrimSpace(flockID)
 	if d != nil && d.routedFlocks != nil {
-		if record, ok := d.routedFlocks.GetRoutedFlock(flockID); ok {
+		if record, ok := d.routedFlocks.GetRoutedFlock(routedFlockID); ok && routedFlockRecordVisible(record) {
 			info := flockInfoFromRoutedRecord(record)
 			return &info, nil
 		}
@@ -91,23 +94,32 @@ func (d *ReplicatingDaemon) ListFlocks(ctx context.Context) ([]FlockInfo, error)
 		return base, nil
 	}
 	for _, record := range d.routedFlocks.ListRoutedFlocks() {
+		if !routedFlockRecordVisible(record) {
+			continue
+		}
 		base = append(base, flockInfoFromRoutedRecord(record))
 	}
 	return base, nil
 }
 
 func (d *ReplicatingDaemon) PostTownWall(ctx context.Context, flockID string, req TownWallPostRequest) (*TownWallMessage, error) {
-	if d != nil && d.routedFlocks != nil && d.routedFlocks.IsRoutedFlock(flockID) {
-		return nil, fmt.Errorf("%s %q", routedTownWallUnsupportedMessage, flockID)
+	routedFlockID := strings.TrimSpace(flockID)
+	if d != nil && d.routedFlocks != nil && d.routedFlocks.IsRoutedFlock(routedFlockID) {
+		return nil, fmt.Errorf("%s %q", routedTownWallUnsupportedMessage, routedFlockID)
 	}
 	return d.Daemon.PostTownWall(ctx, flockID, req)
 }
 
 func (d *ReplicatingDaemon) TownWallHistory(ctx context.Context, flockID string) ([]TownWallMessage, error) {
-	if d != nil && d.routedFlocks != nil && d.routedFlocks.IsRoutedFlock(flockID) {
-		return nil, fmt.Errorf("%s %q", routedTownWallUnsupportedMessage, flockID)
+	routedFlockID := strings.TrimSpace(flockID)
+	if d != nil && d.routedFlocks != nil && d.routedFlocks.IsRoutedFlock(routedFlockID) {
+		return nil, fmt.Errorf("%s %q", routedTownWallUnsupportedMessage, routedFlockID)
 	}
 	return d.Daemon.TownWallHistory(ctx, flockID)
+}
+
+func routedFlockRecordVisible(record RoutedFlockRecord) bool {
+	return record.Status != RoutedFlockStatusDeleted
 }
 
 func flockInfoFromRoutedRecord(record RoutedFlockRecord) FlockInfo {
