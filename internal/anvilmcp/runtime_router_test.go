@@ -2,8 +2,10 @@ package anvilmcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -12,6 +14,8 @@ type routerFakeDaemon struct {
 	spawnCalls           int
 	spawnReq             SpawnVMRequest
 	spawnResp            *SpawnVMResponse
+	spawnResponses       []*SpawnVMResponse
+	spawnReqs            []SpawnVMRequest
 	spawnErr             error
 	runTaskCalls         int
 	runTaskVMID          string
@@ -40,8 +44,14 @@ type routerFakeDaemon struct {
 func (f *routerFakeDaemon) SpawnVM(_ context.Context, req SpawnVMRequest) (*SpawnVMResponse, error) {
 	f.spawnCalls++
 	f.spawnReq = req
+	f.spawnReqs = append(f.spawnReqs, req)
 	if f.spawnErr != nil {
 		return nil, f.spawnErr
+	}
+	if len(f.spawnResponses) > 0 {
+		resp := f.spawnResponses[0]
+		f.spawnResponses = f.spawnResponses[1:]
+		return resp, nil
 	}
 	if f.spawnResp != nil {
 		return f.spawnResp, nil
@@ -507,6 +517,136 @@ func TestRuntimeRouterCreateFlockRecordsNilResponseMetrics(t *testing.T) {
 	requireFlockPlacementMetricPhaseCount(t, state, FlockPlacementPhaseDaemonCreate, 1)
 	requireFlockPlacementMetricPhaseCount(t, state, FlockPlacementPhaseTotal, 1)
 	requireFlockPlacementMetricPhaseCount(t, state, FlockPlacementPhasePlacementSave, 0)
+}
+
+func TestRuntimeRouterCreateRoutedFlockMembersSpawnsAcrossHosts(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
+	hostA := &routerFakeDaemon{spawnResponses: []*SpawnVMResponse{{
+		VMID:         "vm-worker-1",
+		GuestIP:      "10.0.1.10",
+		AgentURL:     "http://10.0.1.10:8080",
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+		AgentToken:   "agent-token-worker",
+	}}}
+	hostB := &routerFakeDaemon{spawnResponses: []*SpawnVMResponse{{
+		VMID:         "vm-reviewer-1",
+		GuestIP:      "10.0.2.10",
+		AgentURL:     "http://10.0.2.10:8080",
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+		AgentToken:   "agent-token-reviewer",
+	}}}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(
+			[]RuntimeHost{
+				{Name: "host-a", Endpoint: "http://host-a.internal/secret-endpoint", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+				{Name: "host-b", Endpoint: "http://host-b.internal/secret-endpoint", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+			},
+			nil,
+			nil,
+		),
+		map[string]Daemon{"host-a": hostA, "host-b": hostB},
+		RuntimeRouterOptions{PlacementStore: store},
+	)
+
+	out, err := router.CreateRoutedFlockMembers(context.Background(), FlockCreateRequest{
+		Task:         "review worker output",
+		Roles:        []string{"worker", "reviewer"},
+		TenantID:     " tenant-1 ",
+		EgressPolicy: " PROFILE ",
+	})
+	if err != nil {
+		t.Fatalf("CreateRoutedFlockMembers returned error: %v", err)
+	}
+	if out.Task != "review worker output" {
+		t.Fatalf("task = %q, want review worker output", out.Task)
+	}
+	if out.TenantID != "tenant-1" {
+		t.Fatalf("tenant id = %q, want tenant-1", out.TenantID)
+	}
+	if out.EgressPolicy != "profile" {
+		t.Fatalf("egress policy = %q, want profile", out.EgressPolicy)
+	}
+	if out.Mode != RoutedFlockModeCrossHostMembersOnly {
+		t.Fatalf("mode = %q, want %q", out.Mode, RoutedFlockModeCrossHostMembersOnly)
+	}
+	if out.Status != RoutedFlockStatusReady {
+		t.Fatalf("status = %q, want %q", out.Status, RoutedFlockStatusReady)
+	}
+	if out.TownWallEnabled {
+		t.Fatal("town wall enabled = true, want false")
+	}
+	if len(out.Agents) != 2 {
+		t.Fatalf("agents len = %d, want 2: %+v", len(out.Agents), out.Agents)
+	}
+	if hostA.spawnCalls != 1 || hostB.spawnCalls != 1 {
+		t.Fatalf("spawn calls hostA/hostB = %d/%d, want 1/1", hostA.spawnCalls, hostB.spawnCalls)
+	}
+	if len(hostA.spawnReqs) != 1 || len(hostB.spawnReqs) != 1 {
+		t.Fatalf("spawn req counts hostA/hostB = %d/%d, want 1/1", len(hostA.spawnReqs), len(hostB.spawnReqs))
+	}
+	if req := hostA.spawnReqs[0]; req.Profile != "worker" || req.TenantID != "tenant-1" || req.EgressPolicy != "profile" {
+		t.Fatalf("host-a spawn req = %+v, want worker tenant-1 profile", req)
+	}
+	if req := hostB.spawnReqs[0]; req.Profile != "reviewer" || req.TenantID != "tenant-1" || req.EgressPolicy != "profile" {
+		t.Fatalf("host-b spawn req = %+v, want reviewer tenant-1 profile", req)
+	}
+
+	agentsByID := make(map[string]RoutedFlockAgent, len(out.Agents))
+	for _, agent := range out.Agents {
+		agentsByID[agent.AgentID] = agent
+	}
+	worker := agentsByID["worker-1"]
+	if worker.Role != "worker" || worker.VMID != "vm-worker-1" || worker.Host != "host-a" || worker.Status != "running" || worker.AgentURL != "http://10.0.1.10:8080" {
+		t.Fatalf("worker agent = %+v, want host-a vm-worker-1 running", worker)
+	}
+	reviewer := agentsByID["reviewer-1"]
+	if reviewer.Role != "reviewer" || reviewer.VMID != "vm-reviewer-1" || reviewer.Host != "host-b" || reviewer.Status != "running" || reviewer.AgentURL != "http://10.0.2.10:8080" {
+		t.Fatalf("reviewer agent = %+v, want host-b vm-reviewer-1 running", reviewer)
+	}
+
+	outputJSON, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal output: %v", err)
+	}
+	for _, forbidden := range []string{"agent-token", "agent_token", "secret-endpoint", "host-a.internal", "host-b.internal", "Authorization", "Bearer"} {
+		if strings.Contains(string(outputJSON), forbidden) {
+			t.Fatalf("routed output leaked forbidden marker %q: %s", forbidden, outputJSON)
+		}
+	}
+
+	record, ok := store.RoutedFlock(out.FlockID)
+	if !ok {
+		t.Fatalf("routed flock %q not found in registry", out.FlockID)
+	}
+	if record.Status != RoutedFlockStatusReady {
+		t.Fatalf("registry status = %q, want %q", record.Status, RoutedFlockStatusReady)
+	}
+	if record.Mode != RoutedFlockModeCrossHostMembersOnly {
+		t.Fatalf("registry mode = %q, want %q", record.Mode, RoutedFlockModeCrossHostMembersOnly)
+	}
+	if len(record.Agents) != 2 {
+		t.Fatalf("registry agents len = %d, want 2: %+v", len(record.Agents), record.Agents)
+	}
+	registryJSON, err := json.Marshal(record)
+	if err != nil {
+		t.Fatalf("marshal registry record: %v", err)
+	}
+	for _, forbidden := range []string{"agent-token", "agent_token", "secret-endpoint", "host-a.internal", "host-b.internal", "Authorization", "Bearer"} {
+		if strings.Contains(string(registryJSON), forbidden) {
+			t.Fatalf("registry record leaked forbidden marker %q: %s", forbidden, registryJSON)
+		}
+	}
+
+	for vmID, wantHost := range map[string]string{"vm-worker-1": "host-a", "vm-reviewer-1": "host-b"} {
+		if host, ok := router.Placement(vmID); !ok || host != wantHost {
+			t.Fatalf("router placement for %s = %q,%v want %s,true", vmID, host, ok, wantHost)
+		}
+		if host, ok := store.VMHost(vmID); !ok || host != wantHost {
+			t.Fatalf("store placement for %s = %q,%v want %s,true", vmID, host, ok, wantHost)
+		}
+	}
 }
 
 func TestRuntimeRouterSpawnRecordsPlacementAndRoutesVMCalls(t *testing.T) {

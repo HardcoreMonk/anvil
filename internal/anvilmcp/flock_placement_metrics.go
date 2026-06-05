@@ -8,12 +8,17 @@ import (
 )
 
 const (
-	FlockPlacementOutcomeSuccess            = "success"
-	FlockPlacementOutcomeDenied             = "denied"
-	FlockPlacementOutcomeSchedulerError     = "scheduler_error"
-	FlockPlacementOutcomeDaemonError        = "daemon_error"
-	FlockPlacementOutcomeDaemonNilResponse  = "daemon_nil_response"
-	FlockPlacementOutcomePlacementSaveError = "placement_save_error"
+	FlockPlacementOutcomeSuccess                = "success"
+	FlockPlacementOutcomeDenied                 = "denied"
+	FlockPlacementOutcomeSchedulerError         = "scheduler_error"
+	FlockPlacementOutcomeDaemonError            = "daemon_error"
+	FlockPlacementOutcomeDaemonNilResponse      = "daemon_nil_response"
+	FlockPlacementOutcomePlacementSaveError     = "placement_save_error"
+	FlockPlacementOutcomeCrossHostSuccess       = "cross_host_success"
+	FlockPlacementOutcomeCrossHostDenied        = "cross_host_denied"
+	FlockPlacementOutcomeCrossHostSpawnError    = "cross_host_spawn_error"
+	FlockPlacementOutcomeCrossHostRollbackError = "cross_host_rollback_error"
+	FlockPlacementOutcomeCrossHostRegistryError = "cross_host_registry_error"
 
 	FlockPlacementReasonScheduled           = "scheduled"
 	FlockPlacementReasonQuotaExceeded       = "quota_exceeded"
@@ -28,6 +33,10 @@ const (
 	FlockPlacementPhaseDaemonCreate  = "daemon_create"
 	FlockPlacementPhasePlacementSave = "placement_save"
 	FlockPlacementPhaseTotal         = "total"
+	FlockPlacementPhasePlan          = "plan"
+	FlockPlacementPhaseAgentSpawn    = "agent_spawn"
+	FlockPlacementPhaseRegistrySave  = "registry_save"
+	FlockPlacementPhaseRollback      = "rollback"
 )
 
 var flockPlacementLatencyBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60}
@@ -219,6 +228,16 @@ func normalizeFlockPlacementOutcome(value string) string {
 		return FlockPlacementOutcomeDaemonNilResponse
 	case FlockPlacementOutcomePlacementSaveError:
 		return FlockPlacementOutcomePlacementSaveError
+	case FlockPlacementOutcomeCrossHostSuccess:
+		return FlockPlacementOutcomeCrossHostSuccess
+	case FlockPlacementOutcomeCrossHostDenied:
+		return FlockPlacementOutcomeCrossHostDenied
+	case FlockPlacementOutcomeCrossHostSpawnError:
+		return FlockPlacementOutcomeCrossHostSpawnError
+	case FlockPlacementOutcomeCrossHostRollbackError:
+		return FlockPlacementOutcomeCrossHostRollbackError
+	case FlockPlacementOutcomeCrossHostRegistryError:
+		return FlockPlacementOutcomeCrossHostRegistryError
 	default:
 		return FlockPlacementOutcomeSchedulerError
 	}
@@ -257,7 +276,14 @@ func normalizeFlockPlacementPhase(value string) string {
 
 func isAllowedFlockPlacementPhase(value string) bool {
 	switch value {
-	case FlockPlacementPhaseSchedule, FlockPlacementPhaseDaemonCreate, FlockPlacementPhasePlacementSave, FlockPlacementPhaseTotal:
+	case FlockPlacementPhaseSchedule,
+		FlockPlacementPhaseDaemonCreate,
+		FlockPlacementPhasePlacementSave,
+		FlockPlacementPhaseTotal,
+		FlockPlacementPhasePlan,
+		FlockPlacementPhaseAgentSpawn,
+		FlockPlacementPhaseRegistrySave,
+		FlockPlacementPhaseRollback:
 		return true
 	default:
 		return false
