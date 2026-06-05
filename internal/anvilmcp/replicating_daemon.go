@@ -7,18 +7,36 @@ import (
 
 type ReplicatingDaemon struct {
 	Daemon
-	replicator  snapshotReplicator
-	flockRouter flockCreator
+	replicator   snapshotReplicator
+	flockRouter  flockCreator
+	routedFlocks routedFlockController
 }
 
 type flockCreator interface {
 	CreateFlock(context.Context, FlockCreateRequest) (*FlockCreateResponse, error)
 }
 
+type routedFlockController interface {
+	CreateRoutedFlockMembers(context.Context, FlockCreateRequest) (*RoutedFlockCreateOutput, error)
+	IsRoutedFlock(string) bool
+	DeleteRoutedFlock(context.Context, string) (*RawDaemonResponse, error)
+	GetRoutedFlock(string) (RoutedFlockRecord, bool)
+	ListRoutedFlocks() []RoutedFlockRecord
+}
+
+type ReplicatingDaemonOptions struct {
+	RoutedFlocks routedFlockController
+}
+
 func NewReplicatingDaemon(base Daemon, replicator snapshotReplicator) *ReplicatingDaemon {
+	return NewReplicatingDaemonWithOptions(base, replicator, ReplicatingDaemonOptions{})
+}
+
+func NewReplicatingDaemonWithOptions(base Daemon, replicator snapshotReplicator, opts ReplicatingDaemonOptions) *ReplicatingDaemon {
 	daemon := &ReplicatingDaemon{
-		Daemon:     base,
-		replicator: replicator,
+		Daemon:       base,
+		replicator:   replicator,
+		routedFlocks: opts.RoutedFlocks,
 	}
 	if router, ok := replicator.(flockCreator); ok {
 		daemon.flockRouter = router
@@ -38,4 +56,77 @@ func (d *ReplicatingDaemon) CreateFlock(ctx context.Context, req FlockCreateRequ
 		return d.flockRouter.CreateFlock(ctx, req)
 	}
 	return d.Daemon.CreateFlock(ctx, req)
+}
+
+func (d *ReplicatingDaemon) CreateRoutedFlockMembers(ctx context.Context, req FlockCreateRequest) (*RoutedFlockCreateOutput, error) {
+	if d == nil || d.routedFlocks == nil {
+		return nil, fmt.Errorf("routed flock members create is disabled; set ANVIL_MCP_CROSS_HOST_FLOCK_CREATE=members_only with persistent scheduler state")
+	}
+	return d.routedFlocks.CreateRoutedFlockMembers(ctx, req)
+}
+
+func (d *ReplicatingDaemon) DeleteFlock(ctx context.Context, flockID string) (*RawDaemonResponse, error) {
+	if d != nil && d.routedFlocks != nil && d.routedFlocks.IsRoutedFlock(flockID) {
+		return d.routedFlocks.DeleteRoutedFlock(ctx, flockID)
+	}
+	return d.Daemon.DeleteFlock(ctx, flockID)
+}
+
+func (d *ReplicatingDaemon) GetFlock(ctx context.Context, flockID string) (*FlockInfo, error) {
+	if d != nil && d.routedFlocks != nil {
+		if record, ok := d.routedFlocks.GetRoutedFlock(flockID); ok {
+			info := flockInfoFromRoutedRecord(record)
+			return &info, nil
+		}
+	}
+	return d.Daemon.GetFlock(ctx, flockID)
+}
+
+func (d *ReplicatingDaemon) ListFlocks(ctx context.Context) ([]FlockInfo, error) {
+	base, err := d.Daemon.ListFlocks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if d == nil || d.routedFlocks == nil {
+		return base, nil
+	}
+	for _, record := range d.routedFlocks.ListRoutedFlocks() {
+		base = append(base, flockInfoFromRoutedRecord(record))
+	}
+	return base, nil
+}
+
+func (d *ReplicatingDaemon) PostTownWall(ctx context.Context, flockID string, req TownWallPostRequest) (*TownWallMessage, error) {
+	if d != nil && d.routedFlocks != nil && d.routedFlocks.IsRoutedFlock(flockID) {
+		return nil, fmt.Errorf("%s %q", routedTownWallUnsupportedMessage, flockID)
+	}
+	return d.Daemon.PostTownWall(ctx, flockID, req)
+}
+
+func (d *ReplicatingDaemon) TownWallHistory(ctx context.Context, flockID string) ([]TownWallMessage, error) {
+	if d != nil && d.routedFlocks != nil && d.routedFlocks.IsRoutedFlock(flockID) {
+		return nil, fmt.Errorf("%s %q", routedTownWallUnsupportedMessage, flockID)
+	}
+	return d.Daemon.TownWallHistory(ctx, flockID)
+}
+
+func flockInfoFromRoutedRecord(record RoutedFlockRecord) FlockInfo {
+	agents := make(map[string]FlockAgentInfo, len(record.Agents))
+	for _, agent := range record.Agents {
+		agents[agent.AgentID] = FlockAgentInfo{
+			AgentID:  agent.AgentID,
+			Role:     agent.Role,
+			VMID:     agent.VMID,
+			AgentURL: agent.AgentURL,
+			Status:   agent.Status,
+		}
+	}
+	return FlockInfo{
+		FlockID:      record.FlockID,
+		Task:         record.Task,
+		TenantID:     record.TenantID,
+		EgressPolicy: record.EgressPolicy,
+		Agents:       agents,
+		CreatedAt:    record.CreatedAt,
+	}
 }
