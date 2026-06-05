@@ -559,6 +559,9 @@ func TestRuntimeRouterCreateRoutedFlockMembersSpawnsAcrossHosts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateRoutedFlockMembers returned error: %v", err)
 	}
+	if !strings.HasPrefix(out.FlockID, "routed-flock-") {
+		t.Fatalf("flock id = %q, want routed-flock- prefix", out.FlockID)
+	}
 	if out.Task != "review worker output" {
 		t.Fatalf("task = %q, want review worker output", out.Task)
 	}
