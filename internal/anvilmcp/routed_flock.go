@@ -375,6 +375,7 @@ func (r *RuntimeRouter) DeleteRoutedFlock(ctx context.Context, flockID string) (
 		record.Agents = pendingAgents
 		record.UpdatedAt = time.Now().UTC()
 		if err := r.placementStore.SaveRoutedFlockAndPlacements(record, removeVMIDs); err != nil {
+			preserveRoutedFlockCleanupStateInMemory(r.placementStore, record, removeVMIDs)
 			return nil, fmt.Errorf("routed flock delete cleanup pending: flock_id=%q reason=%s", record.FlockID, sanitizeRoutedFlockErrorReason(FlockPlacementReasonPlacementSaveFailed))
 		}
 		return nil, fmt.Errorf("routed flock delete cleanup pending: flock_id=%q reason=%s", record.FlockID, sanitizeRoutedFlockErrorReason(routedFlockReasonCleanupFailed))
@@ -384,7 +385,10 @@ func (r *RuntimeRouter) DeleteRoutedFlock(ctx context.Context, flockID string) (
 	record.Agents = []RoutedFlockAgent{}
 	record.UpdatedAt = time.Now().UTC()
 	if err := r.placementStore.SaveRoutedFlockAndPlacements(record, removeVMIDs); err != nil {
-		return nil, fmt.Errorf("routed flock delete failed: flock_id=%q reason=%s", record.FlockID, sanitizeRoutedFlockErrorReason(FlockPlacementReasonPlacementSaveFailed))
+		record.Status = RoutedFlockStatusFailedCleanupPending
+		record.UpdatedAt = time.Now().UTC()
+		preserveRoutedFlockCleanupStateInMemory(r.placementStore, record, removeVMIDs)
+		return nil, fmt.Errorf("routed flock delete cleanup pending: flock_id=%q reason=%s", record.FlockID, sanitizeRoutedFlockErrorReason(FlockPlacementReasonPlacementSaveFailed))
 	}
 	body, err := json.Marshal(map[string]string{
 		"status":   "deleted",
@@ -418,13 +422,25 @@ func (r *RuntimeRouter) deleteRoutedFlockAgents(ctx context.Context, agents []Ro
 			pendingAgents = append(pendingAgents, cleanupPendingRoutedFlockAgent(agent))
 			continue
 		}
-		if _, err := daemon.Delete(ctx, vmID); err != nil {
+		resp, err := daemon.Delete(ctx, vmID)
+		if err != nil || resp == nil {
 			pendingAgents = append(pendingAgents, cleanupPendingRoutedFlockAgent(agent))
 			continue
 		}
 		removeVMIDs = append(removeVMIDs, vmID)
 	}
 	return removeVMIDs, pendingAgents
+}
+
+func preserveRoutedFlockCleanupStateInMemory(store *PlacementStore, record RoutedFlockRecord, removeVMIDs []string) {
+	if store == nil {
+		return
+	}
+	record = normalizeRoutedFlockRecord(record)
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.ensureMaps()
+	applyRoutedFlockAndPlacements(&store.state, record, removeVMIDs)
 }
 
 func cleanupPendingRoutedFlockAgent(agent RoutedFlockAgent) RoutedFlockAgent {
