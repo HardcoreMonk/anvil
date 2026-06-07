@@ -1,3 +1,38 @@
+# v0.5.1 — Per-Profile Sizing & Goose Stability
+
+**Ephemera** v0.5.1 extends the v0.5.0 Web UI with **profile creation + per-VM sizing** and **snapshot/restore screens**, and hardens `goose-agent` for tight-budget and reasoning LLMs. Additive — the control-plane API adds `POST`/`DELETE /config/profiles` and `GET /config/providers`; existing routes are unchanged. **Golden-image rebake**: `cmd/goose-agent` changes (token cap, extension trim, `/nothink`, latest-turn output), so the daemon rebuilds the golden image on first start after the change.
+
+---
+
+## What's New
+
+### Profile creation + per-VM vCPU/memory
+
+- `POST /config/profiles` creates a user-defined profile (name + provider/model + optional vCPU/memory); `DELETE /config/profiles/{name}` removes one; `GET /config/providers` lists known providers and which have a keychain API key. The static `configs/profiles/*` role examples are removed — profiles are now created at runtime through the **Settings** UI.
+- Per-VM sizing is stored as `EPHEMERA_VCPU_COUNT` / `EPHEMERA_MEM_SIZE_MIB` keys in the profile's `goose.yaml` (goose ignores them) and applied at spawn; unset falls back to the default **2 vCPU / 2048 MiB**. Groq's discontinued `mixtral-8x7b` is dropped from suggestions.
+
+### Snapshot / restore Web console
+
+- The console gains a **Snapshots** screen (`GET /snapshots` — type/base/created) with **restore** (`POST /snapshots/{id}/restore`) and delete behind confirm modals, plus a **Snapshots** section on **VM detail** to capture Full/Diff snapshots (optionally stop-after). The snapshot/restore control-plane API itself is unchanged.
+
+### goose-agent hardening
+
+- Loads **only** the `developer` builtin extension (`--no-profile --with-builtin developer`) and caps `GOOSE_MAX_TOKENS`, so a single request fits tight provider token-per-minute budgets — e.g. Groq's free tier, where the full default toolset otherwise overflows and the 413 rate-limit is misreported as a context overflow.
+- Returns **only the latest turn's reply**, slicing goose's whole-transcript `--resume` output to the last user message — fixing the multi-turn "accumulating output" bug; the UI's brittle prefix-strip is removed.
+- Prepends **`/nothink`** for qwen reasoning models, since goose replays their `reasoning_content` on resume and Groq rejects it with a 400.
+
+### Korean UI vocabulary
+
+- `ko.json`: 프로필 → **프로파일**, the Provider label → **프로바이더**, and snapshot wording (e.g. "스냅샷을 만든 뒤 원본 VM을 제거합니다").
+
+### Stability
+
+- Restore's `waitForAgent` budget is raised **30s → 60s** to match the spawn/recovery boot paths, fixing a concurrent-restore flake (two 2 GB VMs restored at once) under host memory pressure.
+
+> **Caveats**: per-VM sizing applies to UI-created profiles and the spawn path — built-in flock roles keep their canonical sizing. The qwen `/nothink` workaround is partial: very long multi-turn reasoning-model sessions can still hit a `reasoning_content` 400 — start a fresh conversation, or use a non-reasoning model for heavy multi-turn.
+
+---
+
 # v0.5.0 — Web UI
 
 **Ephemera** v0.5.0 adds a **browser console** served by the daemon itself, replacing the script-form external client for everyday use. The existing control-plane API is unchanged and fully backward compatible; the only new server routes are `/ui/` (the embedded UI) and `/config/profiles` (profile model/provider editing). **Golden-image rebake**: `cmd/goose-agent` gains optional goose-session support, so the daemon rebuilds the golden image on first start after the change.
