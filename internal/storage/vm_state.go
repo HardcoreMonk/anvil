@@ -41,6 +41,8 @@ type VMState struct {
 	DiskPath      string    `json:"disk_path"`
 	DiskMode      string    `json:"disk_mode"` // "plain" | "cow"
 	Profile       string    `json:"profile,omitempty"`
+	Provider      string    `json:"provider,omitempty"` // GOOSE_PROVIDER; carried so recovered VMs keep their model/provider in the UI
+	Model         string    `json:"model,omitempty"`    // GOOSE_MODEL
 	VcpuCount     int64     `json:"vcpu_count"`
 	MemSizeMib    int64     `json:"mem_size_mib"`
 	FlockID       string    `json:"flock_id,omitempty"`

@@ -57,7 +57,7 @@ func TestWriteProfileConfig_PreservesStructure(t *testing.T) {
 	cp := newTestCP(t)
 	path := writeProfileFixture(t, cp, "worker", sampleGooseYAML)
 
-	if err := cp.writeProfileConfig("worker", "anthropic", "claude-sonnet-4-6"); err != nil {
+	if err := cp.writeProfileConfig("worker", "anthropic", "claude-sonnet-4-6", 4, 4096); err != nil {
 		t.Fatalf("writeProfileConfig: %v", err)
 	}
 	out := mustRead(t, path)
@@ -69,7 +69,7 @@ func TestWriteProfileConfig_PreservesStructure(t *testing.T) {
 		t.Errorf("model not updated:\n%s", out)
 	}
 	// Comments, unrelated keys, and the nested extensions block must survive.
-	for _, want := range []string{"# Goose config", "GOOSE_DISABLE_KEYRING: true", "extensions:", "developer:", "timeout: 300"} {
+	for _, want := range []string{"# Goose config", "GOOSE_DISABLE_KEYRING: true", "extensions:", "developer:", "timeout: 300", "EPHEMERA_VCPU_COUNT: 4", "EPHEMERA_MEM_SIZE_MIB: 4096"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("writeProfileConfig dropped %q:\n%s", want, out)
 		}
@@ -162,6 +162,137 @@ func TestReadGooseConfigFile(t *testing.T) {
 	// A missing file is best-effort: empty strings, no panic.
 	if p, m := readGooseConfigFile(filepath.Join(cp.workDir, "nope.yaml")); p != "" || m != "" {
 		t.Fatalf("missing file should yield empty, got %q/%q", p, m)
+	}
+}
+
+func TestHandleConfigProviders_Shape(t *testing.T) {
+	cp := newTestCP(t)
+	// Only Google has a real key; everything else is unset.
+	os.WriteFile(cp.gooseSecretsPath, []byte("GOOGLE_API_KEY: \"AIzaReal\"\n"), 0o644)
+
+	rr := httptest.NewRecorder()
+	cp.handleConfigProviders(rr, httptest.NewRequest(http.MethodGet, "/config/providers", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	var list []providerStatus
+	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(list) != len(providerRegistry) {
+		t.Fatalf("got %d providers, want %d", len(list), len(providerRegistry))
+	}
+	byID := map[string]providerStatus{}
+	for _, p := range list {
+		byID[p.ID] = p
+	}
+	if !byID["google"].Available {
+		t.Error("google should be available")
+	}
+	if byID["anthropic"].Available || byID["groq"].Available || byID["openai"].Available {
+		t.Error("providers without a key should be unavailable")
+	}
+	if byID["groq"].DefaultModel == "" || len(byID["groq"].SuggestedModels) == 0 {
+		t.Error("groq should carry default + suggested models")
+	}
+}
+
+func TestCreateProfile_WritesGooseYAMLNoSecrets(t *testing.T) {
+	cp := newTestCP(t)
+	rr := httptest.NewRecorder()
+	body := strings.NewReader(`{"name":"myprofile","provider":"anthropic","model":"claude-sonnet-4-6"}`)
+	cp.handleConfigProfiles(rr, httptest.NewRequest(http.MethodPost, "/config/profiles", body))
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rr.Code, rr.Body.String())
+	}
+	dir := filepath.Join(cp.workDir, "configs", "profiles", "myprofile")
+	out := mustRead(t, filepath.Join(dir, "goose.yaml"))
+	if !strings.Contains(out, "GOOSE_PROVIDER: anthropic") || !strings.Contains(out, "GOOSE_MODEL: claude-sonnet-4-6") {
+		t.Fatalf("goose.yaml not written correctly:\n%s", out)
+	}
+	// No per-profile secrets file is created — keys live in the global keychain.
+	if _, err := os.Stat(filepath.Join(dir, "goose-secrets.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("unexpected per-profile secrets file")
+	}
+}
+
+func TestCreateProfile_DefaultsModel(t *testing.T) {
+	cp := newTestCP(t)
+	rr := httptest.NewRecorder()
+	// No model field → provider's default model is used.
+	cp.handleConfigProfiles(rr, httptest.NewRequest(http.MethodPost, "/config/profiles",
+		strings.NewReader(`{"name":"groqp","provider":"groq"}`)))
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rr.Code, rr.Body.String())
+	}
+	out := mustRead(t, filepath.Join(cp.workDir, "configs", "profiles", "groqp", "goose.yaml"))
+	if !strings.Contains(out, "GOOSE_MODEL: llama-3.3-70b-versatile") {
+		t.Fatalf("expected groq default model:\n%s", out)
+	}
+}
+
+func TestCreateProfile_RejectsDefaultAndBadNames(t *testing.T) {
+	cp := newTestCP(t)
+	for _, n := range []string{"default", "../evil", "Has Space", "UPPER", ".."} {
+		rr := httptest.NewRecorder()
+		b := strings.NewReader(`{"name":"` + n + `","provider":"google"}`)
+		cp.handleConfigProfiles(rr, httptest.NewRequest(http.MethodPost, "/config/profiles", b))
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("name %q: status = %d, want 400", n, rr.Code)
+		}
+	}
+}
+
+func TestCreateProfile_RejectsUnavailableProvider(t *testing.T) {
+	cp := newTestCP(t)
+	os.WriteFile(cp.gooseSecretsPath, []byte(""), 0o644) // no keys at all
+	rr := httptest.NewRecorder()
+	cp.handleConfigProfiles(rr, httptest.NewRequest(http.MethodPost, "/config/profiles",
+		strings.NewReader(`{"name":"p","provider":"google"}`)))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestCreateProfile_Duplicate(t *testing.T) {
+	cp := newTestCP(t)
+	writeProfileFixture(t, cp, "dup", sampleGooseYAML)
+	rr := httptest.NewRecorder()
+	cp.handleConfigProfiles(rr, httptest.NewRequest(http.MethodPost, "/config/profiles",
+		strings.NewReader(`{"name":"dup","provider":"google"}`)))
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestDeleteProfile_RemovesDir(t *testing.T) {
+	cp := newTestCP(t)
+	writeProfileFixture(t, cp, "gone", sampleGooseYAML)
+	rr := httptest.NewRecorder()
+	cp.handleConfigProfile(rr, httptest.NewRequest(http.MethodDelete, "/config/profiles/gone", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(cp.workDir, "configs", "profiles", "gone")); !os.IsNotExist(err) {
+		t.Fatalf("profile dir not removed")
+	}
+}
+
+func TestDeleteProfile_RejectsDefault(t *testing.T) {
+	cp := newTestCP(t)
+	rr := httptest.NewRecorder()
+	cp.handleConfigProfile(rr, httptest.NewRequest(http.MethodDelete, "/config/profiles/default", nil))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rr.Code)
+	}
+}
+
+func TestDeleteProfile_NotFound(t *testing.T) {
+	cp := newTestCP(t)
+	rr := httptest.NewRecorder()
+	cp.handleConfigProfile(rr, httptest.NewRequest(http.MethodDelete, "/config/profiles/nope", nil))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rr.Code)
 	}
 }
 

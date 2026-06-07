@@ -4,9 +4,9 @@ import { writable } from 'svelte/store'
 // (no token needed), token=the current bearer when auth is enabled.
 export const auth = writable({ ready: false, disabled: false, token: null })
 
-// view: simple client-side router state. name is one of login|list|detail.
-// detail carries the selected vm object (lost on hard reload — bootstrap then
-// returns to list, which is acceptable for v0.5.0).
+// view: simple client-side router state. name is one of
+// login|list|detail|snapshots|settings. detail carries the selected vm object
+// (lost on hard reload — bootstrap then returns to list, which is acceptable).
 export const view = writable({ name: 'login' })
 
 export const toasts = writable([])

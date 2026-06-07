@@ -271,18 +271,13 @@ type AgentProfile struct {
 	ProfileDir string
 }
 
-// agentProfiles maps a profile name to its canonical sizing and profile directory.
-// The empty key "" is the backward-compatible default returned for unset profiles.
-// Unknown names fall back to default sizing with ProfileDir set to the name
-// itself, preserving prior behavior where any directory under configs/profiles
-// could be selected by name.
+// agentProfiles holds only the reserved default. Every other profile is
+// user-defined: created through the Settings UI as a configs/profiles/{name}
+// directory and resolved by name. LookupProfile returns default sizing
+// (2 vCPU / 2048 MiB) with ProfileDir set to the requested name, so any
+// user profile or flock role works without a hardcoded entry here.
 var agentProfiles = map[string]AgentProfile{
-	"":             {Name: "default", VcpuCount: 2, MemSizeMib: 2048, ProfileDir: ""},
-	"researcher":   {Name: "researcher", VcpuCount: 1, MemSizeMib: 512, ProfileDir: "researcher"},
-	"reviewer":     {Name: "reviewer", VcpuCount: 1, MemSizeMib: 512, ProfileDir: "reviewer"},
-	"worker":       {Name: "worker", VcpuCount: 2, MemSizeMib: 2048, ProfileDir: "worker"},
-	"orchestrator": {Name: "orchestrator", VcpuCount: 2, MemSizeMib: 2048, ProfileDir: "orchestrator"},
-	"builder":      {Name: "builder", VcpuCount: 4, MemSizeMib: 4096, ProfileDir: "worker"},
+	"": {Name: "default", VcpuCount: 2, MemSizeMib: 2048, ProfileDir: ""},
 }
 
 // LookupProfile returns the canonical AgentProfile for a known name, or a

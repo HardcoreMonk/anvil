@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte'
   import { get } from 'svelte/store'
   import { _ } from 'svelte-i18n'
-  import { apiFetch } from '../lib/api.js'
+  import { apiFetch, apiJSON } from '../lib/api.js'
   import { streamFrames } from '../lib/stream.js'
   import { toast } from '../lib/store.js'
 
@@ -13,34 +13,56 @@
   let prompt = ''
   let running = false
   let session = '' // goose session name; the agent resumes it across turns
-  let prevOutput = '' // last turn's cumulative goose output, to show only the delta
   let controller = null
   let elapsed = 0
   let elapsedTimer = null
   let logEl
+  let sessionList = [] // [{ name, created_at, title, turns, last_output }] from the agent
+  let selectedKey = '__new__' // conversation picker: '__new__' or a session name
+  let resuming = false // true when the active session is a resumed prior conversation
+  let resumeTurns = 0
 
   function newSession() {
     // A fresh goose session per conversation. Date.now keeps it unique per VM.
     session = vmId + '-' + Date.now()
-    prevOutput = ''
-  }
-
-  // goose --resume returns the WHOLE session transcript each turn (every prior
-  // assistant reply concatenated). Show only the newest reply by stripping the
-  // previous cumulative output as a prefix.
-  function takeDelta(full) {
-    let reply = full
-    if (prevOutput && full.startsWith(prevOutput)) {
-      reply = full.slice(prevOutput.length).replace(/^\n+/, '')
-    }
-    if (full) prevOutput = full
-    return reply
+    resuming = false
+    selectedKey = '__new__'
   }
 
   function newConversation() {
     if (running) return
     newSession()
     messages = []
+  }
+
+  async function loadSessions() {
+    try {
+      const data = await apiJSON('/vms/' + encodeURIComponent(vmId) + '/sessions')
+      sessionList = Array.isArray(data) ? data : []
+      // Once the agent knows the active session, reflect it in the picker.
+      if (session && sessionList.some((s) => s.name === session)) selectedKey = session
+    } catch (e) {
+      sessionList = [] // listing is best-effort; the panel still works without it
+    }
+  }
+
+  function resumeSession(s) {
+    // Continue a prior conversation: just point the agent at its session. The
+    // agent returns only the latest turn's reply (it slices goose's transcript to
+    // the last user message), so no client-side delta baseline is needed.
+    session = s.name
+    selectedKey = s.name
+    resumeTurns = s.turns || 0
+    resuming = true
+    messages = []
+  }
+
+  function onPickSession() {
+    if (selectedKey === '__new__') newConversation()
+    else {
+      const s = sessionList.find((x) => x.name === selectedKey)
+      if (s) resumeSession(s)
+    }
   }
 
   function scrollDown() {
@@ -91,13 +113,13 @@
               scrollDown()
             }
           } else if (frame.type === 'result') {
-            a.output = takeDelta(frame.output || '')
+            a.output = frame.output || ''
             a.error = frame.error || ''
           }
         })
       } else {
         const data = await resp.json()
-        a.output = takeDelta(data.output || '')
+        a.output = data.output || ''
         a.error = data.error || ''
       }
     } catch (e) {
@@ -114,6 +136,7 @@
       stopElapsed()
       controller = null
       scrollDown()
+      loadSessions() // refresh the picker: new session appears; turn count updates
     }
   }
 
@@ -129,7 +152,13 @@
     }
   }
 
-  onMount(newSession)
+  onMount(async () => {
+    await loadSessions()
+    // Newest-first: continue the latest conversation (seamless after a restore);
+    // a freshly-spawned VM has none, so start a new one.
+    if (sessionList.length) resumeSession(sessionList[0])
+    else newSession()
+  })
   onDestroy(() => {
     if (controller) controller.abort()
     stopElapsed()
@@ -139,10 +168,23 @@
 <div class="panel" style="margin-bottom:16px;">
   <div class="row between" style="margin-bottom:12px;">
     <h2>{$_('taskpanel.title')}</h2>
-    <button class="ghost" on:click={newConversation} disabled={running || messages.length === 0}>
-      {$_('taskpanel.newConversation')}
-    </button>
+    {#if sessionList.length}
+      <select class="conv" bind:value={selectedKey} on:change={onPickSession} disabled={running}>
+        <option value="__new__">{$_('taskpanel.newConversation')}</option>
+        {#each sessionList as s (s.name)}
+          <option value={s.name}>{s.title || s.name}</option>
+        {/each}
+      </select>
+    {:else}
+      <button class="ghost" on:click={newConversation} disabled={running || messages.length === 0}>
+        {$_('taskpanel.newConversation')}
+      </button>
+    {/if}
   </div>
+
+  {#if resuming && !messages.length}
+    <div class="resume-note muted">{$_('taskpanel.resumingNote', { values: { turns: resumeTurns } })}</div>
+  {/if}
 
   {#if messages.length}
     <div class="chat" bind:this={logEl}>
@@ -190,6 +232,8 @@
 </div>
 
 <style>
+  .conv { width: auto; max-width: 260px; }
+  .resume-note { font-size: 12px; margin-bottom: 12px; }
   .chat {
     max-height: 360px;
     overflow-y: auto;

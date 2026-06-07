@@ -7,6 +7,7 @@
   import Login from './components/Login.svelte'
   import VMList from './components/VMList.svelte'
   import VMDetail from './components/VMDetail.svelte'
+  import Snapshots from './components/Snapshots.svelte'
   import Settings from './components/Settings.svelte'
   import Toasts from './components/Toasts.svelte'
 
@@ -59,8 +60,9 @@
 {:else}
   <div class="nav">
     <span class="brand">EPHEMERA</span>
-    <span class="badge">v0.5.0</span>
+    <span class="badge">v0.5.1</span>
     <button class="ghost" on:click={() => view.set({ name: 'list' })}>{$_('nav.vms')}</button>
+    <button class="ghost" on:click={() => view.set({ name: 'snapshots' })}>{$_('nav.snapshots')}</button>
     <button class="ghost" on:click={() => view.set({ name: 'settings' })}>{$_('nav.settings')}</button>
     <span class="spacer"></span>
     <div class="lang-switch">
@@ -78,6 +80,8 @@
       <VMList />
     {:else if $view.name === 'detail'}
       <VMDetail vm={$view.vm} />
+    {:else if $view.name === 'snapshots'}
+      <Snapshots />
     {:else if $view.name === 'settings'}
       <Settings />
     {/if}

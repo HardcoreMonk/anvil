@@ -59,7 +59,7 @@
           <tr class="clickable" on:click={() => open(vm)}>
             <td class="mono">{vm.vm_id}</td>
             <td class="mono">{vm.guest_ip}</td>
-            <td>{vm.profile || '—'}</td>
+            <td>{vm.profile || 'default'}</td>
             <td class="mono">{vm.model || '—'}</td>
             <td>{pct(vm.stats?.cpu_percent)}</td>
             <td>{vm.stats?.mem_used_mib ?? 0} / {vm.stats?.mem_total_mib ?? 0}</td>

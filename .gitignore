@@ -6,6 +6,7 @@
 /ephemera-daemon
 /ephemera-ctl
 /goose-daemon
+/goose-agent
 /cmd/goose-daemon/goose-daemon
 *.exe
 *.exe~

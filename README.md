@@ -10,7 +10,7 @@
 
 Ephemera orchestrates isolated, KVM-backed MicroVM environments for agentic AI workloads. Each VM runs [Goose](https://github.com/aaif-goose/goose) as an autonomous agent inside a minimal Debian guest, fully contained within hardware VM boundaries and completely wiped on termination.
 
-Beyond single-VM execution, Ephemera supports **multi-agent flocks** ("Goosetown"): one `POST /flocks` call spawns a group of role-specialized VMs (orchestrator, researcher, worker, reviewer, …), each with its own vCPU/memory profile and system prompt, all sharing an append-only **Town Wall** log for coordination.
+Beyond single-VM execution, Ephemera supports **multi-agent flocks** ("Goosetown"): one `POST /flocks` call spawns a group of role-labeled VMs (orchestrator, researcher, worker, reviewer, …), all sharing an append-only **Town Wall** log for coordination. Each role name doubles as a profile name: if a matching `configs/profiles/{role}/` exists it supplies that agent's provider/model and system prompt, otherwise the agent spawns with the default config.
 
 ---
 
@@ -40,8 +40,11 @@ Ephemera Control Plane  :3000         ← VM + snapshot + flock management
   GET    /flocks/{id}/wall            → SSE stream of Town Wall messages
   GET    /flocks/{id}/wall/history    → Town Wall log (filters: ?agent_id/since/until/contains, v0.4.3)
   GET    /watchdog/status             → watchdog tunables + per-VM health state (v0.4.4)
+  GET    /config/providers            → known LLM providers + which have an API key (v0.5.1)
   GET    /config/profiles             → list each profile's provider/model (v0.5.0)
+  POST   /config/profiles             → create a user-defined profile (+ optional vCPU/memory) (v0.5.1)
   PUT    /config/profiles/{name}      → update a profile's provider/model (v0.5.0)
+  DELETE /config/profiles/{name}      → delete a user-defined profile (v0.5.1)
   GET    /ui/                         → embedded browser Web console (Svelte SPA, v0.5.0)
 
       │  provision
@@ -131,8 +134,8 @@ DELETE /vms/{id}
 | **Self-bootstrapping** | Golden image, kernel, Firecracker downloaded + SHA256-verified on first run; goose-agent / micro-init / golden image are also rebuilt automatically when their sources are newer than the cached artifact (mtime-based staleness check), so editing in-VM Go code or `build_image.sh` does not need a manual `rm artifacts/...` |
 | **Minimal guest OS** | Debian Bookworm minbase — no SSH, no init daemon; `micro-init` (Go binary, PID 1) mounts virtual filesystems and manages goose-agent lifecycle |
 | **Graceful guest shutdown** | `micro-init` traps SIGTERM and calls `poweroff(2)` — no kernel panic on VM exit |
-| **Per-VM LLM profiles** | Each VM spawn can specify a named profile (`configs/profiles/{name}/`) with its own provider, model, and API key |
-| **Per-profile vCPU/memory** | Known roles (`researcher`, `worker`, `reviewer`, `orchestrator`, `builder`) map to canonical sizing (e.g. 1 vCPU / 512 MiB for researcher, 4 vCPU / 4096 MiB for builder); unknown profiles fall back to the legacy 2 vCPU / 2048 MiB default |
+| **Per-VM LLM profiles** | A mandatory `default` profile (`configs/goose.yaml`) plus any number of user-defined profiles (`configs/profiles/{name}/goose.yaml`), each selecting a provider + model. API keys live in one global keychain (`configs/goose-secrets.yaml`), never per profile. User-defined profiles can set their own per-VM vCPU/memory (v0.5.1); the default and any unsized profile spawn at 2 vCPU / 2048 MiB |
+| **Provider-restricted config** | The Settings UI only offers providers whose API key is present in the global keychain (`GET /config/providers`); the built-in registry covers Google, Anthropic, OpenAI, and Groq |
 | **Multi-agent flocks** | `POST /flocks` spawns a group of role-specialized VMs in one call; `DELETE /flocks/{id}` tears them all down in parallel |
 | **Town Wall log** | Per-flock append-only log with SSE streaming (`/flocks/{id}/wall`) for coordination; `gtwall "..."` CLI inside each VM posts to it, and `gtcall <agent_id> "..."` (v0.3.6) dispatches a prompt to a peer agent — both hide curl/token/JSON-quoting behind a one-line interface |
 | **Role system prompts** | Each role profile can ship a `system.md` that is injected into the VM and prepended to every `/tasks` prompt |
@@ -214,15 +217,18 @@ cmd/
                       (Flusher-preserving), GET /audit, auditMiddleware (v0.4.1)
     ui.go             Serves the embedded Web UI at /ui/ (go:embed uidist) + SPA
                       fallback + "/" → /ui/ redirect, outside the auth chain (v0.5.0)
-    config_api.go     GET /config/profiles, GET/PUT /config/profiles/{name} —
-                      read/update a profile's GOOSE_PROVIDER/GOOSE_MODEL on disk (v0.5.0)
+    config_api.go     GET /config/providers (registry + keychain availability);
+                      GET/POST /config/profiles, GET/PUT/DELETE /config/profiles/{name} —
+                      list/create/update/delete a profile's GOOSE_PROVIDER/GOOSE_MODEL
+                      (+ optional per-VM vCPU/memory) on disk (v0.5.1)
     uidist/           Committed Web UI build (go:embed input; rebuilt from web/, v0.5.0)
   goose-agent/        In-VM HTTP agent (baked into golden image)
     main.go           /tasks (optional `session` → goose -n/--resume for multi-turn, v0.5.0),
                       /health, /stop, /townwall/post  (Bearer token auth);
                       prepends role system prompt to /tasks bodies;
-                      runs `goose run --output-format json` and extracts the
-                      assistant text via extractGooseJSONText (banner-skip) (v0.3.6)
+                      runs `goose run --output-format json --no-profile --with-builtin
+                      developer` (+ capped GOOSE_MAX_TOKENS, `/nothink` for qwen) and
+                      extracts only the latest turn's text via extractGooseJSONText (v0.5.1)
   micro-init/         PID 1 for each MicroVM (baked into golden image)
     main.go           Mounts virtual filesystems, manages goose-agent,
                       calls poweroff(2) on exit
@@ -276,14 +282,10 @@ internal/
 configs/
   goose.yaml.example             Default provider/model template
   goose-secrets.yaml.example     API key template
-  profiles/                      Per-VM LLM profiles (optional)
+  profiles/                      User-defined LLM profiles (created via the Settings UI; empty by default)
     <profile-name>/
-      goose.yaml                 (gitignored; copied from .example)
-      goose-secrets.yaml         (gitignored; copied from .example)
+      goose.yaml                 (gitignored) provider + model for this profile; API keys come from the global keychain above
       system.md                  Role system prompt prepended to /tasks (optional)
-      system.webdev.md           webdev_demo.sh override prompt, swapped over system.md at demo time (v0.3.6)
-      goose.webdev.yaml          webdev_demo.sh override config (Gemini model per role), swapped over goose.yaml (v0.3.6)
-    researcher/  worker/  reviewer/  orchestrator/    ← built-in role profiles
   webdev-demo/                   Host-side vite-template overlaid onto worker output by webdev_demo.sh (v0.3.6)
     vite-template/               package.json, vite.config.js, index.html, src/* placeholders
   observability/                 Provisioning bundle for observability_demo.sh (v0.3.5)
@@ -794,8 +796,9 @@ cd web && npm install && npm run build   # writes ../cmd/goose-daemon/uidist/
 
 - **Login** — takes an API Bearer token (`sessionStorage`, or `localStorage` with "remember"). If the server has no clients configured (auth disabled), login is auto-skipped.
 - **VM list** — `GET /vms?stats=true` (polled): id, IP, profile, **model**, CPU/memory/uptime. *Create VM* opens a modal with a **profile dropdown** (`GET /config/profiles`) and shows the one-time `agent_token`.
-- **VM detail** — live stats + the spawned provider/model; a **conversation** panel that streams each turn (`POST /vms/{id}/tasks?stream=1`) and keeps context across turns (multi-turn, below), with Cancel + elapsed time; and a Delete action behind an in-app confirm (graceful teardown).
-- **Settings** — lists every profile and edits its provider/model (`PUT /config/profiles/{name}`); changes apply to the **next** Create VM, not running VMs.
+- **VM detail** — live stats + the spawned provider/model; a **conversation** panel that streams each turn (`POST /vms/{id}/tasks?stream=1`) and keeps context across turns (multi-turn, below), with Cancel + elapsed time; a **Snapshots** section to capture Full/Diff snapshots (optionally stop-after, v0.5.1); and a Delete action behind an in-app confirm (graceful teardown).
+- **Settings** — lists every profile, edits its provider/model (`PUT /config/profiles/{name}`), and **creates** profiles with a name + provider/model + **per-VM vCPU/memory** (`POST /config/profiles`, v0.5.1); changes apply to the **next** Create VM, not running VMs.
+- **Snapshots** — lists stored snapshots (`GET /snapshots`: type, base, created), **restores** one into a new VM (`POST /snapshots/{id}/restore`), and deletes — each behind a confirm modal (v0.5.1).
 
 ### Localization (EN / KO)
 
@@ -803,7 +806,9 @@ All UI strings live in `web/src/locales/{en,ko}.json` and render via `svelte-i18
 
 ### Multi-turn conversation
 
-The conversation panel sends an optional `session` on `POST /vms/{id}/tasks`. When present, `goose-agent` runs `goose run --output-format json -n <session> [--resume] -i -` — the first turn creates the named session, later turns `--resume` it — so the agent keeps conversation context across turns (stored in the VM's goose session db). Omitting `session` preserves the original stateless one-shot behavior used by `ephemera-ctl` and `gtcall`.
+The conversation panel sends an optional `session` on `POST /vms/{id}/tasks`. When present, `goose-agent` runs `goose run --output-format json --no-profile --with-builtin developer -n <session> [--resume] -i -` — the first turn creates the named session, later turns `--resume` it — so the agent keeps conversation context across turns (stored in the VM's goose session db). Omitting `session` preserves the original stateless one-shot behavior used by `ephemera-ctl` and `gtcall`.
+
+> **v0.5.1 agent hardening.** goose-agent now (a) loads **only** the `developer` builtin extension (`--no-profile --with-builtin developer`) and caps `GOOSE_MAX_TOKENS`, so a single request fits tight provider token-per-minute budgets — e.g. Groq's free tier, where the full default toolset otherwise overflows and the 429/413 is misreported as a context overflow; (b) returns **only the latest turn's reply**, slicing goose's whole-transcript `--resume` output to the last user message (fixes the multi-turn "accumulating output" bug); and (c) prepends **`/nothink`** for qwen reasoning models, since goose replays their `reasoning_content` on resume and Groq rejects it with a 400. The qwen workaround is partial — very long multi-turn sessions can still flake; a non-reasoning model is the robust choice there.
 
 ---
 
@@ -1069,9 +1074,9 @@ Without `EPHEMERA_PUBLIC_URL`, `agent_url` still contains the private IP, but th
 
 ### Flock API (Multi-Agent Orchestration)
 
-A **flock** is one `POST /flocks` call that spawns one VM per requested role and registers them under a shared flock ID. Each role string is mapped through `LookupProfile` to (vCPU, memory, profile directory, system prompt), so a single request can produce a heterogeneous group of agents that all share a Town Wall log.
+A **flock** is one `POST /flocks` call that spawns one VM per requested role and registers them under a shared flock ID, all sharing a Town Wall log. Each role string is used directly as a profile name.
 
-> Role names map through built-in profiles. Unknown names spawn at default sizing (2 vCPU / 2048 MiB) and look for `configs/profiles/{name}/` for goose config files.
+> Every agent spawns at default sizing (2 vCPU / 2048 MiB). A role uses `configs/profiles/{role}/goose.yaml` (provider/model) and `system.md` (prompt) when that directory exists; otherwise it falls back to the default config. API keys always come from the global `configs/goose-secrets.yaml`.
 
 #### Spawn a flock
 
@@ -1301,7 +1306,7 @@ A handful of role names are pre-mapped to canonical sizing and a profile directo
 | `orchestrator` | 2 | 2048 | `orchestrator/` | Delegation + synthesis (never executes work itself) |
 | `builder` | 4 | 4096 | `worker/` | Heavyweight worker (reuses the worker profile) |
 
-Unknown names also work — they spawn at the default `2 vCPU / 2048 MiB` and look up `configs/profiles/{name}/`.
+Unknown names also work — a Web-UI-created profile uses its own vCPU/memory when set (v0.5.1), otherwise the default `2 vCPU / 2048 MiB`; either way it looks up `configs/profiles/{name}/`.
 
 ### Setup
 
@@ -1343,15 +1348,22 @@ If the profile directory has a `system.md`, its contents are written into the VM
 
 ### Editing a profile's model (Web UI / API, v0.5.0)
 
-A profile's provider/model can be read and changed at runtime without restarting the daemon — the Web UI **Settings** screen drives these endpoints:
+A profile can be **created**, and its provider/model read and changed, at runtime without restarting the daemon — the Web UI **Settings** screen drives these endpoints:
 
 ```bash
 # List all profiles with their current provider/model
 curl http://localhost:3000/config/profiles -H "Authorization: Bearer $TOKEN"
 # → [{"name":"default","provider":"google","model":"gemini-2.5-flash"}, {"name":"worker", …}]
 
+# Create a profile (provider/model + optional per-VM vCPU/memory, v0.5.1).
+# Omit vcpu_count/mem_size_mib (or pass 0) to use the default 2 vCPU / 2048 MiB.
+curl -X POST http://localhost:3000/config/profiles \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"fast-worker","provider":"groq","model":"llama-3.3-70b-versatile","vcpu_count":2,"mem_size_mib":2048}'
+
 # Update one profile (rewrites GOOSE_PROVIDER/GOOSE_MODEL in place — comments +
-# extensions preserved; API keys in goose-secrets.yaml are never touched here)
+# extensions preserved; API keys in goose-secrets.yaml are never touched here;
+# vcpu_count/mem_size_mib update sizing too — 0 or omitted keeps the current value)
 curl -X PUT http://localhost:3000/config/profiles/worker \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"provider":"anthropic","model":"claude-sonnet-4-6"}'

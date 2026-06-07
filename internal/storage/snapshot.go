@@ -21,6 +21,8 @@ type SnapshotMetadata struct {
 	SnapshotID     string    `json:"snapshot_id"`
 	SourceVMID     string    `json:"source_vm_id"`
 	Profile        string    `json:"profile"`
+	Provider       string    `json:"provider,omitempty"`         // GOOSE_PROVIDER at snapshot time; restored into VMInfo for UI display
+	Model          string    `json:"model,omitempty"`            // GOOSE_MODEL at snapshot time
 	SnapshotType   string    `json:"snapshot_type"`              // "full" | "diff"
 	BaseSnapshotID string    `json:"base_snapshot_id,omitempty"` // set for diff snapshots
 	GuestIP        string    `json:"guest_ip"`
