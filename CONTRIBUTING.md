@@ -35,8 +35,9 @@ The daemon's `Ensure{GooseAgent,MicroInit}` helpers set the right flags automati
 
 Files committed to the repo:
 
-- `configs/profiles/<role>/goose.yaml.example`
-- `configs/profiles/<role>/goose-secrets.yaml.example`
+- `configs/goose.yaml.example`, `configs/goose-secrets.yaml.example` (default-profile templates)
+
+> The static per-role `configs/profiles/<role>/*.example` files were removed in v0.5.1 — user profiles are now created at runtime through the Settings UI (their real `configs/profiles/<name>/goose.yaml` stays gitignored, below).
 
 Files that must **never** be committed:
 

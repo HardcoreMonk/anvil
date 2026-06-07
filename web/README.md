@@ -74,20 +74,22 @@ surfaced via toasts), the `EPHEMERA` brand, and the version badge.
 
 Each VM's LLM provider/model comes from a **profile** — `configs/goose.yaml` (the
 `default` profile) or `configs/profiles/{name}/goose.yaml` — injected into the
-VM's rootfs at spawn time. The UI views and edits the provider/model of these
-profiles:
+VM's rootfs at spawn time. The UI creates, views, and edits these profiles:
 
 - **Create VM modal** — a dropdown (from `GET /config/profiles`) picks which
   profile a new VM uses (`default` → the daemon's default config).
-- **Settings screen** — edits each profile's `GOOSE_PROVIDER` / `GOOSE_MODEL` and
-  saves via `PUT /config/profiles/{name}`.
+- **Settings screen** — lists profiles, **creates** new ones (name + provider/model
+  + optional **per-VM vCPU/memory**, v0.5.1) and edits provider/model.
 
 Endpoints (auth-protected, `cmd/goose-daemon/config_api.go`):
-- `GET /config/profiles` → `[{name, provider, model}]`
-- `GET /config/profiles/{name}` → `{name, provider, model}`
-- `PUT /config/profiles/{name}` body `{provider, model}` — rewrites the
-  GOOSE_PROVIDER/GOOSE_MODEL lines in place (comments + `extensions:` block
-  preserved; values validated against newline injection).
+- `GET /config/providers` → known providers + which have a keychain API key (v0.5.1)
+- `GET /config/profiles` → `[{name, provider, model, vcpu_count, mem_size_mib}]`
+- `POST /config/profiles` body `{name, provider, model, vcpu_count?, mem_size_mib?}` — create a profile (v0.5.1)
+- `GET /config/profiles/{name}` → `{name, provider, model, vcpu_count, mem_size_mib}`
+- `PUT /config/profiles/{name}` body `{provider, model, vcpu_count?, mem_size_mib?}` — rewrites
+  GOOSE_PROVIDER/GOOSE_MODEL (+ optional `EPHEMERA_VCPU_COUNT`/`EPHEMERA_MEM_SIZE_MIB`) in place
+  (comments + `extensions:` block preserved; values validated against newline injection).
+- `DELETE /config/profiles/{name}` — remove a user-defined profile (v0.5.1)
 
 **Constraints:** API keys (`goose-secrets.yaml`) are **never** exposed or edited
 through the UI — they stay server-side. Config is injected at spawn, so edits
