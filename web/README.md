@@ -3,8 +3,10 @@
 A single-page app (Svelte + Vite) that the daemon serves from its own binary
 under `/ui/`. It is the browser-based replacement for the script-form External
 Client (`ephemera-ctl` + curl): system management through agent usage in one
-place. Introduced in v0.5.0 (VM lifecycle); later cycles add tasks, snapshots,
-flocks, system management, and embedded Grafana monitoring.
+place. Introduced in v0.5.0 (VM lifecycle + tasks); v0.5.1 added snapshots and
+profile creation; v0.5.2 added the **Orchestration** console (Agent Groups) and a
+live **Activity Feed** over SSE. Later cycles add system management and embedded
+Grafana monitoring.
 
 ## How it is served
 
@@ -22,6 +24,17 @@ the app makes (`/vms`, …) still flows through the normal Bearer auth.
   against `GET /vms`, and stores it in `sessionStorage` (or `localStorage` with
   "remember me"). It is sent as `Authorization: Bearer <token>` on every call;
   any `401` clears it and returns to login.
+
+## Streaming over fetch (no EventSource)
+
+Two server streams power the UI: the NDJSON task stream
+(`POST /vms/{id}/tasks?stream=1`) and the Activity Feed's SSE Town Wall
+(`GET /flocks/{id}/wall`). Both are read over `fetch` + `ReadableStream`, **not
+`EventSource`** — `EventSource` cannot send the `Authorization: Bearer` header,
+and every data route is auth-gated. `src/lib/stream.js` carries one parser each:
+`streamFrames` (newline-delimited JSON) and `streamSSE` (`data: {json}` SSE
+frames). The Activity Feed aborts its fetch on unmount / flock switch and offers
+a manual **Reconnect** when the stream ends.
 
 ## UI terminology
 

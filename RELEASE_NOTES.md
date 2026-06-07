@@ -1,3 +1,29 @@
+# v0.5.2 — Orchestration Web UI + Live Activity Feed (SSE)
+
+**Ephemera** v0.5.2 adds the **Orchestration** console — browser-based Agent Group (flock) management — and a **live Activity Feed** over Server-Sent Events. Pure frontend: every flock endpoint already shipped in v0.4.x, so there are **no control-plane code changes and no golden-image rebake** (UI bundle + docs + tests only).
+
+---
+
+## What's New
+
+### Orchestration console (Agent Groups)
+
+- A new **Orchestration** screen lists Agent Groups (`GET /flocks`, 4s poll, newest-first) and creates them (`POST /flocks` — a task plus one role per VM; the one-time `agent_token` for each agent is shown once and not stored server-side).
+- **Group detail** (`GET /flocks/{id}`, live poll) shows the agent table with per-agent **restart** / **remove** / **change role**, group **pause** / **resume**, **add agent**, **broadcast** a prompt to every member (per-agent sent / busy / failed results), and **delete group** — destructive actions behind confirm modals.
+
+### Live Activity Feed (SSE)
+
+- Group detail embeds an **Activity Feed** that streams the Town Wall live via `GET /flocks/{id}/wall` (Server-Sent Events): the full history replays on connect, then new messages append in real time. A composer posts to the feed (`POST /flocks/{id}/post`).
+- Because `EventSource` cannot send the `Authorization` header, the feed reads the SSE stream over `fetch` (bearer-injected by `apiFetch`) with a hand-written `data:`-frame parser (`streamSSE` in `src/lib/stream.js`); it aborts on unmount and offers a manual **Reconnect** when the stream ends.
+
+### Korean localization
+
+- New `orchestration` / `createFlockModal` / `flockDetail` / `activityFeed` / `broadcastModal` / `changeRoleModal` / `addAgentModal` namespaces (오케스트레이션 / 에이전트 그룹 / 액티비티 피드 / 브로드캐스트), plus agent status terms (생성 중 / 준비됨 / 완료 / 중단됨 / 일시중지).
+
+> **No rebake**: this release changes only `web/` (and the regenerated `uidist/` bundle), KVM-free Go tests, and docs — no `cmd/goose-agent`, `scripts/build_image.sh`, or `artifacts/*` changes, so the golden image is untouched. Spawn-dependent flows (create group / add agent / change role / restart / broadcast) are verified through the e2e/KVM gate; list / get / delete / pause / resume / post / wall-history and the SSE framing contract are covered by KVM-free handler tests.
+
+---
+
 # v0.5.1 — Per-Profile Sizing & Goose Stability
 
 **Ephemera** v0.5.1 extends the v0.5.0 Web UI with **profile creation + per-VM sizing** and **snapshot/restore screens**, and hardens `goose-agent` for tight-budget and reasoning LLMs. Additive — the control-plane API adds `POST`/`DELETE /config/profiles` and `GET /config/providers`; existing routes are unchanged. **Golden-image rebake**: `cmd/goose-agent` changes (token cap, extension trim, `/nothink`, latest-turn output), so the daemon rebuilds the golden image on first start after the change.
