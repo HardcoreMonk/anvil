@@ -5,6 +5,7 @@
   import { view, toast } from '../lib/store.js'
   import { apiJSON } from '../lib/api.js'
   import TaskPanel from './TaskPanel.svelte'
+  import SnapshotModal from './SnapshotModal.svelte'
 
   export let vm // the VMInfo selected from the list
 
@@ -12,6 +13,7 @@
   let health = null // { status: "idle" | "busy" }
   let destroying = false
   let confirmingDelete = false
+  let showSnapshot = false
   let statsTimer = null
   let healthTimer = null
 
@@ -57,6 +59,14 @@
     view.set({ name: 'list' })
   }
 
+  function onSnapshotCreated(e) {
+    // stop_after destroyed the VM — leave the now-dead detail page.
+    if (e.detail && e.detail.stopAfter) {
+      stopPolling()
+      view.set({ name: 'list' })
+    }
+  }
+
   onMount(() => {
     refreshStats()
     refreshHealth()
@@ -78,7 +88,7 @@
   <h2>{$_('vmdetail.info')}</h2>
   <div class="row" style="gap:40px;">
     <div><div class="muted">{$_('vmdetail.guestIp')}</div><div class="mono">{vm.guest_ip}</div></div>
-    <div><div class="muted">{$_('vmdetail.profile')}</div><div>{vm.profile || '—'}</div></div>
+    <div><div class="muted">{$_('vmdetail.profile')}</div><div>{vm.profile || 'default'}</div></div>
     <div><div class="muted">{$_('vmdetail.model')}</div><div class="mono">{vm.provider ? vm.provider + ' / ' : ''}{vm.model || '—'}</div></div>
     <div><div class="muted">{$_('vmdetail.agentUrl')}</div><div class="mono">{vm.agent_url}</div></div>
   </div>
@@ -101,6 +111,12 @@
 
 <TaskPanel vmId={vm.vm_id} />
 
+<div class="panel" style="margin-bottom:16px;">
+  <h2>{$_('vmdetail.snapshotsSection')}</h2>
+  <p class="muted" style="margin-bottom:12px;">{$_('vmdetail.snapshotsHint')}</p>
+  <button on:click={() => (showSnapshot = true)}>{$_('vmdetail.createSnapshotBtn')}</button>
+</div>
+
 <div class="panel">
   <h2>{$_('vmdetail.dangerZone')}</h2>
   <button class="danger" on:click={() => (confirmingDelete = true)} disabled={destroying}>
@@ -121,4 +137,8 @@
       </div>
     </div>
   </div>
+{/if}
+
+{#if showSnapshot}
+  <SnapshotModal vmId={vm.vm_id} on:close={() => (showSnapshot = false)} on:created={onSnapshotCreated} />
 {/if}

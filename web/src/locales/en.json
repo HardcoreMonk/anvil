@@ -1,6 +1,7 @@
 {
   "nav": {
     "vms": "VMs",
+    "snapshots": "Snapshots",
     "settings": "Settings",
     "logout": "Log out",
     "authDisabled": "auth disabled"
@@ -74,7 +75,10 @@
     "deleteBtn": "Delete VM",
     "deleting": "Deleting…",
     "deleteConfirm": "Delete VM {id}? This is irreversible.",
-    "deletedToast": "VM {id} deleted"
+    "deletedToast": "VM {id} deleted",
+    "snapshotsSection": "Snapshots",
+    "snapshotsHint": "Capture this VM's memory + disk as a restorable snapshot.",
+    "createSnapshotBtn": "Create snapshot"
   },
   "taskpanel": {
     "title": "Conversation",
@@ -82,6 +86,7 @@
     "hint": "Enter to send · Shift+Enter for a newline",
     "send": "Send",
     "newConversation": "New conversation",
+    "resumingNote": "Resuming a previous conversation ({turns} turns) — the agent keeps its context; earlier messages aren't re-shown here.",
     "you": "You",
     "assistant": "Agent",
     "thinking": "Thinking…",
@@ -91,13 +96,87 @@
   },
   "settings": {
     "title": "Settings",
-    "note": "Model and provider per profile. Changes apply to the next Create VM, not to running VMs.",
+    "note": "Each profile selects a provider and model. Provider choices are limited to those with an API key in the global keychain (configs/goose-secrets.yaml). Changes apply to the next Create VM, not to running VMs.",
     "colProfile": "Profile",
     "colProvider": "Provider",
     "colModel": "Model",
     "save": "Save",
     "saving": "Saving…",
     "saved": "Profile {name} saved — new VMs will use it.",
-    "empty": "No profiles found."
+    "empty": "No profiles found.",
+    "createProfile": "Create profile",
+    "delete": "Delete",
+    "deleting": "Deleting…",
+    "confirmDeleteBtn": "Confirm delete",
+    "deletedToast": "Profile {name} deleted.",
+    "providerUnavailable": "no key",
+    "noProviders": "No providers configured. Add an API key (e.g. GROQ_API_KEY) to configs/goose-secrets.yaml, then reload."
+  },
+  "profileModal": {
+    "title": "New profile",
+    "nameLabel": "Name",
+    "nameHint": "Lowercase letters, digits, '-' or '_'. Used as the profile id.",
+    "providerLabel": "Provider",
+    "modelLabel": "Model",
+    "modelHint": "Pick a suggested model or type any model id the provider supports.",
+    "vcpuLabel": "vCPUs",
+    "memLabel": "Memory (MiB)",
+    "sizingHint": "vCPUs (1–8) and memory (256–16384 MiB) to allocate to VMs created from this profile.",
+    "create": "Create",
+    "creating": "Creating…",
+    "createdToast": "Profile {name} created.",
+    "noProviders": "No providers have an API key configured. Add one to configs/goose-secrets.yaml first."
+  },
+  "snapshots": {
+    "title": "Snapshots",
+    "empty": "No snapshots yet. Create one from a VM's detail page.",
+    "colId": "Snapshot ID",
+    "colSource": "Source VM",
+    "colType": "Type",
+    "colBase": "Base",
+    "colCreated": "Created",
+    "colActions": "Actions",
+    "typeFull": "full",
+    "typeDiff": "diff",
+    "restoreBtn": "Restore",
+    "deleteBtn": "Delete",
+    "deleteTitle": "Delete snapshot",
+    "deleteConfirm": "Delete snapshot {id}? This cannot be undone.",
+    "deleteWarnRestored": "If a running VM was restored from this snapshot, it will not survive a daemon restart after deletion.",
+    "deleting": "Deleting…",
+    "deletedToast": "Snapshot {id} deleted"
+  },
+  "restoreModal": {
+    "title": "Restore snapshot",
+    "confirmIntro": "Restore snapshot {id} into a new VM.",
+    "warnSourceStopped": "The source VM must be stopped — restore is refused while it is still running.",
+    "warnNewVm": "This creates a new VM (new ID and IP) that reuses the original agent token.",
+    "warnResetOnRestart": "Restored VMs reset to their snapshot state on daemon restart.",
+    "restore": "Restore",
+    "restoring": "Restoring…",
+    "restoredTitle": "VM restored",
+    "vmId": "VM ID",
+    "agentToken": "Agent token",
+    "tokenWarnPre": "This is the original agent token, shown once and ",
+    "tokenWarnBold": "not stored server-side",
+    "tokenWarnPost": ". Copy it now if you need to call the agent directly.",
+    "copyToken": "Copy token",
+    "tokenCopied": "Token copied",
+    "copyFailed": "Copy failed",
+    "goToVm": "Go to VM",
+    "restoredToast": "VM {id} restored from snapshot"
+  },
+  "snapshotModal": {
+    "title": "Create snapshot",
+    "typeLabel": "Type",
+    "typeAuto": "Auto",
+    "typeFull": "Full",
+    "typeDiff": "Diff",
+    "typeHint": "Auto picks full if no prior full snapshot exists, otherwise diff.",
+    "stopAfter": "Stop VM after snapshot",
+    "stopAfterHint": "Destroys the source VM once the snapshot is taken.",
+    "create": "Create",
+    "creating": "Creating…",
+    "createdToast": "Snapshot {id} created"
   }
 }

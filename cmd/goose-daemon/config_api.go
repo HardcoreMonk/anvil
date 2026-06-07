@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -15,9 +17,11 @@ import (
 // Only provider/model are exposed; API keys (goose-secrets.yaml) stay
 // server-side and are never read or written through this surface.
 type ProfileConfig struct {
-	Name     string `json:"name"`     // "default" for the daemon default, else the profile dir name
-	Provider string `json:"provider"` // GOOSE_PROVIDER
-	Model    string `json:"model"`    // GOOSE_MODEL
+	Name       string `json:"name"`         // "default" for the daemon default, else the profile dir name
+	Provider   string `json:"provider"`     // GOOSE_PROVIDER
+	Model      string `json:"model"`        // GOOSE_MODEL
+	VcpuCount  int64  `json:"vcpu_count"`   // EPHEMERA_VCPU_COUNT; 0 → default sizing (2)
+	MemSizeMib int64  `json:"mem_size_mib"` // EPHEMERA_MEM_SIZE_MIB; 0 → default sizing (2048)
 }
 
 // defaultProfileName is the reserved name for the daemon's default goose.yaml
@@ -42,13 +46,23 @@ func (cp *ControlPlane) gooseConfigPathForProfile(name string) (string, error) {
 	return path, nil
 }
 
-// handleConfigProfiles serves GET /config/profiles — the list of editable
-// profiles (the default config plus every configs/profiles/* with a goose.yaml).
+// handleConfigProfiles serves GET /config/profiles (list the default config plus
+// every configs/profiles/* with a goose.yaml) and POST /config/profiles (create a
+// new user-defined profile).
 func (cp *ControlPlane) handleConfigProfiles(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
+		cp.listProfiles(w, r)
+	case http.MethodPost:
+		cp.createProfile(w, r)
+	default:
 		writeJSONError(w, http.StatusMethodNotAllowed, fmt.Errorf("method not allowed"))
-		return
 	}
+}
+
+// listProfiles writes the editable profile list: the default config first, then
+// each on-disk profile sorted by directory name for a stable UI order.
+func (cp *ControlPlane) listProfiles(w http.ResponseWriter, r *http.Request) {
 	out := []ProfileConfig{}
 	// Default config first.
 	if pc, err := cp.readProfileConfig(defaultProfileName); err == nil {
@@ -80,7 +94,8 @@ func (cp *ControlPlane) handleConfigProfiles(w http.ResponseWriter, r *http.Requ
 // spawns (config is injected into each VM's rootfs at spawn time).
 func (cp *ControlPlane) handleConfigProfile(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/config/profiles/")
-	if name == "" || strings.Contains(name, "/") {
+	// Reject empty and any path-traversal form before touching the filesystem.
+	if name == "" || name == ".." || strings.ContainsAny(name, "/\\") {
 		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("profile name required"))
 		return
 	}
@@ -94,8 +109,10 @@ func (cp *ControlPlane) handleConfigProfile(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusOK, pc)
 	case http.MethodPut:
 		var body struct {
-			Provider string `json:"provider"`
-			Model    string `json:"model"`
+			Provider   string `json:"provider"`
+			Model      string `json:"model"`
+			VcpuCount  int64  `json:"vcpu_count"`
+			MemSizeMib int64  `json:"mem_size_mib"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeJSONError(w, http.StatusBadRequest, fmt.Errorf("invalid JSON body"))
@@ -111,7 +128,16 @@ func (cp *ControlPlane) handleConfigProfile(w http.ResponseWriter, r *http.Reque
 			writeJSONError(w, http.StatusBadRequest, err)
 			return
 		}
-		if err := cp.writeProfileConfig(name, provider, model); err != nil {
+		// Provider must be a known one whose API key is present in the keychain.
+		if err := cp.validateProviderAvailable(provider); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := validateSizing(body.VcpuCount, body.MemSizeMib); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := cp.writeProfileConfig(name, provider, model, body.VcpuCount, body.MemSizeMib); err != nil {
 			if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "invalid") {
 				writeJSONError(w, http.StatusBadRequest, err)
 				return
@@ -119,11 +145,227 @@ func (cp *ControlPlane) handleConfigProfile(w http.ResponseWriter, r *http.Reque
 			writeJSONError(w, http.StatusInternalServerError, err)
 			return
 		}
-		slog.Info("profile config updated", "profile", name, "provider", provider, "model", model)
-		writeJSON(w, http.StatusOK, ProfileConfig{Name: name, Provider: provider, Model: model})
+		slog.Info("profile config updated", "profile", name, "provider", provider, "model", model, "vcpu", body.VcpuCount, "mem", body.MemSizeMib)
+		writeJSON(w, http.StatusOK, ProfileConfig{Name: name, Provider: provider, Model: model, VcpuCount: body.VcpuCount, MemSizeMib: body.MemSizeMib})
+	case http.MethodDelete:
+		if name == defaultProfileName {
+			writeJSONError(w, http.StatusBadRequest, fmt.Errorf("the default profile cannot be deleted"))
+			return
+		}
+		dir := filepath.Join(cp.workDir, "configs", "profiles", name)
+		if _, err := os.Stat(dir); os.IsNotExist(err) {
+			writeJSONError(w, http.StatusNotFound, fmt.Errorf("profile %q not found", name))
+			return
+		}
+		if err := os.RemoveAll(dir); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err)
+			return
+		}
+		slog.Info("profile deleted", "profile", name)
+		writeJSON(w, http.StatusOK, map[string]string{"deleted": name})
 	default:
 		writeJSONError(w, http.StatusMethodNotAllowed, fmt.Errorf("method not allowed"))
 	}
+}
+
+// providerStatus is one element of the GET /config/providers response: a known
+// provider annotated with whether its API key is present in the global keychain.
+// Secret values never leave the server — only the availability flag is exposed.
+type providerStatus struct {
+	ID              string   `json:"id"`
+	Label           string   `json:"label"`
+	Available       bool     `json:"available"`
+	DefaultModel    string   `json:"default_model"`
+	SuggestedModels []string `json:"suggested_models"`
+}
+
+// handleConfigProviders serves GET /config/providers — the registry of known LLM
+// providers, each flagged available iff its API key is set (uncommented and not a
+// placeholder) in the single global keychain configs/goose-secrets.yaml. The UI
+// uses this to restrict the Provider dropdown to providers that can actually run.
+func (cp *ControlPlane) handleConfigProviders(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSONError(w, http.StatusMethodNotAllowed, fmt.Errorf("method not allowed"))
+		return
+	}
+	data, _ := os.ReadFile(cp.gooseSecretsPath) // best-effort: a missing file → all unavailable
+	out := make([]providerStatus, 0, len(providerRegistry))
+	for _, p := range providerRegistry {
+		out = append(out, providerStatus{
+			ID:              p.ID,
+			Label:           p.Label,
+			Available:       secretKeyPresent(data, p.SecretEnv),
+			DefaultModel:    p.DefaultModel,
+			SuggestedModels: p.SuggestedModels,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// secretKeyPresent reports whether goose-secrets.yaml content carries a usable
+// value for envKey: an uncommented top-level `envKey: value` whose value is not a
+// shipped placeholder. topLevelScalar already skips comments and indented lines.
+func secretKeyPresent(data []byte, envKey string) bool {
+	for _, line := range strings.Split(string(data), "\n") {
+		key, val, ok := topLevelScalar(line)
+		if !ok || key != envKey {
+			continue
+		}
+		return !isPlaceholderSecret(val)
+	}
+	return false
+}
+
+// isPlaceholderSecret recognizes the placeholder values shipped in the
+// goose-secrets.yaml.example templates ("your-key-here", "sk-ant-your-key-here",
+// "sk-your-key-here") so an unfilled key counts as "not set".
+func isPlaceholderSecret(v string) bool {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return true
+	}
+	low := strings.ToLower(v)
+	if strings.Contains(low, "your-key-here") {
+		return true
+	}
+	for _, prefix := range []string{"your-", "sk-your", "sk-ant-your"} {
+		if strings.HasPrefix(low, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// profileNameRe constrains user-defined profile names to a filesystem- and
+// URL-safe slug; it also rejects "/", "\", "." and "..".
+var profileNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+
+// validateProfileName enforces the slug format and reserves "default".
+func validateProfileName(name string) error {
+	if name == "" {
+		return fmt.Errorf("profile name required")
+	}
+	if name == defaultProfileName {
+		return fmt.Errorf("%q is a reserved profile name", defaultProfileName)
+	}
+	if len(name) > 64 {
+		return fmt.Errorf("profile name too long (max 64)")
+	}
+	if !profileNameRe.MatchString(name) {
+		return fmt.Errorf("profile name must be lowercase letters, digits, '-' or '_'")
+	}
+	return nil
+}
+
+// validateProviderAvailable ensures a provider is known and its API key is present
+// in the global keychain. Shared by profile create and update.
+func (cp *ControlPlane) validateProviderAvailable(provider string) error {
+	def, ok := providerByID(provider)
+	if !ok {
+		return fmt.Errorf("unknown provider %q", provider)
+	}
+	data, _ := os.ReadFile(cp.gooseSecretsPath)
+	if !secretKeyPresent(data, def.SecretEnv) {
+		return fmt.Errorf("provider %q has no API key in goose-secrets.yaml", provider)
+	}
+	return nil
+}
+
+// createProfile handles POST /config/profiles. It creates a new user-defined
+// profile directory holding a goose.yaml with the chosen provider/model. Secrets
+// are NOT stored per profile — every VM reads the global keychain at spawn time.
+// validateSizing checks optional per-profile VM sizing. 0 means "use the default";
+// otherwise vCPU is capped at 8 and memory is bounded to a sane 256–16384 MiB.
+func validateSizing(vcpu, mem int64) error {
+	if vcpu < 0 || vcpu > 8 {
+		return fmt.Errorf("vcpu_count out of range (0 = default, max 8)")
+	}
+	if mem < 0 || mem > 16384 || (mem > 0 && mem < 256) {
+		return fmt.Errorf("mem_size_mib out of range (0 = default, otherwise 256–16384)")
+	}
+	return nil
+}
+
+func (cp *ControlPlane) createProfile(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name       string `json:"name"`
+		Provider   string `json:"provider"`
+		Model      string `json:"model"`
+		VcpuCount  int64  `json:"vcpu_count"`
+		MemSizeMib int64  `json:"mem_size_mib"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("invalid JSON body"))
+		return
+	}
+	name := strings.TrimSpace(body.Name)
+	provider := strings.TrimSpace(body.Provider)
+	model := strings.TrimSpace(body.Model)
+	if err := validateProfileName(name); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := cp.validateProviderAvailable(provider); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err)
+		return
+	}
+	// An empty model defaults to the provider's recommended model.
+	if model == "" {
+		def, _ := providerByID(provider)
+		model = def.DefaultModel
+	}
+	if err := validateConfigValue("model", model); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := validateSizing(body.VcpuCount, body.MemSizeMib); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err)
+		return
+	}
+	dir := filepath.Join(cp.workDir, "configs", "profiles", name)
+	if _, err := os.Stat(dir); err == nil {
+		writeJSONError(w, http.StatusConflict, fmt.Errorf("profile %q already exists", name))
+		return
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := os.WriteFile(filepath.Join(dir, "goose.yaml"), []byte(renderGooseProfileYAML(provider, model, body.VcpuCount, body.MemSizeMib)), 0o644); err != nil {
+		os.RemoveAll(dir) // don't leave a half-created profile behind
+		writeJSONError(w, http.StatusInternalServerError, err)
+		return
+	}
+	slog.Info("profile created", "profile", name, "provider", provider, "model", model, "vcpu", body.VcpuCount, "mem", body.MemSizeMib)
+	writeJSON(w, http.StatusCreated, ProfileConfig{Name: name, Provider: provider, Model: model, VcpuCount: body.VcpuCount, MemSizeMib: body.MemSizeMib})
+}
+
+// renderGooseProfileYAML produces a goose.yaml body for a new profile, mirroring
+// the structure of the default configs/goose.yaml (telemetry off, keyring off, the
+// bundled developer extension). Provider/model are rendered via yamlScalar.
+func renderGooseProfileYAML(provider, model string, vcpu, mem int64) string {
+	s := "# Goose config for this profile. Provider/model only — API keys live in\n" +
+		"# the global configs/goose-secrets.yaml keychain.\n" +
+		"GOOSE_PROVIDER: " + yamlScalar(provider) + "\n" +
+		"GOOSE_MODEL: " + yamlScalar(model) + "\n" +
+		"GOOSE_TELEMETRY_ENABLED: false\n" +
+		"GOOSE_DISABLE_KEYRING: true\n"
+	// Per-profile VM sizing. goose ignores these unknown keys; the spawn path reads
+	// them back (parseProfileSizing) to size the MicroVM. Omitted when 0 (default).
+	if vcpu > 0 {
+		s += fmt.Sprintf("EPHEMERA_VCPU_COUNT: %d\n", vcpu)
+	}
+	if mem > 0 {
+		s += fmt.Sprintf("EPHEMERA_MEM_SIZE_MIB: %d\n", mem)
+	}
+	return s + "\n" +
+		"extensions:\n" +
+		"  developer:\n" +
+		"    bundled: true\n" +
+		"    enabled: true\n" +
+		"    name: developer\n" +
+		"    timeout: 300\n" +
+		"    type: builtin\n"
 }
 
 // readProfileConfig parses GOOSE_PROVIDER and GOOSE_MODEL out of a profile's
@@ -138,7 +380,8 @@ func (cp *ControlPlane) readProfileConfig(name string) (ProfileConfig, error) {
 		return ProfileConfig{}, err
 	}
 	provider, model := parseGooseConfig(data)
-	return ProfileConfig{Name: name, Provider: provider, Model: model}, nil
+	vcpu, mem := parseProfileSizing(data)
+	return ProfileConfig{Name: name, Provider: provider, Model: model, VcpuCount: vcpu, MemSizeMib: mem}, nil
 }
 
 // parseGooseConfig extracts GOOSE_PROVIDER and GOOSE_MODEL from goose.yaml bytes.
@@ -158,6 +401,25 @@ func parseGooseConfig(data []byte) (provider, model string) {
 	return provider, model
 }
 
+// parseProfileSizing extracts the optional per-profile VM sizing keys from
+// goose.yaml bytes. Missing or non-numeric values come back as 0, which the
+// spawn path treats as "use default sizing".
+func parseProfileSizing(data []byte) (vcpu, mem int64) {
+	for _, line := range strings.Split(string(data), "\n") {
+		key, val, ok := topLevelScalar(line)
+		if !ok {
+			continue
+		}
+		switch key {
+		case "EPHEMERA_VCPU_COUNT":
+			vcpu, _ = strconv.ParseInt(val, 10, 64)
+		case "EPHEMERA_MEM_SIZE_MIB":
+			mem, _ = strconv.ParseInt(val, 10, 64)
+		}
+	}
+	return vcpu, mem
+}
+
 // readGooseConfigFile reads provider/model from a goose.yaml path, best-effort
 // (a missing file or keys yield empty strings). Used to record a VM's model at
 // spawn time so the UI can show what each running VM is actually using.
@@ -172,7 +434,7 @@ func readGooseConfigFile(path string) (provider, model string) {
 // writeProfileConfig rewrites the GOOSE_PROVIDER and GOOSE_MODEL lines in a
 // profile's goose.yaml in place, preserving comments, ordering, and the nested
 // extensions block. Missing keys are appended. The write is atomic (temp+rename).
-func (cp *ControlPlane) writeProfileConfig(name, provider, model string) error {
+func (cp *ControlPlane) writeProfileConfig(name, provider, model string, vcpu, mem int64) error {
 	path, err := cp.gooseConfigPathForProfile(name)
 	if err != nil {
 		return err
@@ -182,7 +444,7 @@ func (cp *ControlPlane) writeProfileConfig(name, provider, model string) error {
 		return err
 	}
 	lines := strings.Split(string(data), "\n")
-	setProvider, setModel := false, false
+	setProvider, setModel, setVcpu, setMem := false, false, false, false
 	for i, line := range lines {
 		key, _, ok := topLevelScalar(line)
 		if !ok {
@@ -195,6 +457,18 @@ func (cp *ControlPlane) writeProfileConfig(name, provider, model string) error {
 		case "GOOSE_MODEL":
 			lines[i] = "GOOSE_MODEL: " + yamlScalar(model)
 			setModel = true
+		case "EPHEMERA_VCPU_COUNT":
+			// vcpu == 0 means "unspecified": keep the existing line so an update
+			// that doesn't carry sizing (e.g. provider/model edit) doesn't reset it.
+			if vcpu > 0 {
+				lines[i] = fmt.Sprintf("EPHEMERA_VCPU_COUNT: %d", vcpu)
+			}
+			setVcpu = true
+		case "EPHEMERA_MEM_SIZE_MIB":
+			if mem > 0 {
+				lines[i] = fmt.Sprintf("EPHEMERA_MEM_SIZE_MIB: %d", mem)
+			}
+			setMem = true
 		}
 	}
 	if !setProvider {
@@ -202,6 +476,12 @@ func (cp *ControlPlane) writeProfileConfig(name, provider, model string) error {
 	}
 	if !setModel {
 		lines = append(lines, "GOOSE_MODEL: "+yamlScalar(model))
+	}
+	if !setVcpu && vcpu > 0 {
+		lines = append(lines, fmt.Sprintf("EPHEMERA_VCPU_COUNT: %d", vcpu))
+	}
+	if !setMem && mem > 0 {
+		lines = append(lines, fmt.Sprintf("EPHEMERA_MEM_SIZE_MIB: %d", mem))
 	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, []byte(strings.Join(lines, "\n")), 0o644); err != nil {

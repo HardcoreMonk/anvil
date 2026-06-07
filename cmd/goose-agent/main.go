@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,18 +43,38 @@ var (
 	srv  *http.Server
 )
 
-// startedSessions records goose session names already created on this VM so the
-// second and later turns pass --resume. Guarded by sessionMu.
+// sessionInfo is the agent's in-memory record of a goose chat session created on
+// this VM. It lives only in memory, but VM memory snapshots capture it, so a
+// snapshot-restored VM keeps its conversations and the Web UI can list/resume
+// them (GET /sessions). The conversation itself lives in goose's own on-disk
+// session file, which the snapshot's rootfs copy preserves in lockstep.
+type sessionInfo struct {
+	Name       string    `json:"name"`
+	CreatedAt  time.Time `json:"created_at"`
+	Title      string    `json:"title"`       // first user prompt, trimmed to a label
+	Turns      int       `json:"turns"`       // completed task turns on this session
+	LastOutput string    `json:"last_output"` // last cumulative goose output; lets the UI resume without re-dumping the transcript
+}
+
+// sessions records goose chat sessions created on this VM so the second and later
+// turns pass --resume and the Web UI can list/resume them. Guarded by sessionMu.
 var (
-	sessionMu       sync.Mutex
-	startedSessions = map[string]bool{}
+	sessionMu sync.Mutex
+	sessions  = map[string]*sessionInfo{}
 )
 
 // gooseArgs builds the goose run argv. With no session it preserves the original
 // stateless invocation; with a session it names the session and (on the second+
 // turn) resumes it so the conversation persists across tasks — multi-turn.
+//
+// --no-profile drops goose's default builtin extensions (8 of them, ~7.5k tokens
+// of tool definitions on every request); --with-builtin developer adds back only
+// the shell/file extension the agent needs. Trimming the tool schema keeps each
+// request small — otherwise the per-request token count can exceed a provider's
+// per-minute budget (Groq free-tier TPM is 6000), which goose misreports as a
+// context overflow and aborts with a spurious "failed to compact" error.
 func gooseArgs(session string, resume bool) []string {
-	args := []string{"run", "--output-format", "json"}
+	args := []string{"run", "--output-format", "json", "--no-profile", "--with-builtin", "developer"}
 	if session != "" {
 		args = append(args, "-n", session)
 		if resume {
@@ -61,6 +82,50 @@ func gooseArgs(session string, resume bool) []string {
 		}
 	}
 	return append(args, "-i", "-")
+}
+
+// noThinkForModel returns "/nothink\n" for qwen reasoning models, else "". qwen3
+// emits thinking blocks that goose persists as reasoning_content and replays on
+// --resume; Groq rejects reasoning_content in request messages with a 400
+// ("property 'reasoning_content' is unsupported"), which breaks every multi-turn
+// follow-up. The "/nothink" directive disables qwen thinking so none is produced.
+// It is plain text other models ignore, so it is safe to prepend unconditionally
+// for qwen and never for anything else.
+func noThinkForModel(model string) string {
+	if strings.Contains(strings.ToLower(model), "qwen") {
+		return "/nothink\n"
+	}
+	return ""
+}
+
+// noThinkPrefix reads GOOSE_MODEL from the VM's goose config and returns the
+// no-think directive for it, or "" when the config is unreadable or the model
+// is not a reasoning model.
+func noThinkPrefix() string {
+	data, err := os.ReadFile(gooseConfigPath)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "GOOSE_MODEL:") {
+			continue
+		}
+		model := strings.Trim(strings.TrimSpace(line[len("GOOSE_MODEL:"):]), `"'`)
+		return noThinkForModel(model)
+	}
+	return ""
+}
+
+// sessionTitle derives a short, single-line label for a session from its first
+// user prompt, for the Web UI's conversation picker. Rune-safe truncation.
+func sessionTitle(prompt string) string {
+	t := strings.TrimSpace(strings.ReplaceAll(prompt, "\n", " "))
+	const max = 60
+	if r := []rune(t); len(r) > max {
+		return string(r[:max]) + "…"
+	}
+	return t
 }
 
 // validSessionName allows only filesystem/CLI-safe session identifiers (goose
@@ -92,6 +157,7 @@ const (
 	flockMetaPath    = "/root/.ephemera-flock"
 	systemPromptPath = "/root/.goose-system-prompt"
 	cpTokenPath      = "/root/.ephemera-cp-token"
+	gooseConfigPath  = "/root/.config/goose/config.yaml" // provider/model; read to detect reasoning models
 	// defaultControlPlaneAddr is the gateway IP the host uses inside the VM's
 	// /24 network. Overridable via EPHEMERA_CONTROL_PLANE for testing.
 	defaultControlPlaneAddr = "http://10.0.1.1:3000"
@@ -234,6 +300,7 @@ func main() {
 	mux.HandleFunc("/tasks", agentAuthMiddleware(token, handleTask))
 	mux.HandleFunc("/stop", agentAuthMiddleware(token, handleStop))
 	mux.HandleFunc("/townwall/post", agentAuthMiddleware(token, handleTownWallPost))
+	mux.HandleFunc("/sessions", agentAuthMiddleware(token, handleSessions))
 	mux.HandleFunc("/health", handleHealth) // always unauthenticated
 
 	addr := agentListenAddr()
@@ -367,6 +434,26 @@ func applyIPConfig(cidrIP, gateway string) error {
 	return nil
 }
 
+// handleSessions lists the goose chat sessions created on this VM, newest first.
+// The registry is in memory but VM snapshots capture it, so a snapshot-restored
+// VM reports the conversations frozen in the snapshot and the Web UI can resume
+// them. Authenticated like /tasks (titles are derived from user prompts).
+func handleSessions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET required", http.StatusMethodNotAllowed)
+		return
+	}
+	sessionMu.Lock()
+	list := make([]sessionInfo, 0, len(sessions))
+	for _, s := range sessions {
+		list = append(list, *s)
+	}
+	sessionMu.Unlock()
+	sort.Slice(list, func(i, j int) bool { return list[i].CreatedAt.After(list[j].CreatedAt) })
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(list)
+}
+
 func handleTask(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
@@ -404,6 +491,9 @@ func handleTask(w http.ResponseWriter, r *http.Request) {
 		// can recognize and ignore the prefix as instructions.
 		finalPrompt = "[SYSTEM INSTRUCTIONS]\n" + sysPrompt + "\n\n[USER TASK]\n" + req.Prompt
 	}
+	// Disable qwen reasoning so thinking blocks don't break multi-turn --resume:
+	// goose replays them as reasoning_content, which Groq rejects with a 400.
+	finalPrompt = noThinkPrefix() + finalPrompt
 
 	// --output-format json bypasses goose-cli's streaming markdown buffer, whose
 	// truncate_code_blocks() unconditionally caps fenced code at 50 lines and
@@ -417,8 +507,15 @@ func handleTask(w http.ResponseWriter, r *http.Request) {
 	resume := false
 	if req.Session != "" {
 		sessionMu.Lock()
-		resume = startedSessions[req.Session]
-		startedSessions[req.Session] = true
+		if _, ok := sessions[req.Session]; ok {
+			resume = true // created on a prior turn → continue it
+		} else {
+			sessions[req.Session] = &sessionInfo{
+				Name:      req.Session,
+				CreatedAt: time.Now().UTC(),
+				Title:     sessionTitle(req.Prompt),
+			}
+		}
 		sessionMu.Unlock()
 	}
 	cmd := exec.CommandContext(r.Context(), "/usr/local/bin/goose", gooseArgs(req.Session, resume)...)
@@ -435,19 +532,43 @@ func handleTask(w http.ResponseWriter, r *http.Request) {
 		depth = "0"
 	}
 	cmd.Env = append(os.Environ(), "EPHEMERA_TASK_DEPTH="+depth)
+	// Cap the per-response output reservation. goose otherwise reserves the
+	// model's full output window (tens of thousands of tokens for some models);
+	// added to the input that can exceed a provider's per-minute token budget
+	// (Groq free-tier TPM is 6000), which goose misreports as a context overflow.
+	// A modest default keeps the request in budget; override by exporting
+	// GOOSE_MAX_TOKENS into the VM environment for higher-budget providers.
+	if _, ok := os.LookupEnv("GOOSE_MAX_TOKENS"); !ok {
+		cmd.Env = append(cmd.Env, "GOOSE_MAX_TOKENS=2048")
+	}
 
 	// Opt-in streaming: ?stream=1 streams NDJSON progress + a final result frame.
 	// The default path keeps the buffered {"output","error"} contract verbatim.
+	var res TaskResult
 	if r.URL.Query().Get("stream") == "1" {
-		runTaskStreaming(w, cmd)
-		return
+		res = runTaskStreaming(w, cmd)
+	} else {
+		res = runTaskBuffered(w, cmd)
 	}
-	runTaskBuffered(w, cmd)
+
+	// Record the turn so GET /sessions can list it and the Web UI can resume after
+	// a snapshot/restore. LastOutput seeds the UI's delta baseline so a resumed
+	// conversation doesn't re-dump the whole transcript on the first follow-up.
+	if req.Session != "" {
+		sessionMu.Lock()
+		if s, ok := sessions[req.Session]; ok {
+			s.Turns++
+			if res.Output != "" {
+				s.LastOutput = res.Output
+			}
+		}
+		sessionMu.Unlock()
+	}
 }
 
 // runTaskBuffered runs goose to completion and returns the whole TaskResult as a
 // single JSON object — the original (pre-v0.4.4) behavior, unchanged.
-func runTaskBuffered(w http.ResponseWriter, cmd *exec.Cmd) {
+func runTaskBuffered(w http.ResponseWriter, cmd *exec.Cmd) TaskResult {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	stdout, err := cmd.Output()
@@ -469,6 +590,7 @@ func runTaskBuffered(w http.ResponseWriter, cmd *exec.Cmd) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(res)
+	return res
 }
 
 // streamFrame is one newline-delimited JSON frame emitted by runTaskStreaming.
@@ -490,22 +612,19 @@ type streamFrame struct {
 // connection. Because the 200 status is committed before goose runs, a goose
 // failure cannot be a 500 — the error rides in the result frame's error field,
 // so streaming clients MUST inspect result.error rather than the status code.
-func runTaskStreaming(w http.ResponseWriter, cmd *exec.Cmd) {
+func runTaskStreaming(w http.ResponseWriter, cmd *exec.Cmd) TaskResult {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		// No flushing available — fall back to the buffered contract.
-		runTaskBuffered(w, cmd)
-		return
+		return runTaskBuffered(w, cmd)
 	}
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
-		runTaskBuffered(w, cmd)
-		return
+		return runTaskBuffered(w, cmd)
 	}
 	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
-		runTaskBuffered(w, cmd)
-		return
+		return runTaskBuffered(w, cmd)
 	}
 
 	w.Header().Set("Content-Type", "application/x-ndjson")
@@ -530,7 +649,7 @@ func runTaskStreaming(w http.ResponseWriter, cmd *exec.Cmd) {
 
 	if err := cmd.Start(); err != nil {
 		emit(streamFrame{Type: "result", Error: err.Error()})
-		return
+		return TaskResult{Error: err.Error()}
 	}
 
 	// Drain stderr line-by-line: relay each line as a progress frame and retain
@@ -589,11 +708,16 @@ func runTaskStreaming(w http.ResponseWriter, cmd *exec.Cmd) {
 		}
 	}
 	emit(streamFrame{Type: "result", Output: res.Output, Error: res.Error})
+	return res
 }
 
 // extractGooseJSONText parses the envelope produced by `goose run --output-format json`
-// and returns the concatenated text of every assistant content block. Returns ""
-// when stdout is not the expected shape so callers can fall back to raw bytes.
+// and returns the assistant text that follows the LAST user message — i.e. only the
+// latest turn's reply. goose --resume re-emits the whole session transcript on every
+// turn, so concatenating every assistant block would re-show all prior replies (the
+// multi-turn "accumulating output" bug); slicing from the last user message fixes it
+// at the source. Returns "" when stdout is not the expected shape so callers can fall
+// back to raw bytes.
 //
 // Goose prints a startup banner to stdout BEFORE the JSON envelope even in
 // --output-format json mode (e.g. "    __( O)> ● new session ... goose is ready"),
@@ -622,8 +746,17 @@ func extractGooseJSONText(stdout []byte) string {
 	if err := json.Unmarshal(stdout[start:end+1], &env); err != nil {
 		return ""
 	}
+	// Emit only the latest turn: find the last user message and concatenate the
+	// assistant text after it. No user message (lastUser == -1) → whole transcript,
+	// which is the single-shot / stateless case.
+	lastUser := -1
+	for i, m := range env.Messages {
+		if m.Role == "user" {
+			lastUser = i
+		}
+	}
 	var sb strings.Builder
-	for _, m := range env.Messages {
+	for _, m := range env.Messages[lastUser+1:] {
 		if m.Role != "assistant" {
 			continue
 		}

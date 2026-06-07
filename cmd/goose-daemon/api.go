@@ -148,6 +148,22 @@ type runningVM struct {
 	fcPID      int32
 }
 
+// rootfsPath returns the host path of the VM's live rootfs — the device/file the
+// guest actually reads and writes, which is what a snapshot must copy. It must NOT
+// be reconstructed from the VM ID: COW VMs (both spawned and snapshot-restored)
+// expose their rootfs at the dm-snapshot device's bind-mount target, and a
+// restored VM keeps the *source* VM's original disk path (baked into the snapshot's
+// Firecracker state), so {workspace}/{vmID}.ext4 does not exist for it.
+func (v *runningVM) rootfsPath() string {
+	if v.dmSnapshot != nil {
+		return v.dmSnapshot.MountTarget // COW spawn & COW restore
+	}
+	if v.bindMountTarget != "" {
+		return v.bindMountTarget // legacy bind-mount restore
+	}
+	return v.diskPath // plain spawn: the full .ext4 clone
+}
+
 // generateAgentToken creates a 32-byte cryptographically random token, hex-encoded (64 chars).
 func generateAgentToken() (string, error) {
 	b := make([]byte, 32)
@@ -318,6 +334,7 @@ func NewControlPlane(
 	internalMux.HandleFunc("/snapshots/", cp.handleSnapshotItem)
 	internalMux.HandleFunc("/audit", cp.handleAudit)
 	internalMux.HandleFunc("/watchdog/status", cp.handleWatchdogStatus)
+	internalMux.HandleFunc("/config/providers", cp.handleConfigProviders)
 	internalMux.HandleFunc("/config/profiles", cp.handleConfigProfiles)
 	internalMux.HandleFunc("/config/profiles/", cp.handleConfigProfile)
 	cp.registerOrchestratorRoutes(internalMux)
@@ -463,6 +480,7 @@ func (cp *ControlPlane) Start() error {
 		"  POST   /vms/{vm_id}/tasks                — proxy: run task on agent\n" +
 		"  GET    /vms/{vm_id}/health               — proxy: agent health check\n" +
 		"  POST   /vms/{vm_id}/stop                 — proxy: stop agent\n" +
+		"  GET    /vms/{vm_id}/sessions             — proxy: list agent chat sessions\n" +
 		"  GET    /snapshots                        — list snapshots\n" +
 		"  POST   /snapshots/{snapshot_id}/restore  — restore VM from snapshot\n" +
 		"  DELETE /snapshots/{snapshot_id}          — delete snapshot\n" +
@@ -601,6 +619,16 @@ func (cp *ControlPlane) handleVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if strings.HasSuffix(path, "/sessions") {
+		vmID := strings.TrimSuffix(path, "/sessions")
+		if r.Method != http.MethodGet {
+			http.Error(w, `{"error":"GET required"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		cp.proxyAgentEndpoint(w, r, vmID, "/sessions")
+		return
+	}
+
 	// DELETE /vms/{vm_id}
 	if r.Method != http.MethodDelete {
 		http.Error(w, "DELETE required", http.StatusMethodNotAllowed)
@@ -724,33 +752,36 @@ func buildAgentURL(vmID, guestIP string) string {
 	return fmt.Sprintf("http://%s:%d", guestIP, agentPort)
 }
 
-// profileConfigPaths resolves the goose.yaml and goose-secrets.yaml paths for a given profile.
-// An empty profile returns the ControlPlane's default paths (existing behavior).
-// Returns HTTP 400-appropriate errors if the profile name is unsafe or the files are missing.
+// profileConfigPaths resolves the goose.yaml and goose-secrets.yaml host paths
+// for a given profile. Secrets ALWAYS come from the single global keychain
+// (configs/goose-secrets.yaml) — profiles carry provider/model only, never their
+// own keys. The config path is the profile's own goose.yaml when that profile
+// directory exists, and falls back to the daemon's default goose.yaml otherwise,
+// so flock roles and ad-hoc profile names that have no on-disk directory still
+// spawn (using the default provider/model). Only an unsafe (path-traversal)
+// profile name is an error.
 func (cp *ControlPlane) profileConfigPaths(profile string) (configPath, secretsPath string, err error) {
+	// API keys live in one place, regardless of profile.
+	secretsPath = cp.gooseSecretsPath
 	if profile == "" {
-		return cp.gooseConfigPath, cp.gooseSecretsPath, nil
+		return cp.gooseConfigPath, secretsPath, nil
 	}
 	// Reject path traversal attempts before any filesystem access.
 	if strings.ContainsAny(profile, "/\\") || profile == ".." {
 		return "", "", fmt.Errorf("invalid profile name: %q", profile)
 	}
-	// LookupProfile rewrites known aliases (e.g. "builder" → "worker") to a
-	// canonical directory. Unknown names fall back to the name itself.
+	// LookupProfile maps a profile name to its on-disk directory (unknown names
+	// map to the name itself).
 	p := LookupProfile(profile)
 	if p.ProfileDir == "" {
-		return cp.gooseConfigPath, cp.gooseSecretsPath, nil
+		return cp.gooseConfigPath, secretsPath, nil
 	}
-	dir := filepath.Join(cp.workDir, "configs", "profiles", p.ProfileDir)
-	configPath = filepath.Join(dir, "goose.yaml")
-	secretsPath = filepath.Join(dir, "goose-secrets.yaml")
-	if _, e := os.Stat(configPath); os.IsNotExist(e) {
-		return "", "", fmt.Errorf("profile %q not found (missing goose.yaml)", profile)
+	candidate := filepath.Join(cp.workDir, "configs", "profiles", p.ProfileDir, "goose.yaml")
+	if _, e := os.Stat(candidate); e == nil {
+		return candidate, secretsPath, nil
 	}
-	if _, e := os.Stat(secretsPath); os.IsNotExist(e) {
-		return "", "", fmt.Errorf("profile %q not found (missing goose-secrets.yaml)", profile)
-	}
-	return configPath, secretsPath, nil
+	// Profile directory absent → use the default config (global secrets already set).
+	return cp.gooseConfigPath, secretsPath, nil
 }
 
 // spawnVMOptions captures all caller-supplied inputs for spawnVMInternal.
@@ -945,6 +976,8 @@ func (cp *ControlPlane) spawnVMInternal(opts spawnVMOptions) (*VMInfo, string, e
 		DiskPath:   diskPath,
 		DiskMode:   diskMode,
 		Profile:    opts.Profile,
+		Provider:   info.Provider,
+		Model:      info.Model,
 		VcpuCount:  opts.VcpuCount,
 		MemSizeMib: opts.MemSizeMib,
 		FlockID:    opts.FlockID,
@@ -1003,13 +1036,24 @@ func (cp *ControlPlane) spawnVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	agentProfile := LookupProfile(req.Profile)
+	vcpu, mem := agentProfile.VcpuCount, agentProfile.MemSizeMib
+	// UI-created profiles persist their own sizing in goose.yaml (EPHEMERA_* keys);
+	// prefer those over the LookupProfile defaults when present.
+	if pc, err := cp.readProfileConfig(req.Profile); err == nil {
+		if pc.VcpuCount > 0 {
+			vcpu = pc.VcpuCount
+		}
+		if pc.MemSizeMib > 0 {
+			mem = pc.MemSizeMib
+		}
+	}
 
 	info, agentToken, err := cp.spawnVMInternal(spawnVMOptions{
 		Profile:     req.Profile,
 		ConfigPath:  configPath,
 		SecretsPath: secretsPath,
-		VcpuCount:   agentProfile.VcpuCount,
-		MemSizeMib:  agentProfile.MemSizeMib,
+		VcpuCount:   vcpu,
+		MemSizeMib:  mem,
 	})
 	if err != nil {
 		status := http.StatusInternalServerError
@@ -1409,7 +1453,7 @@ func (cp *ControlPlane) createSnapshot(w http.ResponseWriter, r *http.Request, v
 	{
 		needBytes := uint64(v.memSizeMib) << 20
 		if snapType != "diff" {
-			if fi, statErr := os.Stat(filepath.Join("/tmp/goose-workspaces", vmID+".ext4")); statErr == nil {
+			if fi, statErr := os.Stat(v.rootfsPath()); statErr == nil {
 				needBytes += uint64(fi.Size())
 			}
 		}
@@ -1459,7 +1503,7 @@ func (cp *ControlPlane) createSnapshot(w http.ResponseWriter, r *http.Request, v
 	// Capture the rootfs while the VM is still paused (consistent state). Full snapshots
 	// store a complete rootfs.ext4; diff snapshots store only the 4 KiB blocks changed since
 	// the base snapshot (sparse rootfs.diff), merged back to a full image on restore.
-	diskPath := filepath.Join("/tmp/goose-workspaces", vmID+".ext4")
+	diskPath := v.rootfsPath()
 	var diskCopyPath, rootfsDiffPath string
 	if snapType == "diff" {
 		cp.snapshotsMu.RLock()
@@ -1508,6 +1552,8 @@ func (cp *ControlPlane) createSnapshot(w http.ResponseWriter, r *http.Request, v
 		SnapshotID:     snapID,
 		SourceVMID:     vmID,
 		Profile:        v.VMInfo.Profile,
+		Provider:       v.VMInfo.Provider,
+		Model:          v.VMInfo.Model,
 		SnapshotType:   snapType,
 		BaseSnapshotID: baseSnapID,
 		GuestIP:        v.VMInfo.GuestIP,
@@ -1747,6 +1793,8 @@ func (cp *ControlPlane) restoreSnapshot(w http.ResponseWriter, snapID string) {
 		GuestIP:  newGuestIP,
 		AgentURL: buildAgentURL(newVMID, newGuestIP),
 		Profile:  meta.Profile,
+		Provider: meta.Provider,
+		Model:    meta.Model,
 	}
 
 	cp.mu.Lock()
@@ -1780,6 +1828,8 @@ func (cp *ControlPlane) restoreSnapshot(w http.ResponseWriter, snapID string) {
 		DiskPath:         exceptionStorePath,
 		DiskMode:         storage.DiskModeCOW,
 		Profile:          meta.Profile,
+		Provider:         meta.Provider,
+		Model:            meta.Model,
 		MemSizeMib:       2048,
 		AgentURL:         info.AgentURL,
 		SourceSnapshotID: snapID,
@@ -1789,7 +1839,9 @@ func (cp *ControlPlane) restoreSnapshot(w http.ResponseWriter, snapID string) {
 	}
 
 	slog.Warn("restore: waiting for agent", "snapshot_id", snapID, "agent_url", info.AgentURL)
-	if err := waitForAgent(newGuestIP, 30*time.Second); err != nil {
+	// 60s to match the spawn/recovery boot budget. 30s flaked on concurrent restore
+	// (two 2GB VMs at once) under host memory pressure — see project-e2e-diff-restore-flaky.
+	if err := waitForAgent(newGuestIP, 60*time.Second); err != nil {
 		cp.destroyVM(newVMID)
 		http.Error(w, fmt.Sprintf(`{"error":"goose-agent not ready after restore: %v"}`, err), http.StatusInternalServerError)
 		return
@@ -1875,6 +1927,8 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 		GuestIP:  newGuestIP,
 		AgentURL: buildAgentURL(newVMID, newGuestIP),
 		Profile:  meta.Profile,
+		Provider: meta.Provider,
+		Model:    meta.Model,
 	}
 	cp.mu.Lock()
 	cp.vms[newVMID] = &runningVM{
@@ -1891,7 +1945,9 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 	}
 	cp.mu.Unlock()
 
-	if err := waitForAgent(newGuestIP, 30*time.Second); err != nil {
+	// 60s to match the spawn/recovery boot budget. 30s flaked on concurrent restore
+	// (two 2GB VMs at once) under host memory pressure — see project-e2e-diff-restore-flaky.
+	if err := waitForAgent(newGuestIP, 60*time.Second); err != nil {
 		cp.destroyVM(newVMID)
 		http.Error(w, fmt.Sprintf(`{"error":"goose-agent not ready: %v"}`, err), http.StatusInternalServerError)
 		return

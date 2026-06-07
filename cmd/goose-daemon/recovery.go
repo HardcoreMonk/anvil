@@ -236,6 +236,8 @@ func (cp *ControlPlane) registerRecoveredVM(s storage.VMState, machine *firecrac
 			GuestIP:  s.GuestIP,
 			AgentURL: s.AgentURL,
 			Profile:  s.Profile,
+			Provider: s.Provider,
+			Model:    s.Model,
 		},
 		agentToken:       s.AgentToken,
 		diskPath:         s.DiskPath,
