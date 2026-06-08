@@ -274,10 +274,10 @@ type AgentProfile struct {
 // agentProfiles holds only the reserved default. Every other profile is
 // user-defined: created through the Settings UI as a configs/profiles/{name}
 // directory and resolved by name. LookupProfile returns default sizing
-// (2 vCPU / 2048 MiB) with ProfileDir set to the requested name, so any
-// user profile or flock role works without a hardcoded entry here.
+// (1 vCPU / 1024 MiB, the "Standard" preset) with ProfileDir set to the requested
+// name, so any user profile or flock role works without a hardcoded entry here.
 var agentProfiles = map[string]AgentProfile{
-	"": {Name: "default", VcpuCount: 2, MemSizeMib: 2048, ProfileDir: ""},
+	"": {Name: "default", VcpuCount: 1, MemSizeMib: 1024, ProfileDir: ""},
 }
 
 // LookupProfile returns the canonical AgentProfile for a known name, or a
@@ -288,5 +288,5 @@ func LookupProfile(name string) AgentProfile {
 	if p, ok := agentProfiles[name]; ok {
 		return p
 	}
-	return AgentProfile{Name: name, VcpuCount: 2, MemSizeMib: 2048, ProfileDir: name}
+	return AgentProfile{Name: name, VcpuCount: 1, MemSizeMib: 1024, ProfileDir: name}
 }
