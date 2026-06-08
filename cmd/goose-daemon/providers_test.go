@@ -41,8 +41,8 @@ func TestProviderRegistry_Groq(t *testing.T) {
 	if !ok {
 		t.Fatal("groq not in registry")
 	}
-	if p.DefaultModel != "llama-3.3-70b-versatile" {
-		t.Errorf("groq default model = %q, want llama-3.3-70b-versatile", p.DefaultModel)
+	if p.DefaultModel != "openai/gpt-oss-120b" {
+		t.Errorf("groq default model = %q, want openai/gpt-oss-120b", p.DefaultModel)
 	}
 	if p.SecretEnv != "GROQ_API_KEY" {
 		t.Errorf("groq secret env = %q, want GROQ_API_KEY", p.SecretEnv)

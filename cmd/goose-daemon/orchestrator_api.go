@@ -33,8 +33,11 @@ func flockMax(f *orchestrator.Flock) int {
 
 // FlockCreateRequest is the POST /flocks body. roles[i] becomes one VM.
 type FlockCreateRequest struct {
-	Task      string   `json:"task"`
-	Roles     []string `json:"roles"`
+	Task  string   `json:"task"`
+	Roles []string `json:"roles"`
+	// Profiles[i] is the profile Roles[i] uses for sizing/model/system prompt.
+	// Empty or absent → the role name is used as the profile (back-compat).
+	Profiles  []string `json:"profiles,omitempty"`
 	MaxAgents *int     `json:"max_agents,omitempty"` // per-flock cap (v0.4.3); nil → default
 }
 
@@ -179,10 +182,16 @@ func (cp *ControlPlane) createFlock(w http.ResponseWriter, r *http.Request) {
 		}
 		cp.flockMgr.Delete(flockID)
 	}
-	for _, role := range req.Roles {
+	for i, role := range req.Roles {
 		roleSeq[role]++
 		agentID := fmt.Sprintf("%s-%d", role, roleSeq[role])
-		vmInfo, agentToken, err := cp.spawnVMForFlock(flockID, agentID, role)
+		// The profile (sizing/model/system prompt) defaults to the role name but can
+		// be chosen independently per role via req.Profiles (parallel to req.Roles).
+		profile := role
+		if i < len(req.Profiles) && strings.TrimSpace(req.Profiles[i]) != "" {
+			profile = strings.TrimSpace(req.Profiles[i])
+		}
+		vmInfo, agentToken, err := cp.spawnVMForFlock(flockID, agentID, profile)
 		if err != nil {
 			cleanup()
 			writeJSONError(w, http.StatusInternalServerError, fmt.Errorf("spawn %s: %w", agentID, err))
@@ -191,6 +200,7 @@ func (cp *ControlPlane) createFlock(w http.ResponseWriter, r *http.Request) {
 		flock.AddAgent(&orchestrator.AgentInfo{
 			AgentID:  agentID,
 			Role:     role,
+			Profile:  profile,
 			VMID:     vmInfo.VMID,
 			AgentURL: vmInfo.AgentURL,
 			Status:   orchestrator.AgentStatusReady,
@@ -401,17 +411,23 @@ func (cp *ControlPlane) restartAgent(w http.ResponseWriter, flockID, agentID str
 		return
 	}
 
-	var oldVMID, role string
+	var oldVMID, role, profileName string
 	for _, a := range f.Snapshot() {
 		if a.AgentID == agentID {
 			oldVMID = a.VMID
 			role = a.Role
+			profileName = a.Profile
 			break
 		}
 	}
 	if oldVMID == "" {
 		writeJSONError(w, http.StatusNotFound, fmt.Errorf("agent not found"))
 		return
+	}
+	// Respawn with the SAME profile the agent was created with. Legacy records have
+	// no profile → fall back to the role name (the pre-split behavior).
+	if profileName == "" {
+		profileName = role
 	}
 
 	// Token must be read before destroyVM removes the runningVM entry.
@@ -425,23 +441,23 @@ func (cp *ControlPlane) restartAgent(w http.ResponseWriter, flockID, agentID str
 	cp.destroyVM(oldVMID)
 	cp.watchdog.ForgetVM(oldVMID)
 
-	configPath, secretsPath, err := cp.profileConfigPaths(role)
+	configPath, secretsPath, err := cp.profileConfigPaths(profileName)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err)
 		return
 	}
-	profile := LookupProfile(role)
+	agentProfile := LookupProfile(profileName)
 	info, _, err := cp.spawnVMInternal(spawnVMOptions{
-		Profile:           role,
+		Profile:           profileName,
 		ConfigPath:        configPath,
 		SecretsPath:       secretsPath,
-		SystemPrompt:      cp.loadProfileSystemPrompt(profile.ProfileDir),
+		SystemPrompt:      cp.loadProfileSystemPrompt(agentProfile.ProfileDir),
 		FlockID:           flockID,
 		AgentID:           agentID,
 		AgentToken:        oldToken,
 		ControlPlaneToken: cp.controlPlaneTokenForVM(),
-		VcpuCount:         profile.VcpuCount,
-		MemSizeMib:        profile.MemSizeMib,
+		VcpuCount:         agentProfile.VcpuCount,
+		MemSizeMib:        agentProfile.MemSizeMib,
 	})
 	if err != nil {
 		// Agent slot no longer has a backing VM — mark dead so callers see it
@@ -466,6 +482,9 @@ func (cp *ControlPlane) restartAgent(w http.ResponseWriter, flockID, agentID str
 // PATCH /flocks/{id}/agents/{agent_id} (role change): the target role.
 type AgentRoleRequest struct {
 	Role string `json:"role"`
+	// Profile is the config profile to spawn the (re)created VM with. Empty → the
+	// role name is used as the profile (back-compat).
+	Profile string `json:"profile,omitempty"`
 }
 
 // nextAgentID returns the next "<role>-N" id for a role within a flock, using
@@ -508,7 +527,11 @@ func (cp *ControlPlane) addFlockAgent(w http.ResponseWriter, r *http.Request, fl
 	}
 
 	agentID := nextAgentID(f, req.Role)
-	vmInfo, agentToken, err := cp.spawnVMForFlock(flockID, agentID, req.Role)
+	profile := req.Role
+	if strings.TrimSpace(req.Profile) != "" {
+		profile = strings.TrimSpace(req.Profile)
+	}
+	vmInfo, agentToken, err := cp.spawnVMForFlock(flockID, agentID, profile)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, fmt.Errorf("spawn %s: %w", agentID, err))
 		return
@@ -516,6 +539,7 @@ func (cp *ControlPlane) addFlockAgent(w http.ResponseWriter, r *http.Request, fl
 	f.AddAgent(&orchestrator.AgentInfo{
 		AgentID:  agentID,
 		Role:     req.Role,
+		Profile:  profile,
 		VMID:     vmInfo.VMID,
 		AgentURL: vmInfo.AgentURL,
 		Status:   orchestrator.AgentStatusReady,
@@ -618,7 +642,11 @@ func (cp *ControlPlane) changeFlockAgentRole(w http.ResponseWriter, r *http.Requ
 	cp.destroyVM(oldVMID)
 	cp.watchdog.ForgetVM(oldVMID)
 
-	configPath, secretsPath, err := cp.profileConfigPaths(req.Role)
+	newProfile := req.Role
+	if strings.TrimSpace(req.Profile) != "" {
+		newProfile = strings.TrimSpace(req.Profile)
+	}
+	configPath, secretsPath, err := cp.profileConfigPaths(newProfile)
 	if err != nil {
 		f.UpdateAgentStatus(agentID, orchestrator.AgentStatusDead)
 		if perr := f.Persist(cp.workDir); perr != nil {
@@ -627,18 +655,18 @@ func (cp *ControlPlane) changeFlockAgentRole(w http.ResponseWriter, r *http.Requ
 		writeJSONError(w, http.StatusInternalServerError, err)
 		return
 	}
-	profile := LookupProfile(req.Role)
+	agentProfile := LookupProfile(newProfile)
 	info, _, err := cp.spawnVMInternal(spawnVMOptions{
-		Profile:           req.Role,
+		Profile:           newProfile,
 		ConfigPath:        configPath,
 		SecretsPath:       secretsPath,
-		SystemPrompt:      cp.loadProfileSystemPrompt(profile.ProfileDir),
+		SystemPrompt:      cp.loadProfileSystemPrompt(agentProfile.ProfileDir),
 		FlockID:           flockID,
 		AgentID:           agentID,
 		AgentToken:        oldToken,
 		ControlPlaneToken: cp.controlPlaneTokenForVM(),
-		VcpuCount:         profile.VcpuCount,
-		MemSizeMib:        profile.MemSizeMib,
+		VcpuCount:         agentProfile.VcpuCount,
+		MemSizeMib:        agentProfile.MemSizeMib,
 	})
 	if err != nil {
 		f.UpdateAgentStatus(agentID, orchestrator.AgentStatusDead)
@@ -648,7 +676,7 @@ func (cp *ControlPlane) changeFlockAgentRole(w http.ResponseWriter, r *http.Requ
 		writeJSONError(w, http.StatusInternalServerError, err)
 		return
 	}
-	f.ChangeAgentRole(agentID, req.Role)
+	f.ChangeAgentRole(agentID, req.Role, newProfile)
 	f.UpdateAgentVM(agentID, info.VMID, info.AgentURL)
 	if err := f.Persist(cp.workDir); err != nil {
 		slog.Warn("change role: persist failed", "flock_id", flockID, "err", err)
@@ -863,19 +891,21 @@ func (cp *ControlPlane) dispatchBroadcastTask(ctx context.Context, vmID, prompt 
 	return broadcastResult{Status: "ok", Output: tr.Output, Error: tr.Error}
 }
 
-// spawnVMForFlock spawns one VM as a flock member. role is mapped through
+// spawnVMForFlock spawns one VM as a flock member. profile is mapped through
 // LookupProfile to determine VM sizing, the goose config directory, and the
-// system prompt that will be injected at boot. The control plane token is
+// system prompt injected at boot. The profile may differ from the agent's logical
+// role: createFlock passes the chosen profile, while add-agent passes the role
+// (preserving the legacy role==profile behavior). The control plane token is
 // auto-injected (apiClients[0]) so the in-VM /townwall/post forwarder
 // authenticates against an auth-on control plane without manual setup.
-func (cp *ControlPlane) spawnVMForFlock(flockID, agentID, role string) (*VMInfo, string, error) {
-	configPath, secretsPath, err := cp.profileConfigPaths(role)
+func (cp *ControlPlane) spawnVMForFlock(flockID, agentID, profile string) (*VMInfo, string, error) {
+	configPath, secretsPath, err := cp.profileConfigPaths(profile)
 	if err != nil {
 		return nil, "", err
 	}
-	agentProfile := LookupProfile(role)
+	agentProfile := LookupProfile(profile)
 	return cp.spawnVMInternal(spawnVMOptions{
-		Profile:           role,
+		Profile:           profile,
 		ConfigPath:        configPath,
 		SecretsPath:       secretsPath,
 		SystemPrompt:      cp.loadProfileSystemPrompt(agentProfile.ProfileDir),

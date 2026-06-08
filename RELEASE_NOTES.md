@@ -1,3 +1,42 @@
+# v0.5.3 — Sizing Presets + Flock Profile Workflow
+
+**Ephemera** v0.5.3 lowers the default agent VM sizing from **2 vCPU / 2048 MiB** to **1 vCPU / 1024 MiB** (the new **Standard** preset) and adds three named sizing tiers — **Light** (1 vCPU / 512 MiB), **Standard** (1 vCPU / 1024 MiB), and **Advanced** (2 vCPU / 2048 MiB) — surfaced in the Settings profile editor. Rationale: Goose runs LLM inference remotely, so an agent VM mostly waits on network IO and runs tools; 2 GB was over-provisioned for chat/file-edit roles. It also reworks the **flock profile workflow** — Agent Groups now pick a profile per role (separate from the role label), that profile survives restart / role-change, the model field becomes a real dropdown, and an in-use profile can no longer be deleted out from under running agents. **No golden-image rebake** — only the daemon, `web/` bundle, docs, the webdev demo, and KVM-free tests change.
+
+---
+
+## What's New
+
+### Lighter default + sizing presets
+
+- The default for an agent VM created without explicit sizing is now **1 vCPU / 1024 MiB** (was 2 / 2048). This is the `vm` package default (`defaultVcpuCount` / `defaultMemSizeMib`) and the reserved `default` profile; existing profiles with explicit sizing are unaffected.
+- New `GET /config/presets` returns the named tiers (Light / Standard / Advanced) from a backend registry (mirrors `GET /config/providers`). The **Settings** profile editor shows them as quick-select chips that fill the vCPU/memory fields, with free-form entry still available for custom sizing.
+- Tune sizing from the live `GET /vms/{id}/stats` `mem_used_mib` reading: most chat/edit agents sit well under 512 MiB; raise a profile only if an agent runs build/test-heavy tools.
+
+### Accurate restored-VM stats
+
+- Snapshots now record the VM's sizing in metadata (`vcpu_count` / `mem_size_mib`), so a restored VM reports its true `mem_total_mib` instead of a hardcoded 2048. Legacy snapshots (no sizing recorded) fall back to the historical 2 vCPU / 2048 MiB. The memory file still governs the actual restored boot size.
+
+### webdev demo modernized (hybrid Gemini + Groq, preset sizing)
+
+- `webdev_demo.sh` (the 3-agent React + Vite flock demo) is rebuilt for the runtime-profile architecture. Role profiles now live in `configs/webdev-demo/profiles/{orchestrator,worker,reviewer}/` (system.md + goose.yaml); the script installs them into `configs/profiles/` for the run and removes them on cleanup (a same-named user profile is backed up to `{role}.webdev_bak` and restored). It runs **hybrid**: the orchestrator (tool-heavy multi-step loop) on **Google Gemini** `gemini-2.5-flash`, and worker/reviewer on **Groq** `openai/gpt-oss-20b` — with per-role preset sizing **1024 / 512 / 512 MiB (2 GiB total)**, fitting an **8 GiB laptop**; the memory floor drops from 6500 to 3584 MiB. Both API keys live in the global keychain (no per-role secrets). **Why hybrid**: Groq could not reliably drive the multi-turn tool loop — its Llama models reject the tool-call format ("Failed to call a function") and its `gpt-oss` reasoning models reject `reasoning_content` on follow-up tool turns (sometimes emitting the tool command as plain text); neither goose 1.36 nor 1.37 fixed it. Gemini handles multi-turn tool use reliably, while gpt-oss is fine for the worker/reviewer's single-shot generation. Independently, the **Groq provider default** (Settings UI + `configs/goose.yaml`) moves to `openai/gpt-oss-120b` (standard tool-call format, better than Llama for single-shot tool use). Override any demo role with `WEBDEV_ORCH_MODEL` / `WEBDEV_WORKER_MODEL` / `WEBDEV_REVIEWER_MODEL`; the script also re-dispatches the orchestrator up to `WEBDEV_ORCH_ATTEMPTS` times (default 4) and flags partial runs (unfilled PLACEHOLDER files).
+
+### Flock role ↔ profile separation
+
+- Creating an Agent Group now takes a **free-text role label and a profile** per agent. Previously the role string was overloaded as the profile name, so a role that didn't match a profile directory silently fell back to the default config. `POST /flocks` accepts an optional `profiles[]` array parallel to `roles[]` (empty entry → the role name is the profile, back-compat); each agent's profile is recorded on `AgentInfo.Profile`.
+- **Fix:** restart / change-role / add-agent now respawn with the agent's **recorded profile** instead of re-deriving it from the role label — so a restarted agent keeps its sizing, model, and system prompt instead of falling back to default. Legacy flock records (no stored profile) fall back to the role name. The Change-role and Add-agent modals gained the same profile dropdown.
+
+### Model input dropdown
+
+- The model field in the New-profile modal and Settings was an `<input list>` + `<datalist>` (a type-to-filter bubble, unlike a normal dropdown). It is now a shared **`ModelPicker`** component: a `<select>` of the provider's suggested models plus a **"Custom model…"** option that reveals a free-text input for any model id.
+
+### Profile delete guard
+
+- Deleting a profile that running VMs were spawned from is now **refused (HTTP 409)** instead of silently leaving those agents to fall back to the default config on their next restart / role-change. The Settings UI shows an i18n notice (`settings.profileInUse`); remove or re-profile the agents first.
+
+> **No rebake**: this release changes only the daemon (config / flock / orchestrator handlers), `web/` (and the regenerated `uidist/` bundle), docs, KVM-free Go tests, and the webdev demo (`webdev_demo.sh` + `configs/webdev-demo/`) — no `cmd/goose-agent`, `scripts/build_image.sh`, or `artifacts/*` changes, so the golden image is untouched. Snapshot restore sizing is exercised by the e2e/KVM gate; the preset registry/handler, snapshot-metadata round-trip, and default-sizing resolver are covered by KVM-free unit tests.
+
+---
+
 # v0.5.2 — Orchestration Web UI + Live Activity Feed (SSE)
 
 **Ephemera** v0.5.2 adds the **Orchestration** console — browser-based Agent Group (flock) management — and a **live Activity Feed** over Server-Sent Events. Pure frontend: every flock endpoint already shipped in v0.4.x, so there are **no control-plane code changes and no golden-image rebake** (UI bundle + docs + tests only).

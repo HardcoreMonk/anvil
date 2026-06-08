@@ -142,7 +142,10 @@ type runningVM struct {
 	// v0.3.5 additions for /vms/{vm_id}/stats. memSizeMib mirrors VMState.MemSizeMib,
 	// spawnedAt mirrors VMState.CreatedAt, and fcPID caches the Firecracker child
 	// PID resolved via /proc/net/unix on first stats request. atomic stores so
-	// concurrent stats requests across goroutines remain race-free.
+	// concurrent stats requests across goroutines remain race-free. vcpuCount mirrors
+	// the VM's vCPU count; it is not used by stats but is recorded into snapshot
+	// metadata (alongside memSizeMib) so a restore can report the VM's true sizing.
+	vcpuCount  int64
 	memSizeMib int64
 	spawnedAt  time.Time
 	fcPID      int32
@@ -335,6 +338,7 @@ func NewControlPlane(
 	internalMux.HandleFunc("/audit", cp.handleAudit)
 	internalMux.HandleFunc("/watchdog/status", cp.handleWatchdogStatus)
 	internalMux.HandleFunc("/config/providers", cp.handleConfigProviders)
+	internalMux.HandleFunc("/config/presets", cp.handleConfigPresets)
 	internalMux.HandleFunc("/config/profiles", cp.handleConfigProfiles)
 	internalMux.HandleFunc("/config/profiles/", cp.handleConfigProfile)
 	cp.registerOrchestratorRoutes(internalMux)
@@ -803,8 +807,8 @@ type spawnVMOptions struct {
 	// back into the control plane. Auto-populated by spawnVMForFlock from
 	// the daemon's apiClients[0]; standalone spawnVM leaves this empty.
 	ControlPlaneToken string
-	VcpuCount         int64 // 0 → default 2
-	MemSizeMib        int64 // 0 → default 2048
+	VcpuCount         int64 // 0 → default 1
+	MemSizeMib        int64 // 0 → default 1024
 }
 
 // spawnVMInternal performs the actual VM lifecycle: allocate networking, clone
@@ -934,9 +938,13 @@ func (cp *ControlPlane) spawnVMInternal(opts spawnVMOptions) (*VMInfo, string, e
 
 	// runningVM.dmSnapshot drives the COW teardown branch in destroyVM; when
 	// nil, destroyVM falls back to deleting diskPath as a plain file.
+	vcpu := opts.VcpuCount
+	if vcpu == 0 {
+		vcpu = 1 // matches vm.defaultVcpuCount
+	}
 	memSize := opts.MemSizeMib
 	if memSize == 0 {
-		memSize = 2048 // matches vm.defaultMemSizeMib
+		memSize = 1024 // matches vm.defaultMemSizeMib
 	}
 	spawnedAt := time.Now().UTC()
 	cp.mu.Lock()
@@ -949,6 +957,7 @@ func (cp *ControlPlane) spawnVMInternal(opts spawnVMOptions) (*VMInfo, string, e
 		machine:    machine,
 		tapDevice:  tapDevice,
 		socketPath: socketPath,
+		vcpuCount:  vcpu,
 		memSizeMib: memSize,
 		spawnedAt:  spawnedAt,
 	}
@@ -1566,6 +1575,8 @@ func (cp *ControlPlane) createSnapshot(w http.ResponseWriter, r *http.Request, v
 		StatFilePath:   statPath,
 		DiskCopyPath:   diskCopyPath,
 		RootfsDiffPath: rootfsDiffPath,
+		VcpuCount:      v.vcpuCount,
+		MemSizeMib:     v.memSizeMib,
 		CreatedAt:      time.Now().UTC(),
 	}
 
@@ -1614,6 +1625,22 @@ func deriveMACFromTap(tapDevice string) string {
 }
 
 // POST /snapshots/{snapshot_id}/restore
+// snapshotSizing returns the VM sizing to apply when restoring from snapshot meta.
+// Snapshots created from v0.5.2+ carry their sizing; legacy snapshots leave the
+// fields zero and were always captured at the historical 2 vCPU / 2048 MiB default,
+// so fall back to that. The mem file governs the actual restored memory size — this
+// only sets the values reported via the stats API.
+func snapshotSizing(meta storage.SnapshotMetadata) (vcpu, mem int64) {
+	vcpu, mem = meta.VcpuCount, meta.MemSizeMib
+	if vcpu == 0 {
+		vcpu = 2
+	}
+	if mem == 0 {
+		mem = 2048
+	}
+	return vcpu, mem
+}
+
 func (cp *ControlPlane) restoreSnapshot(w http.ResponseWriter, snapID string) {
 	start := time.Now()
 	outcome := "fail"
@@ -1797,6 +1824,7 @@ func (cp *ControlPlane) restoreSnapshot(w http.ResponseWriter, snapID string) {
 		Model:    meta.Model,
 	}
 
+	rvcpu, rmem := snapshotSizing(meta)
 	cp.mu.Lock()
 	cp.vms[newVMID] = &runningVM{
 		VMInfo:           info,
@@ -1807,7 +1835,8 @@ func (cp *ControlPlane) restoreSnapshot(w http.ResponseWriter, snapID string) {
 		machine:          machine,
 		tapDevice:        tapDevice,
 		socketPath:       socketPath,
-		memSizeMib:       2048, // restore default; meta does not carry per-snapshot sizing
+		vcpuCount:        rvcpu,
+		memSizeMib:       rmem, // from snapshot meta (legacy snapshots → 2048); the mem file governs actual size
 		spawnedAt:        time.Now().UTC(),
 		sourceSnapshotID: snapID,
 	}
@@ -1830,7 +1859,8 @@ func (cp *ControlPlane) restoreSnapshot(w http.ResponseWriter, snapID string) {
 		Profile:          meta.Profile,
 		Provider:         meta.Provider,
 		Model:            meta.Model,
-		MemSizeMib:       2048,
+		VcpuCount:        rvcpu,
+		MemSizeMib:       rmem,
 		AgentURL:         info.AgentURL,
 		SourceSnapshotID: snapID,
 		CreatedAt:        time.Now().UTC(),
@@ -1930,6 +1960,7 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 		Provider: meta.Provider,
 		Model:    meta.Model,
 	}
+	rvcpu, rmem := snapshotSizing(meta)
 	cp.mu.Lock()
 	cp.vms[newVMID] = &runningVM{
 		VMInfo:          info,
@@ -1940,7 +1971,8 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 		machine:         machine,
 		tapDevice:       tapDevice,
 		socketPath:      socketPath,
-		memSizeMib:      2048,
+		vcpuCount:       rvcpu,
+		memSizeMib:      rmem,
 		spawnedAt:       time.Now().UTC(),
 	}
 	cp.mu.Unlock()

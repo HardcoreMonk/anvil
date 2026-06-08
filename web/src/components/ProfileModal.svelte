@@ -4,21 +4,33 @@
   import { _ } from 'svelte-i18n'
   import { apiJSON } from '../lib/api.js'
   import { toast } from '../lib/store.js'
+  import ModelPicker from './ModelPicker.svelte'
 
   // Available providers only: [{ id, label, default_model, suggested_models }].
   export let providers = []
+  // VM sizing presets from GET /config/presets: [{ id, label, vcpu_count, mem_size_mib }].
+  export let presets = []
 
   const dispatch = createEventDispatcher()
 
   let name = ''
   let provider = providers.length ? providers[0].id : ''
   let model = providers.length ? providers[0].default_model : ''
-  let vcpu = 2
-  let mem = 2048
+  let vcpu = 1
+  let mem = 1024
   let busy = false
 
   // Suggested models track the selected provider.
   $: suggested = (providers.find((p) => p.id === provider) || {}).suggested_models || []
+
+  // The preset whose sizing matches the current vcpu/mem, or null for a custom mix.
+  $: activePreset = presets.find((p) => p.vcpu_count === vcpu && p.mem_size_mib === mem) || null
+
+  // Apply a preset's sizing to the form. Users may still fine-tune the fields after.
+  function applyPreset(p) {
+    vcpu = p.vcpu_count
+    mem = p.mem_size_mib
+  }
 
   // Pre-fill the model with the provider's default when the provider changes.
   function onProviderChange() {
@@ -69,12 +81,25 @@
       </div>
       <div class="field">
         <label for="pm-model">{$_('profileModal.modelLabel')}</label>
-        <input id="pm-model" list="pm-models" bind:value={model} />
-        <datalist id="pm-models">
-          {#each suggested as m}<option value={m}></option>{/each}
-        </datalist>
+        <ModelPicker id="pm-model" models={suggested} bind:value={model} />
         <div class="muted" style="margin-top:6px; font-size:12px;">{$_('profileModal.modelHint')}</div>
       </div>
+      {#if presets.length}
+        <div class="field">
+          <span class="preset-label">{$_('profileModal.presetLabel')}</span>
+          <div class="row" style="gap:8px; flex-wrap:wrap;">
+            {#each presets as p (p.id)}
+              <button type="button" class="ghost preset-chip" class:active={activePreset && activePreset.id === p.id}
+                on:click={() => applyPreset(p)}>
+                {p.label} <small>{p.vcpu_count} vCPU · {p.mem_size_mib} MiB</small>
+              </button>
+            {/each}
+            {#if !activePreset}
+              <span class="preset-custom">{$_('profileModal.presetCustom')}</span>
+            {/if}
+          </div>
+        </div>
+      {/if}
       <div class="row" style="gap:12px;">
         <div class="field" style="flex:1;">
           <label for="pm-vcpu">{$_('profileModal.vcpuLabel')}</label>
@@ -95,3 +120,21 @@
     {/if}
   </div>
 </div>
+
+<style>
+  .preset-label { display: block; margin-bottom: 6px; color: var(--muted); }
+  .preset-chip {
+    padding: 6px 10px;
+    font-size: 13px;
+    display: inline-flex;
+    gap: 6px;
+    align-items: baseline;
+  }
+  .preset-chip.active {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .preset-chip small { color: var(--muted); font-size: 11px; }
+  .preset-chip.active small { color: var(--accent); opacity: 0.85; }
+  .preset-custom { font-size: 12px; color: var(--muted); align-self: center; }
+</style>

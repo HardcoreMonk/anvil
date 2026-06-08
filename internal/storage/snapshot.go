@@ -35,6 +35,8 @@ type SnapshotMetadata struct {
 	StatFilePath   string    `json:"stat_file_path"`             // absolute path to state.bin
 	DiskCopyPath   string    `json:"disk_copy_path"`             // full rootfs copy inside snapshot dir (full snapshots; empty for v0.4.0 diff snapshots)
 	RootfsDiffPath string    `json:"rootfs_diff_path,omitempty"` // v0.4.0+ diff: sparse rootfs delta vs base.DiskCopyPath
+	VcpuCount      int64     `json:"vcpu_count,omitempty"`       // VM vCPU count at snapshot time; 0 (legacy snapshots) → restore falls back to the historical 2
+	MemSizeMib     int64     `json:"mem_size_mib,omitempty"`     // VM memory (MiB) at snapshot time; 0 (legacy) → 2048. The mem file governs actual boot size — this is for stats display
 	CreatedAt      time.Time `json:"created_at"`
 }
 

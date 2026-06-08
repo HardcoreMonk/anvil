@@ -41,11 +41,15 @@ var providerRegistry = []ProviderDef{
 		SuggestedModels: []string{"gpt-4o", "gpt-4o-mini", "gpt-4.1"},
 	},
 	{
-		ID:              "groq",
-		Label:           "Groq",
-		SecretEnv:       "GROQ_API_KEY",
-		DefaultModel:    "llama-3.3-70b-versatile",
-		SuggestedModels: []string{"llama-3.3-70b-versatile", "llama-3.1-8b-instant"},
+		ID:        "groq",
+		Label:     "Groq",
+		SecretEnv: "GROQ_API_KEY",
+		// gpt-oss (OpenAI open models) emit standard OpenAI-format tool calls Groq
+		// accepts reliably. The Llama models' non-standard tool-call format makes Groq
+		// return "Failed to call a function" on tool-heavy agents, so they are offered
+		// but not the default.
+		DefaultModel:    "openai/gpt-oss-120b",
+		SuggestedModels: []string{"openai/gpt-oss-120b", "openai/gpt-oss-20b", "llama-3.3-70b-versatile", "llama-3.1-8b-instant"},
 	},
 }
 

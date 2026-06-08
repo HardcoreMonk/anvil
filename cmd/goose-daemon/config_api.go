@@ -20,8 +20,8 @@ type ProfileConfig struct {
 	Name       string `json:"name"`         // "default" for the daemon default, else the profile dir name
 	Provider   string `json:"provider"`     // GOOSE_PROVIDER
 	Model      string `json:"model"`        // GOOSE_MODEL
-	VcpuCount  int64  `json:"vcpu_count"`   // EPHEMERA_VCPU_COUNT; 0 → default sizing (2)
-	MemSizeMib int64  `json:"mem_size_mib"` // EPHEMERA_MEM_SIZE_MIB; 0 → default sizing (2048)
+	VcpuCount  int64  `json:"vcpu_count"`   // EPHEMERA_VCPU_COUNT; 0 → default sizing (1)
+	MemSizeMib int64  `json:"mem_size_mib"` // EPHEMERA_MEM_SIZE_MIB; 0 → default sizing (1024)
 }
 
 // defaultProfileName is the reserved name for the daemon's default goose.yaml
@@ -157,6 +157,13 @@ func (cp *ControlPlane) handleConfigProfile(w http.ResponseWriter, r *http.Reque
 			writeJSONError(w, http.StatusNotFound, fmt.Errorf("profile %q not found", name))
 			return
 		}
+		// Refuse to delete a profile that running VMs were spawned from — otherwise a
+		// restart / change-role of those agents would silently fall back to the default
+		// config. The caller must remove or re-profile those agents first.
+		if inUse := cp.vmsUsingProfile(name); len(inUse) > 0 {
+			writeJSONError(w, http.StatusConflict, fmt.Errorf("profile %q is in use by %d running VM(s) (%s); remove or change those agents before deleting", name, len(inUse), strings.Join(inUse, ", ")))
+			return
+		}
 		if err := os.RemoveAll(dir); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err)
 			return
@@ -166,6 +173,21 @@ func (cp *ControlPlane) handleConfigProfile(w http.ResponseWriter, r *http.Reque
 	default:
 		writeJSONError(w, http.StatusMethodNotAllowed, fmt.Errorf("method not allowed"))
 	}
+}
+
+// vmsUsingProfile returns the IDs of running VMs spawned from the named profile.
+// Used to block deletion of an in-use profile (deleting it would leave those agents
+// silently falling back to the default config on restart / change-role).
+func (cp *ControlPlane) vmsUsingProfile(name string) []string {
+	cp.mu.RLock()
+	defer cp.mu.RUnlock()
+	var ids []string
+	for id, v := range cp.vms {
+		if v.Profile == name {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 // providerStatus is one element of the GET /config/providers response: a known
@@ -200,6 +222,18 @@ func (cp *ControlPlane) handleConfigProviders(w http.ResponseWriter, r *http.Req
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// handleConfigPresets serves GET /config/presets — the registry of named VM sizing
+// tiers (Light/Standard/Advanced) the profile editor offers as quick presets. The
+// values are advisory: a profile may still carry any sizing within validateSizing's
+// bounds. The "standard" tier matches the daemon's default sizing.
+func (cp *ControlPlane) handleConfigPresets(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSONError(w, http.StatusMethodNotAllowed, fmt.Errorf("method not allowed"))
+		return
+	}
+	writeJSON(w, http.StatusOK, sizingPresetRegistry)
 }
 
 // secretKeyPresent reports whether goose-secrets.yaml content carries a usable
