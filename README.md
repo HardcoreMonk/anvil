@@ -134,7 +134,7 @@ DELETE /vms/{id}
 | **Self-bootstrapping** | Golden image, kernel, Firecracker downloaded + SHA256-verified on first run; goose-agent / micro-init / golden image are also rebuilt automatically when their sources are newer than the cached artifact (mtime-based staleness check), so editing in-VM Go code or `build_image.sh` does not need a manual `rm artifacts/...` |
 | **Minimal guest OS** | Debian Bookworm minbase — no SSH, no init daemon; `micro-init` (Go binary, PID 1) mounts virtual filesystems and manages goose-agent lifecycle |
 | **Graceful guest shutdown** | `micro-init` traps SIGTERM and calls `poweroff(2)` — no kernel panic on VM exit |
-| **Per-VM LLM profiles** | A mandatory `default` profile (`configs/goose.yaml`) plus any number of user-defined profiles (`configs/profiles/{name}/goose.yaml`), each selecting a provider + model. API keys live in one global keychain (`configs/goose-secrets.yaml`), never per profile. User-defined profiles can set their own per-VM vCPU/memory (v0.5.1); the default and any unsized profile spawn at 2 vCPU / 2048 MiB |
+| **Per-VM LLM profiles** | A mandatory `default` profile (`configs/goose.yaml`) plus any number of user-defined profiles (`configs/profiles/{name}/goose.yaml`), each selecting a provider + model. API keys live in one global keychain (`configs/goose-secrets.yaml`), never per profile. User-defined profiles can set their own per-VM vCPU/memory (v0.5.1); the default and any unsized profile spawn at 1 vCPU / 1024 MiB; the Settings UI offers Light/Standard/Advanced sizing presets (v0.5.3) |
 | **Provider-restricted config** | The Settings UI only offers providers whose API key is present in the global keychain (`GET /config/providers`); the built-in registry covers Google, Anthropic, OpenAI, and Groq |
 | **Multi-agent flocks** | `POST /flocks` spawns a group of role-specialized VMs in one call; `DELETE /flocks/{id}` tears them all down in parallel |
 | **Town Wall log** | Per-flock append-only log with SSE streaming (`/flocks/{id}/wall`) for coordination; `gtwall "..."` CLI inside each VM posts to it, and `gtcall <agent_id> "..."` (v0.3.6) dispatches a prompt to a peer agent — both hide curl/token/JSON-quoting behind a one-line interface |
@@ -250,7 +250,7 @@ web/                  Web UI source — Svelte 4 + Vite 5 SPA (v0.5.0)
 
 internal/
   vm/machine.go       Firecracker SDK wrapper — StartMachine, RestoreMachine
-                      (VcpuCount / MemSizeMib are per-call; zero falls back to 2 / 2048)
+                      (VcpuCount / MemSizeMib are per-call; zero falls back to 1 / 1024)
   network/manager.go  IP pool, TAP device lifecycle, AllocateForRestore,
                       ReclaimAllocation (cold-restart reuse), bridge, NAT
   storage/
@@ -964,7 +964,7 @@ Returns a point-in-time snapshot of host-observable VM stats. Authentication use
   "vm_id": "vm-1778227000000",
   "cpu_percent": 12.4,
   "mem_used_mib": 187,
-  "mem_total_mib": 2048,
+  "mem_total_mib": 1024,
   "uptime_seconds": 312,
   "network_rx_bytes": 12849,
   "network_tx_bytes": 5328,
@@ -1077,7 +1077,7 @@ Without `EPHEMERA_PUBLIC_URL`, `agent_url` still contains the private IP, but th
 
 A **flock** is one `POST /flocks` call that spawns one VM per requested role and registers them under a shared flock ID, all sharing a Town Wall log. Each role string is used directly as a profile name.
 
-> Every agent spawns at default sizing (2 vCPU / 2048 MiB). A role uses `configs/profiles/{role}/goose.yaml` (provider/model) and `system.md` (prompt) when that directory exists; otherwise it falls back to the default config. API keys always come from the global `configs/goose-secrets.yaml`.
+> Every agent spawns at default sizing (1 vCPU / 1024 MiB). A role uses `configs/profiles/{role}/goose.yaml` (provider/model) and `system.md` (prompt) when that directory exists; otherwise it falls back to the default config. API keys always come from the global `configs/goose-secrets.yaml`.
 
 #### Spawn a flock
 
@@ -1091,13 +1091,16 @@ Content-Type: application/json
 }
 ```
 
+`profiles[]` is an optional array **parallel to `roles[]`** (v0.5.3): `profiles[i]` is the config profile (sizing / model / system prompt) for `roles[i]`. An empty or omitted entry falls back to the role name as the profile (back-compat), so existing callers are unchanged. This lets a logical role label (e.g. `frontend`) differ from the profile it runs (e.g. `worker`); the chosen profile is preserved across restart / change-role / add-agent.
+
 ```bash
 curl -X POST http://localhost:3000/flocks \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
         "task":"Add dark mode toggle to login page",
-        "roles":["orchestrator","researcher","researcher","worker","reviewer"]
+        "roles":["orchestrator","researcher","worker"],
+        "profiles":["fast-orchestrator","cheap-researcher","worker"]
       }'
 ```
 
@@ -1307,7 +1310,7 @@ A handful of role names are pre-mapped to canonical sizing and a profile directo
 | `orchestrator` | 2 | 2048 | `orchestrator/` | Delegation + synthesis (never executes work itself) |
 | `builder` | 4 | 4096 | `worker/` | Heavyweight worker (reuses the worker profile) |
 
-Unknown names also work — a Web-UI-created profile uses its own vCPU/memory when set (v0.5.1), otherwise the default `2 vCPU / 2048 MiB`; either way it looks up `configs/profiles/{name}/`.
+Unknown names also work — a Web-UI-created profile uses its own vCPU/memory when set (v0.5.1), otherwise the default `1 vCPU / 1024 MiB` (the Standard preset); either way it looks up `configs/profiles/{name}/`.
 
 ### Setup
 
@@ -1343,7 +1346,7 @@ curl -X POST http://localhost:3000/vms \
   -d '{"profile": "researcher"}'
 ```
 
-Omitting `profile` (or sending an empty body) uses `configs/goose.yaml` and `configs/goose-secrets.yaml` at the legacy 2 vCPU / 2048 MiB sizing.
+Omitting `profile` (or sending an empty body) uses `configs/goose.yaml` and `configs/goose-secrets.yaml` at the default 1 vCPU / 1024 MiB sizing.
 
 If the profile directory has a `system.md`, its contents are written into the VM as `/root/.goose-system-prompt` and the in-VM `goose-agent` prepends it to every `/tasks` prompt — so the role stays in-character even when the orchestrator dispatches plain user prompts.
 
@@ -1356,11 +1359,17 @@ A profile can be **created**, and its provider/model read and changed, at runtim
 curl http://localhost:3000/config/profiles -H "Authorization: Bearer $TOKEN"
 # → [{"name":"default","provider":"google","model":"gemini-2.5-flash"}, {"name":"worker", …}]
 
+# List the named sizing presets (v0.5.3) the Settings editor offers as quick-select chips.
+curl http://localhost:3000/config/presets -H "Authorization: Bearer $TOKEN"
+# → [{"id":"light","label":"Light","vcpu_count":1,"mem_size_mib":512},
+#    {"id":"standard","label":"Standard","vcpu_count":1,"mem_size_mib":1024},
+#    {"id":"advanced","label":"Advanced","vcpu_count":2,"mem_size_mib":2048}]
+
 # Create a profile (provider/model + optional per-VM vCPU/memory, v0.5.1).
-# Omit vcpu_count/mem_size_mib (or pass 0) to use the default 2 vCPU / 2048 MiB.
+# Omit vcpu_count/mem_size_mib (or pass 0) to use the default 1 vCPU / 1024 MiB.
 curl -X POST http://localhost:3000/config/profiles \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"name":"fast-worker","provider":"groq","model":"llama-3.3-70b-versatile","vcpu_count":2,"mem_size_mib":2048}'
+  -d '{"name":"fast-worker","provider":"groq","model":"openai/gpt-oss-120b","vcpu_count":2,"mem_size_mib":2048}'
 
 # Update one profile (rewrites GOOSE_PROVIDER/GOOSE_MODEL in place — comments +
 # extensions preserved; API keys in goose-secrets.yaml are never touched here;
@@ -1368,6 +1377,12 @@ curl -X POST http://localhost:3000/config/profiles \
 curl -X PUT http://localhost:3000/config/profiles/worker \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"provider":"anthropic","model":"claude-sonnet-4-6"}'
+
+# Delete a profile. Refused with 409 Conflict (v0.5.3) if any running VM was spawned
+# from it — remove or re-profile those agents first so they don't silently fall back
+# to the default config on their next restart / change-role.
+curl -X DELETE http://localhost:3000/config/profiles/fast-worker \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 `name` is `default` for `configs/goose.yaml`, otherwise a `configs/profiles/{name}/` directory. Because config is injected at spawn, an edit applies to the **next** VM created from that profile; already-running VMs keep the model they were spawned with (`GET /vms` reports each VM's `provider`/`model`).
