@@ -229,6 +229,7 @@ start_daemon() {
         EPHEMERA_API_TOKENS_FILE="$tokens_file" \
         EPHEMERA_LOG_FORMAT=json \
         EPHEMERA_LOG_LEVEL=info \
+        EPHEMERA_GRAFANA_URL="http://localhost:${GRAFANA_PORT}" \
         ./ephemera-daemon >"$log" 2>&1 &
         echo $! > "${RUNDIR}/daemon.pid"
     )
@@ -295,6 +296,9 @@ start_grafana() {
         GF_LOG_MODE="file" \
         GF_ANALYTICS_REPORTING_ENABLED="false" \
         GF_ANALYTICS_CHECK_FOR_UPDATES="false" \
+        GF_SECURITY_ALLOW_EMBEDDING="true" \
+        GF_AUTH_ANONYMOUS_ENABLED="true" \
+        GF_AUTH_ANONYMOUS_ORG_ROLE="Viewer" \
         ./bin/grafana server \
             --homepath="${GRAFANA_DIR}" \
             --config="${GRAFANA_DIR}/conf/defaults.ini" \
@@ -394,6 +398,7 @@ print_banner() {
   Prometheus   http://localhost:${PROM_PORT}   (query browser)
   Grafana      http://localhost:${GRAFANA_PORT}   (admin / admin)
 
+  Web UI:      http://localhost:3000/ui/  →  System → Monitoring  (embedded Grafana)
   Dashboard:   Grafana → Dashboards → Ephemera Overview
 
   Try in Prometheus (or the dashboard's panels):
