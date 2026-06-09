@@ -5,7 +5,7 @@ import { writable } from 'svelte/store'
 export const auth = writable({ ready: false, disabled: false, token: null })
 
 // view: simple client-side router state. name is one of
-// login|list|detail|snapshots|flocks|flockDetail|settings. detail carries the
+// login|list|detail|snapshots|flocks|flockDetail|settings|system. detail carries the
 // selected vm object and flockDetail the selected flock (lost on hard reload —
 // bootstrap then returns to list, which is acceptable).
 export const view = writable({ name: 'login' })

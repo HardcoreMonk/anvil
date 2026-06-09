@@ -11,6 +11,7 @@
   import Settings from './components/Settings.svelte'
   import Flocks from './components/Flocks.svelte'
   import FlockDetail from './components/FlockDetail.svelte'
+  import System from './components/System.svelte'
   import Toasts from './components/Toasts.svelte'
 
   // Bootstrap: figure out whether auth is enabled and whether we already hold a
@@ -62,11 +63,12 @@
 {:else}
   <div class="nav">
     <span class="brand">EPHEMERA</span>
-    <span class="badge">v0.5.2</span>
+    <span class="badge">v0.5.5</span>
     <button class="ghost" on:click={() => view.set({ name: 'list' })}>{$_('nav.vms')}</button>
     <button class="ghost" on:click={() => view.set({ name: 'snapshots' })}>{$_('nav.snapshots')}</button>
     <button class="ghost" on:click={() => view.set({ name: 'flocks' })}>{$_('nav.orchestration')}</button>
     <button class="ghost" on:click={() => view.set({ name: 'settings' })}>{$_('nav.settings')}</button>
+    <button class="ghost" on:click={() => view.set({ name: 'system' })}>{$_('nav.system')}</button>
     <span class="spacer"></span>
     <div class="lang-switch">
       <button class="lang-btn" class:active={$locale === 'en'} on:click={() => setLocale('en')}>EN</button>
@@ -91,6 +93,8 @@
       <FlockDetail flock={$view.flock} />
     {:else if $view.name === 'settings'}
       <Settings />
+    {:else if $view.name === 'system'}
+      <System />
     {/if}
   </div>
 {/if}
