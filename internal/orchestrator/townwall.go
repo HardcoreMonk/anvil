@@ -13,6 +13,13 @@ import (
 	"time"
 )
 
+// SystemAuthor is the Town Wall author label for messages the control plane posts
+// on its own behalf — flock lifecycle events (spawn / join / leave / role change /
+// pause / resume / broadcast) and watchdog notices — as opposed to messages
+// authored by an agent. It is intentionally not a name a user would assign to an
+// agent role or profile, so it never collides with a user-defined "orchestrator".
+const SystemAuthor = "control-plane"
+
 // Message is a single Town Wall entry. Seq is a monotonic per-flock counter
 // starting at 1; subscribers can detect dropped messages by checking for gaps.
 type Message struct {

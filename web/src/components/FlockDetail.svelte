@@ -8,6 +8,7 @@
   import AddAgentModal from './AddAgentModal.svelte'
   import ChangeRoleModal from './ChangeRoleModal.svelte'
   import BroadcastModal from './BroadcastModal.svelte'
+  import SendTaskModal from './SendTaskModal.svelte'
 
   export let flock // selected from the list; refetched for live state
 
@@ -19,6 +20,7 @@
   let showAddAgent = false
   let showBroadcast = false
   let changeRoleTarget = null
+  let sendTaskTarget = null // agent the Send-task modal targets
   let confirmingRemove = null // agent pending remove
   let confirmingRestart = null // agent pending restart
   let confirmingDelete = false
@@ -159,6 +161,7 @@
             <td class="mono">{a.vm_id}</td>
             <td>
               <div class="row" style="gap:8px;">
+                <button class="ghost sm" on:click={() => (sendTaskTarget = a)} disabled={busyAction}>{$_('flockDetail.sendTask')}</button>
                 <button class="ghost sm" on:click={() => (changeRoleTarget = a)} disabled={busyAction}>{$_('flockDetail.changeRole')}</button>
                 <button class="ghost sm" on:click={() => (confirmingRestart = a)} disabled={busyAction}>{$_('flockDetail.restart')}</button>
                 <button class="danger sm" on:click={() => (confirmingRemove = a)} disabled={busyAction}>{$_('flockDetail.remove')}</button>
@@ -171,7 +174,7 @@
   {/if}
 </div>
 
-<ActivityFeed {flockId} {agents} />
+<ActivityFeed {flockId} />
 
 <div class="panel" style="margin-top:16px;">
   <h2>{$_('flockDetail.dangerZone')}</h2>
@@ -183,6 +186,9 @@
 {/if}
 {#if showBroadcast}
   <BroadcastModal {flockId} on:close={() => (showBroadcast = false)} />
+{/if}
+{#if sendTaskTarget}
+  <SendTaskModal agent={sendTaskTarget} on:close={() => (sendTaskTarget = null)} />
 {/if}
 {#if changeRoleTarget}
   <ChangeRoleModal {flockId} agent={changeRoleTarget} on:close={() => (changeRoleTarget = null)} on:changed={refreshDetail} />

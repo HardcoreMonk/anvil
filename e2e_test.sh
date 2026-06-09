@@ -1138,7 +1138,7 @@ check_http "$NOAUTH_CODE" "401" "POST /townwall/post without bearer (must be rej
 sleep 1
 
 # ── 56. Retrieve Town Wall history ───────────────────────────────
-# createFlock writes one "orchestrator" entry on spawn; step 55 added one
+# createFlock writes one "control-plane" entry on spawn; step 55 added one
 # (direct CP post) and step 55a added one (via in-VM /townwall/post).
 # Expect ≥3 parseable lines, including step 55a's escaped-quote body.
 step "56. Retrieve Town Wall history"
@@ -1686,7 +1686,7 @@ else
         || fail "researcher-1 did not report ok: $BC_OUT"
     # The broadcast notice must land on the Town Wall.
     curl -s -H "$AUTH_HDR" "$API/flocks/$LLM_FLOCK_ID/wall/history" | \
-        jq -e '[.[] | select(.agent_id=="orchestrator" and (.body|contains("Broadcast to 1 agents")))] | length >= 1' >/dev/null \
+        jq -e '[.[] | select(.agent_id=="control-plane" and (.body|contains("Broadcast to 1 agent")))] | length >= 1' >/dev/null \
         && ok "broadcast notice recorded on Town Wall ✓" \
         || fail "Town Wall missing broadcast notice"
 
