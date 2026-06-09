@@ -1,3 +1,28 @@
+# v0.5.5 — System & Monitoring Console
+
+**Ephemera** v0.5.5 adds a **System** console — a read-only operations surface in the browser with four sub-tabs: **Audit log**, **Watchdog status**, **Configured clients**, and **Monitoring** (embedded Grafana). The underlying data already existed (v0.4.x `GET /audit` / `GET /watchdog/status`, plus the `/metrics` + `observability_demo.sh` stack), so this is mostly frontend; two small read-only endpoints (`GET /config/clients`, `GET /config/monitoring`) are the only new backend. This **folds in the planned v0.5.6 monitoring work**. **No golden-image rebake** — two daemon config handlers + the `web/` bundle + `observability_demo.sh` + docs + KVM-free tests.
+
+---
+
+## What's New
+
+### System console (single nav tab, four sub-tabs)
+
+- **Audit log** — browses `GET /audit` with live filters (method / client / status, plus a row limit of 100/250/1000). Columns: time, client, method, path, status (red pill on ≥400), duration, remote addr, bytes. Polls at 4s; the daemon returns newest-first. (No `path` filter — the backend doesn't support one.)
+- **Watchdog** — `GET /watchdog/status`: a tunables panel (interval / timeout / dying-threshold / auto-heal — read-only, set via `EPHEMERA_WATCHDOG_*` env, with a hint saying so) plus per-VM failure counts and the dead-marked VM list, each with an empty state.
+- **Configured clients** — a new **`GET /config/clients`** endpoint lists each configured API client's **name** and **token expiry** with an active/expired pill. **The bearer token value is never exposed** — the wire struct has no token field at all, so it cannot leak even by accident; a KVM-free test asserts no token string appears in the response and an expired client is still listed.
+- **Monitoring** — embeds the `ephemera-overview` Grafana dashboard (8 panels) in an iframe via a new `GET /config/monitoring` endpoint that surfaces `EPHEMERA_GRAFANA_URL`. `observability_demo.sh` now launches Grafana with `allow_embedding=true` + an anonymous Viewer and wires the URL to the daemon, so `sudo bash observability_demo.sh` → `/ui/` → System → Monitoring shows live dashboards. An unset URL renders a graceful "not configured" notice.
+
+### New endpoint
+
+- `GET /config/clients` → `[{"name": "...", "expires": "...|null", "expired": bool}]`. Auth-protected, GET-only, mirroring `handleConfigProviders`'s read-only registry pattern (which likewise exposes only an availability flag, never the API key). `expires: null` = never expires.
+- `GET /config/monitoring` → `{"grafana_url": "...", "enabled": bool}` — the Grafana base URL (from `EPHEMERA_GRAFANA_URL`) for the Monitoring iframe; URL only, no secret.
+- A startup **warning** now fires when `EPHEMERA_API_TOKEN` (singular) contains a `:` — almost always a sign the operator meant `EPHEMERA_API_TOKENS` (plural, `name:token`). The singular form takes the whole value as the token and names the client `default`, which was a silent surprise in the new Clients view.
+
+> **No rebake**: this release changes only the daemon (two new read-only config handlers + routes), `web/` (and the regenerated `uidist/` bundle — new `System.svelte` + `AuditLog`/`WatchdogPanel`/`ConfiguredClients`/`Monitoring` sub-views), `observability_demo.sh` (Grafana embedding env + URL wiring), docs, and KVM-free Go tests — no `cmd/goose-agent`, `scripts/build_image.sh`, or `artifacts/*` changes, so the golden image is untouched. The Audit, Watchdog, and Monitoring views call existing v0.4.x endpoints / the Grafana stack unchanged.
+
+---
+
 # v0.5.4 — Profile System Prompt Management
 
 **Ephemera** v0.5.4 lets operators create, edit, and clear a profile's **system prompt** (`system.md`) from the Settings UI. A profile's `goose.yaml` (provider / model / sizing) was already fully editable in the browser, but its `system.md` — the per-profile prompt injected into every VM spawned from the profile as `/root/.goose-system-prompt` (`loadProfileSystemPrompt`) — was not. So a flock agent created from a UI-made profile booted with an **empty system prompt** and could not act as, say, an orchestrator the way the static `configs/webdev-demo/profiles/*/system.md` files do. It also tidies the Orchestration surface — the Town Wall system author is renamed **`control-plane`** (the old `orchestrator` label collided with a user-defined role) and lifecycle notices pluralize agent counts correctly. **No golden-image rebake** — only the daemon, the `web/` bundle, docs, e2e assertions, and KVM-free tests change.
