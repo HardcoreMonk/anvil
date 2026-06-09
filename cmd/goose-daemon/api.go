@@ -339,6 +339,8 @@ func NewControlPlane(
 	internalMux.HandleFunc("/watchdog/status", cp.handleWatchdogStatus)
 	internalMux.HandleFunc("/config/providers", cp.handleConfigProviders)
 	internalMux.HandleFunc("/config/presets", cp.handleConfigPresets)
+	internalMux.HandleFunc("/config/clients", cp.handleConfigClients)
+	internalMux.HandleFunc("/config/monitoring", cp.handleConfigMonitoring)
 	internalMux.HandleFunc("/config/profiles", cp.handleConfigProfiles)
 	internalMux.HandleFunc("/config/profiles/", cp.handleConfigProfile)
 	cp.registerOrchestratorRoutes(internalMux)
