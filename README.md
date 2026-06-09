@@ -45,6 +45,9 @@ Ephemera Control Plane  :3000         ← VM + snapshot + flock management
   POST   /config/profiles             → create a user-defined profile (+ optional vCPU/memory) (v0.5.1)
   PUT    /config/profiles/{name}      → update a profile's provider/model (v0.5.0)
   DELETE /config/profiles/{name}      → delete a user-defined profile (v0.5.1)
+  GET    /config/profiles/{name}/system    → read a profile's system.md prompt (v0.5.4)
+  PUT    /config/profiles/{name}/system    → write a profile's system.md (≤64 KiB) (v0.5.4)
+  DELETE /config/profiles/{name}/system    → clear a profile's system.md (v0.5.4)
   GET    /ui/                         → embedded browser Web console (Svelte SPA, v0.5.0)
 
       │  provision
@@ -138,7 +141,7 @@ DELETE /vms/{id}
 | **Provider-restricted config** | The Settings UI only offers providers whose API key is present in the global keychain (`GET /config/providers`); the built-in registry covers Google, Anthropic, OpenAI, and Groq |
 | **Multi-agent flocks** | `POST /flocks` spawns a group of role-specialized VMs in one call; `DELETE /flocks/{id}` tears them all down in parallel |
 | **Town Wall log** | Per-flock append-only log with SSE streaming (`/flocks/{id}/wall`) for coordination; `gtwall "..."` CLI inside each VM posts to it, and `gtcall <agent_id> "..."` (v0.3.6) dispatches a prompt to a peer agent — both hide curl/token/JSON-quoting behind a one-line interface |
-| **Role system prompts** | Each role profile can ship a `system.md` that is injected into the VM and prepended to every `/tasks` prompt |
+| **Role system prompts** | Each role profile can ship a `system.md` that is injected into the VM and prepended to every `/tasks` prompt. Editable from the Settings UI (`GET/PUT/DELETE /config/profiles/{name}/system`, v0.5.4) — a UI-created profile no longer boots with an empty prompt |
 | **COW spawn rootfs (default)** | New VMs get a dm-snapshot view of the golden image instead of a 700 MiB full copy — ~43% faster spawn, ~0 MiB initial disk. Default since v0.4.2; opt out with `EPHEMERA_DISK_MODE=plain`. The daemon probes dm-snapshot support at startup and auto-falls back to a full clone if unavailable. Auto-recovered across a daemon restart since v0.4.0. |
 | **Runtime config injection** | `goose.yaml` and `goose-secrets.yaml` injected at provision time — no image rebuild required to change provider/model |
 | **Per-VM agent authentication** | Control plane generates a 32-byte random Bearer token per VM; token is written to the VM disk and returned once in `POST /vms` response |
@@ -175,7 +178,7 @@ DELETE /vms/{id}
 | **Access audit log** (v0.4.1) | Every API request is appended as one JSON line to `{workDir}/audit/access.jsonl` (`ts, client, method, path, status, duration_ms, remote_addr, bytes` — never tokens or bodies), size-rotated (`EPHEMERA_AUDIT_MAX_MIB`/`_KEEP`), queryable via authenticated `GET /audit`. On by default; `EPHEMERA_AUDIT_DISABLE=true` to disable. See [Access audit log](#access-audit-log-v041). |
 | **Per-token TTL & rotation** (v0.4.1) | Token entries accept an optional expiry — `name:token:expires` (RFC3339 or Unix seconds); a matched-but-expired token is rejected `401` (`ephemera_auth_total{outcome="expired"}`). The in-VM control-plane token is the first **non-expired** client. Two-field `name:token` never expires (backward compatible). |
 | **Operator CLI `ephemera-ctl`** (v0.4.1) | Dependency-free stdlib CLI wrapping the REST API (`vm`/`flock`/`snapshot`/`audit`/`metrics` verbs; human tables or `--json`). Reads `EPHEMERA_CTL_URL` + `--token`/`EPHEMERA_CTL_TOKEN`/`EPHEMERA_API_TOKEN`. See [Operator CLI](#operator-cli-ephemera-ctl-v041). |
-| **Web console** (v0.5.0–0.5.2) | A browser console the daemon serves at `/ui/` (single binary via `go:embed`, same origin as the API — no CORS): token login (auto-skipped when auth is disabled), VM list with live stats + model, Create VM (profile dropdown), VM detail with live stats and a **multi-turn conversation** panel (cancelable streaming), per-profile model/provider **Settings**, and VM delete (v0.5.0); snapshot/restore screens + profile creation with per-VM sizing (v0.5.1); and the **Orchestration** console — Agent Group (flock) CRUD, per-agent actions, pause/resume, broadcast, and a live **Activity Feed** (Town Wall over SSE) (v0.5.2). Svelte + Vite SPA; the build is committed (`cmd/goose-daemon/uidist/`) so `go build` needs no Node. See [Web UI](#web-ui-v050). |
+| **Web console** (v0.5.0–0.5.4) | A browser console the daemon serves at `/ui/` (single binary via `go:embed`, same origin as the API — no CORS): token login (auto-skipped when auth is disabled), VM list with live stats + model, Create VM (profile dropdown), VM detail with live stats and a **multi-turn conversation** panel (cancelable streaming), per-profile model/provider **Settings**, and VM delete (v0.5.0); snapshot/restore screens + profile creation with per-VM sizing (v0.5.1); and the **Orchestration** console — Agent Group (flock) CRUD, per-agent actions, pause/resume, broadcast, and a live **Activity Feed** (Town Wall over SSE) (v0.5.2); a per-profile **system prompt** editor, an **operator**-authored feed, and a per-agent **Send task** action (v0.5.4). Svelte + Vite SPA; the build is committed (`cmd/goose-daemon/uidist/`) so `go build` needs no Node. See [Web UI](#web-ui-v050). |
 | **English / Korean UI** (v0.5.0) | The Web console ships full EN/KO localization (`svelte-i18n`); the initial language follows the browser (`ko*` → Korean, else English) and a nav toggle switches + persists the choice. UI vocabulary is generic IT (display only): *Platform Agent* (in-VM goose agent), *Agent Group* (flock), *Activity Feed* (Town Wall), *Create/Delete* (spawn/destroy). |
 | **Profile/model editing** (v0.5.0) | `GET /config/profiles` lists each profile's provider/model; `PUT /config/profiles/{name}` rewrites `GOOSE_PROVIDER`/`GOOSE_MODEL` in place (comments + `extensions:` preserved; API keys are never read or written here). The Settings screen drives these; an edit applies to the **next** VM (config is injected at spawn), and each VM records the provider/model it was spawned with (`VMInfo.model`). |
 | **Multi-turn conversation** (v0.5.0) | `POST /vms/{id}/tasks` accepts an optional `session`; with it, `goose-agent` runs goose as `-n <session> [--resume]`, so consecutive turns continue one goose chat session (context preserved). Omitting `session` keeps the original stateless one-shot behavior (`ephemera-ctl`, `gtcall`). |
@@ -220,7 +223,9 @@ cmd/
     config_api.go     GET /config/providers (registry + keychain availability);
                       GET/POST /config/profiles, GET/PUT/DELETE /config/profiles/{name} —
                       list/create/update/delete a profile's GOOSE_PROVIDER/GOOSE_MODEL
-                      (+ optional per-VM vCPU/memory) on disk (v0.5.1)
+                      (+ optional per-VM vCPU/memory) on disk (v0.5.1);
+                      GET/PUT/DELETE /config/profiles/{name}/system — a profile's
+                      system.md prompt (≤64 KiB, suffix-routed) (v0.5.4)
     uidist/           Committed Web UI build (go:embed input; rebuilt from web/, v0.5.0)
   goose-agent/        In-VM HTTP agent (baked into golden image)
     main.go           /tasks (optional `session` → goose -n/--resume for multi-turn, v0.5.0),
@@ -461,7 +466,7 @@ sudo bash e2e_test.sh
 | 54 | `GET /vms` shows all 5 flock members |
 | 55 | `POST /flocks/{id}/post` accepts a message and persists it |
 | 55a | **In-VM forwarding** — direct `POST $agent_url/townwall/post` (the chain that `gtwall` uses) round-trips through goose-agent → control plane; unauthenticated probe rejected with 401 |
-| 56 | `GET /flocks/{id}/wall/history` returns ≥ 3 entries (orchestrator init + step 55 + step 55a) and the 55a body (escaped quote + backslash) matches verbatim |
+| 56 | `GET /flocks/{id}/wall/history` returns ≥ 3 entries (control-plane init + step 55 + step 55a) and the 55a body (escaped quote + backslash) matches verbatim |
 | 56a | **Town Wall query filters** (v0.4.3) — `?agent_id=` returns only that agent's entries; `?contains=` returns only matching bodies |
 | 57 | `GET /flocks` lists the new flock |
 | 57a–c | **Dynamic agent membership** (v0.4.3) — `POST /flocks/{id}/agents` adds `worker-2` (count→6, `/health` 200); `PATCH …/agents/worker-2` `{role:reviewer}` recreates the VM (vm_id swap, role updated); `DELETE …/agents/worker-2` (count→5, VM torn down) |
@@ -797,9 +802,9 @@ cd web && npm install && npm run build   # writes ../cmd/goose-daemon/uidist/
 - **Login** — takes an API Bearer token (`sessionStorage`, or `localStorage` with "remember"). If the server has no clients configured (auth disabled), login is auto-skipped.
 - **VM list** — `GET /vms?stats=true` (polled): id, IP, profile, **model**, CPU/memory/uptime. *Create VM* opens a modal with a **profile dropdown** (`GET /config/profiles`) and shows the one-time `agent_token`.
 - **VM detail** — live stats + the spawned provider/model; a **conversation** panel that streams each turn (`POST /vms/{id}/tasks?stream=1`) and keeps context across turns (multi-turn, below), with Cancel + elapsed time; a **Snapshots** section to capture Full/Diff snapshots (optionally stop-after, v0.5.1); and a Delete action behind an in-app confirm (graceful teardown).
-- **Settings** — lists every profile, edits its provider/model (`PUT /config/profiles/{name}`), and **creates** profiles with a name + provider/model + **per-VM vCPU/memory** (`POST /config/profiles`, v0.5.1); changes apply to the **next** Create VM, not running VMs.
+- **Settings** — lists every profile, edits its provider/model (`PUT /config/profiles/{name}`), edits each profile's **system prompt** in a modal (`GET/PUT/DELETE /config/profiles/{name}/system`, v0.5.4), and **creates** profiles with a name + provider/model + **per-VM vCPU/memory** (`POST /config/profiles`, v0.5.1); changes apply to the **next** Create VM, not running VMs.
 - **Snapshots** — lists stored snapshots (`GET /snapshots`: type, base, created), **restores** one into a new VM (`POST /snapshots/{id}/restore`), and deletes — each behind a confirm modal (v0.5.1).
-- **Orchestration** — lists Agent Groups (`GET /flocks`) and creates them (a task + one role per VM; the one-time `agent_token` per agent is shown once). **Group detail** shows the agent table with per-agent **restart** / **remove** / **change role**, group **pause** / **resume**, **add agent**, **broadcast**, and **delete**, plus a live **Activity Feed** that streams the Town Wall over SSE (`GET /flocks/{id}/wall`, read via `fetch` + `streamSSE` since `EventSource` can't send the bearer) with a post composer (v0.5.2).
+- **Orchestration** — lists Agent Groups (`GET /flocks`) and creates them (a task + one role per VM; the one-time `agent_token` per agent is shown once). **Group detail** shows the agent table with per-agent **send task** (a one-shot prompt to a single agent, the targeted counterpart to broadcast, v0.5.4) / **restart** / **remove** / **change role**, group **pause** / **resume**, **add agent**, **broadcast**, and **delete**, plus a live **Activity Feed** that streams the Town Wall over SSE (`GET /flocks/{id}/wall`, read via `fetch` + `streamSSE` since `EventSource` can't send the bearer) with an **operator**-authored post composer (v0.5.2; the control plane's own lifecycle notices are authored `control-plane`, v0.5.4).
 
 ### Localization (EN / KO)
 

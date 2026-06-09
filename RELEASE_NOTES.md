@@ -1,3 +1,39 @@
+# v0.5.4 — Profile System Prompt Management
+
+**Ephemera** v0.5.4 lets operators create, edit, and clear a profile's **system prompt** (`system.md`) from the Settings UI. A profile's `goose.yaml` (provider / model / sizing) was already fully editable in the browser, but its `system.md` — the per-profile prompt injected into every VM spawned from the profile as `/root/.goose-system-prompt` (`loadProfileSystemPrompt`) — was not. So a flock agent created from a UI-made profile booted with an **empty system prompt** and could not act as, say, an orchestrator the way the static `configs/webdev-demo/profiles/*/system.md` files do. It also tidies the Orchestration surface — the Town Wall system author is renamed **`control-plane`** (the old `orchestrator` label collided with a user-defined role) and lifecycle notices pluralize agent counts correctly. **No golden-image rebake** — only the daemon, the `web/` bundle, docs, e2e assertions, and KVM-free tests change.
+
+---
+
+## What's New
+
+### Edit a profile's system prompt in the browser
+
+- The **Settings** screen gains a **System prompt** action on each non-default profile row that opens a modal editor: it loads the current `system.md` (`GET`), saves edits (`PUT`), and clears it (`DELETE`). New EN + KO `systemPrompt.*` strings; "profile" stays **프로파일** in Korean.
+- New endpoints (`cmd/goose-daemon/config_api.go`, auth-protected, path-traversal guarded like the existing profile routes, dispatched off the `/config/profiles/{name}/system` suffix inside `handleConfigProfile`):
+  - `GET /config/profiles/{name}/system` → `{"system_md": "..."}` — empty string if the profile has no `system.md` yet (matching `loadProfileSystemPrompt`'s "missing = empty" semantics)
+  - `PUT /config/profiles/{name}/system` body `{"system_md": "..."}` — atomic (temp+rename) write, capped at **64 KiB** (413 above it). No newline/YAML-escape check is needed: `system.md` is a free-form file body, not a value interpolated into a YAML scalar like provider/model.
+  - `DELETE /config/profiles/{name}/system` — idempotent clear (already-absent → still 200)
+  - The reserved `default` profile has no directory and is rejected (400); an unknown profile is 404.
+
+### Editing is spawn-time-safe (no in-use guard)
+
+- Unlike a whole-profile **delete** (refused with 409 while running VMs use it, because removing `goose.yaml` would silently drop those agents to the default config on restart / change-role), editing or clearing `system.md` needs **no in-use guard**: the prompt is read once at spawn and baked into the VM's rootfs, so a running VM is unaffected and only **future** spawns pick up the change — which is the operator's intent. Clearing a prompt is strictly less dangerous than the unguarded provider/model `PUT`.
+
+### Town Wall system author + agent-count grammar
+
+- Lifecycle and watchdog notices the control plane writes to the Town Wall (Activity Feed) are now authored as **`control-plane`** instead of `orchestrator` — the old label collided with a user-defined `orchestrator` role/profile, which is a legitimate agent name (e.g. the `webdev_demo` orchestrator). A shared `orchestrator.SystemAuthor` constant replaces the scattered string literals across flock spawn / join / leave / role-change / pause / resume / broadcast and the watchdog's auto-heal / dead-mark notices.
+- The Activity Feed composer's default sender is now **`operator`** (a human posting to the feed) rather than `orchestrator`.
+- System notices pluralize correctly — **"1 agent"** vs "N agents" (spawn / pause / resume / broadcast) via a small `agentCount` helper, so no more "Broadcast to 1 agents".
+
+### Operator-authored feed + single-agent task
+
+- The Activity Feed composer no longer lets an operator impersonate an agent — UI posts are now always authored as **`operator`** (the agent dropdown is gone). Agents still post under their own `agent_id` via in-VM `gtwall`, so the feed stays a trustworthy "who did what" timeline.
+- Each agent row in an Agent Group gains a **Send task** action: a one-shot prompt dispatched to that single agent (`POST /vms/{id}/tasks`), the targeted counterpart to group **Broadcast**. A busy agent reports back (503) without blocking; the reply is shown inline.
+
+> **No rebake**: this release changes only the daemon (one new config handler + suffix routing, plus the Town Wall author constant + plural fix), `web/` (and the regenerated `uidist/` bundle), docs, the e2e assertions, and KVM-free Go tests — no `cmd/goose-agent`, `scripts/build_image.sh`, or `artifacts/*` changes, so the golden image is untouched. The GET/PUT/DELETE handlers, the `/system` suffix routing, path-traversal + `default` rejection, the 64 KiB cap, and a `loadProfileSystemPrompt` write↔read round-trip are covered by KVM-free unit tests.
+
+---
+
 # v0.5.3 — Sizing Presets + Flock Profile Workflow
 
 **Ephemera** v0.5.3 lowers the default agent VM sizing from **2 vCPU / 2048 MiB** to **1 vCPU / 1024 MiB** (the new **Standard** preset) and adds three named sizing tiers — **Light** (1 vCPU / 512 MiB), **Standard** (1 vCPU / 1024 MiB), and **Advanced** (2 vCPU / 2048 MiB) — surfaced in the Settings profile editor. Rationale: Goose runs LLM inference remotely, so an agent VM mostly waits on network IO and runs tools; 2 GB was over-provisioned for chat/file-edit roles. It also reworks the **flock profile workflow** — Agent Groups now pick a profile per role (separate from the role label), that profile survives restart / role-change, the model field becomes a real dropdown, and an in-use profile can no longer be deleted out from under running agents. **No golden-image rebake** — only the daemon, `web/` bundle, docs, the webdev demo, and KVM-free tests change.
