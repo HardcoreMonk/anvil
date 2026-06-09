@@ -217,7 +217,7 @@ func (wd *Watchdog) onSuccess(vmID string) {
 		slog.Warn("watchdog: persist auto-heal failed", "agent_id", agentID, "err", err)
 	}
 	if _, err := flock.TownWall.Post(
-		"orchestrator",
+		SystemAuthor,
 		fmt.Sprintf("%s recovered - auto-healed to ready", agentID),
 	); err != nil {
 		slog.Warn("watchdog: post auto-heal notice failed", "agent_id", agentID, "err", err)
@@ -263,7 +263,7 @@ func (wd *Watchdog) onFailure(v VMRef) {
 		slog.Warn("watchdog: persist dead status failed", "agent_id", agentID, "err", err)
 	}
 	if _, err := flock.TownWall.Post(
-		"orchestrator",
+		SystemAuthor,
 		fmt.Sprintf("%s unresponsive after %d health probes - marked dead",
 			agentID, wd.dyingThreshold),
 	); err != nil {

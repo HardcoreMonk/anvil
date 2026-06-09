@@ -24,6 +24,15 @@ const defaultMaxAgentsPerFlock = 20
 
 // flockMax returns a flock's effective agent cap: its own MaxAgents, or the
 // default when unset (0). Recovered flocks with no stored cap also fall back here.
+// agentCount renders an agent count with the grammatically correct noun for Town
+// Wall system messages: "1 agent" (singular) vs "N agents" (plural).
+func agentCount(n int) string {
+	if n == 1 {
+		return "1 agent"
+	}
+	return fmt.Sprintf("%d agents", n)
+}
+
 func flockMax(f *orchestrator.Flock) int {
 	if f.MaxAgents > 0 {
 		return f.MaxAgents
@@ -209,8 +218,8 @@ func (cp *ControlPlane) createFlock(w http.ResponseWriter, r *http.Request) {
 		tokens[agentID] = agentToken
 	}
 
-	if _, err := flock.TownWall.Post("orchestrator",
-		fmt.Sprintf("Flock spawned with %d agents: %v", len(req.Roles), req.Roles)); err != nil {
+	if _, err := flock.TownWall.Post(orchestrator.SystemAuthor,
+		fmt.Sprintf("Flock spawned with %s: %v", agentCount(len(req.Roles)), req.Roles)); err != nil {
 		slog.Warn("flock: initial town wall post failed", "flock_id", flockID, "err", err)
 	}
 
@@ -547,7 +556,7 @@ func (cp *ControlPlane) addFlockAgent(w http.ResponseWriter, r *http.Request, fl
 	if err := f.Persist(cp.workDir); err != nil {
 		slog.Warn("add agent: persist failed", "flock_id", flockID, "agent_id", agentID, "err", err)
 	}
-	if _, err := f.TownWall.Post("orchestrator", fmt.Sprintf("Agent %s (%s) joined the flock", agentID, req.Role)); err != nil {
+	if _, err := f.TownWall.Post(orchestrator.SystemAuthor, fmt.Sprintf("Agent %s (%s) joined the flock", agentID, req.Role)); err != nil {
 		slog.Warn("add agent: town wall post failed", "flock_id", flockID, "err", err)
 	}
 	slog.Warn("flock: agent added", "flock_id", flockID, "agent_id", agentID, "role", req.Role, "vm_id", vmInfo.VMID)
@@ -587,7 +596,7 @@ func (cp *ControlPlane) removeFlockAgent(w http.ResponseWriter, flockID, agentID
 	if err := f.Persist(cp.workDir); err != nil {
 		slog.Warn("remove agent: persist failed", "flock_id", flockID, "agent_id", agentID, "err", err)
 	}
-	if _, err := f.TownWall.Post("orchestrator", fmt.Sprintf("Agent %s left the flock", agentID)); err != nil {
+	if _, err := f.TownWall.Post(orchestrator.SystemAuthor, fmt.Sprintf("Agent %s left the flock", agentID)); err != nil {
 		slog.Warn("remove agent: town wall post failed", "flock_id", flockID, "err", err)
 	}
 	slog.Warn("flock: agent removed", "flock_id", flockID, "agent_id", agentID, "vm_id", vmID)
@@ -681,7 +690,7 @@ func (cp *ControlPlane) changeFlockAgentRole(w http.ResponseWriter, r *http.Requ
 	if err := f.Persist(cp.workDir); err != nil {
 		slog.Warn("change role: persist failed", "flock_id", flockID, "err", err)
 	}
-	if _, err := f.TownWall.Post("orchestrator", fmt.Sprintf("Agent %s role changed %s → %s", agentID, curRole, req.Role)); err != nil {
+	if _, err := f.TownWall.Post(orchestrator.SystemAuthor, fmt.Sprintf("Agent %s role changed %s → %s", agentID, curRole, req.Role)); err != nil {
 		slog.Warn("change role: town wall post failed", "flock_id", flockID, "err", err)
 	}
 	slog.Warn("flock: agent role changed", "flock_id", flockID, "agent_id", agentID, "old_role", curRole, "new_role", req.Role, "old_vm_id", oldVMID, "new_vm_id", info.VMID)
@@ -726,7 +735,7 @@ func (cp *ControlPlane) pauseFlock(w http.ResponseWriter, flockID string) {
 		f.UpdateAgentStatus(a.AgentID, orchestrator.AgentStatusPaused)
 	}
 	f.SetPaused(true)
-	if _, err := f.TownWall.Post("orchestrator", fmt.Sprintf("Flock paused (%d agents)", len(paused))); err != nil {
+	if _, err := f.TownWall.Post(orchestrator.SystemAuthor, fmt.Sprintf("Flock paused (%s)", agentCount(len(paused)))); err != nil {
 		slog.Warn("flock pause: town wall post failed", "flock_id", flockID, "err", err)
 	}
 	slog.Warn("flock: paused", "flock_id", flockID, "agents", len(paused))
@@ -758,7 +767,7 @@ func (cp *ControlPlane) resumeFlock(w http.ResponseWriter, flockID string) {
 		f.UpdateAgentStatus(a.AgentID, orchestrator.AgentStatusReady)
 	}
 	f.SetPaused(false)
-	if _, err := f.TownWall.Post("orchestrator", fmt.Sprintf("Flock resumed (%d agents)", resumed)); err != nil {
+	if _, err := f.TownWall.Post(orchestrator.SystemAuthor, fmt.Sprintf("Flock resumed (%s)", agentCount(resumed))); err != nil {
 		slog.Warn("flock resume: town wall post failed", "flock_id", flockID, "err", err)
 	}
 	slog.Warn("flock: resumed", "flock_id", flockID, "agents", resumed)
@@ -830,9 +839,9 @@ func (cp *ControlPlane) broadcastFlock(w http.ResponseWriter, r *http.Request, f
 		}
 	}
 
-	if _, err := f.TownWall.Post("orchestrator",
-		fmt.Sprintf("Broadcast to %d agents (%d sent, %d busy, %d failed): %s",
-			len(agents), sent, skipped, failed, req.Body)); err != nil {
+	if _, err := f.TownWall.Post(orchestrator.SystemAuthor,
+		fmt.Sprintf("Broadcast to %s (%d sent, %d busy, %d failed): %s",
+			agentCount(len(agents)), sent, skipped, failed, req.Body)); err != nil {
 		slog.Warn("broadcast: town wall post failed", "flock_id", flockID, "err", err)
 	}
 	slog.Warn("flock: broadcast", "flock_id", flockID, "agents", len(agents), "sent", sent, "busy", skipped, "failed", failed)
