@@ -6,17 +6,20 @@
   import { toast } from '../lib/store.js'
   import ProfileModal from './ProfileModal.svelte'
   import SystemPromptModal from './SystemPromptModal.svelte'
+  import BuiltinsModal from './BuiltinsModal.svelte'
   import ModelPicker from './ModelPicker.svelte'
 
-  let profiles = [] // [{ name, provider, model }]
+  let profiles = [] // [{ name, provider, model, builtins }]
   let providers = [] // [{ id, label, available, default_model, suggested_models }]
   let presets = [] // [{ id, label, vcpu_count, mem_size_mib }]
+  let builtins = [] // [{ id, label, description, default }]
   let loading = true
   let savingName = null
   let deletingName = null
   let confirmName = null // profile whose Delete is awaiting in-row confirmation
   let showCreate = false
   let systemPromptName = null // profile whose system.md editor is open
+  let builtinsName = null // profile whose builtin-extensions editor is open
 
   // Only providers whose API key is configured may be selected.
   $: availableProviders = providers.filter((p) => p.available)
@@ -24,14 +27,16 @@
   async function load() {
     loading = true
     try {
-      const [profileData, providerData, presetData] = await Promise.all([
+      const [profileData, providerData, presetData, builtinData] = await Promise.all([
         apiJSON('/config/profiles'),
         apiJSON('/config/providers'),
         apiJSON('/config/presets'),
+        apiJSON('/config/builtins'),
       ])
       profiles = Array.isArray(profileData) ? profileData : []
       providers = Array.isArray(providerData) ? providerData : []
       presets = Array.isArray(presetData) ? presetData : []
+      builtins = Array.isArray(builtinData) ? builtinData : []
     } catch (e) {
       if (e.message !== 'unauthorized') toast(e.message, 'error')
     } finally {
@@ -122,6 +127,7 @@
                 <button class="ghost" on:click={() => save(p)} disabled={savingName === p.name}>
                   {savingName === p.name ? $_('settings.saving') : $_('settings.save')}
                 </button>
+                <button class="ghost" on:click={() => (builtinsName = p.name)}>{$_('settings.editBuiltins')}</button>
                 {#if p.name !== 'default'}
                   <button class="ghost" on:click={() => (systemPromptName = p.name)}>{$_('settings.editSystem')}</button>
                   {#if confirmName === p.name}
@@ -145,11 +151,15 @@
 </div>
 
 {#if showCreate}
-  <ProfileModal providers={availableProviders} {presets}
+  <ProfileModal providers={availableProviders} {presets} {builtins}
     on:created={() => { showCreate = false; load() }}
     on:close={() => (showCreate = false)} />
 {/if}
 
 {#if systemPromptName}
   <SystemPromptModal name={systemPromptName} on:close={() => (systemPromptName = null)} />
+{/if}
+
+{#if builtinsName}
+  <BuiltinsModal name={builtinsName} options={builtins} on:close={() => (builtinsName = null)} />
 {/if}

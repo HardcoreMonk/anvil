@@ -4,8 +4,9 @@
   import WatchdogPanel from './WatchdogPanel.svelte'
   import ConfiguredClients from './ConfiguredClients.svelte'
   import Monitoring from './Monitoring.svelte'
+  import MCPGateway from './MCPGateway.svelte'
 
-  let tab = 'audit' // audit | watchdog | clients | monitoring
+  let tab = 'audit' // audit | watchdog | clients | monitoring | mcp
 </script>
 
 <div class="row between" style="margin-bottom:16px;">
@@ -16,6 +17,7 @@
   <button class="tab" class:active={tab === 'audit'} on:click={() => (tab = 'audit')}>{$_('system.tabAudit')}</button>
   <button class="tab" class:active={tab === 'watchdog'} on:click={() => (tab = 'watchdog')}>{$_('system.tabWatchdog')}</button>
   <button class="tab" class:active={tab === 'clients'} on:click={() => (tab = 'clients')}>{$_('system.tabClients')}</button>
+  <button class="tab" class:active={tab === 'mcp'} on:click={() => (tab = 'mcp')}>{$_('system.tabMCP')}</button>
   <button class="tab" class:active={tab === 'monitoring'} on:click={() => (tab = 'monitoring')}>{$_('system.tabMonitoring')}</button>
 </div>
 
@@ -27,6 +29,8 @@
   <WatchdogPanel />
 {:else if tab === 'clients'}
   <ConfiguredClients />
+{:else if tab === 'mcp'}
+  <MCPGateway />
 {:else}
   <Monitoring />
 {/if}

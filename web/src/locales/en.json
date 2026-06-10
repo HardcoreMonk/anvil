@@ -111,6 +111,7 @@
     "saving": "Saving…",
     "saved": "Profile {name} saved — new VMs will use it.",
     "editSystem": "System prompt",
+    "editBuiltins": "Extensions",
     "empty": "No profiles found.",
     "createProfile": "Create profile",
     "delete": "Delete",
@@ -150,6 +151,40 @@
     "clear": "Clear",
     "clearConfirm": "Confirm clear",
     "clearedToast": "System prompt for {name} cleared."
+  },
+  "builtins": {
+    "label": "Builtin extensions",
+    "tokenHint": "Tools available to agents from this profile. Each enabled extension adds to the per-request token count, so a heavy set can exceed a provider's rate limit.",
+    "none": "No builtin extensions are available.",
+    "items": {
+      "developer": { "desc": "Shell commands and file/text editing." },
+      "memory": { "desc": "Persistent memory the agent reads and writes across turns." },
+      "tutorial": { "desc": "Interactive goose tutorials." }
+    }
+  },
+  "builtinsModal": {
+    "title": "Builtin extensions — {name}",
+    "intro": "Select the goose builtin tools agents created from this profile may use. Changes apply to the next VM, not running ones.",
+    "save": "Save",
+    "saving": "Saving…",
+    "savedToast": "Builtin extensions for {name} saved — new VMs will use them."
+  },
+  "mcp": {
+    "disabled": "The MCP gateway is off. Enable it by starting the daemon with EPHEMERA_MCP_ENABLED=1 and configuring configs/mcp/servers.yaml.",
+    "endpoint": "Gateway endpoint",
+    "serverCount": "Backends",
+    "empty": "No backend MCP servers are configured. Add them to configs/mcp/servers.yaml.",
+    "colId": "ID",
+    "colNamespace": "Namespace",
+    "colUrl": "URL",
+    "colProfiles": "Profiles",
+    "colCredential": "Credential",
+    "colHealth": "Health",
+    "allProfiles": "all",
+    "credYes": "Yes",
+    "credNo": "—",
+    "up": "Up",
+    "down": "Down"
   },
   "snapshots": {
     "title": "Snapshots",
@@ -346,6 +381,7 @@
     "tabAudit": "Audit log",
     "tabWatchdog": "Watchdog",
     "tabClients": "Clients",
+    "tabMCP": "MCP Gateway",
     "tabMonitoring": "Monitoring",
     "monitoringDisabled": "Grafana isn't configured. Launch it with observability_demo.sh (daemon + Prometheus + Grafana), or set EPHEMERA_GRAFANA_URL.",
     "methodAny": "Any method",
