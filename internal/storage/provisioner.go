@@ -211,6 +211,19 @@ type VMPrepareOptions struct {
 	// when calling back into the control plane. Auto-derived from the host's
 	// apiClients[0] by the daemon; empty when control plane auth is disabled.
 	ControlPlaneToken string
+
+	// MCPGatewayURL, when non-empty, is written to /root/.ephemera-mcp. The in-VM
+	// agent reads it and adds the host MCP gateway as a goose streamable-HTTP
+	// extension, so the agent's tools include the gateway's aggregated catalog.
+	// Empty (gateway off or profile has no allowed servers) injects nothing.
+	MCPGatewayURL string
+
+	// MCPGatewayHostsEntry, when non-empty, is appended to the guest's /etc/hosts
+	// (e.g. "10.0.1.1 ephemera-gw"). It lets the letter-starting hostname in
+	// MCPGatewayURL resolve to the bridge gateway IP, so goose derives a
+	// provider-valid extension/tool-name prefix from the URL. Paired with
+	// MCPGatewayURL.
+	MCPGatewayHostsEntry string
 }
 
 // PrepareVM injects all VM-specific files in a single mount/unmount cycle.
@@ -238,6 +251,7 @@ func (p *Provisioner) PrepareVM(vmID string, opts VMPrepareOptions) error {
 //   - /root/.ephemera-flock                  (FLOCK_ID + AGENT_ID; mode 0600; optional)
 //   - /root/.goose-system-prompt             (role system prompt; optional)
 //   - /root/.ephemera-cp-token               (bearer for in-VM /townwall/post forward; mode 0600; optional)
+//   - /root/.ephemera-mcp                     (host MCP gateway URL; optional)
 func injectVMFiles(mntDir string, opts VMPrepareOptions) error {
 	gooseConfigDir := filepath.Join(mntDir, "root", ".config", "goose")
 	if err := os.MkdirAll(gooseConfigDir, 0755); err != nil {
@@ -294,6 +308,34 @@ func injectVMFiles(mntDir string, opts VMPrepareOptions) error {
 		cpTokenPath := filepath.Join(mntDir, "root", ".ephemera-cp-token")
 		if err := os.WriteFile(cpTokenPath, []byte(opts.ControlPlaneToken), 0600); err != nil {
 			return fmt.Errorf("failed to write CP token: %w", err)
+		}
+	}
+
+	// MCP gateway URL: read by the in-VM agent to add the host gateway as a goose
+	// streamable-HTTP extension. Not a secret (caller identity is by source IP), so
+	// mode 0644 like the system prompt.
+	if opts.MCPGatewayURL != "" {
+		mcpPath := filepath.Join(mntDir, "root", ".ephemera-mcp")
+		if err := os.WriteFile(mcpPath, []byte(opts.MCPGatewayURL), 0644); err != nil {
+			return fmt.Errorf("failed to write mcp gateway url: %w", err)
+		}
+	}
+
+	// MCP gateway /etc/hosts entry: maps the letter-starting gateway hostname to the
+	// bridge IP so the URL above resolves (guest nsswitch is files→dns). Appended so
+	// the image's existing localhost line is preserved.
+	if opts.MCPGatewayHostsEntry != "" {
+		hostsPath := filepath.Join(mntDir, "etc", "hosts")
+		f, err := os.OpenFile(hostsPath, os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			return fmt.Errorf("failed to open /etc/hosts: %w", err)
+		}
+		if _, err := f.WriteString(opts.MCPGatewayHostsEntry + "\n"); err != nil {
+			f.Close()
+			return fmt.Errorf("failed to append mcp hosts entry: %w", err)
+		}
+		if err := f.Close(); err != nil {
+			return fmt.Errorf("failed to close /etc/hosts: %w", err)
 		}
 	}
 	return nil

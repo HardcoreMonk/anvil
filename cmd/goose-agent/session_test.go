@@ -12,18 +12,24 @@ import (
 
 func TestGooseArgs(t *testing.T) {
 	cases := []struct {
-		name    string
-		session string
-		resume  bool
-		want    []string
+		name     string
+		builtins []string
+		mcpURL   string
+		session  string
+		resume   bool
+		want     []string
 	}{
-		{"no session (stateless)", "", false, []string{"run", "--output-format", "json", "--no-profile", "--with-builtin", "developer", "-i", "-"}},
-		{"session first turn", "vm-1", false, []string{"run", "--output-format", "json", "--no-profile", "--with-builtin", "developer", "-n", "vm-1", "-i", "-"}},
-		{"session resume", "vm-1", true, []string{"run", "--output-format", "json", "--no-profile", "--with-builtin", "developer", "-n", "vm-1", "--resume", "-i", "-"}},
+		{"developer only, no session", []string{"developer"}, "", "", false, []string{"run", "--output-format", "json", "--no-profile", "--with-builtin", "developer", "-i", "-"}},
+		{"multiple builtins comma-joined", []string{"developer", "memory"}, "", "", false, []string{"run", "--output-format", "json", "--no-profile", "--with-builtin", "developer,memory", "-i", "-"}},
+		{"no builtins (tools-free)", []string{}, "", "", false, []string{"run", "--output-format", "json", "--no-profile", "-i", "-"}},
+		{"with mcp gateway", []string{"developer"}, "http://10.0.1.1:3001/mcp", "", false, []string{"run", "--output-format", "json", "--no-profile", "--with-builtin", "developer", "--with-streamable-http-extension", "http://10.0.1.1:3001/mcp", "-i", "-"}},
+		{"mcp only, no builtins", []string{}, "http://10.0.1.1:3001/mcp", "", false, []string{"run", "--output-format", "json", "--no-profile", "--with-streamable-http-extension", "http://10.0.1.1:3001/mcp", "-i", "-"}},
+		{"session first turn", []string{"developer"}, "", "vm-1", false, []string{"run", "--output-format", "json", "--no-profile", "--with-builtin", "developer", "-n", "vm-1", "-i", "-"}},
+		{"session resume", []string{"developer"}, "", "vm-1", true, []string{"run", "--output-format", "json", "--no-profile", "--with-builtin", "developer", "-n", "vm-1", "--resume", "-i", "-"}},
 	}
 	for _, c := range cases {
-		if got := gooseArgs(c.session, c.resume); !reflect.DeepEqual(got, c.want) {
-			t.Errorf("%s: gooseArgs(%q,%v) = %v, want %v", c.name, c.session, c.resume, got, c.want)
+		if got := gooseArgs(c.builtins, c.mcpURL, c.session, c.resume); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s: gooseArgs(%v,%q,%q,%v) = %v, want %v", c.name, c.builtins, c.mcpURL, c.session, c.resume, got, c.want)
 		}
 	}
 }

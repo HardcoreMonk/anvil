@@ -6,6 +6,7 @@ require (
 	github.com/firecracker-microvm/firecracker-go-sdk v1.0.0
 	github.com/sirupsen/logrus v1.9.4
 	golang.org/x/sys v0.13.0
+	gopkg.in/yaml.v2 v2.4.0
 )
 
 require (
@@ -40,5 +41,4 @@ require (
 	go.mongodb.org/mongo-driver v1.8.3 // indirect
 	golang.org/x/net v0.0.0-20220127200216-cd36cc0744dd // indirect
 	golang.org/x/text v0.3.7 // indirect
-	gopkg.in/yaml.v2 v2.4.0 // indirect
 )

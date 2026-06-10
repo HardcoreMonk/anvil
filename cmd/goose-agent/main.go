@@ -68,13 +68,25 @@ var (
 // turn) resumes it so the conversation persists across tasks — multi-turn.
 //
 // --no-profile drops goose's default builtin extensions (8 of them, ~7.5k tokens
-// of tool definitions on every request); --with-builtin developer adds back only
-// the shell/file extension the agent needs. Trimming the tool schema keeps each
-// request small — otherwise the per-request token count can exceed a provider's
-// per-minute budget (Groq free-tier TPM is 6000), which goose misreports as a
-// context overflow and aborts with a spurious "failed to compact" error.
-func gooseArgs(session string, resume bool) []string {
-	args := []string{"run", "--output-format", "json", "--no-profile", "--with-builtin", "developer"}
+// of tool definitions on every request); the profile's selected builtins are
+// added back via a single comma-separated --with-builtin so only the tools that
+// role needs are loaded. Trimming the tool schema keeps each request small —
+// otherwise the per-request token count can exceed a provider's per-minute budget
+// (Groq free-tier TPM is 6000), which goose misreports as a context overflow and
+// aborts with a spurious "failed to compact" error. An empty builtins list omits
+// --with-builtin entirely (a tools-free, chat-only agent).
+//
+// When mcpURL is set (the host injected /root/.ephemera-mcp), the host MCP gateway
+// is added as a streamable-HTTP extension so the agent's tools also include the
+// gateway's aggregated, profile-filtered catalog of external MCP servers.
+func gooseArgs(builtins []string, mcpURL, session string, resume bool) []string {
+	args := []string{"run", "--output-format", "json", "--no-profile"}
+	if len(builtins) > 0 {
+		args = append(args, "--with-builtin", strings.Join(builtins, ","))
+	}
+	if mcpURL != "" {
+		args = append(args, "--with-streamable-http-extension", mcpURL)
+	}
 	if session != "" {
 		args = append(args, "-n", session)
 		if resume {
@@ -82,6 +94,46 @@ func gooseArgs(session string, resume bool) []string {
 		}
 	}
 	return append(args, "-i", "-")
+}
+
+// loadMCPURL returns the host MCP gateway URL the daemon injected at
+// /root/.ephemera-mcp, or "" when the gateway is off (file absent) or the profile
+// has no permitted backends. Mirrors loadBuiltins' read-from-config-at-runtime
+// approach so no rebake is needed to change which VMs use the gateway.
+func loadMCPURL() string {
+	data, err := os.ReadFile(mcpConfigPath)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// loadBuiltins reads EPHEMERA_BUILTINS (a comma-separated builtin list) from the
+// VM's goose config and returns the builtin extensions to enable. The host writes
+// this key per profile. A missing/unreadable key falls back to ["developer"], the
+// historical hardcoded default, so profiles and snapshots created before per-
+// profile builtin selection are unchanged; an explicit empty value yields no
+// builtins. Mirrors the daemon's parseProfileBuiltins.
+func loadBuiltins() []string {
+	data, err := os.ReadFile(gooseConfigPath)
+	if err != nil {
+		return []string{"developer"}
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "EPHEMERA_BUILTINS:") {
+			continue
+		}
+		val := strings.Trim(strings.TrimSpace(line[len("EPHEMERA_BUILTINS:"):]), `"'`)
+		out := []string{}
+		for _, p := range strings.Split(val, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+	return []string{"developer"}
 }
 
 // noThinkForModel returns "/nothink\n" for qwen reasoning models, else "". qwen3
@@ -157,6 +209,7 @@ const (
 	flockMetaPath    = "/root/.ephemera-flock"
 	systemPromptPath = "/root/.goose-system-prompt"
 	cpTokenPath      = "/root/.ephemera-cp-token"
+	mcpConfigPath    = "/root/.ephemera-mcp"             // host MCP gateway URL; added as a goose streamable-HTTP extension
 	gooseConfigPath  = "/root/.config/goose/config.yaml" // provider/model; read to detect reasoning models
 	// defaultControlPlaneAddr is the gateway IP the host uses inside the VM's
 	// /24 network. Overridable via EPHEMERA_CONTROL_PLANE for testing.
@@ -518,7 +571,7 @@ func handleTask(w http.ResponseWriter, r *http.Request) {
 		}
 		sessionMu.Unlock()
 	}
-	cmd := exec.CommandContext(r.Context(), "/usr/local/bin/goose", gooseArgs(req.Session, resume)...)
+	cmd := exec.CommandContext(r.Context(), "/usr/local/bin/goose", gooseArgs(loadBuiltins(), loadMCPURL(), req.Session, resume)...)
 	cmd.Stdin = strings.NewReader(finalPrompt)
 
 	// Propagate the nested-invocation depth (v0.4.4) to the goose subprocess so a

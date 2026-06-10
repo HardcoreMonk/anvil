@@ -18,11 +18,12 @@ import (
 // Only provider/model are exposed; API keys (goose-secrets.yaml) stay
 // server-side and are never read or written through this surface.
 type ProfileConfig struct {
-	Name       string `json:"name"`         // "default" for the daemon default, else the profile dir name
-	Provider   string `json:"provider"`     // GOOSE_PROVIDER
-	Model      string `json:"model"`        // GOOSE_MODEL
-	VcpuCount  int64  `json:"vcpu_count"`   // EPHEMERA_VCPU_COUNT; 0 → default sizing (1)
-	MemSizeMib int64  `json:"mem_size_mib"` // EPHEMERA_MEM_SIZE_MIB; 0 → default sizing (1024)
+	Name       string   `json:"name"`         // "default" for the daemon default, else the profile dir name
+	Provider   string   `json:"provider"`     // GOOSE_PROVIDER
+	Model      string   `json:"model"`        // GOOSE_MODEL
+	VcpuCount  int64    `json:"vcpu_count"`   // EPHEMERA_VCPU_COUNT; 0 → default sizing (1)
+	MemSizeMib int64    `json:"mem_size_mib"` // EPHEMERA_MEM_SIZE_MIB; 0 → default sizing (1024)
+	Builtins   []string `json:"builtins"`     // EPHEMERA_BUILTINS; effective set the VM runs (unset → defaultBuiltins())
 }
 
 // defaultProfileName is the reserved name for the daemon's default goose.yaml
@@ -108,6 +109,12 @@ func (cp *ControlPlane) handleConfigProfile(w http.ResponseWriter, r *http.Reque
 		cp.handleConfigProfileSystem(w, r, strings.TrimSuffix(name, "/system"))
 		return
 	}
+	// Sub-route /config/profiles/{name}/builtins manages the profile's enabled
+	// goose builtin extensions (EPHEMERA_BUILTINS), same peel pattern as /system.
+	if strings.HasSuffix(name, "/builtins") {
+		cp.handleConfigProfileBuiltins(w, r, strings.TrimSuffix(name, "/builtins"))
+		return
+	}
 	// Reject empty and any path-traversal form before touching the filesystem.
 	if name == "" || name == ".." || strings.ContainsAny(name, "/\\") {
 		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("profile name required"))
@@ -160,7 +167,13 @@ func (cp *ControlPlane) handleConfigProfile(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		slog.Info("profile config updated", "profile", name, "provider", provider, "model", model, "vcpu", body.VcpuCount, "mem", body.MemSizeMib)
-		writeJSON(w, http.StatusOK, ProfileConfig{Name: name, Provider: provider, Model: model, VcpuCount: body.VcpuCount, MemSizeMib: body.MemSizeMib})
+		// Re-read so the response carries the authoritative on-disk view, including
+		// the profile's builtins (untouched by this provider/model/sizing edit).
+		pc, rerr := cp.readProfileConfig(name)
+		if rerr != nil {
+			pc = ProfileConfig{Name: name, Provider: provider, Model: model, VcpuCount: body.VcpuCount, MemSizeMib: body.MemSizeMib, Builtins: defaultBuiltins()}
+		}
+		writeJSON(w, http.StatusOK, pc)
 	case http.MethodDelete:
 		if name == defaultProfileName {
 			writeJSONError(w, http.StatusBadRequest, fmt.Errorf("the default profile cannot be deleted"))
@@ -457,11 +470,12 @@ func validateSizing(vcpu, mem int64) error {
 
 func (cp *ControlPlane) createProfile(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Name       string `json:"name"`
-		Provider   string `json:"provider"`
-		Model      string `json:"model"`
-		VcpuCount  int64  `json:"vcpu_count"`
-		MemSizeMib int64  `json:"mem_size_mib"`
+		Name       string   `json:"name"`
+		Provider   string   `json:"provider"`
+		Model      string   `json:"model"`
+		VcpuCount  int64    `json:"vcpu_count"`
+		MemSizeMib int64    `json:"mem_size_mib"`
+		Builtins   []string `json:"builtins"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("invalid JSON body"))
@@ -491,6 +505,18 @@ func (cp *ControlPlane) createProfile(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err)
 		return
 	}
+	// A missing builtins field defaults to the registry default (developer);
+	// an explicit (possibly empty) list is honored. Validate against the
+	// registry and canonicalize before writing it into the goose.yaml.
+	builtins := body.Builtins
+	if builtins == nil {
+		builtins = defaultBuiltins()
+	}
+	if err := validateBuiltins(builtins); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err)
+		return
+	}
+	builtins = normalizeBuiltins(builtins)
 	dir := filepath.Join(cp.workDir, "configs", "profiles", name)
 	if _, err := os.Stat(dir); err == nil {
 		writeJSONError(w, http.StatusConflict, fmt.Errorf("profile %q already exists", name))
@@ -500,19 +526,20 @@ func (cp *ControlPlane) createProfile(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if err := os.WriteFile(filepath.Join(dir, "goose.yaml"), []byte(renderGooseProfileYAML(provider, model, body.VcpuCount, body.MemSizeMib)), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "goose.yaml"), []byte(renderGooseProfileYAML(provider, model, body.VcpuCount, body.MemSizeMib, builtins)), 0o644); err != nil {
 		os.RemoveAll(dir) // don't leave a half-created profile behind
 		writeJSONError(w, http.StatusInternalServerError, err)
 		return
 	}
-	slog.Info("profile created", "profile", name, "provider", provider, "model", model, "vcpu", body.VcpuCount, "mem", body.MemSizeMib)
-	writeJSON(w, http.StatusCreated, ProfileConfig{Name: name, Provider: provider, Model: model, VcpuCount: body.VcpuCount, MemSizeMib: body.MemSizeMib})
+	slog.Info("profile created", "profile", name, "provider", provider, "model", model, "vcpu", body.VcpuCount, "mem", body.MemSizeMib, "builtins", strings.Join(builtins, ","))
+	writeJSON(w, http.StatusCreated, ProfileConfig{Name: name, Provider: provider, Model: model, VcpuCount: body.VcpuCount, MemSizeMib: body.MemSizeMib, Builtins: builtins})
 }
 
 // renderGooseProfileYAML produces a goose.yaml body for a new profile, mirroring
-// the structure of the default configs/goose.yaml (telemetry off, keyring off, the
-// bundled developer extension). Provider/model are rendered via yamlScalar.
-func renderGooseProfileYAML(provider, model string, vcpu, mem int64) string {
+// the structure of the default configs/goose.yaml (telemetry off, keyring off).
+// Provider/model are rendered via yamlScalar. EPHEMERA_BUILTINS records the
+// enabled goose builtin extensions (read back by the in-VM agent at run time).
+func renderGooseProfileYAML(provider, model string, vcpu, mem int64, builtins []string) string {
 	s := "# Goose config for this profile. Provider/model only — API keys live in\n" +
 		"# the global configs/goose-secrets.yaml keychain.\n" +
 		"GOOSE_PROVIDER: " + yamlScalar(provider) + "\n" +
@@ -527,14 +554,27 @@ func renderGooseProfileYAML(provider, model string, vcpu, mem int64) string {
 	if mem > 0 {
 		s += fmt.Sprintf("EPHEMERA_MEM_SIZE_MIB: %d\n", mem)
 	}
-	return s + "\n" +
-		"extensions:\n" +
-		"  developer:\n" +
-		"    bundled: true\n" +
-		"    enabled: true\n" +
-		"    name: developer\n" +
-		"    timeout: 300\n" +
-		"    type: builtin\n"
+	// Enabled goose builtin extensions (comma-separated). goose ignores this
+	// unknown key; the in-VM agent reads it (loadBuiltins) to build the
+	// `--with-builtin` argv. An empty value means "no builtin tools".
+	s += "EPHEMERA_BUILTINS: " + strings.Join(builtins, ",") + "\n"
+	// The extensions block below is inert under the agent's `goose run --no-profile`
+	// (which loads only CLI-specified extensions); EPHEMERA_BUILTINS above is the
+	// authoritative control. It is kept for parity with the default config, and
+	// omitted entirely when no builtins are enabled.
+	if len(builtins) == 0 {
+		return s
+	}
+	block := "\nextensions:\n"
+	for _, b := range builtins {
+		block += "  " + b + ":\n" +
+			"    bundled: true\n" +
+			"    enabled: true\n" +
+			"    name: " + b + "\n" +
+			"    timeout: 300\n" +
+			"    type: builtin\n"
+	}
+	return s + block
 }
 
 // readProfileConfig parses GOOSE_PROVIDER and GOOSE_MODEL out of a profile's
@@ -550,7 +590,14 @@ func (cp *ControlPlane) readProfileConfig(name string) (ProfileConfig, error) {
 	}
 	provider, model := parseGooseConfig(data)
 	vcpu, mem := parseProfileSizing(data)
-	return ProfileConfig{Name: name, Provider: provider, Model: model, VcpuCount: vcpu, MemSizeMib: mem}, nil
+	// A profile with no EPHEMERA_BUILTINS key (e.g. created before this feature)
+	// runs the registry default in the VM (loadBuiltins fallback); reflect that
+	// effective set here so the editor shows what actually runs.
+	builtins := parseProfileBuiltins(data)
+	if builtins == nil {
+		builtins = defaultBuiltins()
+	}
+	return ProfileConfig{Name: name, Provider: provider, Model: model, VcpuCount: vcpu, MemSizeMib: mem, Builtins: builtins}, nil
 }
 
 // parseGooseConfig extracts GOOSE_PROVIDER and GOOSE_MODEL from goose.yaml bytes.

@@ -63,7 +63,7 @@
 {:else}
   <div class="nav">
     <span class="brand">EPHEMERA</span>
-    <span class="badge">v0.5.5</span>
+    <span class="badge">v0.6.0</span>
     <button class="ghost" on:click={() => view.set({ name: 'list' })}>{$_('nav.vms')}</button>
     <button class="ghost" on:click={() => view.set({ name: 'snapshots' })}>{$_('nav.snapshots')}</button>
     <button class="ghost" on:click={() => view.set({ name: 'flocks' })}>{$_('nav.orchestration')}</button>

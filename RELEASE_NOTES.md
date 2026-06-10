@@ -1,3 +1,35 @@
+# v0.6.0 — MCP Gateway & Per-Profile Builtin Extensions
+
+**Ephemera** v0.6.0 adds two complementary, opt-in capabilities for shaping each agent's toolset, plus a host-resident **MCP Gateway**.
+
+**⚠️ Golden-image rebake required** — the in-VM `goose-agent` changed (it now builds `--with-builtin` from the profile and adds the gateway extension). Run `sudo bash scripts/build_image.sh`, rebuild the daemon, and pass the manual `e2e_test.sh` gate before release.
+
+## What's New
+
+### Per-profile goose builtin extensions
+
+The in-VM agent previously hardcoded `--with-builtin developer`, fixing every agent's tools to shell+file regardless of role. Now each **profile** selects which goose builtin extensions its agents load:
+
+- Stored as `EPHEMERA_BUILTINS: developer,memory` in the profile's `goose.yaml` (the same line-preserving pattern as `EPHEMERA_VCPU_COUNT`). The in-VM agent reads it (`loadBuiltins`) and builds a single comma-separated `--with-builtin`; an absent key falls back to `developer` (so existing profiles, the default config, and snapshots are unchanged), and an explicit empty selection yields a tools-free agent.
+- New **`GET /config/builtins`** registry (developer / memory / tutorial, curated against the bundled goose 1.37.0) plus `GET/PUT /config/profiles/{name}/builtins`. The Settings UI gains a checkbox group on profile create and a per-profile **Extensions** editor, with a token-budget warning (more extensions = more tokens per request).
+
+### MCP Gateway (`EPHEMERA_MCP_ENABLED=1`)
+
+A host-resident MCP server, bound to the bridge IP (`10.0.1.1:3001`), that the in-VM goose clients connect to and that **aggregates many backend MCP servers behind one namespaced, per-profile-filtered catalog**:
+
+- VMs stay minimal: each gets a single injected extension URL (`/root/.ephemera-mcp`), added via `goose run --with-streamable-http-extension`. No MCP servers are baked into the image; no backend credentials are injected into a VM. The URL uses a letter-starting hostname (`http://ephemera-gw:<port>/mcp`, mapped to the bridge IP via an injected `/etc/hosts` entry) so the tool-name prefix goose derives from the URL stays valid for providers like Gemini — an IP host would start with a digit and be rejected as an invalid function name.
+- Backends are declared in **`configs/mcp/servers.yaml`** (id, namespace, url, allowed `profiles:`); their credentials live host-side in **`configs/mcp/secrets.yaml`** and are injected by the gateway as `Authorization: Bearer …` per call. The caller is identified by source IP → VM registry → profile, so policy scopes the tool catalog per profile (the token-budget control).
+- Tool names are namespaced (`github__create_issue`) and routed back to the owning backend. Every `tools/call` is metered (`ephemera_mcp_tool_calls_total{server,outcome}`) and audited to `audit/mcp.jsonl` (metadata only — never arguments or results).
+- New **`GET /config/mcp`** and **`GET /config/mcp/servers`** (with live health) back a new **System › MCP Gateway** console tab. Credentials are never exposed (only `has_credential`).
+
+The gateway is built on interfaces (`CallerResolver`, `Registry`/`Backend`, `PolicyStore`, `CredentialProvider`, `SessionStore`) so the multi-host commercial build can re-implement them — distributed registry, token identity, shared sessions — without changing the protocol core or the VM-side contract.
+
+### New env vars
+
+`EPHEMERA_MCP_ENABLED` (off by default), `EPHEMERA_MCP_PORT` (3001), `EPHEMERA_MCP_BIND_IP` (10.0.1.1). When the gateway is off, nothing changes — VMs get no MCP extension.
+
+---
+
 # v0.5.5 — System & Monitoring Console
 
 **Ephemera** v0.5.5 adds a **System** console — a read-only operations surface in the browser with four sub-tabs: **Audit log**, **Watchdog status**, **Configured clients**, and **Monitoring** (embedded Grafana). The underlying data already existed (v0.4.x `GET /audit` / `GET /watchdog/status`, plus the `/metrics` + `observability_demo.sh` stack), so this is mostly frontend; two small read-only endpoints (`GET /config/clients`, `GET /config/monitoring`) are the only new backend. This **folds in the planned v0.5.6 monitoring work**. **No golden-image rebake** — two daemon config handlers + the `web/` bundle + `observability_demo.sh` + docs + KVM-free tests.

@@ -29,6 +29,7 @@ type daemonMetrics struct {
 	sighupReload      *metrics.Counter
 	cpTokenPropagated *metrics.CounterVec // outcome=ok|fail
 	authTotal         *metrics.CounterVec // outcome=ok|denied|expired (v0.4.1)
+	mcpToolCalls      *metrics.CounterVec // server, outcome=ok|fail|forbidden (v0.6.0)
 
 	// Histograms (seconds).
 	vmSpawnDuration         *metrics.Histogram
@@ -87,6 +88,11 @@ func newDaemonMetrics(cp *ControlPlane) *daemonMetrics {
 			"ephemera_auth_total",
 			"Total API auth decisions by outcome.",
 			"outcome",
+		),
+		mcpToolCalls: r.NewCounterVec(
+			"ephemera_mcp_tool_calls_total",
+			"Total MCP gateway tool calls by backend server and outcome.",
+			"server", "outcome",
 		),
 
 		vmSpawnDuration: r.NewHistogram(
