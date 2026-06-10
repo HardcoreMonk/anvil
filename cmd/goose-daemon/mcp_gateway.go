@@ -1,0 +1,201 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"ephemera/internal/mcpgateway"
+)
+
+const (
+	defaultMCPPort = 3001
+	// mcpVMHostIP is the bridge gateway IP every VM reaches the host at.
+	mcpVMHostIP = "10.0.1.1"
+	// mcpVMHostName is a letter-starting alias for the gateway used in the URL
+	// injected into VMs. goose derives the streamable-HTTP extension name — and
+	// thus the LLM-facing tool-name prefix (e.g. <name>__deepwiki__ask_question) —
+	// by sanitizing the URL. An IP host yields a name starting with a digit, which
+	// providers like Gemini reject ("function name must start with a letter or
+	// underscore"). A letter-starting hostname avoids that; it resolves to
+	// mcpVMHostIP via an /etc/hosts entry injected at spawn (the guest's nsswitch
+	// is files→dns, so the entry is consulted first).
+	mcpVMHostName = "ephemera-gw"
+)
+
+// mcpHostsEntry is the /etc/hosts line injected into a VM that uses the gateway,
+// mapping the letter-starting mcpVMHostName to the bridge gateway IP.
+func mcpHostsEntry() string { return mcpVMHostIP + " " + mcpVMHostName }
+
+// mcpEnabled reports whether the MCP gateway is switched on via EPHEMERA_MCP_ENABLED.
+func mcpEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("EPHEMERA_MCP_ENABLED"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// mcpPort returns the gateway port (EPHEMERA_MCP_PORT, default 3001).
+func mcpPort() int {
+	if v := os.Getenv("EPHEMERA_MCP_PORT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultMCPPort
+}
+
+// mcpBindIP returns the listener bind IP (EPHEMERA_MCP_BIND_IP, default the bridge
+// gateway IP so the gateway is reachable only from VMs and the host, never
+// externally).
+func mcpBindIP() string {
+	if v := strings.TrimSpace(os.Getenv("EPHEMERA_MCP_BIND_IP")); v != "" {
+		return v
+	}
+	return mcpVMHostIP
+}
+
+// initMCPGateway loads configs/mcp/{servers,secrets}.yaml and builds the gateway
+// and its listener. Disabled or misconfigured → the gateway stays nil and VMs get
+// no MCP extension (behavior unchanged). Failures are logged, never fatal.
+func (cp *ControlPlane) initMCPGateway() {
+	if !mcpEnabled() {
+		return
+	}
+	dir := filepath.Join(cp.workDir, "configs", "mcp")
+	servers, err := mcpgateway.LoadServers(filepath.Join(dir, "servers.yaml"))
+	if err != nil {
+		slog.Error("mcp gateway: load servers.yaml failed; gateway disabled", "err", err)
+		return
+	}
+	secrets, err := mcpgateway.LoadSecrets(filepath.Join(dir, "secrets.yaml"))
+	if err != nil {
+		slog.Error("mcp gateway: load secrets.yaml failed; gateway disabled", "err", err)
+		return
+	}
+	reg, err := mcpgateway.NewRegistry(servers, secrets, &http.Client{Timeout: 60 * time.Second})
+	if err != nil {
+		slog.Error("mcp gateway: invalid server config; gateway disabled", "err", err)
+		return
+	}
+	gw := mcpgateway.New(mcpgateway.Options{
+		Resolver: mcpgateway.NewIPCallerResolver(cp.lookupVMByIP),
+		Registry: reg,
+		Observe:  cp.observeMCPCall,
+	})
+	port := mcpPort()
+	cp.mcpRegistry = reg
+	cp.mcpGateway = gw
+	cp.mcpEndpoint = fmt.Sprintf("http://%s:%d/mcp", mcpVMHostName, port)
+
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", gw)
+	mux.Handle("/mcp/", gw)
+	cp.mcpSrv = &http.Server{Addr: fmt.Sprintf("%s:%d", mcpBindIP(), port), Handler: mux}
+	slog.Warn("mcp gateway configured", "endpoint", cp.mcpEndpoint, "bind", cp.mcpSrv.Addr, "servers", len(servers))
+}
+
+// startMCPGateway starts the gateway listener (no-op when disabled). A bind
+// failure is logged but must not take down the daemon — the control-plane API
+// stays up so operators can diagnose it.
+func (cp *ControlPlane) startMCPGateway() {
+	if cp.mcpSrv == nil {
+		return
+	}
+	go func() {
+		if err := cp.mcpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("mcp gateway listener stopped", "err", err)
+		}
+	}()
+}
+
+// stopMCPGateway gracefully shuts the gateway listener down (no-op when disabled).
+func (cp *ControlPlane) stopMCPGateway() {
+	if cp.mcpSrv == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cp.mcpSrv.Shutdown(ctx)
+}
+
+// mcpURLForProfile returns the VM-facing gateway URL to inject for a profile, or
+// "" when the gateway is off or the profile is permitted no backend server. This
+// keeps a VM whose role needs no external tools from connecting to the gateway at
+// all (no extra protocol overhead, no empty catalog).
+func (cp *ControlPlane) mcpURLForProfile(profile string) string {
+	if cp.mcpGateway == nil || cp.mcpRegistry == nil || cp.mcpEndpoint == "" {
+		return ""
+	}
+	policy := mcpgateway.NewStaticPolicyStore(cp.mcpRegistry.ServerConfigs()).For(profile)
+	for _, s := range cp.mcpRegistry.ServerConfigs() {
+		if policy.Allows(s.ID) {
+			return cp.mcpEndpoint
+		}
+	}
+	return ""
+}
+
+// lookupVMByIP resolves a VM guest IP to its id and profile, for the gateway's
+// source-IP caller identity. Read-locks cp.mu for a consistent snapshot.
+func (cp *ControlPlane) lookupVMByIP(ip string) (string, string, bool) {
+	cp.mu.RLock()
+	defer cp.mu.RUnlock()
+	for _, v := range cp.vms {
+		if v.GuestIP == ip {
+			return v.VMID, v.Profile, true
+		}
+	}
+	return "", "", false
+}
+
+// observeMCPCall records one gateway tool call: a metric, an append to
+// {workDir}/audit/mcp.jsonl, and a structured slog line. Arguments and results
+// are never recorded (metadata only), matching the access-log privacy invariant.
+func (cp *ControlPlane) observeMCPCall(rec mcpgateway.AuditRecord) {
+	outcome := "ok"
+	if !rec.OK {
+		outcome = "fail"
+		if rec.Err == "forbidden" {
+			outcome = "forbidden"
+		}
+	}
+	if cp.metrics != nil {
+		cp.metrics.mcpToolCalls.WithLabelValues(rec.Server, outcome).Inc()
+	}
+	cp.appendMCPAudit(rec, outcome)
+	slog.Info("mcp tool call", "vm", rec.VMID, "profile", rec.Profile, "server", rec.Server, "tool", rec.Tool, "outcome", outcome, "ms", rec.DurationMs)
+}
+
+// appendMCPAudit appends one tool-call record to {workDir}/audit/mcp.jsonl.
+// Best-effort (a failed open is silently skipped); O_APPEND keeps line-sized
+// writes from concurrent calls from interleaving.
+func (cp *ControlPlane) appendMCPAudit(rec mcpgateway.AuditRecord, outcome string) {
+	dir := filepath.Join(cp.workDir, "audit")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(dir, "mcp.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	line, _ := json.Marshal(map[string]any{
+		"ts":      time.Now().UTC().Format(time.RFC3339),
+		"vm":      rec.VMID,
+		"profile": rec.Profile,
+		"server":  rec.Server,
+		"tool":    rec.Tool,
+		"outcome": outcome,
+		"ms":      rec.DurationMs,
+	})
+	_, _ = f.Write(append(line, '\n'))
+}

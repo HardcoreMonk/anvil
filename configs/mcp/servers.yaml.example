@@ -1,0 +1,35 @@
+# MCP gateway backend servers.
+#
+# The daemon aggregates these backend MCP servers behind ONE host-resident MCP
+# endpoint (injected into VMs as http://ephemera-gw:3001/mcp, an alias for the
+# bridge IP) that the in-VM goose clients connect to.
+# Each VM sees a single, namespaced, profile-filtered catalog; backend
+# credentials stay on the host and are never injected into a VM.
+#
+# Usage:
+#   cp configs/mcp/servers.yaml.example   configs/mcp/servers.yaml
+#   cp configs/mcp/secrets.yaml.example   configs/mcp/secrets.yaml
+#   # edit both, then start the daemon with the gateway enabled:
+#   EPHEMERA_MCP_ENABLED=1 sudo ./ephemera-daemon
+#
+# configs/mcp/servers.yaml and secrets.yaml are gitignored — do not commit them.
+#
+# Per-server fields:
+#   id:         stable identifier and default tool-name namespace (required)
+#   namespace:  tool-name prefix in the aggregated catalog; defaults to id.
+#               Must not contain "__" (the gateway's namespace separator).
+#   transport:  "http" (MCP Streamable HTTP) — the only supported transport today.
+#   url:        the backend MCP server endpoint (http or https; required).
+#   credential: optional key into secrets.yaml. When set, the gateway injects
+#               "Authorization: Bearer <token>" on every call to this backend.
+#   profiles:   Ephemera profiles permitted to use this server. Empty/omitted
+#               means every profile may use it. Scoping per profile keeps each
+#               agent's per-request tool schema small (token-budget control).
+
+servers:
+  - id: example
+    namespace: example
+    transport: http
+    url: https://mcp.example.com/mcp
+    credential: example_token
+    profiles: [leader]
