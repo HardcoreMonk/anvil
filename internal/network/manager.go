@@ -18,6 +18,7 @@ type Manager struct {
 	nextTapID  int
 	freeTapIDs []int // recycled tap IDs — prefer these over nextTapID
 	bridgeName string
+	antiSpoof  bool // pin each TAP to its assigned MAC/IP via ebtables
 }
 
 func NewManager(subnet string, gatewayIP string) *Manager {
@@ -46,6 +47,18 @@ func NewManager(subnet string, gatewayIP string) *Manager {
 
 	if err := m.setupBridge(); err != nil {
 		slog.Warn("bridge setup note (might already exist)", "err", err)
+	}
+
+	// Anti-spoof pins each TAP to its assigned MAC/IP at L2. It runs before
+	// RecoverVMs re-adds per-TAP rules, so the chain starts clean.
+	m.antiSpoof = antiSpoofEnabledFromEnv()
+	if m.antiSpoof && !ebtablesAvailable() {
+		slog.Warn("anti-spoof requested but ebtables not found on PATH; continuing with anti-spoof disabled")
+		m.antiSpoof = false
+	}
+	if m.antiSpoof {
+		m.setupAntiSpoofChain()
+		slog.Warn("per-TAP anti-spoof enabled", "chain", antiSpoofChain)
 	}
 
 	return m
@@ -113,6 +126,7 @@ func (m *Manager) Allocate() (tapDevice string, guestIP string, macAddr string, 
 		return "", "", "", fmt.Errorf("failed to create TAP device: %w", err)
 	}
 
+	m.addAntiSpoofRules(tapDevice, guestIP, macAddr)
 	return tapDevice, guestIP, macAddr, nil
 }
 
@@ -158,6 +172,7 @@ func (m *Manager) ReclaimAllocation(tapDeviceName, guestIP, macAddr string) erro
 		m.ipInUse[guestIP] = false
 		return fmt.Errorf("failed to recreate TAP device for recovery: %w", err)
 	}
+	m.addAntiSpoofRules(tapDeviceName, guestIP, macAddr)
 	return nil
 }
 
@@ -202,6 +217,7 @@ func (m *Manager) AllocateForRestore(tapDeviceName, macAddr string) (tapDevice s
 		return "", "", fmt.Errorf("failed to create TAP device for restore: %w", err)
 	}
 
+	m.addAntiSpoofRules(tapDeviceName, guestIP, macAddr)
 	return tapDeviceName, guestIP, nil
 }
 
@@ -237,6 +253,16 @@ func (m *Manager) Release(tapDevice string, guestIP string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// The tap ID drives both anti-spoof rule removal (MAC is deterministic from
+	// it, since Release does not receive the MAC) and the free-list recycle.
+	var tapID int
+	tapParsed := false
+	if _, err := fmt.Sscanf(tapDevice, "tap%d", &tapID); err == nil {
+		tapParsed = true
+		mac := fmt.Sprintf("AA:FC:00:00:%02X:%02X", tapID/256, tapID%256)
+		m.removeAntiSpoofRules(tapDevice, guestIP, mac)
+	}
+
 	if err := m.deleteTapDevice(tapDevice); err != nil {
 		slog.Warn("delete tap device failed", "tap", tapDevice, "err", err)
 	}
@@ -247,8 +273,7 @@ func (m *Manager) Release(tapDevice string, guestIP string) error {
 	}
 
 	// Return tap ID to the free-list for reuse.
-	var tapID int
-	if _, err := fmt.Sscanf(tapDevice, "tap%d", &tapID); err == nil {
+	if tapParsed {
 		m.freeTapIDs = append(m.freeTapIDs, tapID)
 	}
 	return nil
