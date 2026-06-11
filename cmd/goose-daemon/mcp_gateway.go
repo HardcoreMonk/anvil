@@ -17,6 +17,13 @@ import (
 
 const (
 	defaultMCPPort = 3001
+	// mcpStdioScratchBase is where stdio backend children get their per-server
+	// cwd + HOME (v0.6.4). Deliberately NOT under cp.workDir: the children run
+	// de-privileged and must be able to traverse into their dir, but the work
+	// dir commonly lives under a 0700/0750 home directory the stdio user cannot
+	// enter. /var/lib is root-owned and world-traversable, and survives reboots
+	// (the dirs double as the servers' cache).
+	mcpStdioScratchBase = "/var/lib/ephemera/mcp-stdio"
 	// mcpVMHostIP is the bridge gateway IP every VM reaches the host at.
 	mcpVMHostIP = "10.0.1.1"
 	// mcpVMHostName is a letter-starting alias for the gateway used in the URL
@@ -85,6 +92,16 @@ func mcpBurst() int {
 	return 0
 }
 
+// mcpStdioUser returns the unprivileged user stdio backend subprocesses run as
+// (EPHEMERA_MCP_STDIO_USER, default "nobody"). Only consulted when the daemon
+// runs as root; otherwise children inherit the daemon's own user.
+func mcpStdioUser() string {
+	if v := strings.TrimSpace(os.Getenv("EPHEMERA_MCP_STDIO_USER")); v != "" {
+		return v
+	}
+	return "nobody"
+}
+
 // initMCPGateway loads configs/mcp/{servers,secrets}.yaml and builds the gateway
 // and its listener. Disabled or misconfigured → the gateway stays nil and VMs get
 // no MCP extension (behavior unchanged). Failures are logged, never fatal.
@@ -103,7 +120,9 @@ func (cp *ControlPlane) initMCPGateway() {
 		slog.Error("mcp gateway: load secrets.yaml failed; gateway disabled", "err", err)
 		return
 	}
-	reg, err := mcpgateway.NewRegistry(servers, secrets, &http.Client{Timeout: 60 * time.Second})
+	reg, err := mcpgateway.NewRegistry(servers, secrets, &http.Client{Timeout: 60 * time.Second},
+		mcpgateway.WithStdioUser(mcpStdioUser()),
+		mcpgateway.WithStdioDir(mcpStdioScratchBase))
 	if err != nil {
 		slog.Error("mcp gateway: invalid server config; gateway disabled", "err", err)
 		return
@@ -148,14 +167,18 @@ func (cp *ControlPlane) startMCPGateway() {
 	}()
 }
 
-// stopMCPGateway gracefully shuts the gateway listener down (no-op when disabled).
+// stopMCPGateway gracefully shuts the gateway down (no-op when disabled):
+// first the listener drains so no VM call is in flight, then the registry
+// reaps any stdio backend subprocesses (v0.6.4).
 func (cp *ControlPlane) stopMCPGateway() {
-	if cp.mcpSrv == nil {
-		return
+	if cp.mcpSrv != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		cp.mcpSrv.Shutdown(ctx)
+		cancel()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	cp.mcpSrv.Shutdown(ctx)
+	if cp.mcpRegistry != nil {
+		cp.mcpRegistry.Close()
+	}
 }
 
 // mcpURLForProfile returns the VM-facing gateway URL to inject for a profile, or

@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/steve-seungeui/ephemera/actions/workflows/ci.yml/badge.svg)](https://github.com/steve-seungeui/ephemera/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/steve-seungeui/ephemera)](https://github.com/steve-seungeui/ephemera/releases)
-[![Go](https://img.shields.io/badge/Go-1.18+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[![Go](https://img.shields.io/badge/Go-1.21+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Firecracker](https://img.shields.io/badge/Firecracker-v1.15.1-FF4500?logo=amazonaws&logoColor=white)](https://github.com/firecracker-microvm/firecracker)
 
@@ -53,7 +53,8 @@ Ephemera Control Plane  :3000         ← VM + snapshot + flock management
   GET    /config/profiles/{name}/mcp        → read a profile's MCP server binding (v0.6.2)
   PUT    /config/profiles/{name}/mcp        → set a profile's MCP server binding (∩ servers.yaml) (v0.6.2)
   GET    /config/mcp                  → MCP gateway status: enabled, VM-facing endpoint, backend count (v0.6.0)
-  GET    /config/mcp/servers          → configured backend MCP servers + live health (never credentials) (v0.6.0)
+  GET    /config/mcp/servers          → configured backend MCP servers + live health (never credentials;
+                                        transport + command for stdio backends, never args) (v0.6.0, v0.6.4)
   GET    /ui/                         → embedded browser Web console (Svelte SPA, v0.5.0)
 
       │  provision
@@ -86,7 +87,8 @@ MCP Gateway  :3001  (host-resident, bound to bridge IP 10.0.1.1)        ← v0.6
   · every call metered (ephemera_mcp_tool_calls_total) + audited (audit/mcp.jsonl, kind=tool|resource|prompt); optional per-(VM,server) rate limit (EPHEMERA_MCP_RATE — v0.6.1)
       │
       ▼
-Backend MCP servers (remote HTTP)    ← e.g. DeepWiki, GitHub MCP … declared per host
+Backend MCP servers                  ← remote HTTP (e.g. DeepWiki, GitHub MCP) or local stdio
+                                       subprocesses (de-privileged + rlimited host children — v0.6.4)
 ```
 
 > `agent_url` in VM responses points to the control plane proxy when `EPHEMERA_PUBLIC_URL` is set, or to the VM's private IP otherwise. Direct access to the private IP still works from the host.
@@ -152,6 +154,8 @@ DELETE /vms/{id}
 
 ## Key Features
 
+> **v0.6.4 completes the single-host feature roadmap** — the core line (v0.1–v0.4), the browser console line (v0.5.x), and the MCP / agent-platform line (v0.6.x) are all shipped. Multi-host clustering is intentionally out of scope for this codebase and reserved for a downstream fork built on the MCP gateway's swap-in interfaces.
+
 | Feature | Detail |
 |---------|--------|
 | **Self-bootstrapping** | Golden image, kernel, Firecracker downloaded + SHA256-verified on first run; goose-agent / micro-init / golden image are also rebuilt automatically when their sources are newer than the cached artifact (mtime-based staleness check), so editing in-VM Go code or `build_image.sh` does not need a manual `rm artifacts/...` |
@@ -204,7 +208,7 @@ DELETE /vms/{id}
 | **Multi-turn conversation** (v0.5.0) | `POST /vms/{id}/tasks` accepts an optional `session`; with it, `goose-agent` runs goose as `-n <session> [--resume]`, so consecutive turns continue one goose chat session (context preserved). Omitting `session` keeps the original stateless one-shot behavior (`ephemera-ctl`, `gtcall`). |
 | **Graceful VM delete** (v0.5.0) | `DELETE /vms/{id}` first asks the in-VM agent to shut down cleanly (best-effort `POST /stop`, 2 s) before force-stopping Firecracker, then frees TAP/IP/disk and deregisters. The old "stop agent" action — which actually halted the whole guest while leaving the VM registered — was removed; Delete is the single teardown. |
 | **Per-profile builtin extensions** (v0.6.0) | Each profile selects which goose builtin extensions its agents load (`EPHEMERA_BUILTINS` in the profile `goose.yaml`; registry at `GET /config/builtins`; `GET/PUT /config/profiles/{name}/builtins`; Settings checkbox group + Extensions editor). Replaces the old hardcoded `--with-builtin developer`; absent → `developer` fallback (existing profiles unchanged). Ships in the same rebake as the MCP extension. |
-| **MCP Gateway** (v0.6.0, opt-in) | `EPHEMERA_MCP_ENABLED=1` starts a host-resident MCP server on the bridge IP (`10.0.1.1:3001`) that the in-VM goose clients connect to, aggregating backend MCP servers (`configs/mcp/servers.yaml`) behind one namespaced, per-profile-filtered catalog. Backend credentials (`configs/mcp/secrets.yaml`) stay host-side; VMs get only an injected endpoint URL, added via `--with-streamable-http-extension`. Caller identity is by source IP → profile. `GET /config/mcp` + `GET /config/mcp/servers` (live health) back the **System › MCP Gateway** tab; calls are metered (`ephemera_mcp_tool_calls_total`) and audited to `audit/mcp.jsonl`. Built on interfaces so the multi-host build re-implements them without touching the protocol core. **v0.6.1** hardens it: per-TAP ebtables anti-spoof (`EPHEMERA_NET_ANTISPOOF`, default on) pins each VM to its source MAC+IP so the source-IP identity can't be spoofed, plus an optional per-(VM, server) token-bucket rate limit (`EPHEMERA_MCP_RATE`). **v0.6.2** aggregates `resources` and `prompts` too (not just `tools`), and adds finer-grained access control: per-tool `tools_allow`/`tools_deny` in `servers.yaml`, plus a per-profile server binding (`GET/PUT /config/profiles/{name}/mcp`, stored as `EPHEMERA_MCP_SERVERS`) that **intersects** with `servers.yaml` (it can only narrow a profile's access, never widen it). |
+| **MCP Gateway** (v0.6.0, opt-in) | `EPHEMERA_MCP_ENABLED=1` starts a host-resident MCP server on the bridge IP (`10.0.1.1:3001`) that the in-VM goose clients connect to, aggregating backend MCP servers (`configs/mcp/servers.yaml`) behind one namespaced, per-profile-filtered catalog. Backend credentials (`configs/mcp/secrets.yaml`) stay host-side; VMs get only an injected endpoint URL, added via `--with-streamable-http-extension`. Caller identity is by source IP → profile. `GET /config/mcp` + `GET /config/mcp/servers` (live health) back the **System › MCP Gateway** tab; calls are metered (`ephemera_mcp_tool_calls_total`) and audited to `audit/mcp.jsonl`. Built on interfaces so the multi-host build re-implements them without touching the protocol core. **v0.6.1** hardens it: per-TAP ebtables anti-spoof (`EPHEMERA_NET_ANTISPOOF`, default on) pins each VM to its source MAC+IP so the source-IP identity can't be spoofed, plus an optional per-(VM, server) token-bucket rate limit (`EPHEMERA_MCP_RATE`). **v0.6.2** aggregates `resources` and `prompts` too (not just `tools`), and adds finer-grained access control: per-tool `tools_allow`/`tools_deny` in `servers.yaml`, plus a per-profile server binding (`GET/PUT /config/profiles/{name}/mcp`, stored as `EPHEMERA_MCP_SERVERS`) that **intersects** with `servers.yaml` (it can only narrow a profile's access, never widen it). **v0.6.4** adds **stdio backends**: `transport: stdio` + `command`/`args` runs a local MCP server as a host subprocess — spawned lazily on first use as the unprivileged `EPHEMERA_MCP_STDIO_USER` (default `nobody`) in its own process group, with rlimits (`RLIMIT_NOFILE=256` + `RLIMIT_CORE=0` always, `RLIMIT_NPROC=512` when de-privileged; `RLIMIT_AS` deliberately omitted — it kills V8/JVM-style runtimes at startup) and a minimal env whose cwd+HOME is a traversable per-server scratch dir (`/var/lib/ephemera/mcp-stdio/<id>`), speaking newline-delimited JSON-RPC over stdin/stdout, crash-respawned behind a 5s cooldown, and reaped on daemon shutdown (stdin EOF → 2s grace → process-group SIGKILL). stdio credentials are injected as a child env var (`credential` + `credential_env`, required together), never the cmdline; the API/UI show the command but never `args`. |
 
 ---
 
@@ -254,8 +258,10 @@ cmd/
     mcp_gateway.go    MCP gateway lifecycle: initMCPGateway (loads configs/mcp/*.yaml,
                       builds the gateway + bridge-bound listener), mcpURLForProfile,
                       lookupVMByIP (source-IP caller identity), observeMCPCall
-                      (metric + audit/mcp.jsonl); rate-limit wiring (v0.6.0; limit v0.6.1)
-    mcp_api.go        GET /config/mcp + GET /config/mcp/servers (live health, never creds) (v0.6.0)
+                      (metric + audit/mcp.jsonl); rate-limit wiring (v0.6.0; limit v0.6.1);
+                      stdio run-as user + stopMCPGateway child reaping (v0.6.4)
+    mcp_api.go        GET /config/mcp + GET /config/mcp/servers (live health, never creds;
+                      transport + command for stdio, never args) (v0.6.0; stdio v0.6.4)
     builtins.go       Per-profile goose builtin registry + GET /config/builtins,
                       GET/PUT /config/profiles/{name}/builtins (v0.6.0)
     mcp_binding.go    GET/PUT /config/profiles/{name}/mcp — per-profile MCP server
@@ -330,7 +336,13 @@ internal/
                       Observe (audit/metric) hook
     backend.go        HTTPBackend MCP client (initialize, tools/resources/prompts
                       list & call/read/get, SSE parse)
-    registry.go       servers.yaml / secrets.yaml loader, backend indexing, health probe
+    backend_stdio.go  StdioBackend (v0.6.4): local subprocess MCP client — lazy spawn
+                      as the unprivileged stdio user (SysProcAttr.Credential) with
+                      rlimits, newline-JSON over stdin/stdout (reader goroutine +
+                      pending-map multiplexing), 5s crash-respawn cooldown, Close
+                      (stdin EOF → grace → process-group SIGKILL)
+    registry.go       servers.yaml / secrets.yaml loader, backend indexing (http vs
+                      stdio transport branch), health probe, Close (reaps stdio children)
     identity.go       source-IP → VM → profile caller resolver
     policy.go         per-profile policy: servers.yaml `profiles:` ∩ per-profile
                       binding, plus per-tool allow/deny (v0.6.2)
@@ -341,7 +353,8 @@ configs/
   goose.yaml.example             Default provider/model template
   goose-secrets.yaml.example     API key template
   mcp/                           MCP gateway backend config (v0.6.0; live .yaml files gitignored)
-    servers.yaml.example         Backend MCP servers (id, namespace, url, allowed profiles)
+    servers.yaml.example         Backend MCP servers (id, namespace, url or command/args
+                                 for stdio, credentials, allowed profiles, tool filters)
     secrets.yaml.example         Backend credential tokens (host-side only, never injected into a VM)
   profiles/                      User-defined LLM profiles (created via the Settings UI; empty by default)
     <profile-name>/
@@ -367,7 +380,7 @@ snapshots/            Stored snapshot directories (auto-created, gitignored)
     rootfs.diff       Sparse rootfs delta vs base — Diff snapshots only (changed 4 KiB blocks)
     metadata.json     Restore params (IP, TAP, MAC, token, type, base_snapshot_id, rootfs_diff_path)
 
-e2e_test.sh           End-to-end integration test (85+ numbered steps incl. resilience + v0.3.x–v0.6.x sub-steps; requires /dev/kvm + root)
+e2e_test.sh           End-to-end integration test (89 numbered steps + sub-steps incl. resilience + v0.3.x–v0.6.x coverage; requires /dev/kvm + root)
 observability_demo.sh One-shot live demo: daemon + Prometheus + Grafana, auto workload, browser-driven exploration until Ctrl-C (v0.3.5)
 webdev_demo.sh        One-shot live demo: orchestrator+worker+reviewer flock builds a React+Vite site, harvested from the Town Wall and served via vite preview until Ctrl-C (v0.3.6; manual gate, needs a Gemini key + /dev/kvm)
 
@@ -492,7 +505,7 @@ go build -o ephemera-daemon ./cmd/goose-daemon/
 sudo bash e2e_test.sh
 ```
 
-**What it tests (85+ numbered steps incl. sub-steps):**
+**What it tests (89 numbered steps, plus lettered sub-steps):**
 
 | Steps | Scenario |
 |-------|----------|
@@ -559,6 +572,9 @@ sudo bash e2e_test.sh
 | 84 | **MCP gateway plumbing** (v0.6.1) — relaunch with `EPHEMERA_MCP_ENABLED=1` + a DeepWiki backend; `GET /config/mcp` reports enabled with the `ephemera-gw` endpoint, `GET /config/mcp/servers` lists DeepWiki (live health probe), the daemon logged `mcp gateway configured`, and the `EPHEMERA_AS` ebtables anti-spoof chain is present. |
 | 85 | **MCP tool-call round-trip** (v0.6.1, key-gated) — with a Gemini/Anthropic key + DeepWiki reachable, a researcher VM is told to call a DeepWiki tool once; `audit/mcp.jsonl` gains a `server=deepwiki` entry and `ephemera_mcp_tool_calls_total{server="deepwiki",outcome="ok"}` increments. Skipped (not failed) when no key is set or DeepWiki is down. |
 | 86 | **MCP gateway teardown** (v0.6.1) — stops the gateway daemon and restores the backed-up `servers.yaml` / goose config. |
+| 87 | **MCP stdio backend plumbing** (v0.6.4) — relaunch with a `transport: stdio` backend (a jq-based fixture script in `/tmp`); `GET /config/mcp/servers` spawns the child via the health probe and reports `up=true` (spawn → initialize → ping, key-free), shows `transport`/`command` but never `args`; the child runs as the unprivileged stdio user with `RLIMIT_NOFILE=256` / `RLIMIT_NPROC=512` applied (checked in `/proc/<pid>/limits`). |
+| 88 | **MCP stdio tool-call round-trip** (v0.6.4, key-gated) — with a Gemini/Anthropic key, a researcher VM is told to call the fixture's `echo` tool once; `audit/mcp.jsonl` gains a `server=echoer` entry and `ephemera_mcp_tool_calls_total{server="echoer",outcome="ok"}` increments. Skipped (not failed) without a key. |
+| 89 | **stdio subprocess reaping** (v0.6.4) — a graceful daemon shutdown leaves no fixture process behind within 5s (`Registry.Close()` → stdin EOF → grace → process-group SIGKILL), then restores configs. |
 
 **Example output (passing, tail of the run — steps 52–83):**
 
@@ -786,6 +802,7 @@ All settings are read from environment variables at startup.
 | `EPHEMERA_MCP_BIND_IP` | `10.0.1.1` | Bind IP for the gateway listener — the bridge gateway IP, reachable only from VMs and the host, never externally (v0.6.0). |
 | `EPHEMERA_MCP_RATE` | `0` | Per-(VM, backend server) tool-call budget for the MCP gateway, in calls/minute. `0` (default) = unlimited; a positive value enables a token-bucket limiter. Throttled calls return a JSON-RPC error and are metered as `outcome=rate_limited` (v0.6.1). |
 | `EPHEMERA_MCP_BURST` | `0` | Token-bucket burst for `EPHEMERA_MCP_RATE`. `0`/unset defaults to the rate (one idle minute refills a full minute's allowance) (v0.6.1). |
+| `EPHEMERA_MCP_STDIO_USER` | `nobody` | Unprivileged user that `transport: stdio` MCP backend subprocesses run as. Only consulted when the daemon runs as root; a non-root daemon spawns children as itself (with a warning). The user must be able to read + execute the configured `command`. An unresolvable user disables the gateway at startup (v0.6.4). |
 | `EPHEMERA_NET_ANTISPOOF` | `1` (on) | Per-TAP anti-spoof: pin each VM's bridge TAP to its assigned source MAC + IP via ebtables (default on; `0`/`false`/`no`/`off` opts out). Hardens the MCP gateway's source-IP caller identity against a VM spoofing another's IP. If `ebtables` is absent, the daemon logs a warning and continues with anti-spoof disabled (never fatal) (v0.6.1). |
 | `EPHEMERA_MAX_TASK_DEPTH` | `5` | Max nested agent→agent `/tasks` hops (v0.4.4). The proxy reads `X-Ephemera-Task-Depth` per hop, rejects at/over this cap with `508 Loop Detected`, and forwards `depth+1`. A large value effectively disables the guard. |
 | `EPHEMERA_PUBLIC_URL` | *(unset)* | Externally-reachable base URL of the control plane (no trailing slash). When set, `agent_url` in VM responses uses the proxy path `{EPHEMERA_PUBLIC_URL}/vms/{vm_id}` instead of the VM's private IP. Example: `https://api.example.com`. |
@@ -1057,7 +1074,7 @@ Per-VM stats failures (firecracker PID not resolvable, `/proc` race, agent unrea
 
 For bulk dashboards, `GET /vms?stats=true` returns the standard `[]VMInfo` list with an embedded `stats` field on each element.
 
-> The endpoint emits a snapshot. Streaming (`text/event-stream`) is on the v0.4.3 roadmap.
+> The endpoint emits a point-in-time snapshot; poll it for time series (`observability_demo.sh`'s Prometheus setup scrapes it exactly this way).
 
 ---
 
@@ -1954,11 +1971,11 @@ Every daemon-side log call (control plane, recovery, watchdog, network, storage)
 - `EPHEMERA_LOG_FORMAT=json` — slog's JSONHandler, suitable for log-aggregation pipelines.
 - `EPHEMERA_LOG_LEVEL=debug|info|warn|error` (default `warn`) — minimum level emitted.
 
-Context fields are attached as structured pairs (`vm_id`, `flock_id`, `agent_id`, `err`, …) rather than embedded in the message string. The in-VM `goose-agent` keeps its existing `log.Printf` output unchanged this cycle to avoid touching the golden-image bake budget; revisit in v0.4.3.
+Context fields are attached as structured pairs (`vm_id`, `flock_id`, `agent_id`, `err`, …) rather than embedded in the message string. The in-VM `goose-agent` intentionally keeps its plain `log.Printf` output — an agent-only logging change would cost a golden-image rebake for no operator-visible benefit (its stdout is consumed via the VM console, not the daemon's slog pipeline).
 
 ### Per-VM stats endpoint
 
-`GET /vms/{vm_id}/stats` returns a JSON snapshot of cpu/mem/network/uptime/agent_busy (see [Per-VM Stats](#per-vm-stats-v035) under API Reference). The endpoint is a point-in-time snapshot — repeated polling is the intended scrape pattern; streaming is on the v0.4.3 roadmap.
+`GET /vms/{vm_id}/stats` returns a JSON snapshot of cpu/mem/network/uptime/agent_busy (see [Per-VM Stats](#per-vm-stats-v035) under API Reference). The endpoint is a point-in-time snapshot — repeated polling is the intended scrape pattern.
 
 ### Try the demo (`observability_demo.sh`)
 
