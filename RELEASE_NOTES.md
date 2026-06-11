@@ -1,3 +1,36 @@
+# v0.6.1 — MCP Gateway Hardening & e2e Coverage
+
+**Ephemera** v0.6.1 makes the v0.6.0 MCP Gateway trustworthy: its normal path is now exercised end-to-end by `e2e_test.sh`, its source-IP caller identity is defended at L2 against spoofing, and a runaway caller can be throttled. All three additions are host-side. **No golden-image rebake** — the in-VM `goose-agent` and every `artifacts/*` / `scripts/build_image.sh` input are untouched; only `internal/network`, `internal/mcpgateway`, the daemon wiring, `e2e_test.sh`, and docs change.
+
+## What's New
+
+### Per-TAP anti-spoof (`EPHEMERA_NET_ANTISPOOF`, default on)
+
+The gateway identifies a caller by its VM's **source IP** (source IP → VM registry → profile), so a compromised VM that spoofed another VM's IP could borrow its profile's tool permissions. v0.6.1 pins each VM at the bridge:
+
+- A dedicated **ebtables** chain `EPHEMERA_AS` (jumped to from `FORWARD` and `INPUT`) carries, per TAP, three rules: allow ARP with the assigned source MAC (without this the guest can't resolve the gateway), allow IPv4 only with the assigned source MAC **and** source IP, and drop everything else from that port as spoofed. The chain is flushed and rebuilt at startup so recycled-TAP rules can't accumulate across a daemon restart, and rules are re-added by the recovery/restore paths.
+- **Default on**; opt out with `EPHEMERA_NET_ANTISPOOF=0` (`false`/`no`/`off` also accepted). If `ebtables` is not on `PATH`, the daemon logs a warning and continues with anti-spoof disabled — never fatal, mirroring the best-effort bridge/NAT setup. Guest connectivity is unaffected because the kernel-injected guest only ever uses its assigned MAC/IP. The control-plane API on `10.0.1.1:3000` is token-authed (not IP-trusted), so the gateway was the one source-IP-trusting surface this hardens.
+
+### Per-(VM, server) rate limit (`EPHEMERA_MCP_RATE`, opt-in)
+
+An optional token-bucket budget on gateway tool calls, keyed per **(VM, backend server)** so one busy backend can't starve another:
+
+- `EPHEMERA_MCP_RATE` is calls/minute; **`0` (default) leaves the gateway unlimited** with a no-op limiter (zero per-call overhead). A positive value enables a hand-rolled token bucket (no new dependency — stdlib `sync`/`time`, matching the project's own `internal/metrics`). `EPHEMERA_MCP_BURST` sets the burst (defaults to the rate). Idle buckets are swept lazily so the map can't grow as ephemeral VMs come and go.
+- A throttled call returns a JSON-RPC error (`-32603`, retryable) and is observed as a new outcome `rate_limited` — visible in `ephemera_mcp_tool_calls_total{server,outcome="rate_limited"}` and `audit/mcp.jsonl`.
+
+### MCP gateway e2e coverage (steps 84–86)
+
+`e2e_test.sh` previously left the gateway off, so it only confirmed the dormant path didn't regress. New steps relaunch the daemon with `EPHEMERA_MCP_ENABLED=1` and a public **DeepWiki** backend (`https://mcp.deepwiki.com/mcp`, no auth):
+
+- **Tier A (no key):** asserts `GET /config/mcp` is enabled with the `ephemera-gw` endpoint, `GET /config/mcp/servers` lists DeepWiki with a live health probe, the daemon logged the gateway configuration, and the `EPHEMERA_AS` anti-spoof chain is present. DeepWiki unreachability degrades to a skip (never a failure — `set -euo pipefail`-safe).
+- **Tier B (Gemini/Anthropic key):** a researcher VM is told to call a DeepWiki tool exactly once; the test then asserts a `server=deepwiki` line in `audit/mcp.jsonl` and an incremented `ephemera_mcp_tool_calls_total{server="deepwiki",outcome="ok"}`. Skipped when no reliable tool-calling key is set (Groq is excluded — its tool calls are unreliable for multi-turn orchestration).
+
+### New env vars
+
+`EPHEMERA_MCP_RATE` (0 = unlimited), `EPHEMERA_MCP_BURST` (0 = rate), `EPHEMERA_NET_ANTISPOOF` (on by default). When all are at their defaults, behavior is unchanged except that anti-spoof rules are installed (a no-op for correctly-behaving guests).
+
+---
+
 # v0.6.0 — MCP Gateway & Per-Profile Builtin Extensions
 
 **Ephemera** v0.6.0 adds two complementary, opt-in capabilities for shaping each agent's toolset, plus a host-resident **MCP Gateway**.

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // mockMCP is a minimal in-process MCP server for tests. It speaks the subset the
@@ -300,5 +301,76 @@ func TestRegistry_Validation(t *testing.T) {
 	// Non-http URL is rejected.
 	if _, err := NewRegistry([]ServerConfig{{ID: "a", URL: "ftp://a"}}, nil, nil); err == nil {
 		t.Fatal("expected non-http url error")
+	}
+}
+
+func TestGateway_RateLimited(t *testing.T) {
+	m := newMockMCP(t, false)
+	reg := newTestRegistry(t, ServerConfig{ID: "mock", Namespace: "mock", URL: m.srv.URL, Profiles: []string{"leader"}}, nil)
+
+	// 1 call/min, burst 1, with a frozen clock so the second call gets no refill.
+	lim := NewTokenBucketLimiter(1, 1)
+	clock := time.Unix(1000, 0)
+	lim.now = func() time.Time { return clock }
+
+	var audited []AuditRecord
+	g := New(Options{
+		Resolver: stubResolver{Caller{VMID: "vm1", Profile: "leader"}},
+		Registry: reg,
+		Limiter:  lim,
+		Observe:  func(rec AuditRecord) { audited = append(audited, rec) },
+	})
+
+	// First call consumes the only token.
+	first := doRPC(t, g, "tools/call", toolsCallParams{Name: "mock__echo", Arguments: json.RawMessage(`{}`)})
+	if first.Error != nil {
+		t.Fatalf("first call should succeed, got error: %v", first.Error)
+	}
+	// Second call (clock frozen → no refill) is rate-limited.
+	second := doRPC(t, g, "tools/call", toolsCallParams{Name: "mock__echo", Arguments: json.RawMessage(`{}`)})
+	if second.Error == nil || second.Error.Code != codeInternalError {
+		t.Fatalf("second call should be rate-limited with codeInternalError, got: %+v", second.Error)
+	}
+	// The rate-limited call is audited as a failure with the sentinel error.
+	last := audited[len(audited)-1]
+	if last.OK || last.Err != "rate limited" || last.Server != "mock" {
+		t.Fatalf("rate-limited audit record wrong: %+v", last)
+	}
+}
+
+func TestTokenBucketLimiter_Refill(t *testing.T) {
+	lim := NewTokenBucketLimiter(60, 2) // 60/min = 1/s, burst 2
+	clock := time.Unix(0, 0)
+	lim.now = func() time.Time { return clock }
+
+	// The burst of 2 is admitted immediately; the 3rd is denied.
+	if !lim.Allow("vm", "srv") || !lim.Allow("vm", "srv") {
+		t.Fatal("first two calls within burst should be allowed")
+	}
+	if lim.Allow("vm", "srv") {
+		t.Fatal("third call should be denied (bucket empty)")
+	}
+
+	// After 1 second, 60/min refills exactly 1 token.
+	clock = clock.Add(time.Second)
+	if !lim.Allow("vm", "srv") {
+		t.Fatal("one token should have refilled after 1s")
+	}
+	if lim.Allow("vm", "srv") {
+		t.Fatal("only one token refilled; second should be denied")
+	}
+
+	// A multi-second idle refills past burst but caps at burst (2).
+	clock = clock.Add(5 * time.Second)
+	if !lim.Allow("vm", "srv") || !lim.Allow("vm", "srv") {
+		t.Fatal("burst of 2 should be available after refill")
+	}
+	if lim.Allow("vm", "srv") {
+		t.Fatal("bucket should cap at burst=2, not accumulate")
+	}
+
+	// A different (vm, server) key has its own independent bucket.
+	if !lim.Allow("vm2", "srv") {
+		t.Fatal("distinct key should have a fresh bucket")
 	}
 }
