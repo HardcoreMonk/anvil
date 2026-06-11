@@ -16,12 +16,14 @@ import (
 // Credentials are referenced by key (resolved from configs/mcp/secrets.yaml) so the
 // secret value never appears in this struct or any API/UI response.
 type ServerConfig struct {
-	ID         string   `yaml:"id"`         // stable identifier and default namespace
-	Namespace  string   `yaml:"namespace"`  // tool-name prefix; defaults to ID
-	Transport  string   `yaml:"transport"`  // "http" (Streamable HTTP); reserved for future
-	URL        string   `yaml:"url"`        // backend MCP endpoint
-	Credential string   `yaml:"credential"` // key into secrets.yaml; optional (public server)
-	Profiles   []string `yaml:"profiles"`   // Ephemera profiles allowed to use it; empty = all
+	ID         string   `yaml:"id"`          // stable identifier and default namespace
+	Namespace  string   `yaml:"namespace"`   // tool-name prefix; defaults to ID
+	Transport  string   `yaml:"transport"`   // "http" (Streamable HTTP); reserved for future
+	URL        string   `yaml:"url"`         // backend MCP endpoint
+	Credential string   `yaml:"credential"`  // key into secrets.yaml; optional (public server)
+	Profiles   []string `yaml:"profiles"`    // Ephemera profiles allowed to use it; empty = all
+	ToolsAllow []string `yaml:"tools_allow"` // if non-empty, only these tool names are exposed
+	ToolsDeny  []string `yaml:"tools_deny"`  // tool names to hide (ignored when tools_allow is set)
 }
 
 // serversFile is the on-disk shape of servers.yaml.

@@ -115,6 +115,12 @@ func (cp *ControlPlane) handleConfigProfile(w http.ResponseWriter, r *http.Reque
 		cp.handleConfigProfileBuiltins(w, r, strings.TrimSuffix(name, "/builtins"))
 		return
 	}
+	// Sub-route /config/profiles/{name}/mcp manages the profile's MCP server
+	// binding (EPHEMERA_MCP_SERVERS), same peel pattern as /builtins.
+	if strings.HasSuffix(name, "/mcp") {
+		cp.handleConfigProfileMCP(w, r, strings.TrimSuffix(name, "/mcp"))
+		return
+	}
 	// Reject empty and any path-traversal form before touching the filesystem.
 	if name == "" || name == ".." || strings.ContainsAny(name, "/\\") {
 		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("profile name required"))
