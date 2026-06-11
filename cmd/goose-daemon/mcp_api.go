@@ -28,7 +28,9 @@ func (cp *ControlPlane) handleConfigMCP(w http.ResponseWriter, r *http.Request) 
 
 // handleConfigMCPServers serves GET /config/mcp/servers — the configured backend
 // MCP servers plus a live per-backend health probe. Credentials are never
-// included (only has_credential), mirroring /config/providers' secret-free view.
+// included (only has_credential), mirroring /config/providers' secret-free view;
+// stdio servers expose their command but never args (which may carry sensitive
+// values).
 func (cp *ControlPlane) handleConfigMCPServers(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSONError(w, http.StatusMethodNotAllowed, fmt.Errorf("method not allowed"))
@@ -50,7 +52,9 @@ func (cp *ControlPlane) handleConfigMCPServers(w http.ResponseWriter, r *http.Re
 		out = append(out, map[string]any{
 			"id":             s.ID,
 			"namespace":      s.Namespace,
+			"transport":      s.Transport,
 			"url":            s.URL,
+			"command":        s.Command,
 			"profiles":       s.Profiles,
 			"has_credential": s.HasCredential,
 			"up":             h.Up,
