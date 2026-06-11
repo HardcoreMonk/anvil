@@ -176,7 +176,7 @@
     "empty": "No backend MCP servers are configured. Add them to configs/mcp/servers.yaml.",
     "colId": "ID",
     "colNamespace": "Namespace",
-    "colUrl": "URL",
+    "colUrl": "Endpoint",
     "colProfiles": "Profiles",
     "colCredential": "Credential",
     "colHealth": "Health",
