@@ -1,3 +1,48 @@
+# v0.6.4 — MCP Gateway: stdio backends
+
+**Ephemera** v0.6.4 lets the MCP Gateway run a backend MCP server as a **local host subprocess**, not just call a remote HTTP one: `transport: stdio` + `command`/`args` in `servers.yaml`. The child speaks newline-delimited JSON-RPC over its stdin/stdout (the MCP stdio transport) and is treated as an untrusted workload — de-privileged, rlimited, crash-contained, and reaped on shutdown. The `Backend` interface (the multi-host fork seam) is unchanged; the gateway's protocol core, policy, rate limiting, and audit all apply to stdio backends as-is. **No golden-image rebake** — everything is host-side (`internal/mcpgateway` + daemon wiring + UI); `cmd/goose-agent`, `scripts/build_image.sh`, and `artifacts/*` are untouched.
+
+**This release completes Ephemera's single-host feature roadmap.** The core line (v0.1–v0.4: lifecycle, Goosetown flocks, observability, storage/recovery, operational interfaces), the browser console line (v0.5.x), and the MCP / agent-platform line (v0.6.x) are all shipped. From here the codebase moves to maintenance and backlog items; multi-host clustering is intentionally reserved for a downstream fork built on the MCP gateway's swap-in interfaces (`CallerResolver` / `Registry` / `Backend` / `PolicyStore` / `CredentialProvider` / `SessionStore`).
+
+## What's New
+
+### `transport: stdio` backends
+
+- A server entry may now declare `transport: stdio` with a `command` (required; a bare name is resolved on the daemon's PATH once at startup, and the resolved absolute path is what gets executed — the child's minimal PATH can never change which binary runs) and optional `args`. `url` is for HTTP servers only; the two field sets are mutually exclusive and validated at startup.
+- The new `StdioBackend` mirrors `HTTPBackend`'s lazy model: the subprocess is **spawned on first use** (a catalog request, tool call, or health probe), handshaken (`initialize` → `notifications/initialized`), and reused. One **reader goroutine** routes stdout lines to in-flight requests by JSON-RPC id, so concurrent VM calls multiplex over a single child; server-initiated requests get a `-32601` reply (the gateway consumes none) and notifications/banner lines are tolerated and dropped. A caller's ctx expiring (e.g. a 5s health probe racing a slow first start) abandons only that wait — it never kills a child that is still coming up.
+
+### Privilege drop + rlimits
+
+- When the daemon runs as root (production), every stdio child runs as the unprivileged **`EPHEMERA_MCP_STDIO_USER`** (default `nobody`; supplementary groups cleared). The user is resolved once at startup — an unresolvable user disables the gateway, like a missing credential. A non-root daemon (dev, unit tests) spawns children as itself with a warning. All stdio servers share that one uid in v0.6.4 and are not isolated **from each other** (documented in the example file); per-server users are future work.
+- The child's environment is built from scratch (`PATH`, `HOME`, `LANG` + the credential env var below) — the daemon's own environment, which holds `EPHEMERA_*` config and possibly key material, is never inherited. cwd and `HOME` are a per-server scratch dir (`/var/lib/ephemera/mcp-stdio/<id>`, leaf 0700 chowned to the run-as user every spawn, parents 0755, kept across restarts so npx/uvx-style servers can cache). The scratch base deliberately lives outside the work dir: the de-privileged child must be able to traverse into its dir, and the work dir commonly sits under a 0700/0750 home directory the stdio user cannot enter.
+- **rlimits** are applied via `prlimit(2)` right after spawn and fail closed (a child that can't be clamped is killed): `RLIMIT_NOFILE=256` and `RLIMIT_CORE=0` (no core dumps of a process whose env holds a token) always, `RLIMIT_NPROC=512` when de-privileged (NPROC counts the whole uid system-wide, so it is skipped on the shared-uid non-root path where it would be fatal-by-coincidence and isolate nothing). `RLIMIT_AS` is deliberately **not** set: modern runtimes (V8, JVM, sanitizer builds) reserve huge virtual ranges up front and an AS cap kills them at startup while bounding nothing real — RSS containment is a cgroup job, noted as future work.
+
+### Lifecycle: crash containment + shutdown reaping
+
+- The child leads its own **process group** (`Setpgid`), so every kill takes its helpers with it; `Pdeathsig=SIGKILL` is set as daemon-crash insurance.
+- A child that exits or breaks its stream fails all in-flight calls with the exit status **plus its last stderr lines** (a 4-line tail is kept; the same text surfaces in `GET /config/mcp/servers`' `error` field, so "command exited immediately" is diagnosable from the System tab). The next call respawns it, but at most once per **5s cooldown** — a crash-looping server is bounded and self-heals via the health probe.
+- On daemon shutdown, `stopMCPGateway` first drains the gateway listener, then the new `Registry.Close()` reaps every stdio child in parallel: stdin EOF (the MCP stdio exit request) → ≤2s grace → SIGKILL of the process group. e2e step 89 asserts no child survives a graceful daemon stop.
+
+### Credentials for stdio servers (`credential_env`)
+
+The existing `credential:` key (into host-side `secrets.yaml`) now pairs with **`credential_env`** on stdio servers: the token is injected into the child's environment as that variable — and only there. It never appears in `args` (world-readable via `/proc/<pid>/cmdline`; the example file warns against putting secrets there), in the API, or in the UI. Both fields must be set together; HTTP servers keep the `Authorization: Bearer` injection unchanged.
+
+### API + UI
+
+`GET /config/mcp/servers` rows now carry `transport` (normalized, `http` or `stdio`) and `command` — but never `args`, which may embed sensitive values. The **System › MCP Gateway** tab shows a transport pill and lists the command in place of the URL for stdio servers (the column is now "Endpoint").
+
+### New env var
+
+`EPHEMERA_MCP_STDIO_USER` (default `nobody`) — the unprivileged user stdio children run as; root-only, must be able to read + execute the configured commands.
+
+### e2e steps 87–89
+
+Step 87 relaunches the daemon with a jq-based stdio fixture and asserts, key-free, that the health probe spawns + handshakes the child (`up=true`), that it runs as the stdio user, and that the rlimits are visible in `/proc/<pid>/limits`. Step 88 (Gemini/Anthropic key, skipped otherwise) drives a real VM → gateway → subprocess tool call into `audit/mcp.jsonl` + the metric. Step 89 asserts a graceful daemon shutdown reaps the child.
+
+> **No rebake:** the in-VM contract (one injected gateway URL) is unchanged — a VM cannot tell whether a namespaced tool is served by a remote HTTP backend or a host subprocess.
+
+---
+
 # v0.6.2 — MCP Gateway: resources/prompts + granular policy
 
 **Ephemera** v0.6.2 rounds out the MCP Gateway on two fronts: it aggregates a **full MCP catalog** (`resources/*` and `prompts/*` from each backend, alongside tools), and it gains **finer-grained access control** — per-tool allow/deny within a server, and a per-profile server binding editable via the API. All host-side and additive. **No golden-image rebake** — the in-VM goose client auto-discovers the capabilities the gateway advertises; changes are confined to `internal/mcpgateway` + the daemon's config API (no `cmd/goose-agent` / `artifacts/*` changes).
