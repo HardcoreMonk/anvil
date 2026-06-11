@@ -63,6 +63,28 @@ func mcpBindIP() string {
 	return mcpVMHostIP
 }
 
+// mcpRate returns the per-(VM, server) tool-call budget in calls/minute
+// (EPHEMERA_MCP_RATE). 0 (default) = unlimited.
+func mcpRate() int {
+	if v := os.Getenv("EPHEMERA_MCP_RATE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 0
+}
+
+// mcpBurst returns the token-bucket burst for the rate limiter
+// (EPHEMERA_MCP_BURST). 0/unset → the limiter defaults it to the rate.
+func mcpBurst() int {
+	if v := os.Getenv("EPHEMERA_MCP_BURST"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 0
+}
+
 // initMCPGateway loads configs/mcp/{servers,secrets}.yaml and builds the gateway
 // and its listener. Disabled or misconfigured → the gateway stays nil and VMs get
 // no MCP extension (behavior unchanged). Failures are logged, never fatal.
@@ -86,11 +108,16 @@ func (cp *ControlPlane) initMCPGateway() {
 		slog.Error("mcp gateway: invalid server config; gateway disabled", "err", err)
 		return
 	}
-	gw := mcpgateway.New(mcpgateway.Options{
+	opts := mcpgateway.Options{
 		Resolver: mcpgateway.NewIPCallerResolver(cp.lookupVMByIP),
 		Registry: reg,
 		Observe:  cp.observeMCPCall,
-	})
+	}
+	if r := mcpRate(); r > 0 {
+		opts.Limiter = mcpgateway.NewTokenBucketLimiter(r, mcpBurst())
+		slog.Warn("mcp gateway rate limit enabled", "calls_per_min", r, "burst", mcpBurst())
+	}
+	gw := mcpgateway.New(opts)
 	port := mcpPort()
 	cp.mcpRegistry = reg
 	cp.mcpGateway = gw
@@ -163,9 +190,13 @@ func (cp *ControlPlane) lookupVMByIP(ip string) (string, string, bool) {
 func (cp *ControlPlane) observeMCPCall(rec mcpgateway.AuditRecord) {
 	outcome := "ok"
 	if !rec.OK {
-		outcome = "fail"
-		if rec.Err == "forbidden" {
+		switch rec.Err {
+		case "forbidden":
 			outcome = "forbidden"
+		case "rate limited":
+			outcome = "rate_limited"
+		default:
+			outcome = "fail"
 		}
 	}
 	if cp.metrics != nil {

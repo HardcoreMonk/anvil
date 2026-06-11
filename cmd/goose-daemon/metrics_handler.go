@@ -29,7 +29,7 @@ type daemonMetrics struct {
 	sighupReload      *metrics.Counter
 	cpTokenPropagated *metrics.CounterVec // outcome=ok|fail
 	authTotal         *metrics.CounterVec // outcome=ok|denied|expired (v0.4.1)
-	mcpToolCalls      *metrics.CounterVec // server, outcome=ok|fail|forbidden (v0.6.0)
+	mcpToolCalls      *metrics.CounterVec // server, outcome=ok|fail|forbidden|rate_limited (v0.6.0)
 
 	// Histograms (seconds).
 	vmSpawnDuration         *metrics.Histogram

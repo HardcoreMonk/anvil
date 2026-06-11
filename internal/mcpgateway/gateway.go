@@ -27,12 +27,13 @@ type AuditRecord struct {
 
 // Options configures a Gateway. Resolver and Registry are required; Policy
 // defaults to "allow every configured server", Sessions to an in-memory store,
-// and Observe to a no-op.
+// Limiter to "allow every call", and Observe to a no-op.
 type Options struct {
 	Resolver CallerResolver
 	Registry *Registry
 	Policy   PolicyStore
 	Sessions SessionStore
+	Limiter  RateLimiter
 	Observe  func(AuditRecord)
 }
 
@@ -43,6 +44,7 @@ type Gateway struct {
 	registry *Registry
 	policy   PolicyStore
 	sessions SessionStore
+	limiter  RateLimiter
 	observe  func(AuditRecord)
 }
 
@@ -53,6 +55,7 @@ func New(opts Options) *Gateway {
 		registry: opts.Registry,
 		policy:   opts.Policy,
 		sessions: opts.Sessions,
+		limiter:  opts.Limiter,
 		observe:  opts.Observe,
 	}
 	if g.policy == nil {
@@ -60,6 +63,9 @@ func New(opts Options) *Gateway {
 	}
 	if g.sessions == nil {
 		g.sessions = NewMemSessionStore()
+	}
+	if g.limiter == nil {
+		g.limiter = noopLimiter{}
 	}
 	if g.observe == nil {
 		g.observe = func(AuditRecord) {}
@@ -197,6 +203,12 @@ func (g *Gateway) handleToolsCall(w http.ResponseWriter, r *http.Request, caller
 	if !g.policy.For(caller.Profile).Allows(b.ID()) {
 		g.observe(AuditRecord{VMID: caller.VMID, Profile: caller.Profile, Server: b.ID(), Tool: tool, OK: false, Err: "forbidden"})
 		writeRPC(w, "", newError(req.ID, codeInvalidParams, "tool not permitted for this profile: "+p.Name))
+		return
+	}
+	// Rate limit: a transient, retryable per-(VM, server) budget.
+	if !g.limiter.Allow(caller.VMID, b.ID()) {
+		g.observe(AuditRecord{VMID: caller.VMID, Profile: caller.Profile, Server: b.ID(), Tool: tool, OK: false, Err: "rate limited"})
+		writeRPC(w, "", newError(req.ID, codeInternalError, "rate limit exceeded for this server; retry shortly"))
 		return
 	}
 
