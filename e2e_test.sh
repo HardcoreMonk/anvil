@@ -2134,6 +2134,159 @@ unset EPHEMERA_CTL_URL EPHEMERA_CTL_TOKEN
 
 rm -f "$TOKENS_FILE" || true
 
+# ════════════════════════════════════════════════════════════════
+# MCP GATEWAY (v0.6.1) — steps 84-86
+# The gateway is OFF by default through the rest of this script, so
+# these steps relaunch the daemon with EPHEMERA_MCP_ENABLED=1 and a
+# public DeepWiki backend, exercising the VM→gateway→backend path that
+# v0.6.0 added. Tier A (no key) asserts the plumbing; Tier B (a
+# Gemini/Anthropic key) drives a real tool call and checks the audit
+# log + metric. The daemon is relaunched WITHOUT auth tokens, so these
+# control-plane calls need no Authorization header.
+# ════════════════════════════════════════════════════════════════
+
+# ── 84. Relaunch daemon with the MCP gateway enabled ─────────────
+step "84. Relaunch daemon with MCP gateway enabled (DeepWiki backend)"
+kill "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null || true
+pkill -f "firecracker --api-sock" 2>/dev/null || true
+sleep 2
+# Back up any real servers.yaml, then write a DeepWiki-only config.
+# configs/mcp/servers.yaml is gitignored, so this never dirties the tree.
+mkdir -p configs/mcp
+[ -f configs/mcp/servers.yaml ] && cp configs/mcp/servers.yaml /tmp/mcp-servers.bak
+trap '[ -f /tmp/mcp-servers.bak ] && mv /tmp/mcp-servers.bak configs/mcp/servers.yaml || rm -f configs/mcp/servers.yaml' EXIT
+cat > configs/mcp/servers.yaml <<'YAML'
+servers:
+  - id: deepwiki
+    namespace: deepwiki
+    transport: http
+    url: https://mcp.deepwiki.com/mcp
+YAML
+relaunch_daemon "EPHEMERA_MCP_ENABLED=1 EPHEMERA_DISK_MODE=plain"
+ok "Daemon back up with MCP gateway enabled ✓"
+
+# ── 84a. GET /config/mcp reports the gateway is enabled ──────────
+step "84a. GET /config/mcp reports the gateway is enabled"
+MCPCFG=$(curl -s -m 10 "$API/config/mcp" || echo '{}')
+echo "$MCPCFG" | jq -e '.enabled==true and (.endpoint|test("ephemera-gw"))' >/dev/null 2>&1 \
+    && ok "/config/mcp enabled with ephemera-gw endpoint ✓" \
+    || fail "/config/mcp not enabled as expected: $MCPCFG"
+
+# ── 84b. GET /config/mcp/servers lists DeepWiki + reachability ───
+step "84b. GET /config/mcp/servers lists the DeepWiki backend"
+MCPSRV=$(curl -s -m 20 "$API/config/mcp/servers" || echo '[]')
+echo "$MCPSRV" | jq -e 'any(.[]; .id=="deepwiki")' >/dev/null 2>&1 \
+    && ok "DeepWiki backend listed ✓" \
+    || fail "deepwiki not in /config/mcp/servers: $MCPSRV"
+DW_UP=$(echo "$MCPSRV" | jq -r 'map(select(.id=="deepwiki"))[0].up // false' 2>/dev/null)
+if [ "$DW_UP" = "true" ]; then
+    ok "DeepWiki health probe up ✓"
+else
+    ok "Reachability skipped — DeepWiki not up (external; up=$DW_UP)"
+fi
+
+# ── 84c. Daemon logged the gateway configuration ─────────────────
+step "84c. Daemon logged the gateway configuration"
+grep -q "mcp gateway configured" "$LOG" \
+    && ok "gateway configured (endpoint + bind logged) ✓" \
+    || fail "no 'mcp gateway configured' line in $LOG"
+
+# ── 84d. Per-TAP anti-spoof chain is present (v0.6.1) ────────────
+step "84d. ebtables anti-spoof chain EPHEMERA_AS exists"
+if command -v ebtables >/dev/null 2>&1; then
+    ebtables -t filter -L EPHEMERA_AS >/dev/null 2>&1 \
+        && ok "anti-spoof chain EPHEMERA_AS present ✓" \
+        || fail "EPHEMERA_AS chain missing (anti-spoof is default-on)"
+else
+    ok "Skipped — ebtables not installed (anti-spoof auto-disabled)"
+fi
+
+# ── 85. MCP tool-call round-trip (requires Gemini/Anthropic key) ──
+# Groq is excluded: its tool-calling is unreliable for multi-turn
+# orchestration (project memory). DeepWiki must also be reachable.
+step "85. MCP tool-call round-trip through the gateway"
+MCP_LLM_KEY=""; MCP_PROVIDER=""; MCP_SECRET_KEY=""; MCP_MODEL=""
+if [ -n "${GOOGLE_API_KEY:-}" ]; then
+    MCP_LLM_KEY="$GOOGLE_API_KEY"; MCP_PROVIDER="google"; MCP_SECRET_KEY="GOOGLE_API_KEY"; MCP_MODEL="gemini-2.5-flash"
+elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    MCP_LLM_KEY="$ANTHROPIC_API_KEY"; MCP_PROVIDER="anthropic"; MCP_SECRET_KEY="ANTHROPIC_API_KEY"; MCP_MODEL="claude-sonnet-4-6"
+fi
+if [ -z "$MCP_LLM_KEY" ]; then
+    ok "Skipped — set GOOGLE_API_KEY or ANTHROPIC_API_KEY to exercise a real tool call (Groq excluded)"
+elif [ "${DW_UP:-false}" != "true" ]; then
+    ok "Skipped — DeepWiki unreachable, cannot drive a real tool call"
+else
+    # Inject the key into the global goose config (restore-trapped). The
+    # daemon reads configs/goose.yaml at spawn, so no relaunch is needed.
+    cp configs/goose-secrets.yaml /tmp/mcp-global-secrets.bak
+    cp configs/goose.yaml /tmp/mcp-global-goose.bak
+    trap '[ -f /tmp/mcp-servers.bak ] && mv /tmp/mcp-servers.bak configs/mcp/servers.yaml || rm -f configs/mcp/servers.yaml; [ -f /tmp/mcp-global-secrets.bak ] && mv /tmp/mcp-global-secrets.bak configs/goose-secrets.yaml; [ -f /tmp/mcp-global-goose.bak ] && mv /tmp/mcp-global-goose.bak configs/goose.yaml' EXIT
+    if ! grep -qE "^# *${MCP_SECRET_KEY}:" configs/goose-secrets.yaml && \
+       ! grep -qE "^${MCP_SECRET_KEY}:" configs/goose-secrets.yaml; then
+        printf '%s: "%s"\n' "$MCP_SECRET_KEY" "$MCP_LLM_KEY" >> configs/goose-secrets.yaml
+    fi
+    sed -i "s|^# *${MCP_SECRET_KEY}:.*|${MCP_SECRET_KEY}: \"${MCP_LLM_KEY}\"|" configs/goose-secrets.yaml
+    sed -i "s|^${MCP_SECRET_KEY}:.*|${MCP_SECRET_KEY}: \"${MCP_LLM_KEY}\"|" configs/goose-secrets.yaml
+    sed -i "s|^GOOSE_PROVIDER:.*|GOOSE_PROVIDER: ${MCP_PROVIDER}|" configs/goose.yaml
+    sed -i "s|^GOOSE_MODEL:.*|GOOSE_MODEL: ${MCP_MODEL}|" configs/goose.yaml
+    ok "Global goose config set to provider=$MCP_PROVIDER model=$MCP_MODEL"
+
+    # ── 85a. Spawn a researcher flock; its VM gets the MCP extension ──
+    step "85a. Spawn researcher flock under the MCP gateway"
+    MCP_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/flocks" \
+        -H "Content-Type: application/json" \
+        -d '{"task":"mcp smoke","roles":["researcher"]}')
+    check_http "$(echo "$MCP_RESP" | tail -1)" "201" "POST /flocks (MCP smoke)"
+    MCP_BODY=$(echo "$MCP_RESP" | head -1)
+    MCP_FLOCK_ID=$(echo "$MCP_BODY" | jq -r '.flock_id')
+    MCP_VM_ID=$(echo "$MCP_BODY" | jq -r '.agents[] | select(.agent_id=="researcher-1") | .vm_id')
+    MCP_TOKEN=$(echo "$MCP_BODY" | jq -r '.agent_tokens["researcher-1"]')
+    ok "Spawned researcher VM $MCP_VM_ID"
+
+    # ── 85b. Drive a single DeepWiki tool call ───────────────────
+    step "85b. POST /tasks instructing one DeepWiki tool call"
+    MCP_TASK=$(jq -n '{prompt:"Use the deepwiki tool to look up the repository \"modelcontextprotocol/servers\". Call a deepwiki tool exactly once (for example, ask what the repository is), then respond with the JSON {\"done\":true}. Do not call any other tool."}')
+    curl -s -m 180 -X POST "$API/vms/$MCP_VM_ID/tasks" \
+        -H "Authorization: Bearer $MCP_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$MCP_TASK" > /tmp/mcp-task.json || true
+    ok "/tasks invocation returned (see /tmp/mcp-task.json)"
+
+    # ── 85c. audit/mcp.jsonl + metric record the DeepWiki call ───
+    step "85c. Gateway recorded the DeepWiki tool call (audit + metric)"
+    FOUND=false
+    for i in $(seq 1 30); do
+        if [ -f audit/mcp.jsonl ] && \
+           jq -e -s 'any(.[]; .server=="deepwiki")' audit/mcp.jsonl >/dev/null 2>&1; then
+            FOUND=true; break
+        fi
+        sleep 1
+    done
+    $FOUND && ok "audit/mcp.jsonl recorded a deepwiki tool call ✓" \
+           || fail "no deepwiki entry in audit/mcp.jsonl within 30s (see /tmp/mcp-task.json)"
+    MCP_METRICS=$(curl -s -m 5 "$API/metrics" || echo "")
+    echo "$MCP_METRICS" | grep -qE 'ephemera_mcp_tool_calls_total\{server="deepwiki",outcome="ok"\} [1-9]' \
+        && ok "metric ephemera_mcp_tool_calls_total{deepwiki,ok} incremented ✓" \
+        || fail "deepwiki ok tool-call metric not incremented"
+
+    # ── 85d. Cleanup Tier B ──────────────────────────────────────
+    step "85d. DELETE MCP flock + restore global goose config"
+    curl -s -o /dev/null -X DELETE "$API/flocks/$MCP_FLOCK_ID"
+    mv /tmp/mcp-global-secrets.bak configs/goose-secrets.yaml
+    mv /tmp/mcp-global-goose.bak configs/goose.yaml
+    # Re-arm the trap to restore only servers.yaml (step 86 handles it too).
+    trap '[ -f /tmp/mcp-servers.bak ] && mv /tmp/mcp-servers.bak configs/mcp/servers.yaml || rm -f configs/mcp/servers.yaml' EXIT
+    ok "Tier B cleanup complete"
+fi
+
+# ── 86. Stop the MCP gateway daemon + restore servers.yaml ───────
+step "86. Stop MCP gateway daemon + restore configs"
+kill "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null || true
+pkill -f "firecracker --api-sock" 2>/dev/null || true
+[ -f /tmp/mcp-servers.bak ] && mv /tmp/mcp-servers.bak configs/mcp/servers.yaml || rm -f configs/mcp/servers.yaml
+trap - EXIT
+ok "MCP gateway test daemon stopped"
+
 # ── Shut down the last test daemon ───────────────────────────────
 kill "$DAEMON_PID" 2>/dev/null || true; wait "$DAEMON_PID" 2>/dev/null || true
 pkill -f "firecracker --api-sock" 2>/dev/null || true
