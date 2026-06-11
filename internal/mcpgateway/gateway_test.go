@@ -60,6 +60,32 @@ func newMockMCP(t *testing.T, useSSE bool) *mockMCP {
 				"content": []map[string]any{{"type": "text", "text": "called " + p.Name + " with " + string(p.Arguments)}},
 				"isError": false,
 			})
+		case "resources/list":
+			writeJSONResp(w, req.ID, map[string]any{"resources": []map[string]any{
+				{"uri": "file:///a.txt", "name": "A", "mimeType": "text/plain"},
+				{"uri": "file:///b.txt", "name": "B"},
+			}})
+		case "resources/read":
+			var p struct {
+				URI string `json:"uri"`
+			}
+			_ = json.Unmarshal(req.Params, &p)
+			writeJSONResp(w, req.ID, map[string]any{"contents": []map[string]any{
+				{"uri": p.URI, "mimeType": "text/plain", "text": "read " + p.URI},
+			}})
+		case "prompts/list":
+			writeJSONResp(w, req.ID, map[string]any{"prompts": []map[string]any{
+				{"name": "greet", "description": "a greeting"},
+				{"name": "farewell"},
+			}})
+		case "prompts/get":
+			var p struct {
+				Name string `json:"name"`
+			}
+			_ = json.Unmarshal(req.Params, &p)
+			writeJSONResp(w, req.ID, map[string]any{"messages": []map[string]any{
+				{"role": "user", "content": map[string]any{"type": "text", "text": "got " + p.Name}},
+			}})
 		default:
 			writeJSONResp(w, req.ID, map[string]any{})
 		}
@@ -372,5 +398,174 @@ func TestTokenBucketLimiter_Refill(t *testing.T) {
 	// A different (vm, server) key has its own independent bucket.
 	if !lim.Allow("vm2", "srv") {
 		t.Fatal("distinct key should have a fresh bucket")
+	}
+}
+
+func TestGateway_ResourcesAggregation(t *testing.T) {
+	m := newMockMCP(t, false)
+	reg := newTestRegistry(t, ServerConfig{ID: "mock", Namespace: "mock", URL: m.srv.URL, Profiles: []string{"leader"}}, nil)
+	var audited []AuditRecord
+	g := New(Options{
+		Resolver: stubResolver{Caller{VMID: "vm1", Profile: "leader"}},
+		Registry: reg,
+		Observe:  func(rec AuditRecord) { audited = append(audited, rec) },
+	})
+
+	// resources/list → namespaced URIs, sorted.
+	list := doRPC(t, g, "resources/list", map[string]any{})
+	var lr resourcesListResult
+	_ = json.Unmarshal(list.Result, &lr)
+	if len(lr.Resources) != 2 || lr.Resources[0].URI != "mock__file:///a.txt" {
+		t.Fatalf("resources/list = %+v (want namespaced mock__*)", lr.Resources)
+	}
+
+	// resources/read → routed by namespace, relayed, audited as a resource.
+	read := doRPC(t, g, "resources/read", resourcesReadParams{URI: "mock__file:///a.txt"})
+	if read.Error != nil {
+		t.Fatalf("resources/read error: %v", read.Error)
+	}
+	if !strings.Contains(string(read.Result), "read file:///a.txt") {
+		t.Fatalf("unexpected read result: %s", read.Result)
+	}
+	if len(audited) != 1 || !audited[0].OK || audited[0].Kind != "resource" || audited[0].Tool != "file:///a.txt" {
+		t.Fatalf("resource audit record wrong: %+v", audited)
+	}
+
+	// A profile with no access sees nothing and is rejected on read.
+	gw := New(Options{Resolver: stubResolver{Caller{VMID: "vm2", Profile: "worker"}}, Registry: reg})
+	denied := doRPC(t, gw, "resources/read", resourcesReadParams{URI: "mock__file:///a.txt"})
+	if denied.Error == nil {
+		t.Fatal("expected policy rejection for worker")
+	}
+}
+
+func TestGateway_PromptsAggregation(t *testing.T) {
+	m := newMockMCP(t, false)
+	reg := newTestRegistry(t, ServerConfig{ID: "mock", Namespace: "mock", URL: m.srv.URL, Profiles: []string{"leader"}}, nil)
+	var audited []AuditRecord
+	g := New(Options{
+		Resolver: stubResolver{Caller{VMID: "vm1", Profile: "leader"}},
+		Registry: reg,
+		Observe:  func(rec AuditRecord) { audited = append(audited, rec) },
+	})
+
+	// prompts/list → namespaced names, sorted (farewell < greet).
+	list := doRPC(t, g, "prompts/list", map[string]any{})
+	var lr promptsListResult
+	_ = json.Unmarshal(list.Result, &lr)
+	if len(lr.Prompts) != 2 || lr.Prompts[0].Name != "mock__farewell" {
+		t.Fatalf("prompts/list = %+v (want namespaced, sorted)", lr.Prompts)
+	}
+
+	// prompts/get → routed, relayed, audited as a prompt.
+	get := doRPC(t, g, "prompts/get", promptsGetParams{Name: "mock__greet"})
+	if get.Error != nil {
+		t.Fatalf("prompts/get error: %v", get.Error)
+	}
+	if !strings.Contains(string(get.Result), "got greet") {
+		t.Fatalf("unexpected get result: %s", get.Result)
+	}
+	if len(audited) != 1 || !audited[0].OK || audited[0].Kind != "prompt" || audited[0].Tool != "greet" {
+		t.Fatalf("prompt audit record wrong: %+v", audited)
+	}
+}
+
+func TestPolicy_AllowsTool(t *testing.T) {
+	p := Policy{
+		Servers: map[string]bool{"a": true, "b": true},
+		Tools: map[string]ToolPolicy{
+			"a": {Allow: []string{"x", "y"}}, // allow-list
+			"b": {Deny: []string{"z"}},       // deny-list
+		},
+	}
+	// allow-list: only x,y permitted on a.
+	if !p.AllowsTool("a", "x") || p.AllowsTool("a", "z") {
+		t.Fatal("allow-list wrong")
+	}
+	// deny-list: everything but z permitted on b.
+	if !p.AllowsTool("b", "w") || p.AllowsTool("b", "z") {
+		t.Fatal("deny-list wrong")
+	}
+	// a server the profile cannot use is always denied.
+	if p.AllowsTool("c", "x") {
+		t.Fatal("unlisted server should deny")
+	}
+	// an allowed server with no per-tool policy permits every tool.
+	p2 := Policy{Servers: map[string]bool{"a": true}}
+	if !p2.AllowsTool("a", "anything") {
+		t.Fatal("no per-tool policy should allow all")
+	}
+}
+
+func TestStaticPolicyStore_PerTool(t *testing.T) {
+	servers := []ServerConfig{
+		{ID: "gh", Profiles: []string{"leader"}, ToolsAllow: []string{"create_issue"}},
+		{ID: "fs", ToolsDeny: []string{"delete"}},
+	}
+	pol := NewStaticPolicyStore(servers).For("leader")
+	if !pol.AllowsTool("gh", "create_issue") || pol.AllowsTool("gh", "delete_repo") {
+		t.Fatal("gh per-tool allow-list wrong")
+	}
+	if !pol.AllowsTool("fs", "read") || pol.AllowsTool("fs", "delete") {
+		t.Fatal("fs per-tool deny-list wrong")
+	}
+}
+
+func TestStaticPolicyStore_BindingIntersection(t *testing.T) {
+	servers := []ServerConfig{{ID: "a"}, {ID: "b"}, {ID: "c"}} // all profiles
+	binding := map[string][]string{"narrow": {"a", "b"}, "empty": {}}
+	ps := NewStaticPolicyStoreWithBinding(servers, func(profile string) ([]string, bool) {
+		v, ok := binding[profile]
+		return v, ok
+	})
+
+	// Bound profile: servers.yaml (all) ∩ {a,b} → a,b only.
+	pol := ps.For("narrow")
+	if !pol.Allows("a") || !pol.Allows("b") || pol.Allows("c") {
+		t.Fatalf("narrow binding wrong: %+v", pol.Servers)
+	}
+	// Explicit empty binding → no servers.
+	if len(ps.For("empty").Servers) != 0 {
+		t.Fatal("empty binding should allow nothing")
+	}
+	// Unbound profile → servers.yaml as-is (all three).
+	if len(ps.For("other").Servers) != 3 {
+		t.Fatal("unbound profile should see all servers")
+	}
+
+	// A binding must not widen beyond servers.yaml: profile "y" is bound to a+b,
+	// but servers.yaml only grants "a" to profile "x".
+	servers2 := []ServerConfig{{ID: "a", Profiles: []string{"x"}}, {ID: "b"}}
+	ps2 := NewStaticPolicyStoreWithBinding(servers2, func(string) ([]string, bool) {
+		return []string{"a", "b"}, true
+	})
+	poly := ps2.For("y")
+	if poly.Allows("a") {
+		t.Fatal("binding must not widen beyond servers.yaml")
+	}
+	if !poly.Allows("b") {
+		t.Fatal("b (all-profiles + bound) should be allowed")
+	}
+}
+
+func TestGateway_PerToolFilter(t *testing.T) {
+	m := newMockMCP(t, false) // exposes echo, add
+	reg := newTestRegistry(t, ServerConfig{ID: "mock", Namespace: "mock", URL: m.srv.URL, ToolsAllow: []string{"echo"}}, nil)
+	g := New(Options{Resolver: stubResolver{Caller{VMID: "vm1", Profile: "leader"}}, Registry: reg})
+
+	// tools/list is filtered to the allow-list: only echo, not add.
+	list := doRPC(t, g, "tools/list", map[string]any{})
+	var lr toolsListResult
+	_ = json.Unmarshal(list.Result, &lr)
+	if len(lr.Tools) != 1 || lr.Tools[0].Name != "mock__echo" {
+		t.Fatalf("per-tool list = %+v (want only mock__echo)", lr.Tools)
+	}
+	// tools/call on the denied tool is rejected.
+	if call := doRPC(t, g, "tools/call", toolsCallParams{Name: "mock__add"}); call.Error == nil {
+		t.Fatal("expected add to be denied by tools_allow")
+	}
+	// tools/call on the allowed tool succeeds.
+	if call := doRPC(t, g, "tools/call", toolsCallParams{Name: "mock__echo", Arguments: json.RawMessage(`{}`)}); call.Error != nil {
+		t.Fatalf("echo should be allowed: %v", call.Error)
 	}
 }
