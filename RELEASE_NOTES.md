@@ -1,3 +1,29 @@
+# v0.6.2 — MCP Gateway: resources/prompts + granular policy
+
+**Ephemera** v0.6.2 rounds out the MCP Gateway on two fronts: it aggregates a **full MCP catalog** (`resources/*` and `prompts/*` from each backend, alongside tools), and it gains **finer-grained access control** — per-tool allow/deny within a server, and a per-profile server binding editable via the API. All host-side and additive. **No golden-image rebake** — the in-VM goose client auto-discovers the capabilities the gateway advertises; changes are confined to `internal/mcpgateway` + the daemon's config API (no `cmd/goose-agent` / `artifacts/*` changes).
+
+## What's New
+
+### resources & prompts behind the gateway
+
+- The gateway advertises the `resources` and `prompts` capabilities at initialize, and handles `resources/list` / `resources/read` / `prompts/list` / `prompts/get` by mirroring the existing tools path: **list** aggregates every backend the caller's profile may use (namespaced + sorted, one bad server skipped not fatal); **read/get** routes back to the owning backend, applies the per-server policy + rate limit, and relays the result verbatim.
+- **Namespacing:** prompt names are namespaced exactly like tool names (`server__prompt`); resource URIs are namespaced the same way (`server__<uri>`), so `resources/read` routes by the same `splitNamespaced` logic — the first separator splits the backend namespace from the backend's own URI, which may itself contain separators.
+- **Policy & rate limit:** unchanged and reused — a profile sees a backend's tools, resources, and prompts together, or none. `resources/read` and `prompts/get` also pass through the per-(VM, server) rate limiter (a shared budget with tool calls).
+- **Audit:** every gateway call now carries a `kind` (`tool` / `resource` / `prompt`) in `audit/mcp.jsonl`, so reads and prompt fetches are distinguishable from tool calls. The `ephemera_mcp_tool_calls_total{server,outcome}` metric is unchanged (it now counts all three kinds).
+
+### Backend interface
+
+`Backend` gains `ListResources` / `ReadResource` / `ListPrompts` / `GetPrompt`, implemented by `HTTPBackend` over the same lazy-init + JSON-RPC round-trip used for tools. The interface stays the fork seam for a future multi-host build.
+
+### Granular access control
+
+- **Per-tool allow/deny** — a backend in `servers.yaml` may set `tools_allow` (a whitelist: only these tools are exposed) or `tools_deny` (a blacklist; ignored when an allow-list is present). The filter applies to both `tools/list` and `tools/call`, after the existing per-server profile check. With neither key, every tool on an allowed server is exposed (unchanged).
+- **Per-profile server binding** — a new `GET/PUT /config/profiles/{name}/mcp` endpoint stores `EPHEMERA_MCP_SERVERS` in the profile's `goose.yaml` (the same line-preserving edit as `EPHEMERA_BUILTINS`). The gateway's PolicyStore **intersects** this binding with the `servers.yaml` `profiles:` allow-list, so a binding can only *narrow* a profile's access, never widen it. An unset binding leaves `servers.yaml` in charge; an explicit empty binding gives the profile no MCP servers. It is read per request, so edits take effect immediately; unknown server ids are rejected on write.
+
+> **No rebake:** changes are confined to `internal/mcpgateway` (types, backend, gateway handlers, policy) and the daemon's config API (`/config/profiles/{name}/mcp` + the `audit/mcp.jsonl` `kind` field). `cmd/goose-agent`, `scripts/build_image.sh`, and `artifacts/*` are untouched, so the golden image is unchanged. A backend that doesn't expose resources/prompts simply returns an empty list; the profile binding is host-side gateway policy.
+
+---
+
 # v0.6.1 — MCP Gateway Hardening & e2e Coverage
 
 **Ephemera** v0.6.1 makes the v0.6.0 MCP Gateway trustworthy: its normal path is now exercised end-to-end by `e2e_test.sh`, its source-IP caller identity is defended at L2 against spoofing, and a runaway caller can be throttled. All three additions are host-side. **No golden-image rebake** — the in-VM `goose-agent` and every `artifacts/*` / `scripts/build_image.sh` input are untouched; only `internal/network`, `internal/mcpgateway`, the daemon wiring, `e2e_test.sh`, and docs change.
