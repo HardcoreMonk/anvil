@@ -241,6 +241,7 @@ type ControlPlane struct {
 	// in which case VMs get no MCP extension and behavior is unchanged.
 	mcpGateway  *mcpgateway.Gateway
 	mcpRegistry *mcpgateway.Registry
+	mcpPolicy   mcpgateway.PolicyStore // binding-aware: servers.yaml ∩ per-profile EPHEMERA_MCP_SERVERS
 	mcpSrv      *http.Server
 	mcpEndpoint string // gateway URL injected into VMs, e.g. http://10.0.1.1:3001/mcp
 }
