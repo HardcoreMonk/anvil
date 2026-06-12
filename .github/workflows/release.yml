@@ -1,0 +1,47 @@
+name: Release
+
+# Publishes end-user release tarballs to a GitHub Release when a v* tag is pushed.
+# Run the e2e gate (sudo bash e2e_test.sh) BEFORE tagging — CI cannot (no /dev/kvm).
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write # create the release and upload assets
+
+jobs:
+  release:
+    # Build on the oldest supported host: ephemera-daemon links to this glibc, so
+    # building here keeps it runnable on Ubuntu 22.04 and newer.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # FULL variant bakes the golden image via debootstrap (no /dev/kvm needed —
+      # image build is debootstrap + chroot + loop mount, not VM boot).
+      - name: Install image-build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y debootstrap util-linux e2fsprogs
+
+      # The Web UI build output is committed (cmd/goose-daemon/uidist, go:embed),
+      # so no Node step is required. build_release.sh guards that it is present.
+      # FULL bakes the image, which needs root; -E + explicit PATH keeps the Go
+      # toolchain and module cache from the non-root setup-go step.
+      - name: Build release tarballs (FULL + SLIM)
+        run: sudo -E env "PATH=$PATH" bash scripts/build_release.sh "${GITHUB_REF_NAME}"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          generate_release_notes: true
+          fail_on_unmatched_files: true

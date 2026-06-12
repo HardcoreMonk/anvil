@@ -46,15 +46,32 @@
     }
   }
 
-  function resumeSession(s) {
-    // Continue a prior conversation: just point the agent at its session. The
-    // agent returns only the latest turn's reply (it slices goose's transcript to
-    // the last user message), so no client-side delta baseline is needed.
+  async function resumeSession(s) {
+    // Continue a prior conversation: point the agent at its session (it returns
+    // only the latest turn's reply going forward) and repaint the earlier turns
+    // from the agent's transcript endpoint (cache, or a cold-restart export
+    // fallback). Best-effort: on failure the chat still resumes, just without the
+    // prior turns shown.
     session = s.name
     selectedKey = s.name
     resumeTurns = s.turns || 0
     resuming = true
     messages = []
+    try {
+      const data = await apiJSON(
+        '/vms/' + encodeURIComponent(vmId) + '/sessions/' + encodeURIComponent(s.name) + '/transcript'
+      )
+      const turns = data && Array.isArray(data.turns) ? data.turns : []
+      if (turns.length) {
+        messages = turns.map((t) =>
+          t.role === 'user'
+            ? { role: 'user', text: t.text }
+            : { role: 'assistant', progress: [], output: t.text, error: '', done: true }
+        )
+      }
+    } catch (e) {
+      // transcript is best-effort; leave messages empty and let the chat continue
+    }
   }
 
   function onPickSession() {
@@ -156,7 +173,7 @@
     await loadSessions()
     // Newest-first: continue the latest conversation (seamless after a restore);
     // a freshly-spawned VM has none, so start a new one.
-    if (sessionList.length) resumeSession(sessionList[0])
+    if (sessionList.length) await resumeSession(sessionList[0])
     else newSession()
   })
   onDestroy(() => {

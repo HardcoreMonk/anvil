@@ -1,3 +1,33 @@
+# v0.7.0 — End-user installer + conversation transcript
+
+**Ephemera** v0.7.0 opens a v0.7 line on top of the single-host feature set with three things: a one-command **installer** for people who just want to run Ephemera (not build it), **conversation transcript restore** in the Web UI, and maintenance hardening from a full code review. Multi-host clustering remains out of scope for this repo (reserved for a downstream fork on the MCP gateway's swap-in interfaces).
+
+## What's New
+
+### End-user installer + release packaging
+
+- A release now ships prebuilt **tarballs** — no Go toolchain or source checkout needed. Two variants per release: **FULL** (`…-full.tar.gz`, bundles the golden VM image — first VM is instant) and **SLIM** (`…-slim.tar.gz`, small download — the image is built on first boot via debootstrap). This works because the daemon's self-bootstrap already skips `go build`/download/image-build when the prebuilt artifacts are present.
+- **`install.sh`** is interactive: it runs preflight checks (amd64, `/dev/kvm`, `iproute2`/`dmsetup`/`iptables`; plus the image-build tools for SLIM), installs into `/opt/ephemera`, prompts for the LLM provider + API key (writing `goose.yaml`/`goose-secrets.yaml` at `0600`), optionally mints an API token, and registers + starts a **systemd service** (`ephemera`). Re-running it upgrades binaries while preserving config; `--reconfigure` re-runs the provider prompt. **`uninstall.sh`** removes the service (keeps data) or `--purge`es everything.
+- **`scripts/build_release.sh`** builds both tarballs: host + in-VM binaries (the latter `CGO_ENABLED=0` static), kernel/firecracker downloaded against the **same pins parsed from `main.go`** (no desync), and for FULL it bakes + mtime-normalizes the golden image so the daemon treats it as up to date and never rebuilds on first boot.
+- **`.github/workflows/release.yml`** publishes the tarballs (+ `sha256`) to a GitHub Release on every `v*` tag, built on Ubuntu 22.04 (the glibc floor). See **`INSTALL.md`** for the full operator guide.
+- **Daemon change:** `EPHEMERA_HOME` now overrides the working directory (the systemd unit sets it), so the daemon is robust when launched from anywhere instead of depending on the process cwd.
+
+### Web UI: conversation transcript restore
+
+- Resuming a chat (reopening a VM, switching sessions, or after a reload) now **repaints the prior turns** instead of starting blank. `goose-agent` caches each session's full transcript per task turn and serves it at `GET /sessions/{name}/transcript` (proxied via `GET /vms/{id}/sessions/{name}/transcript`); on a cold-restart cache miss it falls back to a read-only `goose session export` dump — no model call. The conversation already continued correctly across turns; this restores the *visible* history to match.
+
+### Maintenance (from a full code review)
+
+- **Kernel download integrity:** `EnsureKernel` now verifies the kernel's SHA256 like `EnsureFirecracker` already did (the kernel is every guest's trust root) — closing an asymmetry where the kernel was fetched unverified.
+- **`waitForAgent` timeout:** the readiness poller now uses a per-probe HTTP timeout, so a guest that accepts the TCP connection but never answers can't block a probe indefinitely and starve the 60 s deadline loop.
+- A `docs/code-review-v0.6.4.md` report captures the full review (P0 none; remaining P2/P3 items are backlog).
+
+### Docs
+
+- README reorganized: a dedicated **Install (from a release)** section, the build-from-source flow relabeled, and **all mid-development version markers removed** so it reflects the current state rather than which version added what. The role/profile/sizing model was corrected (roles and profiles are independent; flock members spawn at the default sizing).
+
+---
+
 # v0.6.4 — MCP Gateway: stdio backends
 
 **Ephemera** v0.6.4 lets the MCP Gateway run a backend MCP server as a **local host subprocess**, not just call a remote HTTP one: `transport: stdio` + `command`/`args` in `servers.yaml`. The child speaks newline-delimited JSON-RPC over its stdin/stdout (the MCP stdio transport) and is treated as an untrusted workload — de-privileged, rlimited, crash-contained, and reaped on shutdown. The `Backend` interface (the multi-host fork seam) is unchanged; the gateway's protocol core, policy, rate limiting, and audit all apply to stdio backends as-is. **No golden-image rebake** — everything is host-side (`internal/mcpgateway` + daemon wiring + UI); `cmd/goose-agent`, `scripts/build_image.sh`, and `artifacts/*` are untouched.

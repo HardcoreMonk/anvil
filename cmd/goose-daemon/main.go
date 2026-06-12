@@ -51,9 +51,16 @@ func main() {
 		slog.Warn("api unauthenticated (no tokens configured)")
 	}
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		fatal("fatal: getwd", "err", err)
+	// Working directory: artifacts/, scripts/, configs/, snapshots/ etc. are all
+	// resolved relative to it. EPHEMERA_HOME pins it explicitly (set by the systemd
+	// unit and the installer) so the daemon is robust when launched from anywhere;
+	// absent, it falls back to the process working directory (the dev / repo flow).
+	cwd := strings.TrimSpace(os.Getenv("EPHEMERA_HOME"))
+	if cwd == "" {
+		var err error
+		if cwd, err = os.Getwd(); err != nil {
+			fatal("fatal: getwd", "err", err)
+		}
 	}
 
 	goldenImagePath := filepath.Join(cwd, "artifacts/golden-image.ext4")
@@ -72,6 +79,7 @@ func main() {
 
 	const (
 		kernelDownloadURL      = "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/x86_64/vmlinux-6.1.155"
+		kernelSHA256           = "e20e46d0c36c55c0d1014eb20576171b3f3d922260d9f792017aeff53af3d4f2"
 		firecrackerDownloadURL = "https://github.com/firecracker-microvm/firecracker/releases/download/v1.15.1/firecracker-v1.15.1-x86_64.tgz"
 		firecrackerSHA256      = "d4a32ab2322d887ca1bc4a4e7afa9cc35393e6362dfc2b3becb389d362e4275a"
 	)
@@ -95,7 +103,7 @@ func main() {
 	}
 
 	slog.Warn("ensuring kernel binary")
-	if err := storage.EnsureKernel(kernelPath, kernelDownloadURL); err != nil {
+	if err := storage.EnsureKernel(kernelPath, kernelDownloadURL, kernelSHA256); err != nil {
 		fatal("fatal: ensure kernel", "err", err)
 	}
 
