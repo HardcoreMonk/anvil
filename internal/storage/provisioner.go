@@ -505,8 +505,12 @@ func EnsureGooseAgent(binaryPath, projectRoot string) error {
 	return nil
 }
 
-// EnsureKernel downloads the Firecracker kernel binary to kernelPath if it does not exist.
-func EnsureKernel(kernelPath, downloadURL string) error {
+// EnsureKernel downloads the Firecracker kernel binary to kernelPath if it does
+// not exist, verifying its SHA256 against expectedSHA256. The kernel is the
+// trust root of every guest (booted via init=), so it gets the same integrity
+// pin as the Firecracker binary. An empty expectedSHA256 skips verification, so
+// callers without a pin (and existing tests) keep working.
+func EnsureKernel(kernelPath, downloadURL, expectedSHA256 string) error {
 	if _, err := os.Stat(kernelPath); err == nil {
 		slog.Warn("kernel found", "path", kernelPath)
 		return nil
@@ -533,7 +537,9 @@ func EnsureKernel(kernelPath, downloadURL string) error {
 		return fmt.Errorf("failed to create kernel file: %w", err)
 	}
 
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	// Stream to disk and compute SHA256 simultaneously (mirrors EnsureFirecracker).
+	h := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(f, h), resp.Body); err != nil {
 		f.Close()
 		os.Remove(kernelPath) // remove partial download
 		return fmt.Errorf("failed to write kernel: %w", err)
@@ -542,6 +548,13 @@ func EnsureKernel(kernelPath, downloadURL string) error {
 	if err := f.Close(); err != nil {
 		os.Remove(kernelPath)
 		return fmt.Errorf("failed to flush kernel file: %w", err)
+	}
+
+	if expectedSHA256 != "" {
+		if actual := hex.EncodeToString(h.Sum(nil)); !strings.EqualFold(actual, expectedSHA256) {
+			os.Remove(kernelPath)
+			return fmt.Errorf("kernel SHA256 mismatch: expected %s, got %s", expectedSHA256, actual)
+		}
 	}
 
 	slog.Warn("kernel downloaded", "path", kernelPath)

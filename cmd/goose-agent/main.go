@@ -54,6 +54,12 @@ type sessionInfo struct {
 	Title      string    `json:"title"`       // first user prompt, trimmed to a label
 	Turns      int       `json:"turns"`       // completed task turns on this session
 	LastOutput string    `json:"last_output"` // last cumulative goose output; lets the UI resume without re-dumping the transcript
+	// transcript caches the full conversation captured on the last task turn
+	// (goose --resume re-emits the whole transcript). Unexported so the /sessions
+	// list stays lightweight; GET /sessions/{name}/transcript serves it, falling
+	// back to `goose session export` on a cold-restart cache miss. A VM memory
+	// snapshot captures it, so a snapshot-restored VM keeps the rendered history.
+	transcript []TranscriptTurn
 }
 
 // sessions records goose chat sessions created on this VM so the second and later
@@ -354,6 +360,7 @@ func main() {
 	mux.HandleFunc("/stop", agentAuthMiddleware(token, handleStop))
 	mux.HandleFunc("/townwall/post", agentAuthMiddleware(token, handleTownWallPost))
 	mux.HandleFunc("/sessions", agentAuthMiddleware(token, handleSessions))
+	mux.HandleFunc("/sessions/", agentAuthMiddleware(token, handleSessionItem))
 	mux.HandleFunc("/health", handleHealth) // always unauthenticated
 
 	addr := agentListenAddr()
@@ -507,6 +514,50 @@ func handleSessions(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(list)
 }
 
+// handleSessionItem serves GET /sessions/{name}/transcript: the full conversation
+// for a resumed chat. It returns the transcript cached on the last task turn, or
+// falls back to `goose session export` (read-only, no model call) on a cold-restart
+// cache miss. On any failure it returns an empty transcript with 200 so the UI
+// degrades gracefully (the conversation still resumes; only prior turns are blank).
+func handleSessionItem(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET required", http.StatusMethodNotAllowed)
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/sessions/")
+	name, sub, _ := strings.Cut(rest, "/")
+	if name == "" || sub != "transcript" {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if !validSessionName(name) {
+		http.Error(w, "invalid session", http.StatusBadRequest)
+		return
+	}
+
+	sessionMu.Lock()
+	var turns []TranscriptTurn
+	if s, ok := sessions[name]; ok {
+		turns = s.transcript
+	}
+	sessionMu.Unlock()
+
+	if len(turns) == 0 {
+		// Cache miss (e.g. a cold restart cleared the in-memory session map): dump
+		// the conversation from goose's on-disk session store.
+		if exported, err := exportSessionTranscript(r.Context(), name); err != nil {
+			slog.Warn("session transcript export failed", "session", name, "err", err)
+		} else {
+			turns = exported
+		}
+	}
+	if turns == nil {
+		turns = []TranscriptTurn{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string][]TranscriptTurn{"turns": turns})
+}
+
 func handleTask(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
@@ -598,21 +649,26 @@ func handleTask(w http.ResponseWriter, r *http.Request) {
 	// Opt-in streaming: ?stream=1 streams NDJSON progress + a final result frame.
 	// The default path keeps the buffered {"output","error"} contract verbatim.
 	var res TaskResult
+	var transcript []TranscriptTurn
 	if r.URL.Query().Get("stream") == "1" {
-		res = runTaskStreaming(w, cmd)
+		res, transcript = runTaskStreaming(w, cmd)
 	} else {
-		res = runTaskBuffered(w, cmd)
+		res, transcript = runTaskBuffered(w, cmd)
 	}
 
 	// Record the turn so GET /sessions can list it and the Web UI can resume after
 	// a snapshot/restore. LastOutput seeds the UI's delta baseline so a resumed
-	// conversation doesn't re-dump the whole transcript on the first follow-up.
+	// conversation doesn't re-dump the whole transcript on the first follow-up;
+	// transcript caches the full conversation for GET /sessions/{name}/transcript.
 	if req.Session != "" {
 		sessionMu.Lock()
 		if s, ok := sessions[req.Session]; ok {
 			s.Turns++
 			if res.Output != "" {
 				s.LastOutput = res.Output
+			}
+			if len(transcript) > 0 {
+				s.transcript = transcript
 			}
 		}
 		sessionMu.Unlock()
@@ -621,12 +677,13 @@ func handleTask(w http.ResponseWriter, r *http.Request) {
 
 // runTaskBuffered runs goose to completion and returns the whole TaskResult as a
 // single JSON object — the original (pre-v0.4.4) behavior, unchanged.
-func runTaskBuffered(w http.ResponseWriter, cmd *exec.Cmd) TaskResult {
+func runTaskBuffered(w http.ResponseWriter, cmd *exec.Cmd) (TaskResult, []TranscriptTurn) {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	stdout, err := cmd.Output()
 
 	res := TaskResult{Output: extractGooseJSONText(stdout)}
+	transcript := extractGooseTranscript(stdout)
 	if res.Output == "" && len(stdout) > 0 {
 		// goose printed something that wasn't the expected JSON envelope (e.g.
 		// crashed before producing output). Surface the raw bytes so the
@@ -643,7 +700,7 @@ func runTaskBuffered(w http.ResponseWriter, cmd *exec.Cmd) TaskResult {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(res)
-	return res
+	return res, transcript
 }
 
 // streamFrame is one newline-delimited JSON frame emitted by runTaskStreaming.
@@ -665,7 +722,7 @@ type streamFrame struct {
 // connection. Because the 200 status is committed before goose runs, a goose
 // failure cannot be a 500 — the error rides in the result frame's error field,
 // so streaming clients MUST inspect result.error rather than the status code.
-func runTaskStreaming(w http.ResponseWriter, cmd *exec.Cmd) TaskResult {
+func runTaskStreaming(w http.ResponseWriter, cmd *exec.Cmd) (TaskResult, []TranscriptTurn) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		// No flushing available — fall back to the buffered contract.
@@ -702,7 +759,7 @@ func runTaskStreaming(w http.ResponseWriter, cmd *exec.Cmd) TaskResult {
 
 	if err := cmd.Start(); err != nil {
 		emit(streamFrame{Type: "result", Error: err.Error()})
-		return TaskResult{Error: err.Error()}
+		return TaskResult{Error: err.Error()}, nil
 	}
 
 	// Drain stderr line-by-line: relay each line as a progress frame and retain
@@ -747,6 +804,7 @@ func runTaskStreaming(w http.ResponseWriter, cmd *exec.Cmd) TaskResult {
 	waitErr := cmd.Wait()
 
 	res := TaskResult{Output: extractGooseJSONText(stdout)}
+	transcript := extractGooseTranscript(stdout)
 	if res.Output == "" && len(stdout) > 0 {
 		res.Output = string(stdout)
 	}
@@ -761,7 +819,7 @@ func runTaskStreaming(w http.ResponseWriter, cmd *exec.Cmd) TaskResult {
 		}
 	}
 	emit(streamFrame{Type: "result", Output: res.Output, Error: res.Error})
-	return res
+	return res, transcript
 }
 
 // extractGooseJSONText parses the envelope produced by `goose run --output-format json`
@@ -824,6 +882,93 @@ func extractGooseJSONText(stdout []byte) string {
 		}
 	}
 	return sb.String()
+}
+
+// TranscriptTurn is one user or assistant turn of a session conversation, for the
+// Web UI to repaint a resumed chat. Tool/thinking blocks are dropped; only text is kept.
+type TranscriptTurn struct {
+	Role string `json:"role"` // "user" | "assistant"
+	Text string `json:"text"`
+}
+
+// extractGooseTranscript parses goose's `--output-format json` envelope (the same
+// shape extractGooseJSONText reads) into the FULL ordered list of user/assistant
+// turns. goose --resume re-emits the whole transcript on every turn, so the latest
+// run's stdout already holds the complete conversation. User text is cleaned of the
+// agent-injected prefixes (system-prompt frame, /nothink) so the UI shows the
+// original prompt. Returns nil when stdout is not the expected envelope shape.
+func extractGooseTranscript(stdout []byte) []TranscriptTurn {
+	var env struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"messages"`
+	}
+	start := bytes.IndexByte(stdout, '{')
+	end := bytes.LastIndexByte(stdout, '}')
+	if start < 0 || end < start {
+		return nil
+	}
+	if err := json.Unmarshal(stdout[start:end+1], &env); err != nil {
+		return nil
+	}
+	var turns []TranscriptTurn
+	for _, m := range env.Messages {
+		if m.Role != "user" && m.Role != "assistant" {
+			continue
+		}
+		var sb strings.Builder
+		for _, c := range m.Content {
+			if c.Type != "text" || c.Text == "" {
+				continue
+			}
+			if sb.Len() > 0 {
+				sb.WriteByte('\n')
+			}
+			sb.WriteString(c.Text)
+		}
+		text := sb.String()
+		if m.Role == "user" {
+			text = cleanUserPrompt(text)
+		}
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+		turns = append(turns, TranscriptTurn{Role: m.Role, Text: text})
+	}
+	return turns
+}
+
+// cleanUserPrompt strips the prefixes goose-agent prepends to a user prompt
+// (the "[SYSTEM INSTRUCTIONS]…[USER TASK]\n" frame from a role system.md, and the
+// "/nothink\n" directive for qwen models), so a restored transcript shows what the
+// user actually typed — mirroring handleTask's finalPrompt construction.
+func cleanUserPrompt(text string) string {
+	if i := strings.Index(text, "[USER TASK]\n"); i >= 0 {
+		return text[i+len("[USER TASK]\n"):]
+	}
+	return strings.TrimPrefix(text, "/nothink\n")
+}
+
+// exportSessionTranscript is the cache-miss fallback for GET /sessions/{name}/transcript
+// (e.g. after a cold restart cleared the in-memory session map). `goose session export`
+// is a read-only dump of the on-disk session that does NOT invoke the model. The JSON
+// format is parsed with the same envelope reader; if goose wraps it differently the
+// reader returns nil and the caller degrades to an empty transcript.
+func exportSessionTranscript(ctx context.Context, name string) ([]TranscriptTurn, error) {
+	cmd := exec.CommandContext(ctx, "/usr/local/bin/goose", "session", "export", "-n", name, "--format", "json")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("goose session export %q: %w", name, err)
+	}
+	turns := extractGooseTranscript(out)
+	if turns == nil {
+		return nil, fmt.Errorf("session export %q: unrecognized format", name)
+	}
+	return turns, nil
 }
 
 // TownWallPostBody is the JSON body accepted by /townwall/post inside the VM.
