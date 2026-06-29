@@ -726,6 +726,40 @@ func TestGenerateAgentToken_Uniqueness(t *testing.T) {
 	}
 }
 
+func TestWaitForAgentTimesOutHungHealthProbe(t *testing.T) {
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(3 * time.Second):
+			w.WriteHeader(http.StatusOK)
+		case <-r.Context().Done():
+		}
+	}))
+	defer agent.Close()
+
+	host, portText, err := net.SplitHostPort(strings.TrimPrefix(agent.URL, "http://"))
+	if err != nil {
+		t.Fatalf("split agent URL: %v", err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatalf("parse agent port: %v", err)
+	}
+	oldAgentPort := agentPort
+	agentPort = port
+	defer func() { agentPort = oldAgentPort }()
+
+	start := time.Now()
+	err = waitForAgent(host, 500*time.Millisecond)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("waitForAgent returned nil error for a hung health probe")
+	}
+	if elapsed > 2800*time.Millisecond {
+		t.Fatalf("waitForAgent elapsed = %v, want bounded by per-probe timeout", elapsed)
+	}
+}
+
 func TestHandleVMWorkspaceProxiesQueryAuthAndBody(t *testing.T) {
 	var gotBody string
 	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

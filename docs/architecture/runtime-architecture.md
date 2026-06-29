@@ -58,6 +58,11 @@ control plane은 host 쪽의 단일 런타임 조정자다. VM lifecycle, networ
 allocation, disk preparation, snapshot metadata, snapshot restore, guest
 agent proxy를 모두 소유한다.
 
+daemon은 기본적으로 process current working directory를 runtime work directory로
+사용한다. `EPHEMERA_HOME`이 설정되면 이 값을 기준으로 `artifacts/`, `configs/`,
+`snapshots/` 경로를 해석하므로 systemd 같은 supervisor에서 시작 directory에
+의존하지 않는다.
+
 ## 구성 요소 책임
 
 | 구성 요소 | 파일 | 책임 |
@@ -65,7 +70,7 @@ agent proxy를 모두 소유한다.
 | Control plane daemon | `cmd/goose-daemon/main.go`, `cmd/goose-daemon/api.go`, `cmd/goose-daemon/config.go`, `cmd/goose-daemon/metrics_handler.go`, `cmd/goose-daemon/stats_handler.go`, `cmd/goose-daemon/orchestrator_api.go` | host artifact bootstrap, HTTP API 시작, client 인증, 실행 중인 VM 관리와 cold-restart, agent proxy, snapshot 생성/복원/삭제, metrics/stats, Goosetown flock/Town Wall API, flock watchdog 시작/중지 |
 | Runtime scheduler service | `cmd/anvil-scheduler/main.go`, `internal/anvilmcp/scheduler_service.go` | host inventory, quota store, placement/snapshot locality state를 기준으로 runtime host schedule decision 반환 |
 | Goosetown orchestrator | `internal/orchestrator/` | flock registry, agent 상태 snapshot, Town Wall append-only log와 SSE subscriber 관리, flock metadata persistence, health watchdog |
-| Storage provisioner | `internal/storage/provisioner.go` | golden image build/검증, stale input 감지, VM별 disk clone, Goose config/secrets 주입, VM별 agent token 작성, timezone data 주입 |
+| Storage provisioner | `internal/storage/provisioner.go` | golden image build/검증, Firecracker/kernel artifact SHA256 검증, stale input 감지, VM별 disk clone, Goose config/secrets 주입, VM별 agent token 작성, timezone data 주입 |
 | Snapshot storage | `internal/storage/snapshot.go` | snapshot metadata 저장, rootfs copy, COW restore device 생성/해제, diff memory snapshot merge |
 | VM wrapper | `internal/vm/machine.go` | Firecracker config 구성, cold VM 시작, snapshot state restore, vsock 기반 guest IP 재설정 |
 | Network manager | `internal/network/manager.go` | `goose-br0` 생성, `10.0.1.0/24` 관리, guest IP/TAP 할당과 재사용, NAT 설정 |

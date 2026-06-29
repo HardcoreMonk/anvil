@@ -1,9 +1,14 @@
 package storage
 
 import (
+	"crypto/sha256"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -152,6 +157,47 @@ func TestPathsNewerThan(t *testing.T) {
 				t.Errorf("pathsNewerThan(%v, %v) = %v, want %v", tc.ref, tc.paths, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestEnsureKernelRejectsSHA256Mismatch(t *testing.T) {
+	body := []byte("not the expected kernel")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+
+	kernelPath := filepath.Join(t.TempDir(), "vmlinux.bin")
+	err := EnsureKernel(kernelPath, server.URL, strings.Repeat("0", 64))
+	if err == nil {
+		t.Fatal("EnsureKernel returned nil error for SHA256 mismatch")
+	}
+	if !strings.Contains(err.Error(), "kernel SHA256 mismatch") {
+		t.Fatalf("EnsureKernel error = %q, want SHA256 mismatch", err)
+	}
+	if _, statErr := os.Stat(kernelPath); !os.IsNotExist(statErr) {
+		t.Fatalf("kernel file stat after mismatch = %v, want not exist", statErr)
+	}
+}
+
+func TestEnsureKernelWritesFileAfterSHA256Match(t *testing.T) {
+	body := []byte("expected kernel")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+
+	sum := sha256.Sum256(body)
+	kernelPath := filepath.Join(t.TempDir(), "vmlinux.bin")
+	if err := EnsureKernel(kernelPath, server.URL, fmt.Sprintf("%x", sum)); err != nil {
+		t.Fatalf("EnsureKernel: %v", err)
+	}
+	got, err := os.ReadFile(kernelPath)
+	if err != nil {
+		t.Fatalf("read kernel: %v", err)
+	}
+	if string(got) != string(body) {
+		t.Fatalf("kernel content = %q, want %q", got, body)
 	}
 }
 

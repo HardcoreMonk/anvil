@@ -8,7 +8,7 @@
 - 0.1.0 기준 커밋: `157753fb5234679ca7cbebb6658e431c6a748ef6`
 - 0.2.0 기준 커밋: `abcaa86`
 - anvil 현재 sync branch runtime baseline: upstream ephemera `v0.3.6` 병합분
-- 다음 upstream 후보: ephemera `v0.4.0` PR-A storage/recovery 변경
+- 다음 upstream 후보: ephemera `v0.4.0`-`v0.4.5` runtime 안정화 변경
 
 ## 0.1.0 문서
 
@@ -39,6 +39,16 @@
 - `09-v0.3.6-upstream-change-review.md`: upstream ephemera `v0.3.6` webdev demo,
   `gtcall`, `gtwall`, Goose JSON output 변경의 anvil 채택 검토 포인트
 
+## 0.4.x upstream 검토 문서
+
+0.4.x 문서는 아직 anvil baseline으로 병합되지 않은 ephemera runtime 안정화 후보를
+분류한다. 분류는 pre-sync adoption review이며, 실제 채택은 `sync/ephemera-*`
+브랜치의 merge commit과 KVM 검증 뒤 확정한다.
+
+- `10-v0.4.0-v0.4.5-runtime-stabilization-adoption.md`: upstream ephemera
+  `v0.4.0`-`v0.4.5` storage/recovery, auth/audit, COW default, flock lifecycle,
+  streaming task, restored VM recovery 변경의 anvil 예비 분류
+
 ## 권장 읽기 순서
 
 1. `04-v0.2.0-diff-from-v0.1.0.md`
@@ -47,6 +57,7 @@
 4. `05-source-line-analysis-v0.2.0.md`
 5. upstream sync 검토가 목적이면
    `08-v0.3.2-v0.3.3-upstream-change-review.md`와
-   `09-v0.3.6-upstream-change-review.md`
+   `09-v0.3.6-upstream-change-review.md`,
+   `10-v0.4.0-v0.4.5-runtime-stabilization-adoption.md`
 
 빠른 의사결정이 목적이면 4번 비교 문서와 7번 비기술 보고서를 먼저 보면 된다. 구현에 투입될 개발자는 6번 보고서를 읽은 뒤 5번 소스 분석으로 들어가는 편이 좋다.

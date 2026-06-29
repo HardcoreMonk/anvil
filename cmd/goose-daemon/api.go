@@ -1241,9 +1241,14 @@ func (cp *ControlPlane) DestroyAll() {
 
 func waitForAgent(guestIP string, timeout time.Duration) error {
 	url := fmt.Sprintf("http://%s:%d/health", guestIP, agentPort)
+	probeTimeout := 2 * time.Second
+	if timeout > 0 && timeout < probeTimeout {
+		probeTimeout = timeout
+	}
+	client := &http.Client{Timeout: probeTimeout}
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(url)
+		resp, err := client.Get(url)
 		if err == nil && resp.StatusCode == http.StatusOK {
 			resp.Body.Close()
 			return nil

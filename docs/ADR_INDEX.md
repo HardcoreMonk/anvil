@@ -1,7 +1,7 @@
 # ADR 적용 상태 인덱스
 
 > **대상:** anvil downstream repository
-> **현행화 기준:** 2026-05-26
+> **현행화 기준:** 2026-06-09
 > **목적:** anvil에서 장기 유지할 설계 결정과 upstream ephemera 변경 채택 상태를 추적한다.
 
 ---
@@ -61,7 +61,25 @@
 
 ---
 
-## 5. 새 ADR 작성 기준
+## 5. 다음 upstream sync 후보 예비 분류
+
+다음 upstream tag는 아직 anvil runtime baseline으로 병합되지 않았다. 예비 분류와
+검토 근거는
+[`docs/analysis/10-v0.4.0-v0.4.5-runtime-stabilization-adoption.md`](analysis/10-v0.4.0-v0.4.5-runtime-stabilization-adoption.md)에
+기록한다.
+
+| upstream tag | 예비 상태 | 적용 전 검토 요약 |
+|---|---|---|
+| `v0.4.0` | adapted | storage/recovery core는 채택 후보지만 rootfs diff snapshot, COW recovery, auto-snapshot을 anvil snapshot replication/GC와 맞춰야 한다. |
+| `v0.4.1` | adapted | client identity, daemon access audit, token TTL은 채택 후보다. `ephemera-ctl`은 runtime operator CLI로 유지하고 anvil MCP public surface로 승격하지 않는다. |
+| `v0.4.2` | adapted/deferred | COW probe/fallback과 COW+Diff support는 채택 후보지만 default `EPHEMERA_DISK_MODE=cow` 전환은 KVM burn-in 뒤 결정한다. |
+| `v0.4.3` | adapted | single-host flock lifecycle은 채택 후보지만 routed members-only cross-host flock에는 그대로 적용하지 않는다. |
+| `v0.4.4` | adapted/deferred | streaming task, watchdog status, depth guard는 채택 후보다. flock broadcast의 MCP public exposure는 tenant/rate/audit 설계 전까지 deferred다. |
+| `v0.4.5` | adapted | snapshot-restored VM auto-recovery는 채택 후보지만 live restored VM의 source snapshot dependency를 GC가 보호해야 한다. |
+
+---
+
+## 6. 새 ADR 작성 기준
 
 다음 조건 중 하나에 해당하면 새 ADR을 추가한다.
 

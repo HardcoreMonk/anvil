@@ -124,6 +124,7 @@ upstream `main`은 이미 `v0.4.0` PR-A까지 진행되어 있으므로 다음 s
   `ANVIL_API_PORT`
 - guest agent port canonical 환경 변수: `EPHEMERA_AGENT_PORT`
 - guest agent port alias 환경 변수: `ANVIL_AGENT_PORT`
+- daemon work directory canonical 환경 변수: `EPHEMERA_HOME`
 - MCP adapter daemon URL 환경 변수: `ANVIL_DAEMON_URL`
 - MCP adapter token 환경 변수: `ANVIL_API_TOKEN`
 - MCP adapter tenant 기본값 환경 변수: `ANVIL_MCP_TENANT_ID`
@@ -186,14 +187,18 @@ daemon으로 보내는 outbound Bearer token이다.
   `gtwall`, Goose JSON output parsing은 `adapted` runtime baseline으로 채택한다.
   `gtcall`은 peer agent credential을 노출하지 않고 control-plane proxy token
   injection 경계를 유지한다.
+- upstream `v0.4.0`-`v0.4.5` runtime 안정화 변경은 pre-sync adoption review로
+  예비 분류했다. storage/recovery, auth/audit, COW, flock lifecycle, streaming task,
+  restored VM recovery는 대체로 `adapted` 후보지만 default COW 전환, auto-snapshot
+  public support, broadcast MCP 노출은 별도 검증/설계 전까지 deferred로 둔다.
 - `scripts/anvil-mcp-e2e.sh flock`, 전체 KVM `sudo bash e2e_test.sh`, script-only
   workload runner E2E가 Goosetown MCP surface, daemon flock lifecycle,
   deterministic workload 검증 경로에 포함된다.
 
 남은 후속 후보:
 
-- upstream ephemera `v0.4.0` PR-A storage/recovery 변경의 sync branch 작성과
-  anvil 보안/운영 정책에 맞춘 `adopted`/`adapted`/`deferred` 분류
+- upstream ephemera `v0.4.0`-`v0.4.5` runtime 안정화 변경의 sync branch 작성,
+  충돌 해결, KVM 검증, 문서 반영
 - scheduler service의 실제 운영 배포와 host inventory polling daemonization
 - snapshot locality의 cross-host snapshot replication
 - scheduler-aware cross-host flock placement

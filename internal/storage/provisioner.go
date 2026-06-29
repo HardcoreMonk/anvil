@@ -621,8 +621,9 @@ func EnsureGooseAgent(binaryPath, projectRoot string) error {
 	return nil
 }
 
-// EnsureKernel downloads the Firecracker kernel binary to kernelPath if it does not exist.
-func EnsureKernel(kernelPath, downloadURL string) error {
+// EnsureKernel downloads the Firecracker kernel binary to kernelPath if it does
+// not exist and verifies the downloaded bytes against expectedSHA256.
+func EnsureKernel(kernelPath, downloadURL, expectedSHA256 string) error {
 	if _, err := os.Stat(kernelPath); err == nil {
 		slog.Warn("kernel found", "path", kernelPath)
 		return nil
@@ -644,20 +645,29 @@ func EnsureKernel(kernelPath, downloadURL string) error {
 		return fmt.Errorf("kernel download returned HTTP %s", resp.Status)
 	}
 
-	f, err := os.Create(kernelPath)
+	tmp, err := os.CreateTemp(filepath.Dir(kernelPath), ".vmlinux-*.tmp")
 	if err != nil {
-		return fmt.Errorf("failed to create kernel file: %w", err)
+		return fmt.Errorf("failed to create temporary kernel file: %w", err)
 	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
 
-	if _, err := io.Copy(f, resp.Body); err != nil {
-		f.Close()
-		os.Remove(kernelPath) // remove partial download
+	h := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(tmp, h), resp.Body); err != nil {
+		tmp.Close()
 		return fmt.Errorf("failed to write kernel: %w", err)
 	}
 
-	if err := f.Close(); err != nil {
-		os.Remove(kernelPath)
+	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("failed to flush kernel file: %w", err)
+	}
+
+	if actual := hex.EncodeToString(h.Sum(nil)); !strings.EqualFold(actual, expectedSHA256) {
+		return fmt.Errorf("kernel SHA256 mismatch: expected %s, got %s", expectedSHA256, actual)
+	}
+
+	if err := os.Rename(tmpPath, kernelPath); err != nil {
+		return fmt.Errorf("failed to install kernel file: %w", err)
 	}
 
 	slog.Warn("kernel downloaded", "path", kernelPath)

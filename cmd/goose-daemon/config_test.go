@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
 
 var daemonConfigEnvKeys = []string{
 	"EPHEMERA_API_ADDR",
@@ -15,6 +18,7 @@ var daemonConfigEnvKeys = []string{
 	"ANVIL_AGENT_PORT",
 	"EPHEMERA_PUBLIC_URL",
 	"ANVIL_PUBLIC_URL",
+	"EPHEMERA_HOME",
 }
 
 func clearDaemonConfigEnv(t *testing.T) {
@@ -87,6 +91,36 @@ func TestResolveAPIAddr_Default(t *testing.T) {
 
 	if got := resolveAPIAddr(); got != "127.0.0.1:3000" {
 		t.Errorf("expected 127.0.0.1:3000, got %q", got)
+	}
+}
+
+func TestResolveWorkDirDefaultsToCurrentDirectory(t *testing.T) {
+	clearDaemonConfigEnv(t)
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+
+	got, err := resolveWorkDir()
+	if err != nil {
+		t.Fatalf("resolveWorkDir: %v", err)
+	}
+	if got != cwd {
+		t.Fatalf("resolveWorkDir = %q, want cwd %q", got, cwd)
+	}
+}
+
+func TestResolveWorkDirUsesEphemeraHome(t *testing.T) {
+	clearDaemonConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("EPHEMERA_HOME", "  "+home+"  ")
+
+	got, err := resolveWorkDir()
+	if err != nil {
+		t.Fatalf("resolveWorkDir: %v", err)
+	}
+	if got != home {
+		t.Fatalf("resolveWorkDir = %q, want EPHEMERA_HOME %q", got, home)
 	}
 }
 

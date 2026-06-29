@@ -1044,6 +1044,11 @@ curl 'http://192.168.3.73:8787/api/recording?id=full-kvm-e2e'
   - 외부에서 접근 가능한 control plane base URL이다.
   - 설정 시 `agent_url`이 proxy path가 된다.
 
+- `EPHEMERA_HOME`
+  - 기본값: process current working directory
+  - daemon이 `artifacts/`, `configs/`, `snapshots/` 같은 runtime path를 해석할
+    기준 directory다.
+
 - `EPHEMERA_DISK_MODE`
   - 기본값: unset
   - `cow`로 설정하면 새 VM 생성 시 golden image full copy 대신 dm-snapshot 기반
@@ -1079,6 +1084,7 @@ control plane으로 전달할 때 Bearer token으로 첨부한다.
 | `EPHEMERA_API_TOKEN` | *(unset)* | Single Bearer token (backward-compatible fallback). |
 | `EPHEMERA_AGENT_PORT` | `8080` | Port goose-agent listens on inside each VM. |
 | `EPHEMERA_PUBLIC_URL` | *(unset)* | Externally-reachable base URL of the control plane (no trailing slash). When set, `agent_url` in VM responses uses the proxy path `{EPHEMERA_PUBLIC_URL}/vms/{vm_id}` instead of the VM's private IP. Example: `https://api.example.com`. |
+| `EPHEMERA_HOME` | current working directory | Work directory used to resolve `artifacts/`, `configs/`, `snapshots/`, and other daemon-local paths. Useful when launching from systemd or another supervisor. |
 | `EPHEMERA_DISK_MODE` | *(unset)* | Set to `cow` to provision spawn disks as a dm-snapshot view of the golden image (~0 MiB initial usage) instead of a 700 MiB full copy. Default behavior is preserved when unset. |
 | `EPHEMERA_WATCHDOG_INTERVAL_SEC` | `5` | Watchdog poll cadence (v0.3.4). |
 | `EPHEMERA_WATCHDOG_TIMEOUT_SEC` | `1` | Watchdog per-probe HTTP timeout (v0.3.4). Clamped: `interval` is bumped up to `timeout` if smaller. |

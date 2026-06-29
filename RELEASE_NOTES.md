@@ -30,6 +30,16 @@
 - routed members-only flock delete는 downstream registry의 member VM placement를 따라
   host별 daemon delete를 호출하고, 일부 cleanup 실패 시 성공한 VM placement만 제거한
   뒤 `failed_cleanup_pending` 상태를 남겨 수동 확인이 가능하게 한다.
+- upstream ephemera `v0.7.0`의 운영 hardening 중 전체 baseline sync와 독립적인
+  항목을 선별 backport한다.
+  - kernel download는 Firecracker binary와 같이 pinned SHA256을 검증한 뒤
+    `artifacts/vmlinux.bin`에 publish한다. mismatch나 write 실패 시 partial kernel
+    file을 남기지 않는다.
+  - `waitForAgent`는 per-probe HTTP timeout을 사용해 guest가 TCP connection을
+    열고도 `/health` 응답을 돌려주지 않는 경우 전체 readiness loop가 묶이지 않게
+    한다.
+  - `EPHEMERA_HOME`으로 daemon work directory를 명시할 수 있다. unset이면 기존처럼
+    process current working directory를 사용한다.
 
 ## 검증 예정
 
@@ -37,6 +47,8 @@
 - `go test ./cmd/anvil-scheduler -count=1`
 - `go test ./cmd/anvil-mcp -count=1`
 - `go test ./scripts -count=1`
+- `go test ./internal/storage -run 'TestEnsureKernel' -count=1`
+- `go test ./cmd/goose-daemon -run 'TestWaitForAgentTimesOutHungHealthProbe|TestResolveWorkDir' -count=1`
 - `go test ./... -count=1`
 - `go build ./cmd/anvil-scheduler`
 - `go build ./cmd/anvil-mcp`

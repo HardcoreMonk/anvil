@@ -80,6 +80,7 @@ Canonical-only upstream runtime 설정:
 | 변수 | 의미 |
 |---|---|
 | `EPHEMERA_API_TOKENS_FILE` | `name:token` entry file. 파일 source는 SIGHUP 때 다시 읽히므로 hot rotation의 권장 경로 |
+| `EPHEMERA_HOME` | daemon work directory. `artifacts/`, `configs/`, `snapshots/` 같은 runtime path의 기준 directory |
 | `EPHEMERA_WATCHDOG_INTERVAL_SEC` | watchdog poll cadence, 기본 `5` |
 | `EPHEMERA_WATCHDOG_TIMEOUT_SEC` | watchdog per-probe HTTP timeout, 기본 `1` |
 | `EPHEMERA_WATCHDOG_THRESHOLD` | dead marking 전 연속 실패 횟수, 기본 `3` |
