@@ -325,7 +325,7 @@ type ControlPlane struct {
 	audit *auditLogger
 
 	// useCOW selects the spawn disk strategy (COW dm-snapshot view vs full byte
-	// copy), resolved once at startup (default COW, plain fallback). See resolveDiskModeCOW.
+	// copy), resolved once at startup. anvil defaults to plain; see resolveDiskModeCOW.
 	useCOW bool
 
 	stopCh chan struct{}
