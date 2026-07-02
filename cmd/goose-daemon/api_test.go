@@ -292,6 +292,77 @@ func TestCommandEgressEnforcerAllowAllIsNoop(t *testing.T) {
 	}
 }
 
+func TestCommandEgressEnforcerProfileApplyFailureRollsBackAppliedRules(t *testing.T) {
+	profileDir := t.TempDir()
+	writeEgressProfileFixture(t, profileDir, "restricted")
+
+	var commands [][]string
+	enforcer := &commandEgressEnforcer{
+		profileDir: profileDir,
+		run: func(name string, args ...string) error {
+			command := append([]string{name}, args...)
+			commands = append(commands, command)
+			if len(commands) == 2 {
+				return errors.New("second insert failed")
+			}
+			return nil
+		},
+	}
+
+	err := enforcer.ApplyWithProfile("vm-1", "tap-vm-1", "10.0.1.10", "profile", "restricted")
+	if err == nil {
+		t.Fatal("ApplyWithProfile returned nil error, want command failure")
+	}
+	if !strings.Contains(err.Error(), "second insert failed") {
+		t.Fatalf("error = %v, want apply failure detail", err)
+	}
+	want := [][]string{
+		{"iptables", "-I", "FORWARD", "-s", "10.0.1.10", "-j", "REJECT", "-m", "comment", "--comment", "anvil-egress-vm-1-default"},
+		{"iptables", "-I", "FORWARD", "-s", "10.0.1.10", "-d", "203.0.113.10/32", "-j", "ACCEPT", "-m", "comment", "--comment", "anvil-egress-vm-1-cidr-0"},
+		{"iptables", "-D", "FORWARD", "-s", "10.0.1.10", "-j", "REJECT", "-m", "comment", "--comment", "anvil-egress-vm-1-default"},
+	}
+	if len(commands) != len(want) {
+		t.Fatalf("commands = %#v, want %#v", commands, want)
+	}
+	for i := range want {
+		if strings.Join(commands[i], " ") != strings.Join(want[i], " ") {
+			t.Fatalf("command[%d] = %#v, want %#v", i, commands[i], want[i])
+		}
+	}
+	if _, ok := enforcer.rules["vm-1"]; ok {
+		t.Fatalf("partial failed apply left egress rule state: %+v", enforcer.rules["vm-1"])
+	}
+}
+
+func TestCommandEgressEnforcerProfileApplyFailureReportsCleanupFailure(t *testing.T) {
+	profileDir := t.TempDir()
+	writeEgressProfileFixture(t, profileDir, "restricted")
+
+	enforcer := &commandEgressEnforcer{
+		profileDir: profileDir,
+		run: func(name string, args ...string) error {
+			if len(args) > 0 && args[0] == "-D" {
+				return errors.New("cleanup failed")
+			}
+			if len(args) > 0 && args[0] == "-I" && strings.Contains(strings.Join(args, " "), "cidr-0") {
+				return errors.New("insert failed")
+			}
+			return nil
+		},
+	}
+
+	err := enforcer.ApplyWithProfile("vm-1", "tap-vm-1", "10.0.1.10", "profile", "restricted")
+	if err == nil {
+		t.Fatal("ApplyWithProfile returned nil error, want apply and cleanup failure")
+	}
+	if !strings.Contains(err.Error(), "insert failed") || !strings.Contains(err.Error(), "cleanup failed") {
+		t.Fatalf("error = %v, want both apply and cleanup failure details", err)
+	}
+	if _, ok := enforcer.rules["vm-1"]; ok {
+		t.Fatalf("partial failed apply left egress rule state: %+v", enforcer.rules["vm-1"])
+	}
+}
+
 func TestSpawnVMRollbackCleansEgressAndReleasesNetworkOnce(t *testing.T) {
 	cp := newTestCP(t)
 	workspace := t.TempDir()
@@ -677,6 +748,17 @@ func (e *recordingEgressEnforcer) Cleanup(vmID string) error {
 		*e.shared = append(*e.shared, event)
 	}
 	return nil
+}
+
+func writeEgressProfileFixture(t *testing.T, baseDir, profileName string) {
+	t.Helper()
+	profileDir := filepath.Join(baseDir, profileName)
+	if err := os.MkdirAll(profileDir, 0700); err != nil {
+		t.Fatalf("mkdir egress profile dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(profileDir, "egress.json"), []byte(`{"allow_cidrs":["203.0.113.10/32"]}`), 0600); err != nil {
+		t.Fatalf("write egress profile: %v", err)
+	}
 }
 
 func decodeGCResponse(t *testing.T, rr *httptest.ResponseRecorder) SnapshotGCResponse {

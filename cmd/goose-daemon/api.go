@@ -1458,10 +1458,16 @@ func (e *commandEgressEnforcer) ApplyWithProfile(vmID, tapDevice, guestIP, polic
 			Args: []string{"-I", "FORWARD", "-s", guestIP, "-j", "REJECT", "-m", "comment", "--comment", comment},
 		}}
 	}
+	var applied []egressCommand
 	for _, command := range commands {
 		if err := e.command(command.Name, command.Args...); err != nil {
-			return fmt.Errorf("apply egress policy: %w", err)
+			applyErr := fmt.Errorf("apply egress policy: %w", err)
+			if cleanupErr := e.cleanupEgressCommands(applied); cleanupErr != nil {
+				return errors.Join(applyErr, fmt.Errorf("rollback egress policy: %w", cleanupErr))
+			}
+			return applyErr
 		}
+		applied = append(applied, command)
 	}
 	e.mu.Lock()
 	if e.rules == nil {
@@ -1483,11 +1489,19 @@ func (e *commandEgressEnforcer) Cleanup(vmID string) error {
 		return nil
 	}
 	commands := append([]egressCommand(nil), rule.Commands...)
-	for left, right := 0, len(commands)-1; left < right; left, right = left+1, right-1 {
-		commands[left], commands[right] = commands[right], commands[left]
-	}
 	if len(commands) == 0 {
 		commands = []egressCommand{{Name: "iptables", Args: []string{"-I", "FORWARD", "-s", rule.GuestIP, "-j", "REJECT", "-m", "comment", "--comment", rule.Comment}}}
+	}
+	if err := e.cleanupEgressCommands(commands); err != nil {
+		return fmt.Errorf("cleanup egress policy: %w", err)
+	}
+	return nil
+}
+
+func (e *commandEgressEnforcer) cleanupEgressCommands(commands []egressCommand) error {
+	commands = append([]egressCommand(nil), commands...)
+	for left, right := 0, len(commands)-1; left < right; left, right = left+1, right-1 {
+		commands[left], commands[right] = commands[right], commands[left]
 	}
 	for _, command := range commands {
 		args := append([]string(nil), command.Args...)
@@ -1495,7 +1509,7 @@ func (e *commandEgressEnforcer) Cleanup(vmID string) error {
 			args[0] = "-D"
 		}
 		if err := e.command(command.Name, args...); err != nil {
-			return fmt.Errorf("cleanup egress policy: %w", err)
+			return fmt.Errorf("delete egress command: %w", err)
 		}
 	}
 	return nil
