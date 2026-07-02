@@ -714,7 +714,7 @@ COW_FINAL_SNAP=$(curl -s "$API/snapshots" | jq 'length')
 # extra_env is intentionally unquoted on the env line so "KEY=VAL" word-splits.
 relaunch_daemon() {
     local extra_env="$1"
-    env EPHEMERA_API_ADDR=0.0.0.0:3000 $extra_env ./ephemera-daemon >>"$LOG" 2>&1 &
+    env EPHEMERA_API_ADDR=0.0.0.0:3000 $extra_env ./anvil-daemon >>"$LOG" 2>&1 &
     DAEMON_PID=$!
     for i in $(seq 1 60); do
         if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
