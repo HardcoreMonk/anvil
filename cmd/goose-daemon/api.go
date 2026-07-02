@@ -80,7 +80,7 @@ func authMiddleware(getClients func() []APIClient, authTotal *metrics.CounterVec
 		matchedName := ""
 		expiredName := ""
 		for _, c := range matches {
-			if !c.Expires.IsZero() && now.After(c.Expires) {
+			if apiClientExpired(c, now) {
 				expiredName = c.Name
 				continue
 			}

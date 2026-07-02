@@ -70,6 +70,19 @@ func TestFirstActiveClient(t *testing.T) {
 	}
 }
 
+func TestAPIClientExpiredAtBoundary(t *testing.T) {
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	if apiClientExpired(APIClient{Name: "boundary", Expires: now}, now) != true {
+		t.Fatal("Expires == now must be expired")
+	}
+	if apiClientExpired(APIClient{Name: "future", Expires: now.Add(time.Nanosecond)}, now) != false {
+		t.Fatal("Expires after now must still be active")
+	}
+	if apiClientExpired(APIClient{Name: "never"}, now) != false {
+		t.Fatal("zero Expires must never expire")
+	}
+}
+
 func TestCountTokenExpiry(t *testing.T) {
 	now := time.Now()
 	clients := []APIClient{

@@ -207,13 +207,17 @@ func parseExpiry(s string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
+func apiClientExpired(c APIClient, now time.Time) bool {
+	return !c.Expires.IsZero() && !now.Before(c.Expires)
+}
+
 // firstActiveClient returns the first client whose token has not expired (a zero
 // Expires never expires). The in-VM control-plane forwarder token is selected
 // this way so an expired primary token does not break in-VM callbacks (v0.4.1).
 func firstActiveClient(clients []APIClient) (APIClient, bool) {
 	now := time.Now()
 	for _, c := range clients {
-		if c.Expires.IsZero() || now.Before(c.Expires) {
+		if !apiClientExpired(c, now) {
 			return c, true
 		}
 	}
@@ -229,7 +233,7 @@ func countTokenExpiry(clients []APIClient) (expired, expiringSoon int) {
 		if c.Expires.IsZero() {
 			continue
 		}
-		if now.After(c.Expires) {
+		if apiClientExpired(c, now) {
 			expired++
 		} else if c.Expires.Before(soon) {
 			expiringSoon++
