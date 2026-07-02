@@ -20,6 +20,7 @@ var daemonConfigEnvKeys = []string{
 	"ANVIL_AGENT_PORT",
 	"EPHEMERA_PUBLIC_URL",
 	"ANVIL_PUBLIC_URL",
+	"EPHEMERA_DISK_MODE",
 	"EPHEMERA_HOME",
 }
 
@@ -364,56 +365,90 @@ func TestEnvBool_Autosnapshot(t *testing.T) {
 	}
 }
 
-// TestResolveDiskModeCOW covers the COW-by-default decision (v0.4.2): unset/"cow"
-// resolves to COW when the host probe passes, falls back to plain when it fails,
-// and "plain"/"full" force plain regardless of the probe.
-func TestResolveDiskModeCOW(t *testing.T) {
-	const key = "EPHEMERA_DISK_MODE"
-	okProbe := func() error { return nil }
-	errProbe := func() error { return errors.New("no dm-snapshot") }
-	cases := []struct {
-		name  string
-		val   string
-		set   bool
-		probe func() error
-		want  bool
-	}{
-		{name: "unset + probe ok -> cow", set: false, probe: okProbe, want: true},
-		{name: "cow + probe ok -> cow", val: "cow", set: true, probe: okProbe, want: true},
-		{name: "unset + probe fails -> fallback plain", set: false, probe: errProbe, want: false},
-		{name: "cow + probe fails -> fallback plain", val: "cow", set: true, probe: errProbe, want: false},
-		{name: "plain forces plain", val: "plain", set: true, probe: okProbe, want: false},
-		{name: "full forces plain", val: "full", set: true, probe: okProbe, want: false},
-		{name: "PLAIN case-insensitive", val: "PLAIN", set: true, probe: okProbe, want: false},
+func TestResolveDiskModeCOW_AnvilDefaultPlain(t *testing.T) {
+	clearDaemonConfigEnv(t)
+
+	probes := 0
+	got := resolveDiskModeCOW(func() error {
+		probes++
+		return nil
+	})
+	if got {
+		t.Fatalf("unset EPHEMERA_DISK_MODE should resolve to plain/full clone")
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if c.set {
-				os.Setenv(key, c.val)
-				defer os.Unsetenv(key)
-			} else {
-				os.Unsetenv(key)
+	if probes != 0 {
+		t.Fatalf("unset EPHEMERA_DISK_MODE probe calls = %d, want 0", probes)
+	}
+}
+
+func TestResolveDiskModeCOW_ExplicitCowProbes(t *testing.T) {
+	clearDaemonConfigEnv(t)
+	t.Setenv("EPHEMERA_DISK_MODE", "cow")
+
+	probes := 0
+	got := resolveDiskModeCOW(func() error {
+		probes++
+		return nil
+	})
+	if !got {
+		t.Fatalf("EPHEMERA_DISK_MODE=cow with passing probe should enable COW")
+	}
+	if probes != 1 {
+		t.Fatalf("EPHEMERA_DISK_MODE=cow probe calls = %d, want 1", probes)
+	}
+}
+
+func TestResolveDiskModeCOW_ExplicitCowFallsBackWhenProbeFails(t *testing.T) {
+	clearDaemonConfigEnv(t)
+	t.Setenv("EPHEMERA_DISK_MODE", "cow")
+
+	probes := 0
+	got := resolveDiskModeCOW(func() error {
+		probes++
+		return errors.New("no dm-snapshot")
+	})
+	if got {
+		t.Fatalf("EPHEMERA_DISK_MODE=cow with failing probe should fall back to plain")
+	}
+	if probes != 1 {
+		t.Fatalf("EPHEMERA_DISK_MODE=cow probe calls = %d, want 1", probes)
+	}
+}
+
+func TestResolveDiskModeCOW_PlainAndFullSkipProbe(t *testing.T) {
+	for _, val := range []string{"plain", "full", "PLAIN"} {
+		t.Run(val, func(t *testing.T) {
+			clearDaemonConfigEnv(t)
+			t.Setenv("EPHEMERA_DISK_MODE", val)
+
+			probes := 0
+			got := resolveDiskModeCOW(func() error {
+				probes++
+				return nil
+			})
+			if got {
+				t.Fatalf("EPHEMERA_DISK_MODE=%q should resolve to plain/full clone", val)
 			}
-			if got := resolveDiskModeCOW(c.probe); got != c.want {
-				t.Errorf("resolveDiskModeCOW(%q=%q) = %v, want %v", key, c.val, got, c.want)
+			if probes != 0 {
+				t.Fatalf("EPHEMERA_DISK_MODE=%q probe calls = %d, want 0", val, probes)
 			}
 		})
 	}
 }
 
-// TestResolveDiskModeCOW_OptOutSkipsProbe verifies the plain/full opt-out
-// short-circuits before the (potentially expensive) host probe runs.
-func TestResolveDiskModeCOW_OptOutSkipsProbe(t *testing.T) {
-	const key = "EPHEMERA_DISK_MODE"
-	os.Setenv(key, "plain")
-	defer os.Unsetenv(key)
+func TestResolveDiskModeCOW_UnsupportedValueSkipsProbe(t *testing.T) {
+	clearDaemonConfigEnv(t)
+	t.Setenv("EPHEMERA_DISK_MODE", "unsupported")
 
-	probed := false
-	got := resolveDiskModeCOW(func() error { probed = true; return nil })
+	probes := 0
+	got := resolveDiskModeCOW(func() error {
+		probes++
+		return nil
+	})
 	if got {
-		t.Errorf("plain should resolve to false, got %v", got)
+		t.Fatalf("unsupported EPHEMERA_DISK_MODE should resolve to plain/full clone")
 	}
-	if probed {
-		t.Error("probe must not run when EPHEMERA_DISK_MODE=plain")
+	if probes != 0 {
+		t.Fatalf("unsupported EPHEMERA_DISK_MODE probe calls = %d, want 0", probes)
 	}
 }
