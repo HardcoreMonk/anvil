@@ -955,6 +955,33 @@ func TestPlanSnapshotGCProtectsReferencedAndKeepLast(t *testing.T) {
 	}
 }
 
+func TestPlanSnapshotGCKeepsSourceSnapshotForRestoredVM(t *testing.T) {
+	now := time.Now().UTC()
+	cp := newTestCP(t)
+
+	sourceID := "snap-source"
+	addTestSnapshot(t, cp, testSnapshotMeta(sourceID, "vm-source", "full", now.Add(-48*time.Hour)))
+	addTestSnapshot(t, cp, testSnapshotMeta("snap-old", "vm-other", "full", now.Add(-72*time.Hour)))
+	if err := storage.SaveVMState(cp.workDir, storage.VMState{
+		VMID:             "vm-restored",
+		DiskMode:         storage.DiskModeCOW,
+		SourceSnapshotID: sourceID,
+	}); err != nil {
+		t.Fatalf("SaveVMState: %v", err)
+	}
+
+	got := cp.planSnapshotGC(SnapshotGCPolicy{
+		OlderThanSeconds: int64((24 * time.Hour) / time.Second),
+		KeepLastPerVM:    0,
+	}, now)
+	if _, ok := gcEntryByID(got.Candidates, sourceID); ok {
+		t.Fatalf("source snapshot %q selected for GC while restored VM references it", sourceID)
+	}
+	if _, ok := gcEntryByID(got.Candidates, "snap-old"); !ok {
+		t.Fatalf("unreferenced old snapshot not selected; candidates=%v", snapshotIDs(got.Candidates))
+	}
+}
+
 func TestPlanSnapshotGCMaxTotalBytesSelectsOldestUnprotected(t *testing.T) {
 	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
 	cp := newTestCP(t)

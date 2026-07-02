@@ -8,22 +8,25 @@ import (
 func TestVMState_SaveLoadRoundTrip(t *testing.T) {
 	tmp := t.TempDir()
 	state := VMState{
-		VMID:       "vm-rt",
-		GuestIP:    "10.0.1.42",
-		TapDevice:  "tap42",
-		MacAddr:    "AA:FC:00:00:00:2A",
-		VsockPath:  "/tmp/firecracker-vsock-vm-rt.sock",
-		SocketPath: "/tmp/firecracker-vm-rt.sock",
-		AgentToken: "deadbeef",
-		DiskPath:   "/tmp/goose-workspaces/vm-rt.ext4",
-		DiskMode:   DiskModePlain,
-		Profile:    "researcher",
-		VcpuCount:  2,
-		MemSizeMib: 2048,
-		FlockID:    "flock-1",
-		AgentID:    "researcher-1",
-		AgentURL:   "http://10.0.1.42:8080",
-		CreatedAt:  time.Now().UTC().Truncate(time.Second),
+		VMID:             "vm-rt",
+		GuestIP:          "10.0.1.42",
+		TapDevice:        "tap42",
+		MacAddr:          "AA:FC:00:00:00:2A",
+		VsockPath:        "/tmp/firecracker-vsock-vm-rt.sock",
+		SocketPath:       "/tmp/firecracker-vm-rt.sock",
+		AgentToken:       "deadbeef",
+		DiskPath:         "/tmp/goose-workspaces/vm-rt.ext4",
+		DiskMode:         DiskModePlain,
+		Profile:          "researcher",
+		TenantID:         "tenant-1",
+		EgressPolicy:     "deny_all",
+		SourceSnapshotID: "snap-source",
+		VcpuCount:        2,
+		MemSizeMib:       2048,
+		FlockID:          "flock-1",
+		AgentID:          "researcher-1",
+		AgentURL:         "http://10.0.1.42:8080",
+		CreatedAt:        time.Now().UTC().Truncate(time.Second),
 	}
 	if err := SaveVMState(tmp, state); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -37,6 +40,9 @@ func TestVMState_SaveLoadRoundTrip(t *testing.T) {
 	}
 	if loaded.FlockID != "flock-1" || loaded.AgentID != "researcher-1" {
 		t.Errorf("flock association not preserved: %+v", loaded)
+	}
+	if loaded.TenantID != "tenant-1" || loaded.EgressPolicy != "deny_all" || loaded.SourceSnapshotID != "snap-source" {
+		t.Errorf("anvil metadata not preserved: %+v", loaded)
 	}
 	if loaded.SchemaVersion != vmStateSchemaVersion {
 		t.Errorf("schema version not set, got %d", loaded.SchemaVersion)
