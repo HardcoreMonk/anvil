@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // auditMiddleware is the OUTER request wrapper (v0.4.1): it installs a
@@ -127,10 +129,23 @@ func newAuditLogger(workDir string) (*auditLogger, error) {
 		return a, nil
 	}
 	a.path = filepath.Join(a.dir, "access.jsonl")
-	if err := os.MkdirAll(a.dir, 0755); err != nil {
+	if err := os.MkdirAll(a.dir, 0700); err != nil {
 		return a, fmt.Errorf("audit: create dir: %w", err)
 	}
-	f, err := os.OpenFile(a.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	dirInfo, err := os.Lstat(a.dir)
+	if err != nil {
+		return a, fmt.Errorf("audit: stat dir: %w", err)
+	}
+	if dirInfo.Mode()&os.ModeSymlink != 0 {
+		return a, fmt.Errorf("audit: dir is a symlink")
+	}
+	if !dirInfo.IsDir() {
+		return a, fmt.Errorf("audit: path is not a dir")
+	}
+	if err := os.Chmod(a.dir, 0700); err != nil {
+		return a, fmt.Errorf("audit: chmod dir: %w", err)
+	}
+	f, err := openAuditFileAppend(a.path)
 	if err != nil {
 		return a, fmt.Errorf("audit: open log: %w", err)
 	}
@@ -139,6 +154,39 @@ func newAuditLogger(workDir string) (*auditLogger, error) {
 		a.size = fi.Size()
 	}
 	return a, nil
+}
+
+func openAuditFileAppend(path string) (*os.File, error) {
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("audit file is a symlink")
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("audit file is not regular")
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("stat audit file: %w", err)
+	}
+
+	fd, err := unix.Open(path, unix.O_CREAT|unix.O_APPEND|unix.O_WRONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0600)
+	if err != nil {
+		return nil, err
+	}
+	f := os.NewFile(uintptr(fd), path)
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, fmt.Errorf("stat opened audit file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		f.Close()
+		return nil, fmt.Errorf("opened audit file is not regular")
+	}
+	if err := f.Chmod(0600); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("chmod audit file: %w", err)
+	}
+	return f, nil
 }
 
 // Write appends one record. Best-effort: errors are logged, never propagated to
@@ -174,6 +222,9 @@ func (a *auditLogger) Write(rec auditRecord) {
 // are atomic (os.Rename). Caller must hold a.mu.
 func (a *auditLogger) rotateLocked() {
 	if a.file != nil {
+		if err := a.file.Chmod(0600); err != nil {
+			slog.Warn("audit: chmod before rotate failed", "err", err)
+		}
 		a.file.Close()
 		a.file = nil
 	}
@@ -182,15 +233,51 @@ func (a *auditLogger) rotateLocked() {
 		os.Rename(fmt.Sprintf("%s.%d", a.path, i), fmt.Sprintf("%s.%d", a.path, i+1))
 	}
 	if a.keep >= 1 {
-		os.Rename(a.path, a.path+".1")
+		if err := os.Rename(a.path, a.path+".1"); err != nil && !os.IsNotExist(err) {
+			slog.Warn("audit: rotate active file failed", "err", err)
+		} else if err == nil {
+			err := os.Chmod(a.path+".1", 0600)
+			if err != nil && !os.IsNotExist(err) {
+				slog.Warn("audit: chmod rotated file failed", "err", err)
+			}
+		}
 	}
-	f, err := os.OpenFile(a.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	f, err := openAuditFileAppend(a.path)
 	if err != nil {
 		slog.Warn("audit: reopen after rotate failed", "err", err)
 		return
 	}
 	a.file = f
 	a.size = 0
+}
+
+func openAuditFileRead(path string) (*os.File, error) {
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("audit file is a symlink")
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("audit file is not regular")
+		}
+	} else {
+		return nil, err
+	}
+
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	f := os.NewFile(uintptr(fd), path)
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, fmt.Errorf("stat opened audit file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		f.Close()
+		return nil, fmt.Errorf("opened audit file is not regular")
+	}
+	return f, nil
 }
 
 // Close closes the active file.
@@ -224,7 +311,7 @@ func (a *auditLogger) tail(limit int, f auditFilter) ([]auditRecord, error) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	fh, err := os.Open(a.path)
+	fh, err := openAuditFileRead(a.path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -274,6 +361,9 @@ func (a *auditLogger) tail(limit int, f auditFilter) ([]auditRecord, error) {
 	}
 	for i, j := 0, len(ordered)-1; i < j; i, j = i+1, j-1 {
 		ordered[i], ordered[j] = ordered[j], ordered[i]
+	}
+	if err := sc.Err(); err != nil {
+		return ordered, err
 	}
 	return ordered, nil
 }

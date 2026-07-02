@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -89,6 +91,107 @@ func TestAuditLogger_RotateAndKeep(t *testing.T) {
 	}
 }
 
+func TestNewAuditLogger_CreatesPrivateAuditLog(t *testing.T) {
+	t.Setenv("EPHEMERA_AUDIT_DISABLE", "false")
+	a, err := newAuditLogger(t.TempDir())
+	if err != nil {
+		t.Fatalf("new audit logger: %v", err)
+	}
+	t.Cleanup(func() { a.Close() })
+
+	dirInfo, err := os.Stat(a.dir)
+	if err != nil {
+		t.Fatalf("stat audit dir: %v", err)
+	}
+	if got := dirInfo.Mode().Perm(); got != 0700 {
+		t.Fatalf("audit dir mode = %o, want 0700", got)
+	}
+	fileInfo, err := os.Stat(a.path)
+	if err != nil {
+		t.Fatalf("stat audit file: %v", err)
+	}
+	if got := fileInfo.Mode().Perm(); got != 0600 {
+		t.Fatalf("audit file mode = %o, want 0600", got)
+	}
+}
+
+func TestNewAuditLogger_TightensExistingLooseFile(t *testing.T) {
+	t.Setenv("EPHEMERA_AUDIT_DISABLE", "false")
+	workDir := t.TempDir()
+	auditDir := filepath.Join(workDir, "audit")
+	auditPath := filepath.Join(auditDir, "access.jsonl")
+	if err := os.MkdirAll(auditDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(auditPath, []byte("{}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	a, err := newAuditLogger(workDir)
+	if err != nil {
+		t.Fatalf("new audit logger: %v", err)
+	}
+	t.Cleanup(func() { a.Close() })
+
+	info, err := os.Stat(auditPath)
+	if err != nil {
+		t.Fatalf("stat audit file: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Fatalf("existing audit file mode = %o, want 0600", got)
+	}
+}
+
+func TestNewAuditLogger_RejectsSymlinkAuditFile(t *testing.T) {
+	t.Setenv("EPHEMERA_AUDIT_DISABLE", "false")
+	workDir := t.TempDir()
+	auditDir := filepath.Join(workDir, "audit")
+	if err := os.MkdirAll(auditDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(workDir, "target.jsonl")
+	if err := os.WriteFile(target, []byte("{}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(auditDir, "access.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+
+	a, err := newAuditLogger(workDir)
+	if a != nil {
+		t.Cleanup(func() { a.Close() })
+	}
+	if err == nil {
+		t.Fatal("new audit logger succeeded with symlink access.jsonl, want error")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("error = %v, want symlink rejection", err)
+	}
+}
+
+func TestAuditLogger_RotateKeepsPrivateModes(t *testing.T) {
+	t.Setenv("EPHEMERA_AUDIT_DISABLE", "false")
+	a, err := newAuditLogger(t.TempDir())
+	if err != nil {
+		t.Fatalf("new audit logger: %v", err)
+	}
+	t.Cleanup(func() { a.Close() })
+	a.maxBytes = 1
+	a.keep = 1
+
+	a.Write(auditRecord{TS: "t", Client: "c", Method: "GET", Path: "/vms", Status: 200})
+
+	for _, path := range []string{a.path, a.path + ".1"} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		if got := info.Mode().Perm(); got != 0600 {
+			t.Fatalf("%s mode = %o, want 0600", filepath.Base(path), got)
+		}
+	}
+}
+
 func TestAuditLogger_TailFilters(t *testing.T) {
 	a := newTestAuditLogger(t, 1<<30, 3) // large cap → no rotation
 	a.Write(auditRecord{Client: "alice", Method: "GET", Path: "/vms", Status: 200})
@@ -107,6 +210,18 @@ func TestAuditLogger_TailFilters(t *testing.T) {
 	}
 	if lim, _ := a.tail(1, auditFilter{}); len(lim) != 1 || lim[0].Method != "DELETE" {
 		t.Errorf("limit=1 newest: got %+v", lim)
+	}
+}
+
+func TestAuditLogger_TailReturnsScannerError(t *testing.T) {
+	a := newTestAuditLogger(t, 1<<30, 3)
+	oversized := strings.Repeat("x", 1024*1024+1)
+	if err := os.WriteFile(a.path, []byte(oversized), 0600); err != nil {
+		t.Fatalf("write oversized line: %v", err)
+	}
+
+	if _, err := a.tail(10, auditFilter{}); !errors.Is(err, bufio.ErrTooLong) {
+		t.Fatalf("tail err = %v, want %v", err, bufio.ErrTooLong)
 	}
 }
 

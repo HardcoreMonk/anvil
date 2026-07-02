@@ -126,3 +126,65 @@ func TestClientDo_PostEncodesBody(t *testing.T) {
 		t.Errorf("body=%s", gotBody)
 	}
 }
+
+func TestAuditCmd_EscapesFilterValues(t *testing.T) {
+	var gotPath string
+	var gotQuery map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		q := r.URL.Query()
+		gotQuery = map[string]string{
+			"limit":  q.Get("limit"),
+			"client": q.Get("client"),
+			"method": q.Get("method"),
+			"status": q.Get("status"),
+			"role":   q.Get("role"),
+			"debug":  q.Get("debug"),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[]`))
+	}))
+	defer srv.Close()
+	t.Setenv("EPHEMERA_CTL_URL", srv.URL)
+	t.Setenv("EPHEMERA_CTL_TOKEN", "")
+	t.Setenv("EPHEMERA_API_TOKEN", "")
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	defer func() {
+		os.Stdout = oldStdout
+		r.Close()
+	}()
+
+	auditCmd([]string{
+		"--json",
+		"--limit", "7",
+		"--client", "alice&role=admin",
+		"--method", "POST+PATCH",
+		"--status", "201&debug=true",
+	})
+
+	w.Close()
+	_, _ = io.ReadAll(r)
+
+	if gotPath != "/audit" {
+		t.Fatalf("path = %q, want /audit", gotPath)
+	}
+	want := map[string]string{
+		"limit":  "7",
+		"client": "alice&role=admin",
+		"method": "POST+PATCH",
+		"status": "201&debug=true",
+		"role":   "",
+		"debug":  "",
+	}
+	for key, wantValue := range want {
+		if gotQuery[key] != wantValue {
+			t.Fatalf("query[%s] = %q, want %q (all query: %#v)", key, gotQuery[key], wantValue, gotQuery)
+		}
+	}
+}

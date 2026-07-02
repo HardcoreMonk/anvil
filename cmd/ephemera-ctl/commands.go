@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 )
@@ -537,17 +538,18 @@ func auditCmd(args []string) {
 	statusF := fs.String("status", "", "filter by HTTP status")
 	methodF := fs.String("method", "", "filter by HTTP method")
 	fs.Parse(rest)
-	q := fmt.Sprintf("/audit?limit=%d", *limit)
+	q := url.Values{}
+	q.Set("limit", fmt.Sprintf("%d", *limit))
 	if *clientF != "" {
-		q += "&client=" + *clientF
+		q.Set("client", *clientF)
 	}
 	if *statusF != "" {
-		q += "&status=" + *statusF
+		q.Set("status", *statusF)
 	}
 	if *methodF != "" {
-		q += "&method=" + *methodF
+		q.Set("method", *methodF)
 	}
-	data, err := mkClient(tok).do("GET", q, nil)
+	data, err := mkClient(tok).do("GET", "/audit?"+q.Encode(), nil)
 	if err != nil {
 		die(err)
 	}

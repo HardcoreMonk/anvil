@@ -47,12 +47,12 @@ type authFailureRecorder interface {
 //
 // If getClients returns an empty slice, every request is allowed (auth disabled).
 //
-// Timing-safe design: subtle.ConstantTimeCompare always inspects every byte of both
-// operands before returning, so response time does not vary with how many leading
-// characters match. All registered tokens are compared on every request (no
-// early-exit after the first match) to prevent leaking which client index was hit.
-// The expiry check (v0.4.1) runs AFTER the full compare loop so it adds no timing
-// signal, and an expired match returns the same 401 body as no match.
+// Timing-safe design: for equal-length operands, subtle.ConstantTimeCompare
+// inspects every byte before returning, so response time does not vary with how
+// many leading characters match. All registered tokens are compared on every
+// request (no early-exit after the first match) to avoid leaking which client
+// index was hit. The expiry decision (v0.4.1) is made AFTER the full compare loop,
+// and an expired match returns the same 401 body as no match.
 func authMiddleware(getClients func() []APIClient, authTotal *metrics.CounterVec, next http.Handler) http.Handler {
 	countAuth := func(outcome string) {
 		if authTotal != nil {
@@ -69,13 +69,22 @@ func authMiddleware(getClients func() []APIClient, authTotal *metrics.CounterVec
 		auth := []byte(r.Header.Get("Authorization"))
 
 		// Compare against every registered token without short-circuiting.
-		matchedName := ""
-		var matched APIClient
+		var matches []APIClient
 		for _, c := range clients {
 			if subtle.ConstantTimeCompare(auth, []byte("Bearer "+c.Token)) == 1 {
-				matchedName = c.Name
-				matched = c
+				matches = append(matches, c)
 			}
+		}
+
+		now := time.Now()
+		matchedName := ""
+		expiredName := ""
+		for _, c := range matches {
+			if !c.Expires.IsZero() && now.After(c.Expires) {
+				expiredName = c.Name
+				continue
+			}
+			matchedName = c.Name
 		}
 
 		unauthorized := func() {
@@ -85,15 +94,15 @@ func authMiddleware(getClients func() []APIClient, authTotal *metrics.CounterVec
 		}
 
 		if matchedName == "" {
+			if expiredName != "" {
+				// Same 401 body as a non-match (no client-facing distinction); only
+				// the server-side log + metric record the expiry.
+				countAuth("expired")
+				slog.Warn("api request rejected: token expired", "client", expiredName, "method", r.Method, "path", r.URL.Path)
+				unauthorized()
+				return
+			}
 			countAuth("denied")
-			unauthorized()
-			return
-		}
-		if !matched.Expires.IsZero() && time.Now().After(matched.Expires) {
-			// Same 401 body as a non-match (no client-facing distinction); only
-			// the server-side log + metric record the expiry.
-			countAuth("expired")
-			slog.Warn("api request rejected: token expired", "client", matchedName, "method", r.Method, "path", r.URL.Path)
 			unauthorized()
 			return
 		}

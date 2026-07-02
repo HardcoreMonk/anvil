@@ -81,3 +81,75 @@ func TestAuthMiddleware_Disabled(t *testing.T) {
 		t.Errorf("auth disabled should pass through: called=%v code=%d", called, rec.Code)
 	}
 }
+
+func TestAuthMiddleware_DuplicateTokenPrefersActiveWhenExpiredAppearsAfter(t *testing.T) {
+	reg := metrics.NewRegistry()
+	authTotal := reg.NewCounterVec("ephemera_auth_total", "auth decisions", "outcome")
+	now := time.Now()
+	clients := []APIClient{
+		{Name: "active", Token: "shared", Expires: now.Add(time.Hour)},
+		{Name: "expired", Token: "shared", Expires: now.Add(-time.Hour)},
+	}
+
+	var ctxClient string
+	h := authMiddleware(func() []APIClient { return clients }, authTotal, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctxClient = clientNameFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/vms", nil)
+	req.Header.Set("Authorization", "Bearer shared")
+	holder := &clientHolder{}
+	req = req.WithContext(withClientHolder(req.Context(), holder))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200", rec.Code)
+	}
+	if holder.name != "active" || ctxClient != "active" {
+		t.Fatalf("matched holder=%q ctx=%q, want active", holder.name, ctxClient)
+	}
+	if g := authTotal.WithLabelValues("ok").Get(); g != 1 {
+		t.Fatalf("ok=%d, want 1", g)
+	}
+	if g := authTotal.WithLabelValues("expired").Get(); g != 0 {
+		t.Fatalf("expired=%d, want 0", g)
+	}
+}
+
+func TestAuthMiddleware_DuplicateTokenPrefersActiveWhenActiveAppearsAfter(t *testing.T) {
+	reg := metrics.NewRegistry()
+	authTotal := reg.NewCounterVec("ephemera_auth_total", "auth decisions", "outcome")
+	now := time.Now()
+	clients := []APIClient{
+		{Name: "expired", Token: "shared", Expires: now.Add(-time.Hour)},
+		{Name: "active", Token: "shared", Expires: now.Add(time.Hour)},
+	}
+
+	var ctxClient string
+	h := authMiddleware(func() []APIClient { return clients }, authTotal, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctxClient = clientNameFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/vms", nil)
+	req.Header.Set("Authorization", "Bearer shared")
+	holder := &clientHolder{}
+	req = req.WithContext(withClientHolder(req.Context(), holder))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200", rec.Code)
+	}
+	if holder.name != "active" || ctxClient != "active" {
+		t.Fatalf("matched holder=%q ctx=%q, want active", holder.name, ctxClient)
+	}
+	if g := authTotal.WithLabelValues("ok").Get(); g != 1 {
+		t.Fatalf("ok=%d, want 1", g)
+	}
+	if g := authTotal.WithLabelValues("expired").Get(); g != 0 {
+		t.Fatalf("expired=%d, want 0", g)
+	}
+}
