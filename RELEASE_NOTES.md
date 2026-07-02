@@ -40,8 +40,11 @@
     한다.
   - `EPHEMERA_HOME`으로 daemon work directory를 명시할 수 있다. unset이면 기존처럼
     process current working directory를 사용한다.
+- 2026-07-02 기준 upstream latest observed는 `v0.7.0`이지만 anvil runtime
+  baseline은 계속 `v0.3.6`이다. `v0.4.0`-`v0.4.5`는 planned sync 후보,
+  `v0.5.0`-`v0.7.0`은 별도 adoption review backlog로 둔다.
 
-## 검증 예정
+## 검증됨
 
 - `go test ./internal/anvilmcp -count=1`
 - `go test ./cmd/anvil-scheduler -count=1`

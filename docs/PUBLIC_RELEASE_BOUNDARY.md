@@ -1,7 +1,7 @@
 # anvil 공개 릴리즈 경계
 
 > **대상:** anvil downstream repository
-> **현행화 기준:** 2026-05-26
+> **현행화 기준:** 2026-07-02
 > **목적:** anvil이 공개적으로 책임지는 기능 표면과, upstream ephemera에서 가져오더라도 anvil 정책상 수정하거나 제외해야 하는 표면을 구분한다.
 
 ---
@@ -108,6 +108,18 @@ upstream ephemera 변경을 병합할 때는 다음 상태 중 하나로 분류�
 | `v0.3.4` | `EPHEMERA_API_TOKENS_FILE`, SIGHUP CP-token vsock fan-out, watchdog tunables/auto-heal, Firecracker SIGHUP forwarding hot-fix | `adapted` — hot rotation은 채택, file permission/VM version caveat를 운영 문서에 명시 |
 | `v0.3.5` | Prometheus `/metrics`, `/vms/{vm_id}/stats`, `log/slog`, observability demo | `adapted` — runtime observability는 채택, `ephemera_*` metric namespace와 `/metrics` auth 정책을 compatibility로 설명 |
 | `v0.3.6` | autonomous webdev demo, in-VM `gtcall`, multi-line-safe `gtwall`, Goose JSON output parsing | `adapted` — demo/helper는 runtime operator 표면으로 채택, peer `agent_token`은 계속 control-plane proxy가 주입하며 직접 노출하지 않음 |
+
+2026-07-02 기준 upstream `main`과 최신 upstream tag는 `v0.7.0`이지만, `v0.4.0`
+이후 tag는 아직 anvil public baseline이 아니다. `v0.4.0`-`v0.4.5`는 runtime 안정화
+planned sync 후보로만 취급하고, `v0.5.0`-`v0.7.0`은 별도 adoption review 전까지
+조건부/제외 표면 후보로 둔다.
+
+| upstream tag 범위 | 공개 경계 판단 |
+|---|---|
+| `v0.4.0`-`v0.4.5` | storage/recovery, auth/audit, COW, flock lifecycle, streaming task, restored VM recovery의 runtime 안정화 후보. public support와 default 전환은 KVM 검증과 anvil 보안 경계 review 뒤 확정한다. |
+| `v0.5.0`-`v0.5.5` | product/operator Web UI 계열로 보인다. IronClaw 전용 execution layer 경계와 맞는지 검토하기 전까지 anvil 공개 표면으로 설명하지 않는다. |
+| `v0.6.0`-`v0.6.4` | MCP Gateway 계열로 보인다. anvil MCP adapter와 권한 모델을 우회하거나 중복할 수 있으므로 별도 ADR/adoption review 전까지 공개 표면으로 승격하지 않는다. |
+| `v0.7.0` | installer/transcript/hardening 계열로 보인다. kernel SHA 검증, `waitForAgent` per-probe timeout, `EPHEMERA_HOME`은 선별 backport됐지만 tag 전체는 미채택이다. |
 
 `v0.3.2`/`v0.3.3` 병합 전 검토 근거는
 `docs/analysis/08-v0.3.2-v0.3.3-upstream-change-review.md`에 historical analysis로

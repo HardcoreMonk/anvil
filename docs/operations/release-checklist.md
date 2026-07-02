@@ -135,9 +135,11 @@ scripts/anvil-mcp-e2e.sh flock
 
 ### 현재 upstream runtime baseline
 
-2026-05-26 기준 `sync/ephemera-v0.3.6`은 upstream ephemera `v0.3.6`까지 병합된
-runtime baseline을 사용한다. 새 anvil release 후보가 이 baseline을 포함한다면
-release 본문에는 upstream runtime 변경과 anvil product 변경을 분리해서 적는다.
+2026-07-02 기준 anvil `main`은 upstream ephemera `v0.3.6`까지 병합된 runtime
+baseline을 사용한다. upstream `main`과 최신 upstream tag는 `v0.7.0`까지 진행되어
+있지만, `v0.4.0` 이후 tag는 아직 anvil baseline으로 병합하지 않았다. 새 anvil
+release 후보가 이 baseline을 포함한다면 release 본문에는 upstream runtime 변경과
+anvil product 변경을 분리해서 적는다.
 
 - upstream `v0.3.2`: live VM cold-restart, `vms/<vm_id>/state.json`, orphan cleanup,
   기존 TAP/IP/MAC 재예약, graceful daemon shutdown 시 rootfs/state 보존.
@@ -156,6 +158,19 @@ release 본문에는 upstream runtime 변경과 anvil product 변경을 분리�
   trace, replay fixture, release artifact에 노출되지 않도록 수정 또는 검증한 내용.
   `ephemera_*` metric namespace와 `EPHEMERA_*` env는 runtime compatibility로
   설명하고 anvil product rename으로 처리하지 않는다.
+
+미병합 upstream review 상태:
+
+- `v0.4.0`-`v0.4.5`: runtime 안정화 planned sync 후보. storage/recovery,
+  auth/audit, COW, flock lifecycle, streaming task, restored VM recovery는
+  pre-sync adoption review를 기준으로 적응 병합한다.
+- `v0.5.0`-`v0.5.5`: product/operator Web UI 계열로 별도 공개 경계 검토 전까지
+  anvil release baseline에 포함하지 않는다.
+- `v0.6.0`-`v0.6.4`: MCP Gateway 계열로 anvil MCP adapter, IronClaw 통합 경계,
+  권한 모델과 충돌하거나 중복될 수 있어 별도 설계 review가 필요하다.
+- `v0.7.0`: installer/transcript/hardening 계열로 보인다. kernel SHA 검증,
+  `waitForAgent` per-probe timeout, `EPHEMERA_HOME`은 선별 backport됐지만 tag 전체를
+  채택한 것은 아니다.
 
 v0.3.6 기반 upstream E2E는 `/metrics`, `/stats`, real-LLM smoke, in-VM helper 경로를
 포함할 수 있다. provider key가 있는 환경에서는 `GOOGLE_API_KEY`,

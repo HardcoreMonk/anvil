@@ -51,6 +51,12 @@ runtime으로 구분한다.
 baseline은 upstream ephemera `v0.3.6`까지 병합한 상태다. 이 병합은 MicroVM
 lifecycle, flock resilience, token rotation, observability 같은 runtime substrate를
 끌어올린 것이며, anvil의 제품 정체성을 ephemera로 바꾸는 작업이 아니다.
+2026-07-02 기준 upstream `main`과 최신 upstream tag는 `v0.7.0`이지만, anvil
+`main`의 runtime baseline은 계속 `v0.3.6`이다. `v0.4.0`-`v0.4.5` runtime 안정화는
+다음 sync 후보이고, `v0.5.0`-`v0.7.0`은 별도 adoption review가 필요한 backlog다.
+upstream `v0.7.0`의 kernel SHA 검증, `waitForAgent` per-probe timeout,
+`EPHEMERA_HOME` hardening은 선별 backport됐지만 baseline sync 완료를 의미하지
+않는다.
 
 IronClaw 통합 프로젝트 anvil의 최신 공개 tag는 `anvil-v0.3.2`이다. 이 release는
 ephemera `v0.3.2`-`v0.3.6` runtime baseline 위에 scheduler metrics, manual
@@ -98,6 +104,7 @@ anvil은 ephemera를 이름만 바꾼 프로젝트가 아니다. anvil은 IronCl
 | 구분 | 현재 기준 | anvil에서의 의미 |
 |---|---|---|
 | ephemera runtime baseline | `v0.3.6` | Firecracker VM lifecycle, cold-restart, flock recovery, token rotation, `/metrics`, `/stats`, `slog`, in-VM `gtcall`, webdev demo 기반 |
+| upstream latest observed | `v0.7.0` (2026-07-02 확인) | 아직 anvil baseline으로 병합하지 않음. `v0.4.0`-`v0.4.5`는 planned sync, `v0.5.0`-`v0.7.0`은 별도 검토 backlog |
 | anvil product surface | `anvil_*` MCP tool, scheduler, tenant/egress, workload runner | IronClaw가 직접 사용하는 공개 실행 계약 |
 | namespace policy | `EPHEMERA_*`, `goose-*`, `ephemera_*` 유지 | upstream runtime 호환성. anvil 이름으로 일괄 rename하지 않는다. |
 
@@ -105,6 +112,8 @@ ephemera `v0.3.2`-`v0.3.6`은 anvil 안에서 runtime baseline으로 채택/적�
 anvil release note에서는 이 내용을 "upstream runtime baseline"으로 분리해 기록하고,
 MCP/scheduler/workload/tenant/egress 같은 anvil 고유 기능과 섞어 제품명처럼 쓰지
 않는다.
+선별 backport된 upstream `v0.7.0` hardening은 현재 baseline 위의 보안/운영 보강으로
+취급하며, `v0.4.x`-`v0.7.x` 전체 sync 완료로 표기하지 않는다.
 
 ## Fork와 upstream 관리
 
@@ -127,8 +136,9 @@ upstream sync는 별도 branch에서 수행한다.
 ```bash
 git fetch upstream main
 git ls-remote --tags upstream
-git checkout -b sync/ephemera-v0.3.x origin/main
-git merge --no-ff upstream/main
+git fetch upstream tag v0.4.5
+git checkout -b sync/ephemera-v0.4-runtime-core origin/main
+git merge --no-ff v0.4.5
 ```
 
 기존 `v*` tag를 덮어쓰는 `git fetch --tags --force`는 사용하지 않는다. ephemera

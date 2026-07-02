@@ -31,8 +31,10 @@ ephemera upstream 반영은 `main`에서 직접 하지 않는다. 항상 전용 
 
 ```bash
 git fetch upstream main
-git checkout -b sync/ephemera-v0.3.x origin/main
-git merge --no-ff upstream/main
+git ls-remote --tags upstream
+git fetch upstream tag v0.4.5
+git checkout -b sync/ephemera-v0.4-runtime-core origin/main
+git merge --no-ff v0.4.5
 ```
 
 특정 upstream release 기준으로 맞출 때는 먼저 tag를 remote에서 확인한다.
@@ -71,18 +73,19 @@ anvil 영역은 upstream runtime 계약에 맞춰 적응한다.
 
 upstream sync PR은 다음 형태를 권장한다.
 
-- branch: `sync/ephemera-v0.3.1`
-- merge commit: `merge: sync ephemera v0.3.1`
-- follow-up adaptation commit: `fix(runtime): adapt anvil to ephemera v0.3.1`
-- docs commit: `docs: document ephemera v0.3.1 baseline`
+- branch: `sync/ephemera-v0.4-runtime-core`
+- merge commit: `merge: sync ephemera v0.4 runtime core`
+- follow-up adaptation commit: `fix(runtime): adapt anvil to ephemera v0.4 runtime core`
+- docs commit: `docs: document ephemera v0.4 runtime baseline`
 
 sync PR은 upstream merge commit과 anvil adaptation commit을 분리한다. 이렇게 해야
 upstream 변경 자체와 anvil에서 해결한 conflict/적응 작업을 review에서 구분할 수 있다.
 
 ## 현재 runtime baseline
 
-2026-05-26 기준 `sync/ephemera-v0.3.6`은 upstream ephemera `v0.3.6` tag까지
-병합한 runtime baseline을 사용한다. `v0.3.2`-`v0.3.5` 병합 commit은
+2026-07-02 기준 anvil `main`은 upstream ephemera `v0.3.6` tag까지 병합한 runtime
+baseline을 사용한다. merge-base는 `v0.3.6`이며, upstream `main`과 최신 upstream tag는
+`v0.7.0`까지 진행되어 있다. `v0.3.2`-`v0.3.5` 병합 commit은
 `1ebe201 Merge upstream/main`이고, `v0.3.6`은 `v0.3.6` tag commit을 merge한다.
 
 | tag | peeled commit | 요약 | anvil 현재 상태 |
@@ -98,6 +101,18 @@ upstream 변경 자체와 anvil에서 해결한 conflict/적응 작업을 review
 historical analysis로 보존한다. 현재 채택 상태는
 [`docs/PUBLIC_RELEASE_BOUNDARY.md`](../PUBLIC_RELEASE_BOUNDARY.md)와
 [`docs/ADR_INDEX.md`](../ADR_INDEX.md)를 기준으로 한다.
+
+다음 sync 순서는 다음 기준으로 관리한다.
+
+1. `v0.4.0`-`v0.4.5` runtime 안정화 변경은
+   [`docs/superpowers/plans/2026-06-10-ephemera-v0.4-runtime-sync.md`](../superpowers/plans/2026-06-10-ephemera-v0.4-runtime-sync.md)의
+   계획을 기준으로 별도 sync branch에서 병합/적응한다.
+2. `v0.5.0`-`v0.7.0`은 product/operator Web UI, MCP Gateway,
+   installer/transcript/hardening 계열 변경으로 분류하고, `v0.4.x` sync 이후 별도
+   adoption review 문서를 먼저 작성한다.
+3. upstream `v0.7.0`의 kernel SHA 검증, `waitForAgent` per-probe timeout,
+   `EPHEMERA_HOME`은 baseline sync와 독립적인 hardening backport로 이미 반영됐지만,
+   이것을 `v0.7.0` 전체 채택으로 표기하지 않는다.
 
 ## 정체성/namespace 규칙
 

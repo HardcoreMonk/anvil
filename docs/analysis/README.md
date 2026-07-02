@@ -8,7 +8,8 @@
 - 0.1.0 기준 커밋: `157753fb5234679ca7cbebb6658e431c6a748ef6`
 - 0.2.0 기준 커밋: `abcaa86`
 - anvil 현재 sync branch runtime baseline: upstream ephemera `v0.3.6` 병합분
-- 다음 upstream 후보: ephemera `v0.4.0`-`v0.4.5` runtime 안정화 변경
+- upstream latest observed: ephemera `v0.7.0` (2026-07-02 확인, anvil baseline 미병합)
+- 다음 구현 sync 후보: ephemera `v0.4.0`-`v0.4.5` runtime 안정화 변경
 
 ## 0.1.0 문서
 
@@ -48,6 +49,19 @@
 - `10-v0.4.0-v0.4.5-runtime-stabilization-adoption.md`: upstream ephemera
   `v0.4.0`-`v0.4.5` storage/recovery, auth/audit, COW default, flock lifecycle,
   streaming task, restored VM recovery 변경의 anvil 예비 분류
+
+## 0.5.x-0.7.x upstream 상태
+
+2026-07-02 기준 upstream ephemera는 `v0.7.0`까지 진행되어 있지만, anvil의 runtime
+baseline은 계속 `v0.3.6`이다. `v0.5.x`-`v0.7.x`는 아직 상세 analysis 문서와 sync
+branch 검증을 거치지 않았으므로 public baseline으로 설명하지 않는다.
+
+- `v0.5.x`: product/operator Web UI 계열로 별도 공개 경계 검토가 필요하다.
+- `v0.6.x`: MCP Gateway 계열로 anvil MCP adapter, IronClaw 통합 경계, 권한 모델과
+  충돌하거나 중복될 수 있어 별도 설계 review가 필요하다.
+- `v0.7.0`: installer/transcript/hardening 계열로 보인다. kernel SHA 검증,
+  `waitForAgent` per-probe timeout, `EPHEMERA_HOME`은 선별 backport됐지만 tag 전체를
+  채택한 것은 아니다.
 
 ## 권장 읽기 순서
 
