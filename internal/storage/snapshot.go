@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -210,6 +211,31 @@ type DMSnapshotInfo struct {
 	DMDevice       string // dm-snapshot device name (e.g. "cow-vm-xxx")
 	ExceptionStore string // sparse COW store file (grows on write, initially ~0 bytes)
 	MountTarget    string // original disk path (from Firecracker state.bin)
+}
+
+// DMSnapshotAvailable reports whether the host can build dm-snapshot COW devices:
+// the losetup/dmsetup/blockdev tools must be on PATH, the device-mapper control
+// node must be usable, and the dm_snapshot target must be loadable. Returns a
+// descriptive error when COW is unsupported so callers can fall back to a full copy.
+func DMSnapshotAvailable() error {
+	for _, tool := range []string{"losetup", "dmsetup", "blockdev"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			return fmt.Errorf("%s not found on PATH: %w", tool, err)
+		}
+	}
+	// `dmsetup version` actually talks to the kernel device-mapper driver, so it
+	// catches a missing /dev/mapper/control or an incompatible driver.
+	if out, err := exec.Command("dmsetup", "version").CombinedOutput(); err != nil {
+		return fmt.Errorf("dmsetup/device-mapper unusable: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	// Load the dm_snapshot target (idempotent). If modprobe is absent but the
+	// target is built into the kernel, /sys/module/dm_snapshot still confirms it.
+	if err := exec.Command("modprobe", "dm_snapshot").Run(); err != nil {
+		if _, statErr := os.Stat("/sys/module/dm_snapshot"); statErr != nil {
+			return fmt.Errorf("dm_snapshot target unavailable: %w", err)
+		}
+	}
+	return nil
 }
 
 // SetupDMSnapshot creates a block-level COW view of the snapshot's rootfs using Linux
@@ -489,6 +515,15 @@ func WriteRootfsDiff(currentPath, basePath, diffPath string) (changedBytes int64
 		return 0, fmt.Errorf("stat base rootfs: %w", err)
 	}
 	size := curInfo.Size()
+	// COW spawn VMs expose the rootfs as a dm-snapshot block device (bind mount),
+	// whose Stat().Size() reports 0. Query the real device size so the diff against
+	// the base (a regular rootfs.ext4 file) lines up instead of failing size-mismatch.
+	if curInfo.Mode()&os.ModeDevice != 0 {
+		size, err = blockDeviceSize(currentPath)
+		if err != nil {
+			return 0, fmt.Errorf("size of current rootfs block device: %w", err)
+		}
+	}
 	if size != baseInfo.Size() {
 		return 0, fmt.Errorf("rootfs size mismatch: current %d != base %d", size, baseInfo.Size())
 	}
@@ -546,6 +581,22 @@ func WriteRootfsDiff(currentPath, basePath, diffPath string) (changedBytes int64
 		return 0, fmt.Errorf("flush rootfs diff: %w", err)
 	}
 	return changedBytes, nil
+}
+
+// blockDeviceSize returns a block device's size in bytes via `blockdev --getsize64`.
+// A regular file's size comes from Stat, but a block device reports 0 there; this is
+// needed for COW spawn VMs whose rootfs is a dm-snapshot device. blockdev is already
+// a hard dependency of the COW path (see DMSnapshotAvailable).
+func blockDeviceSize(path string) (int64, error) {
+	out, err := exec.Command("blockdev", "--getsize64", path).Output()
+	if err != nil {
+		return 0, fmt.Errorf("blockdev --getsize64 %s: %w", path, err)
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse block device size %q: %w", strings.TrimSpace(string(out)), err)
+	}
+	return n, nil
 }
 
 // reflinkOrSparseCopy copies src→dst. `cp` (non-recursive) copies the CONTENTS of src even

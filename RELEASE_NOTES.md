@@ -57,6 +57,32 @@
 - `go build ./cmd/anvil-mcp`
 - `go build ./cmd/goose-daemon`
 
+# v0.4.2 — COW Spawn Support Without Default Flip
+
+**anvil**은 upstream ephemera v0.4.2의 COW spawn rootfs와 COW+Diff snapshot 지원을
+merge하지만, runtime 기본 disk mode는 아직 바꾸지 않는다. `EPHEMERA_DISK_MODE`
+unset, `plain`, `full`은 기존 full byte-for-byte clone을 사용하고 COW probe도
+수행하지 않는다. `EPHEMERA_DISK_MODE=cow`를 명시한 경우에만 dm-snapshot COW를
+probe하고, probe 실패 시 plain clone으로 fallback한다.
+
+Upstream ephemera v0.4.2 promotes copy-on-write spawn disks to the default, with
+measured ~43% faster spawn (1.96s -> 1.12s warm) and ~0 MiB initial per-VM disk.
+anvil keeps the feature opt-in for this slice so operators can adopt the kernel
+device-mapper dependency explicitly. Additive — no wire format changed.
+
+---
+
+## What's New
+
+### COW spawn rootfs is available explicitly
+
+- `EPHEMERA_DISK_MODE=cow` selects COW. Unset, `plain`, and `full` select the existing full byte-for-byte copy and skip the COW probe.
+- `storage.DMSnapshotAvailable()` probes the host when COW is explicitly requested (tool presence + a `dmsetup version` device-mapper round-trip + the `dm_snapshot` module); on failure the daemon logs a warning and uses a full clone. The strategy is resolved once into `ControlPlane.useCOW` instead of re-reading the env on every spawn.
+- Recovery is unaffected: each VM's `DiskMode` is recorded from the actual provisioning result, so plain and COW VMs both cold-restart correctly.
+- COW spawn VMs now support **Diff snapshots**: `WriteRootfsDiff` reads the rootfs size via `blockdev` when the current rootfs is a dm-snapshot block device (whose `Stat().Size()` is 0), so a COW VM's 2nd-and-later snapshot is a sparse rootfs diff. Previously this hit a size-mismatch — the COW+Diff combination was untested while COW was opt-in.
+
+---
+
 # v0.4.1 — Operational Interfaces
 
 **Ephemera** v0.4.1 makes the daemon operable as a service: authenticated **client identity** threaded into request handling, a per-request **access audit log** (`GET /audit`), **per-token TTL/rotation**, and a dependency-free **operator CLI** (`ephemera-ctl`). Additive — no wire format changed; the only behavior changes are that an expired token is now rejected (401) and the in-VM CP token is the first non-expired client.

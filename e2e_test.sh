@@ -698,6 +698,176 @@ COW_FINAL_SNAP=$(curl -s "$API/snapshots" | jq 'length')
                              || fail "Expected 0 snapshots, got $COW_FINAL_SNAP"
 
 # ════════════════════════════════════════════════════════════════
+# 44–50. COW spawn cold-restart (v0.4.0 item A) + orphan reclaim (item E).
+#
+# A daemon launched with EPHEMERA_DISK_MODE=cow provisions spawn disks as
+# dm-snapshot COW views of the golden image. These steps prove such VMs survive
+# both a graceful restart (DestroyAll keeps the exception store; RecoverVMs
+# re-layers it over the golden image) and a crash (RemoveOrphanCOWDevices reclaims
+# a state-less COW device while a surviving VM is cold-restarted). The shared
+# anvil daemon keeps the plain clone default; these steps pin
+# EPHEMERA_DISK_MODE=cow explicitly, then switch to EPHEMERA_DISK_MODE=plain at
+# the end so the remaining flock/recovery steps exercise the explicit plain path.
+# ════════════════════════════════════════════════════════════════
+
+# Helper: (re)launch the daemon with optional extra env, wait until /vms answers.
+# extra_env is intentionally unquoted on the env line so "KEY=VAL" word-splits.
+relaunch_daemon() {
+    local extra_env="$1"
+    env EPHEMERA_API_ADDR=0.0.0.0:3000 $extra_env ./ephemera-daemon >>"$LOG" 2>&1 &
+    DAEMON_PID=$!
+    for i in $(seq 1 60); do
+        if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
+            fail "Daemon exited during (re)start (see $LOG)"; exit 1
+        fi
+        if curl -s -o /dev/null "$API/vms" 2>/dev/null; then return 0; fi
+        sleep 1
+    done
+    fail "Daemon did not respond after (re)start (see $LOG)"; exit 1
+}
+
+# ── 40. Relaunch daemon in COW spawn mode + spawn 2 COW VMs ─────
+step "40. Relaunch daemon in COW spawn mode (EPHEMERA_DISK_MODE=cow)"
+kill "$DAEMON_PID" 2>/dev/null
+wait "$DAEMON_PID" 2>/dev/null || true
+pkill -f "firecracker --api-sock" 2>/dev/null || true
+sleep 2
+relaunch_daemon "EPHEMERA_DISK_MODE=cow"
+ok "Daemon back up in COW spawn mode ✓"
+
+CVM1_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/vms" -H "Content-Type: application/json")
+check_http "$(echo "$CVM1_RESP" | tail -1)" "201" "POST /vms (cow spawn #1)"
+CVM1_ID=$(echo "$CVM1_RESP" | head -1 | jq -r '.vm_id')
+CVM2_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/vms" -H "Content-Type: application/json")
+check_http "$(echo "$CVM2_RESP" | tail -1)" "201" "POST /vms (cow spawn #2)"
+CVM2_ID=$(echo "$CVM2_RESP" | head -1 | jq -r '.vm_id')
+ok "COW spawn VMs: $CVM1_ID, $CVM2_ID"
+
+# ── 41. Verify COW kernel objects + persisted state ────────────
+step "41. Verify COW dm-snapshot devices + persisted state"
+CVM_DEV=$(dmsetup ls 2>/dev/null | grep -c "^cow-" || true)
+[ "${CVM_DEV:-0}" -ge "2" ] \
+    && ok "dm-snapshot devices active (count: $CVM_DEV) ✓" \
+    || fail "Expected ≥2 cow dm devices, got ${CVM_DEV:-0}"
+for VM in $CVM1_ID $CVM2_ID; do
+    [ -f "/tmp/goose-workspaces/$VM.cow" ] \
+        && ok "Exception store present: $VM.cow ✓" \
+        || fail "Exception store missing: $VM.cow"
+    if [ -f "$(pwd)/vms/$VM/state.json" ]; then
+        MODE=$(jq -r '.disk_mode' "$(pwd)/vms/$VM/state.json")
+        [ "$MODE" = "cow" ] \
+            && ok "state.json $VM disk_mode=cow ✓" \
+            || fail "state.json $VM disk_mode=$MODE (expected cow)"
+    else
+        fail "state.json missing for $VM (cold-restart will skip it)"
+    fi
+done
+
+# ── 42. Graceful shutdown preserves exception stores ───────────
+step "42. Graceful shutdown preserves COW exception stores (keep-store)"
+kill "$DAEMON_PID" 2>/dev/null
+wait "$DAEMON_PID" 2>/dev/null || true
+pkill -f "firecracker --api-sock" 2>/dev/null || true
+sleep 2
+# DestroyAll keeps each spawn VM's .cow store but releases the dm/loop objects.
+COW_KEPT=$(find /tmp/goose-workspaces -maxdepth 1 -name "*.cow" 2>/dev/null | wc -l | tr -d ' ')
+[ "$COW_KEPT" = "2" ] \
+    && ok "Both exception stores preserved across graceful shutdown ✓" \
+    || fail "Expected 2 preserved .cow stores, got $COW_KEPT"
+COW_DEV_DOWN=$(dmsetup ls 2>/dev/null | grep -c "^cow-" || true)
+[ "${COW_DEV_DOWN:-0}" = "0" ] \
+    && ok "dm-snapshot kernel objects released on shutdown ✓" \
+    || fail "cow dm devices still present after shutdown (count: ${COW_DEV_DOWN:-0})"
+relaunch_daemon "EPHEMERA_DISK_MODE=cow"
+ok "Daemon back up in COW mode ✓"
+
+# ── 43. COW VMs cold-restarted with same identity + health ─────
+step "43. COW VMs recovered with same vm_id + dm device + health"
+sleep 3
+LIVE=$(curl -s "$API/vms" | jq -r '.[].vm_id' | sort -u)
+for VM in $CVM1_ID $CVM2_ID; do
+    echo "$LIVE" | grep -qx "$VM" \
+        && ok "VM $VM live in /vms after cold-restart ✓" \
+        || fail "VM $VM missing from /vms after cold-restart"
+done
+COW_DEV_UP=$(dmsetup ls 2>/dev/null | grep -c "^cow-" || true)
+[ "${COW_DEV_UP:-0}" = "2" ] \
+    && ok "dm-snapshot devices re-created on recovery (count: 2) ✓" \
+    || fail "Expected 2 cow dm devices after recovery, got ${COW_DEV_UP:-0}"
+for VM in $CVM1_ID $CVM2_ID; do
+    HEALTH=$(curl -s -o /dev/null -w "%{http_code}" "$API/vms/$VM/health")
+    [ "$HEALTH" = "200" ] \
+        && ok "Recovered COW VM $VM /health → 200 ✓" \
+        || fail "Recovered COW VM $VM /health → $HEALTH (expected 200)"
+done
+
+# ── 44. Crash with one VM orphaned (state.json removed) ────────
+step "44. Simulated crash: SIGKILL daemon with $CVM2_ID orphaned"
+# Remove CVM2's state.json so it is NOT recovered; its still-live dm device +
+# store then become an orphan for RemoveOrphanCOWDevices to reclaim on restart.
+rm -f "$(pwd)/vms/$CVM2_ID/state.json"
+rmdir "$(pwd)/vms/$CVM2_ID" 2>/dev/null || true
+# SIGKILL: no DestroyAll runs, so live dm devices + stores survive the crash.
+kill -9 "$DAEMON_PID" 2>/dev/null
+wait "$DAEMON_PID" 2>/dev/null || true
+pkill -9 -f "firecracker --api-sock" 2>/dev/null || true
+sleep 2
+relaunch_daemon "EPHEMERA_DISK_MODE=cow"
+ok "Daemon back up in COW mode after crash ✓"
+
+# ── 45. Orphan reclaimed; surviving VM crash-recovered ─────────
+step "45. Orphan COW device reclaimed (item E) + survivor recovered (item A)"
+sleep 3
+LIVE2=$(curl -s "$API/vms" | jq -r '.[].vm_id' | sort -u)
+echo "$LIVE2" | grep -qx "$CVM1_ID" \
+    && ok "Survivor $CVM1_ID recovered after crash ✓" \
+    || fail "Survivor $CVM1_ID missing from /vms after crash"
+if echo "$LIVE2" | grep -qx "$CVM2_ID"; then
+    fail "Orphaned $CVM2_ID unexpectedly present in /vms"
+else
+    ok "Orphaned $CVM2_ID correctly not recovered ✓"
+fi
+[ ! -f "/tmp/goose-workspaces/$CVM2_ID.cow" ] \
+    && ok "Orphan exception store $CVM2_ID.cow reclaimed ✓" \
+    || fail "Orphan exception store $CVM2_ID.cow still present"
+# -e (not -f): a leaked bind mount leaves a block-device node, which -f misses.
+[ ! -e "/tmp/goose-workspaces/$CVM2_ID.ext4" ] \
+    && ok "Orphan mount target $CVM2_ID.ext4 reclaimed (no stale bind mount) ✓" \
+    || fail "Orphan mount target $CVM2_ID.ext4 still present (stale bind mount leaked)"
+[ -f "/tmp/goose-workspaces/$CVM1_ID.cow" ] \
+    && ok "Survivor exception store $CVM1_ID.cow preserved ✓" \
+    || fail "Survivor exception store $CVM1_ID.cow missing"
+grep -q "orphan cow device" "$LOG" \
+    && ok "Daemon log records orphan cow device reclaim ✓" \
+    || fail "Expected an 'orphan cow device' reclaim line in daemon log"
+HEALTH=$(curl -s -o /dev/null -w "%{http_code}" "$API/vms/$CVM1_ID/health")
+[ "$HEALTH" = "200" ] \
+    && ok "Crash-recovered COW VM $CVM1_ID /health → 200 ✓" \
+    || fail "Crash-recovered COW VM $CVM1_ID /health → $HEALTH (expected 200)"
+
+# ── 46. Clean up COW VM and restore plain disk mode ────────────
+step "46. Delete COW VM + return daemon to plain disk mode"
+check_http "$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/vms/$CVM1_ID")" \
+           "200" "DELETE COW VM $CVM1_ID"
+COW_DEV_END=$(dmsetup ls 2>/dev/null | grep -c "^cow-" || true)
+[ "${COW_DEV_END:-0}" = "0" ] \
+    && ok "All cow dm devices removed after delete ✓" \
+    || fail "cow dm devices still present after delete (count: ${COW_DEV_END:-0})"
+COW_FILE_END=$(find /tmp/goose-workspaces -maxdepth 1 -name "*.cow" 2>/dev/null | wc -l | tr -d ' ')
+[ "$COW_FILE_END" = "0" ] \
+    && ok "All exception stores removed after delete ✓" \
+    || fail "Exception store(s) still present after delete: $COW_FILE_END"
+# Switch to the plain opt-out so the remaining flock/recovery steps run on full
+# clones. anvil keeps the unset default plain, but setting plain here documents
+# and exercises the explicit opt-out value.
+kill "$DAEMON_PID" 2>/dev/null
+wait "$DAEMON_PID" 2>/dev/null || true
+pkill -f "firecracker --api-sock" 2>/dev/null || true
+sleep 2
+relaunch_daemon "EPHEMERA_DISK_MODE=plain"
+ok "Daemon restored to plain disk mode ✓"
+
+# ════════════════════════════════════════════════════════════════
 # Agent Proxy test: verify control plane proxy endpoints.
 #
 # External clients can reach VM agents entirely through the control
@@ -1547,7 +1717,7 @@ step "77. Recovery with a missing disk artifact drops state cleanly (TAP release
 kill "$DAEMON_PID" 2>/dev/null || true; wait "$DAEMON_PID" 2>/dev/null || true
 pkill -f "firecracker --api-sock" 2>/dev/null || true
 sleep 2
-relaunch_daemon ""
+relaunch_daemon "EPHEMERA_DISK_MODE=plain"
 ok "Plain-mode daemon up for disk-missing recovery test"
 
 DFLOCK_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/flocks" \
@@ -1578,7 +1748,7 @@ sleep 2
 rm -f "$DVM_DISK" || true
 ok "Crashed daemon; deleted worker rootfs $DVM_DISK"
 
-relaunch_daemon ""
+relaunch_daemon "EPHEMERA_DISK_MODE=plain"
 sleep 3
 
 [ ! -f "$(pwd)/vms/$DVM_ID/state.json" ] \

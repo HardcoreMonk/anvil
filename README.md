@@ -141,6 +141,19 @@ git checkout -b sync/ephemera-v0.4-runtime-core origin/main
 git merge --no-ff v0.4.5
 ```
 
+### VM Provisioning Flow
+
+```
+CloneDisk()      -> full byte-for-byte rootfs clone by default
+                   (or CloneDiskCOW with EPHEMERA_DISK_MODE=cow -> dm-snapshot view of golden image)
+PrepareVM()      -> inject goose.yaml, goose-secrets.yaml, agent_token,
+                   /etc/localtime, and (flock members only) /root/.ephemera-flock
+                   + /root/.goose-system-prompt   (single mount/unmount cycle)
+StartMachine()   -> Firecracker: kernel + disk + TAP NIC + per-profile vCPU/memory
+                   network via kernel ip= boot parameter (no DHCP)
+waitForAgent()   -> poll http://10.0.1.x:8080/health until ready (~60 s cold boot)
+```
+
 기존 `v*` tag를 덮어쓰는 `git fetch --tags --force`는 사용하지 않는다. ephemera
 runtime release tag는 `v*`, anvil product release tag는 `anvil-v*` prefix를
 사용한다. anvil 작업 branch는 rebase/history rewrite 없이 PR merge로 관리한다.
@@ -436,7 +449,7 @@ Upstream ephemera feature matrix:
 | **Multi-agent flocks** | `POST /flocks` spawns a group of role-specialized VMs in one call; `DELETE /flocks/{id}` tears them all down in parallel |
 | **Town Wall log** | Per-flock append-only log with SSE streaming (`/flocks/{id}/wall`) for coordination; `gtwall "..."` CLI inside each VM posts to it, and `gtcall <agent_id> "..."` (v0.3.6) dispatches a prompt to a peer agent — both hide curl/token/JSON-quoting behind a one-line interface |
 | **Role system prompts** | Each role profile can ship a `system.md` that is injected into the VM and prepended to every `/tasks` prompt |
-| **Optional COW spawn rootfs** | `EPHEMERA_DISK_MODE=cow` provisions new VMs with a dm-snapshot view of the golden image instead of a 700 MiB full copy (default off; safe rollback) |
+| **Optional COW spawn rootfs** | `EPHEMERA_DISK_MODE=cow` provisions new VMs with a dm-snapshot view of the golden image instead of a 700 MiB full copy (~0 MiB initial disk). The daemon probes dm-snapshot support when COW is explicitly selected and auto-falls back to a full clone if unavailable. Auto-recovered across a daemon restart since v0.4.0. Default remains plain/full clone in anvil. |
 | **Runtime config injection** | `goose.yaml` and `goose-secrets.yaml` injected at provision time — no image rebuild required to change provider/model |
 | **Per-VM agent authentication** | Control plane generates a 32-byte random Bearer token per VM; token is written to the VM disk and returned once in `POST /vms` response |
 | **MicroVM snapshots (Full + Diff)** | Freeze VM memory state to disk; restore in ~5 s. First snapshot → Full (2 GB); subsequent snapshots of the same VM → Diff (sparse, dirty pages only). Diff is automatically selected; Full is always the reference base. Original agent token preserved across restores. |
@@ -444,7 +457,7 @@ Upstream ephemera feature matrix:
 | **Post-restore IP reconfiguration** | Restored VMs receive a fresh IP from the pool via vsock — the guest's network stack is updated in-place without reboot, decoupling the restore IP from the snapshot state. |
 | **IP and TAP recycling** | IPs (10.0.1.2–254) and TAP IDs are returned to a pool and reused across VM lifecycle |
 | **NAT for outbound internet** | Host bridge `goose-br0` with iptables MASQUERADE enables VM-to-internet for LLM API calls |
-| **Per-client API auth** | Named Bearer tokens per client (`alice:tok1,bob:tok2`); timing-safe comparison; per-request audit log |
+| **Per-client API auth** | Named Bearer tokens per client (`alice:tok1,bob:tok2`); timing-safe comparison; optional per-token TTL (`name:token:expires`, v0.4.1); the matched client identity is threaded into request context for the audit log |
 | **SIGHUP token hot reload** | API token list can be updated without restarting the daemon or interrupting running VMs |
 | **VM health watchdog** (v0.3.1) | Polls every flock-member `/health` every 5 s; 3 consecutive failures → agent `status=dead` + auto Town Wall notice. See [Resilience](#resilience). |
 | **Flock metadata persistence** (v0.3.1) | `flocks/<id>/metadata.json` written atomically on spawn; daemon startup re-registers every flock and reopens its Town Wall log. |
@@ -453,13 +466,16 @@ Upstream ephemera feature matrix:
 | **Live VM cold-restart** (v0.3.2) | `vms/<vm_id>/state.json` written on every spawn; daemon startup cleans orphan Firecracker processes, re-reserves the original TAP/IP/MAC, and boots each VM from its existing rootfs clone. Same `vm_id`, same agent token, same `agent_url` across the restart. Memory state is not preserved. See [Resilience](#resilience). |
 | **Watchdog dead-status persistence** (v0.3.3) | When the watchdog marks an agent `dead`, the new status is written to `flocks/<id>/metadata.json` (via `Flock.Persist`, serialized by a per-flock `writeMu`). Daemon restart and cold-restart both preserve the marking, so a once-dead agent stays dead until explicitly restarted. |
 | **Per-agent restart** (v0.3.3) | `POST /flocks/{id}/agents/{agent_id}/restart` tears down one flock member's VM and respawns it with the same `agent_id`, role, and `agent_token` (callers' cached tokens keep working). The new VM gets a fresh `vm_id` / `guest_ip`; the agent's status resets to `ready`. |
-| **Auto-injected control-plane token** (v0.3.3) | When `EPHEMERA_API_TOKENS` is set, the host writes `apiClients[0].Token` into each flock VM at `/root/.ephemera-cp-token` (mode 0600); the in-VM `/townwall/post` forwarder reads it automatically. No more manual `EPHEMERA_CONTROL_PLANE_TOKEN` env inside every VM. |
+| **Auto-injected control-plane token** (v0.3.3) | When `EPHEMERA_API_TOKENS` is set, the host writes the first non-expired client's token (`apiClients[0]` until v0.4.1's per-token TTL) into each flock VM at `/root/.ephemera-cp-token` (mode 0600); the in-VM `/townwall/post` forwarder reads it automatically. No more manual `EPHEMERA_CONTROL_PLANE_TOKEN` env inside every VM. |
 | **CP token hot rotation** (v0.3.4) | `EPHEMERA_API_TOKENS_FILE=/path/to/tokens` enables true hot rotation: edit the file, send SIGHUP, and the daemon both swaps `cp.clients` and fans the new token out to every running VM over vsock (`SET_CP_TOKEN` command, atomic file rewrite inside the guest). No per-VM restart needed for the in-VM forwarder to pick up the new bearer. |
 | **Env-tunable watchdog** (v0.3.4) | `EPHEMERA_WATCHDOG_INTERVAL_SEC` / `_TIMEOUT_SEC` / `_THRESHOLD` override the 5 s / 1 s / 3-fail defaults at startup. `EPHEMERA_WATCHDOG_AUTO_HEAL=true` opts in to self-healing — a `dead` agent that resumes responding is auto-marked `ready` (default off preserves sticky-dead). |
 | **Observability trio** (v0.3.5) | Prometheus `/metrics` endpoint (zero-dep exposition format, counters + gauges + histograms), per-VM `GET /vms/{vm_id}/stats` snapshot (cpu/mem/net/uptime/agent_busy), and a `log/slog` migration with `EPHEMERA_LOG_FORMAT=json` + `EPHEMERA_LOG_LEVEL=...` controls. See [Observability](#observability-v035). |
 | **Autonomous multi-agent demo** (v0.3.6) | `webdev_demo.sh` stands up an orchestrator + worker + reviewer flock that designs, generates, reviews, and publishes a complete React + Vite site to the Town Wall with zero host authorship. See [Multi-Agent Webdev Demo](#multi-agent-webdev-demo-v036). |
 | **In-VM agent-to-agent dispatch** (v0.3.6) | `gtcall <agent_id> "<prompt>"` sends a task to a peer through the control-plane proxy, which injects the peer's token. Both `gtcall` and `gtwall` build their request bodies with `jq --arg`, so arbitrary multi-line prompts and file bodies (newlines, quotes, backticks) post safely. |
 | **Clean agent task output** (v0.3.6) | goose-agent runs Goose with `--output-format json` and returns the extracted assistant text, so `/tasks` output is no longer interleaved with the startup banner or truncated to an in-VM temp file when fenced code exceeds 50 lines. |
+| **Access audit log** (v0.4.1) | Every API request is appended as one JSON line to `{workDir}/audit/access.jsonl` (`ts, client, method, path, status, duration_ms, remote_addr, bytes` — never tokens or bodies), size-rotated (`EPHEMERA_AUDIT_MAX_MIB`/`_KEEP`), queryable via authenticated `GET /audit`. On by default; `EPHEMERA_AUDIT_DISABLE=true` to disable. See [Access audit log](#access-audit-log-v041). |
+| **Per-token TTL & rotation** (v0.4.1) | Token entries accept an optional expiry — `name:token:expires` (RFC3339 or Unix seconds); a matched-but-expired token is rejected `401` (`ephemera_auth_total{outcome="expired"}`). The in-VM control-plane token is the first **non-expired** client. Two-field `name:token` never expires (backward compatible). |
+| **Operator CLI `ephemera-ctl`** (v0.4.1) | Dependency-free stdlib CLI wrapping the REST API (`vm`/`flock`/`snapshot`/`audit`/`metrics` verbs; human tables or `--json`). Reads `EPHEMERA_CTL_URL` + `--token`/`EPHEMERA_CTL_TOKEN`/`EPHEMERA_API_TOKEN`. See [Operator CLI](#operator-cli-ephemera-ctl-v041). |
 
 ---
 
@@ -500,13 +516,14 @@ configs/
   goose-daemon/       Control plane daemon (main binary)
     main.go           Startup, artifact bootstrap, ControlPlane init,
                       initSlog (TextHandler/JSONHandler + level gating, v0.3.5)
-    api.go            HTTP API: VM + snapshot CRUD, auth middleware,
+    api.go            HTTP API: VM + snapshot CRUD, auth middleware
+                      (timing-safe; per-token TTL + client-identity context, v0.4.1),
                       two-mux split for unauthenticated /metrics (v0.3.5),
                       spawnVMInternal (shared by /vms and /flocks paths;
                       AgentToken / ControlPlaneToken plumb-through),
                       counter/histogram wiring for spawn/destroy/snapshot/
                       flock/SIGHUP/CP-token paths (v0.3.5),
-                      controlPlaneTokenForVM (apiClients[0] → in-VM bearer)
+                      controlPlaneTokenForVM (first non-expired client → in-VM bearer, v0.4.1)
     config.go         Env-var configuration + AgentProfile / LookupProfile
                       (role → vCPU, memory, profile directory mapping);
                       EPHEMERA_METRICS_REQUIRE_AUTH (v0.3.5)
@@ -521,6 +538,9 @@ configs/
     stats_collector.go   Firecracker PID resolution via /proc/net/unix →
                       /proc/<pid>/fd inode trace, /proc/<pid>/stat CPU sampling,
                       VmRSS, TAP statistics, agent /health probe (v0.3.5)
+    context.go        client-identity context keys + request-scoped holder (v0.4.1)
+    audit.go          access audit log: rotating jsonl writer, statusRecorder
+                      (Flusher-preserving), GET /audit, auditMiddleware (v0.4.1)
   goose-agent/        In-VM HTTP agent (baked into golden image)
     main.go           /tasks, /health, /stop, /townwall/post  (Bearer token auth);
                       prepends role system prompt to /tasks bodies;
@@ -529,6 +549,10 @@ configs/
   micro-init/         PID 1 for each MicroVM (baked into golden image)
     main.go           Mounts virtual filesystems, manages goose-agent,
                       calls poweroff(2) on exit
+  ephemera-ctl/       Operator CLI — dependency-free stdlib HTTP wrapper (v0.4.1)
+    main.go           noun/verb dispatch, EPHEMERA_CTL_URL/_TOKEN, --json
+    client.go         HTTP client (Bearer, non-2xx → error) + wire-type mirrors
+    commands.go       vm/flock/snapshot/audit/metrics verbs, tabwriter output
 
 internal/
   vm/machine.go       Firecracker SDK wrapper — StartMachine, RestoreMachine
@@ -1104,7 +1128,9 @@ control plane으로 전달할 때 Bearer token으로 첨부한다.
 | `EPHEMERA_AGENT_PORT` | `8080` | Port goose-agent listens on inside each VM. |
 | `EPHEMERA_PUBLIC_URL` | *(unset)* | Externally-reachable base URL of the control plane (no trailing slash). When set, `agent_url` in VM responses uses the proxy path `{EPHEMERA_PUBLIC_URL}/vms/{vm_id}` instead of the VM's private IP. Example: `https://api.example.com`. |
 | `EPHEMERA_HOME` | current working directory | Work directory used to resolve `artifacts/`, `configs/`, `snapshots/`, and other daemon-local paths. Useful when launching from systemd or another supervisor. |
-| `EPHEMERA_DISK_MODE` | *(unset)* | Set to `cow` to provision spawn disks as a dm-snapshot view of the golden image (~0 MiB initial usage) instead of a 700 MiB full copy. Default behavior is preserved when unset. |
+| `EPHEMERA_DISK_MODE` | *(unset)* | Spawn disk strategy. Unset, `plain`, or `full` uses the existing full byte-for-byte rootfs clone and does not probe COW support. Set to `cow` to provision spawn disks as a dm-snapshot view of the golden image (~0 MiB initial usage); if `losetup`/`dmsetup`/`dm_snapshot` support is unavailable, the daemon logs a warning and falls back to plain at startup. |
+| `EPHEMERA_DISK_MIN_FREE_MIB` | `1024` | Free-space floor (MiB) enforced before a VM clone or snapshot writes to disk (v0.4.0). A `statfs` pre-flight estimates the footprint (clone / full snapshot ≈ rootfs + memory; diff snapshot ≈ memory only) and returns `507 Insufficient Storage` when the result would drop free space below this margin, rather than failing mid-write. |
+| `EPHEMERA_AUTOSNAPSHOT` | `false` | When `true` (`1`/`yes`/`on` also accepted), the daemon snapshots each recoverable VM's memory+state into `vms/<id>/auto/` on **graceful** shutdown, and the next start **warm-restores** it (in-flight agent work survives a daemon bounce) instead of cold-booting (v0.4.0). One-shot per shutdown; on any restore failure it falls back to cold boot. Requires a graceful shutdown — a SIGKILL/crash cold-boots as before. A 5-agent flock snapshot is ~10 GB, so default off. |
 | `EPHEMERA_WATCHDOG_INTERVAL_SEC` | `5` | Watchdog poll cadence (v0.3.4). |
 | `EPHEMERA_WATCHDOG_TIMEOUT_SEC` | `1` | Watchdog per-probe HTTP timeout (v0.3.4). Clamped: `interval` is bumped up to `timeout` if smaller. |
 | `EPHEMERA_WATCHDOG_THRESHOLD` | `3` | Consecutive probe failures before marking an agent `dead` (v0.3.4). |
@@ -1662,6 +1688,32 @@ Exposed series (additive — never breaks the wire format on minor bumps):
 
 ---
 
+### Access Audit Log (v0.4.1)
+
+```
+GET /audit?limit=100&client=alice&status=200&method=GET
+Authorization: Bearer <token>
+```
+
+Returns the most recent access-log records (newest first) as a JSON array. All
+query params are optional: `limit` (default 100, max 1000), `client`, `status`,
+`method`.
+
+```json
+[
+  { "ts": "2026-05-27T06:11:05Z", "client": "alice", "method": "GET",
+    "path": "/vms", "status": 200, "duration_ms": 3, "remote_addr": "127.0.0.1:54xxx", "bytes": 412 }
+]
+```
+
+Records are appended to `{workDir}/audit/access.jsonl` (size-rotated; see the
+`EPHEMERA_AUDIT_*` env vars) and **never contain tokens, the `Authorization`
+header, request/response bodies, or the query string**. Unauthenticated requests
+are logged with `client` = `"-"`; `/metrics` is excluded. This endpoint is
+authenticated (and is itself audited). See also [Access audit log](#access-audit-log-v041) under Security.
+
+---
+
 ### Agent Proxy (via Control Plane)
 
 The control plane proxies the three agent endpoints, making them accessible to external clients without direct access to the private VM subnet. Authentication uses the **control plane Bearer token** — the agent token is injected internally.
@@ -2146,7 +2198,7 @@ curl -X POST "$API/flocks/$FLOCK_ID/agents/reviewer-1/restart"
 
 When the control plane runs with `EPHEMERA_API_TOKENS` set, the in-VM `/townwall/post` forwarder needs a Bearer to authenticate against `/flocks/{id}/post`. v0.3.3 plumbs that token automatically:
 
-- `ControlPlane.controlPlaneTokenForVM()` returns `apiClients[0].Token` under `clientsMu` (so SIGHUP-driven `ReloadClients` stays safe). Empty when auth is disabled.
+- `ControlPlane.controlPlaneTokenForVM()` returns the first **non-expired** client's token under `clientsMu` (so SIGHUP-driven `ReloadClients` stays safe; `apiClients[0]` until v0.4.1 added per-token TTL). Empty when auth is disabled or every token has expired.
 - `spawnVMForFlock` (and `restartAgent`) pass the token through `spawnVMOptions.ControlPlaneToken` → `VMPrepareOptions.ControlPlaneToken` → `injectVMFiles`, which writes it to `/root/.ephemera-cp-token` at mode 0600. Standalone `POST /vms` does NOT inject it because non-flock VMs do not use `/townwall/post`.
 - `goose-agent`'s `loadCPToken` prefers the file and falls back to the legacy `EPHEMERA_CONTROL_PLANE_TOKEN` env var for older golden images.
 
@@ -2156,9 +2208,9 @@ This removes the per-VM operator burden documented in earlier releases. v0.3.4 a
 
 When you want to rotate the control-plane bearer without restarting either the daemon or any VMs:
 
-1. Run the daemon with `EPHEMERA_API_TOKENS_FILE=/etc/ephemera/tokens` (one `name:token` entry per line — comma-separated also works). The file source takes precedence over `EPHEMERA_API_TOKENS` env when set; both legacy env paths remain as fallback.
+1. Run the daemon with `EPHEMERA_API_TOKENS_FILE=/etc/ephemera/tokens` (one `name:token[:expires]` entry per line — comma-separated also works; the optional `:expires` is the v0.4.1 per-token TTL). The file source takes precedence over `EPHEMERA_API_TOKENS` env when set; both legacy env paths remain as fallback.
 2. Edit the file (operator action).
-3. `pkill -HUP ephemera-daemon`. `ReloadClients` re-reads the file (env values are fixed at exec, the file is not), hot-swaps `cp.clients` under `clientsMu`, and fans the new `apiClients[0].Token` out to every running flock VM over the existing vsock channel.
+3. `pkill -HUP ephemera-daemon`. `ReloadClients` re-reads the file (env values are fixed at exec, the file is not), hot-swaps `cp.clients` under `clientsMu`, and fans the first **non-expired** client's token (v0.4.1; was `apiClients[0]`) out to every running flock VM over the existing vsock channel.
 
 In-VM side, `goose-agent`'s vsock listener now dispatches both `CHANGE_IP` (used since v0.2.0 for snapshot-restore IP plumbing) and the new `SET_CP_TOKEN <token>` command, which atomically rewrites `/root/.ephemera-cp-token` (tmp + rename, mode 0600). The `/townwall/post` handler re-reads the file on every request, so the next forwarder call sees the new bearer.
 
@@ -2300,10 +2352,9 @@ Requirements: a Google Gemini API key in `configs/goose-secrets.yaml`, `/dev/kvm
 | **Single-host VM runtime** | VM 실행 자체는 host-local daemon이 소유한다. Cross-host snapshot replication은 MCP router와 scheduler state를 통해 수동 운영 workflow로 지원한다. |
 | **Same-snapshot concurrent restores not supported** | The guest IP is reconfigured via vsock after restore, so different-snapshot concurrent restores each get a fresh IP. However, two VMs from the *same* snapshot would still collide on the Firecracker vsock UDS path (which is fixed in `state.bin`), so same-snapshot concurrent restores are not supported. |
 | **Cross-machine restore** | `anvil_replicate_snapshot`으로 target host에 snapshot bundle을 import한 뒤 `POST /snapshots/{id}/restore`를 호출한다. diff snapshot은 target에 base full snapshot이 필요하며 `include_dependencies=true`가 base를 먼저 복제한다. |
-| **Cold-restart loses in-VM memory** (v0.3.2) | Live VM auto-restart re-boots each VM from its rootfs clone; the guest kernel and `goose-agent` start fresh. Any `/tasks` request in flight at the moment of daemon shutdown is dropped. Callers should idempotency-key tasks or re-poll for completion across a restart. |
-| **COW-mode VMs are not auto-recovered** (v0.3.2) | VMs spawned with `EPHEMERA_DISK_MODE=cow` are skipped during cold-restart (logged on startup). dm-snapshot orphan cleanup is deferred. Workaround: re-spawn the agent if you depend on it. |
-| **Snapshot-restored VMs are not auto-recovered** (v0.3.2) | Only spawn-path VMs are cold-restarted. After a daemon restart, call `POST /snapshots/{id}/restore` again to bring back a snapshot-derived VM. |
-| **CP token rotation needs v0.3.4 VMs and `_TOKENS_FILE`** (updated v0.3.4) | v0.3.4 hot-propagates the new `apiClients[0].Token` to running VMs via vsock on SIGHUP. Two prerequisites: (a) the daemon must source tokens from `EPHEMERA_API_TOKENS_FILE` rather than env (env values are fixed at exec time and cannot change on SIGHUP); (b) the VMs must run a v0.3.4+ `goose-agent` (older ones lack the `SET_CP_TOKEN` vsock handler). When either is missing the v0.3.3 fallback (`POST /flocks/{id}/agents/{agent_id}/restart`) still works. |
+| **Cold-restart loses in-VM memory by default** (v0.3.2; mitigated v0.4.0) | Live VM auto-restart re-boots each VM from its rootfs clone — the guest kernel and `goose-agent` start fresh, and any `/tasks` request in flight at the moment of daemon shutdown is dropped. Set `EPHEMERA_AUTOSNAPSHOT=true` to warm-restore in-VM memory across a *graceful* shutdown (v0.4.0). A SIGKILL/crash still cold-boots, so callers should still idempotency-key tasks or re-poll for completion across an ungraceful restart. |
+| **Snapshot-restored VMs are not auto-recovered** (v0.3.2) | Only spawn-path VMs are cold-restarted. After a daemon restart, call `POST /snapshots/{id}/restore` again to bring back a snapshot-derived VM. COW *spawn* VMs explicitly created with `EPHEMERA_DISK_MODE=cow` are auto-recovered as of v0.4.0. |
+| **CP token rotation needs v0.3.4 VMs and `_TOKENS_FILE`** (updated v0.3.4) | v0.3.4 hot-propagates the new control-plane token (the first non-expired client since v0.4.1; `apiClients[0]` before) to running VMs via vsock on SIGHUP. Two prerequisites: (a) the daemon must source tokens from `EPHEMERA_API_TOKENS_FILE` rather than env (env values are fixed at exec time and cannot change on SIGHUP); (b) the VMs must run a v0.3.4+ `goose-agent` (older ones lack the `SET_CP_TOKEN` vsock handler). When either is missing the v0.3.3 fallback (`POST /flocks/{id}/agents/{agent_id}/restart`) still works. |
 | **Metrics retention is external** (v0.3.5) | `/metrics` exposes raw counters and gauges only — the daemon does not aggregate, store, or rotate history. Operators are expected to wire an external Prometheus (or any text-exposition-compatible) scraper. |
 
 ---
