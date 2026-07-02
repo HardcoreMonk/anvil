@@ -1,6 +1,10 @@
 package storage
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestParseLosetupOutput(t *testing.T) {
 	out := `/dev/loop0: [64769]:12345 (/tmp/goose-workspaces/vm-1.cow)
@@ -67,5 +71,49 @@ func TestLoopPathFromMajorMinor(t *testing.T) {
 		if got := loopPathFromMajorMinor(in); got != want {
 			t.Errorf("loopPathFromMajorMinor(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestReclaimCOWDeviceRemoveStoreRemovesStoreAndRootfsWithoutDevice(t *testing.T) {
+	workspace := t.TempDir()
+	vmID := "vm-restored"
+	store := filepath.Join(workspace, vmID+".cow")
+	rootfs := filepath.Join(workspace, vmID+".ext4")
+	if err := os.WriteFile(store, []byte("store"), 0600); err != nil {
+		t.Fatalf("write store: %v", err)
+	}
+	if err := os.WriteFile(rootfs, []byte("rootfs"), 0600); err != nil {
+		t.Fatalf("write rootfs: %v", err)
+	}
+
+	ReclaimCOWDeviceRemoveStore(workspace, vmID)
+
+	if _, err := os.Stat(store); !os.IsNotExist(err) {
+		t.Fatalf("store still exists after remove-store cleanup: err=%v", err)
+	}
+	if _, err := os.Stat(rootfs); !os.IsNotExist(err) {
+		t.Fatalf("rootfs still exists after remove-store cleanup: err=%v", err)
+	}
+}
+
+func TestReclaimCOWDeviceKeepStorePreservesStoreAndRootfsWithoutDevice(t *testing.T) {
+	workspace := t.TempDir()
+	vmID := "vm-recoverable"
+	store := filepath.Join(workspace, vmID+".cow")
+	rootfs := filepath.Join(workspace, vmID+".ext4")
+	if err := os.WriteFile(store, []byte("store"), 0600); err != nil {
+		t.Fatalf("write store: %v", err)
+	}
+	if err := os.WriteFile(rootfs, []byte("rootfs"), 0600); err != nil {
+		t.Fatalf("write rootfs: %v", err)
+	}
+
+	ReclaimCOWDeviceKeepStore(workspace, vmID)
+
+	if _, err := os.Stat(store); err != nil {
+		t.Fatalf("store missing after keep-store cleanup: %v", err)
+	}
+	if _, err := os.Stat(rootfs); err != nil {
+		t.Fatalf("rootfs missing after keep-store cleanup: %v", err)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -411,17 +412,21 @@ func TestSpawnVMRollbackCleansEgressAndReleasesNetworkOnce(t *testing.T) {
 	}
 }
 
-func TestRecoveryDropsRestoredCOWStateWithoutProtectingOrphanResources(t *testing.T) {
+func TestRecoveryDropsRestoredCOWStateAfterSafeResourceCleanup(t *testing.T) {
 	cp := newTestCP(t)
 	workspace := t.TempDir()
 	cp.provisioner = &storage.Provisioner{WorkspaceDir: workspace}
 
 	vmID := "vm-restored"
+	socketPath := filepath.Join(t.TempDir(), "firecracker-vm-restored.sock")
+	vsockPath := filepath.Join(t.TempDir(), "vm-restored.vsock")
 	if err := storage.SaveVMState(cp.workDir, storage.VMState{
 		VMID:             vmID,
 		GuestIP:          "10.0.1.99",
 		TapDevice:        "tap99",
 		MacAddr:          "AA:FC:00:00:00:63",
+		SocketPath:       socketPath,
+		VsockPath:        vsockPath,
 		DiskPath:         filepath.Join(workspace, vmID+".ext4"),
 		DiskMode:         storage.DiskModeCOW,
 		SourceSnapshotID: "snap-source",
@@ -437,22 +442,72 @@ func TestRecoveryDropsRestoredCOWStateWithoutProtectingOrphanResources(t *testin
 	}
 
 	oldRemoveOrphans := removeOrphanCOWDevices
-	var sawOrphanCleanup bool
+	oldKillStaleFirecracker := killStaleFirecracker
+	oldRemoveStaleVMArtifacts := removeStaleVMArtifacts
+	oldRemoveRestoredCOWDevice := removeRestoredCOWDevice
+	var events []string
 	removeOrphanCOWDevices = func(workspaceDir string, liveVMIDs map[string]struct{}) int {
-		sawOrphanCleanup = true
+		events = append(events, "orphan-sweep")
 		if workspaceDir != workspace {
 			t.Fatalf("workspaceDir = %q, want %q", workspaceDir, workspace)
 		}
-		if _, ok := liveVMIDs[vmID]; ok {
-			t.Fatalf("restored COW state %q was protected from orphan cleanup by live set %v", vmID, liveVMIDs)
+		if _, ok := liveVMIDs[vmID]; !ok {
+			t.Fatalf("restored COW state %q was not protected in initial live set %v", vmID, liveVMIDs)
 		}
-		return 1
+		return 0
 	}
-	defer func() { removeOrphanCOWDevices = oldRemoveOrphans }()
+	killStaleFirecracker = func(gotSocketPath string) error {
+		events = append(events, "kill")
+		if gotSocketPath != socketPath {
+			t.Fatalf("KillStaleFirecracker socket = %q, want %q", gotSocketPath, socketPath)
+		}
+		if !storage.VMStateExists(cp.workDir, vmID) {
+			t.Fatal("state was dropped before stale Firecracker cleanup")
+		}
+		return nil
+	}
+	removeStaleVMArtifacts = func(gotSocketPath, gotVsockPath, gotLogFifoPath string) {
+		events = append(events, "artifacts")
+		if gotSocketPath != socketPath {
+			t.Fatalf("artifact socket = %q, want %q", gotSocketPath, socketPath)
+		}
+		if gotVsockPath != vsockPath {
+			t.Fatalf("artifact vsock = %q, want %q", gotVsockPath, vsockPath)
+		}
+		wantLog := fmt.Sprintf("/tmp/fc-%s-log.fifo", vmID)
+		if gotLogFifoPath != wantLog {
+			t.Fatalf("artifact log fifo = %q, want %q", gotLogFifoPath, wantLog)
+		}
+		if !storage.VMStateExists(cp.workDir, vmID) {
+			t.Fatal("state was dropped before stale artifact cleanup")
+		}
+	}
+	removeRestoredCOWDevice = func(workspaceDir, gotVMID string) {
+		events = append(events, "cow-cleanup")
+		if workspaceDir != workspace {
+			t.Fatalf("restored COW cleanup workspace = %q, want %q", workspaceDir, workspace)
+		}
+		if gotVMID != vmID {
+			t.Fatalf("restored COW cleanup vmID = %q, want %q", gotVMID, vmID)
+		}
+		if !storage.VMStateExists(cp.workDir, vmID) {
+			t.Fatal("state was dropped before restored COW cleanup")
+		}
+	}
+	defer func() {
+		removeOrphanCOWDevices = oldRemoveOrphans
+		killStaleFirecracker = oldKillStaleFirecracker
+		removeStaleVMArtifacts = oldRemoveStaleVMArtifacts
+		removeRestoredCOWDevice = oldRemoveRestoredCOWDevice
+	}()
 
 	var releases []string
 	cp.releaseVMNetwork = func(tapDevice, guestIP string) error {
+		events = append(events, "release")
 		releases = append(releases, tapDevice+" "+guestIP)
+		if !storage.VMStateExists(cp.workDir, vmID) {
+			t.Fatal("state was dropped before network release")
+		}
 		return nil
 	}
 
@@ -466,11 +521,11 @@ func TestRecoveryDropsRestoredCOWStateWithoutProtectingOrphanResources(t *testin
 	if len(failed) != 1 || failed[0] != vmID {
 		t.Fatalf("failed = %v, want [%s]", failed, vmID)
 	}
-	if !sawOrphanCleanup {
-		t.Fatal("RemoveOrphanCOWDevices was not called")
-	}
 	if len(releases) != 1 || releases[0] != "tap99 10.0.1.99" {
 		t.Fatalf("network releases = %v, want restored VM release", releases)
+	}
+	if got, want := strings.Join(events, ","), "orphan-sweep,kill,artifacts,cow-cleanup,release"; got != want {
+		t.Fatalf("events = %s, want %s", got, want)
 	}
 	if storage.VMStateExists(cp.workDir, vmID) {
 		t.Fatal("restored VM state still exists after recovery drop")

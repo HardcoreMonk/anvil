@@ -16,7 +16,12 @@ import (
 	firecracker "github.com/firecracker-microvm/firecracker-go-sdk"
 )
 
-var removeOrphanCOWDevices = storage.RemoveOrphanCOWDevices
+var (
+	removeOrphanCOWDevices  = storage.RemoveOrphanCOWDevices
+	killStaleFirecracker    = storage.KillStaleFirecracker
+	removeStaleVMArtifacts  = storage.RemoveStaleVMArtifacts
+	removeRestoredCOWDevice = storage.ReclaimCOWDeviceRemoveStore
+)
 
 // RecoverVMs brings every previously-spawned VM whose state.json is still on
 // disk back up after a daemon restart, reusing the same IP, TAP, MAC, and agent
@@ -51,9 +56,6 @@ func (cp *ControlPlane) RecoverVMs() (recovered int, failed []string, err error)
 	// the recovery loop below to handle (v0.4.0 E).
 	liveVMIDs := make(map[string]struct{}, len(states))
 	for _, s := range states {
-		if strings.TrimSpace(s.SourceSnapshotID) != "" {
-			continue
-		}
 		liveVMIDs[s.VMID] = struct{}{}
 	}
 	if cp.provisioner != nil {
@@ -65,6 +67,14 @@ func (cp *ControlPlane) RecoverVMs() (recovered int, failed []string, err error)
 	for _, s := range states {
 		if strings.TrimSpace(s.SourceSnapshotID) != "" {
 			slog.Warn("recovery: restored vm state is not recoverable in v0.4.0 slice, dropping state", "vm_id", s.VMID, "source_snapshot_id", s.SourceSnapshotID)
+			if killErr := killStaleFirecracker(s.SocketPath); killErr != nil {
+				slog.Warn("recovery: stale restored firecracker probe failed", "vm_id", s.VMID, "err", killErr)
+			}
+			logFifoPath := fmt.Sprintf("/tmp/fc-%s-log.fifo", s.VMID)
+			removeStaleVMArtifacts(s.SocketPath, s.VsockPath, logFifoPath)
+			if s.DiskMode == storage.DiskModeCOW && cp.provisioner != nil {
+				removeRestoredCOWDevice(cp.provisioner.WorkspaceDir, s.VMID)
+			}
 			cp.releaseRecoveryNetwork(s.TapDevice, s.GuestIP)
 			cp.dropRecoveryState(s)
 			failed = append(failed, s.VMID)
@@ -85,11 +95,11 @@ func (cp *ControlPlane) RecoverVMs() (recovered int, failed []string, err error)
 		}
 
 		// Clear orphans left by the previous daemon process.
-		if killErr := storage.KillStaleFirecracker(s.SocketPath); killErr != nil {
+		if killErr := killStaleFirecracker(s.SocketPath); killErr != nil {
 			slog.Warn("recovery: stale firecracker probe failed", "vm_id", s.VMID, "err", killErr)
 		}
 		logFifoPath := fmt.Sprintf("/tmp/fc-%s-log.fifo", s.VMID)
-		storage.RemoveStaleVMArtifacts(s.SocketPath, s.VsockPath, logFifoPath)
+		removeStaleVMArtifacts(s.SocketPath, s.VsockPath, logFifoPath)
 
 		if reErr := cp.reclaimRecoveryNetwork(s.TapDevice, s.GuestIP, s.MacAddr); reErr != nil {
 			slog.Warn("recovery: network reclaim failed, dropping state", "vm_id", s.VMID, "err", reErr)

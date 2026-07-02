@@ -187,9 +187,23 @@ func RemoveOrphanCOWDevices(workspaceDir string, liveVMIDs map[string]struct{}) 
 // gone). The .cow store is never removed — it holds the COW writes the restore
 // re-layers over the golden image.
 func ReclaimCOWDeviceKeepStore(workspaceDir, vmID string) {
+	reclaimCOWDevice(workspaceDir, vmID, true)
+}
+
+// ReclaimCOWDeviceRemoveStore tears down a single COW VM's stale dm-snapshot
+// device, loop devices, lingering bind mount, exception store, and rootfs mount
+// target. It is used for stale restored VMs that are intentionally not
+// recoverable in the v0.4.0 slice; unlike ReclaimCOWDeviceKeepStore, there is no
+// future recovery path that needs the exception store preserved.
+func ReclaimCOWDeviceRemoveStore(workspaceDir, vmID string) {
+	reclaimCOWDevice(workspaceDir, vmID, false)
+}
+
+func reclaimCOWDevice(workspaceDir, vmID string, keepStore bool) {
 	// Clear any lingering bind mount on the rootfs target so a fresh
 	// SetupDMSnapshot bind can take its place (lazy: detaches immediately).
-	exec.Command("umount", "-l", filepath.Join(workspaceDir, vmID+".ext4")).Run()
+	rootfs := filepath.Join(workspaceDir, vmID+".ext4")
+	exec.Command("umount", "-l", rootfs).Run()
 
 	detached := make(map[string]bool)
 
@@ -210,7 +224,11 @@ func ReclaimCOWDeviceKeepStore(workspaceDir, vmID string) {
 				detached[lp] = true
 			}
 		}
-		slog.Warn("recovery: cleared stale cow device for restore", "vm_id", vmID, "dm", dmName)
+		if keepStore {
+			slog.Warn("recovery: cleared stale cow device for restore", "vm_id", vmID, "dm", dmName)
+		} else {
+			slog.Warn("recovery: removed stale restored cow device", "vm_id", vmID, "dm", dmName)
+		}
 	}
 
 	// Detach a dangling exception-store loop with no dm device on top (crash between
@@ -225,6 +243,10 @@ func ReclaimCOWDeviceKeepStore(workspaceDir, vmID string) {
 			exec.Command("losetup", "-d", loopDev).Run()
 			slog.Warn("recovery: detached stale cow loop for restore", "vm_id", vmID, "loop", loopDev)
 		}
+	}
+	if !keepStore {
+		os.Remove(store)
+		os.Remove(rootfs)
 	}
 }
 
