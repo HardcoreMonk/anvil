@@ -28,6 +28,7 @@ import (
 	ops "github.com/firecracker-microvm/firecracker-go-sdk/client/operations"
 
 	"ephemera/internal/anvilmcp"
+	"ephemera/internal/metrics"
 	"ephemera/internal/network"
 	"ephemera/internal/orchestrator"
 	"ephemera/internal/storage"
@@ -41,6 +42,8 @@ type authFailureRecorder interface {
 // authMiddleware enforces per-client Bearer token authentication on all requests.
 // getClients is called on every request so token changes (via SIGHUP reload) take
 // effect immediately without restarting the server or dropping running VMs.
+// authTotal records each auth decision (outcome=ok|denied|expired); it may be nil
+// in tests, in which case the metric is skipped.
 //
 // If getClients returns an empty slice, every request is allowed (auth disabled).
 //
@@ -48,7 +51,14 @@ type authFailureRecorder interface {
 // operands before returning, so response time does not vary with how many leading
 // characters match. All registered tokens are compared on every request (no
 // early-exit after the first match) to prevent leaking which client index was hit.
-func authMiddleware(getClients func() []APIClient, metrics authFailureRecorder, next http.Handler) http.Handler {
+// The expiry check (v0.4.1) runs AFTER the full compare loop so it adds no timing
+// signal, and an expired match returns the same 401 body as no match.
+func authMiddleware(getClients func() []APIClient, authTotal *metrics.CounterVec, next http.Handler) http.Handler {
+	countAuth := func(outcome string) {
+		if authTotal != nil {
+			authTotal.WithLabelValues(outcome).Inc()
+		}
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		clients := getClients()
 		if len(clients) == 0 {
@@ -59,23 +69,42 @@ func authMiddleware(getClients func() []APIClient, metrics authFailureRecorder, 
 		auth := []byte(r.Header.Get("Authorization"))
 
 		// Compare against every registered token without short-circuiting.
-		matchedClient := ""
+		matchedName := ""
+		var matched APIClient
 		for _, c := range clients {
 			if subtle.ConstantTimeCompare(auth, []byte("Bearer "+c.Token)) == 1 {
-				matchedClient = c.Name
+				matchedName = c.Name
+				matched = c
 			}
 		}
 
-		if matchedClient == "" {
-			if metrics != nil {
-				metrics.IncAuthFailure()
-			}
+		unauthorized := func() {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="ephemera"`)
 			w.Header().Set("Content-Type", "application/json")
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		}
+
+		if matchedName == "" {
+			countAuth("denied")
+			unauthorized()
 			return
 		}
-		slog.Info("api request", "client", matchedClient, "method", r.Method, "path", r.URL.Path)
+		if !matched.Expires.IsZero() && time.Now().After(matched.Expires) {
+			// Same 401 body as a non-match (no client-facing distinction); only
+			// the server-side log + metric record the expiry.
+			countAuth("expired")
+			slog.Warn("api request rejected: token expired", "client", matchedName, "method", r.Method, "path", r.URL.Path)
+			unauthorized()
+			return
+		}
+		countAuth("ok")
+		// Surface the caller identity: the request-scoped holder lets the outer
+		// audit middleware read it; the context value serves any future handler.
+		if h := clientHolderFromContext(r.Context()); h != nil {
+			h.name = matchedName
+		}
+		r = r.WithContext(withClientName(r.Context(), matchedName))
+		slog.Info("api request", "client", matchedName, "method", r.Method, "path", r.URL.Path)
 		next.ServeHTTP(w, r)
 	})
 }
@@ -282,6 +311,10 @@ type ControlPlane struct {
 	reconfigureGuestIP func(vsockPath, ipCIDR, gateway string) error
 	waitForAgent       func(guestIP string, timeout time.Duration) error
 
+	// audit is the access-log writer (v0.4.1): a rotated jsonl file under
+	// {workDir}/audit/. On by default; nil/disabled is a no-op.
+	audit *auditLogger
+
 	stopCh chan struct{}
 	srv    *http.Server
 }
@@ -314,6 +347,13 @@ func NewControlPlane(
 	if err := cp.tenantStore.Load(); err != nil {
 		log.Printf("Warning: failed to load tenant store: %v", err)
 	}
+
+	// Audit access log (v0.4.1): on by default, rotated jsonl under {workDir}/audit/.
+	audit, auditErr := newAuditLogger(workDir)
+	if auditErr != nil {
+		slog.Warn("audit log init failed; continuing without it", "err", auditErr)
+	}
+	cp.audit = audit
 
 	// Load any snapshots persisted from previous daemon runs.
 	if existing, err := storage.ListSnapshots(workDir); err == nil {
@@ -392,15 +432,18 @@ func NewControlPlane(
 	internalMux.HandleFunc("/snapshots/gc", cp.handleSnapshotGC)
 	internalMux.HandleFunc("/snapshots/import", cp.handleSnapshotImport)
 	internalMux.HandleFunc("/snapshots/", cp.handleSnapshotItem)
+	internalMux.HandleFunc("/audit", cp.handleAudit)
 	cp.registerOrchestratorRoutes(internalMux)
 
 	externalMux := http.NewServeMux()
 	if metricsRequireAuth {
-		externalMux.Handle("/metrics", authMiddleware(cp.getClients, cp.metrics, http.HandlerFunc(cp.handleMetrics)))
+		externalMux.Handle("/metrics", authMiddleware(cp.getClients, cp.metrics.authTotal, http.HandlerFunc(cp.handleMetrics)))
 	} else {
 		externalMux.HandleFunc("/metrics", cp.handleMetrics)
 	}
-	externalMux.Handle("/", authMiddleware(cp.getClients, cp.metrics, internalMux))
+	// audit (outer) wraps auth (inner): the access log captures 401s + final
+	// status, and reads the client name auth back-fills via the request holder.
+	externalMux.Handle("/", cp.auditMiddleware(authMiddleware(cp.getClients, cp.metrics.authTotal, internalMux)))
 
 	cp.srv = &http.Server{Addr: apiAddr, Handler: externalMux}
 	return cp
@@ -414,24 +457,25 @@ func (cp *ControlPlane) getClients() []APIClient {
 }
 
 // controlPlaneTokenForVM returns the bearer the in-VM /townwall/post forwarder
-// uses when calling back into the control plane. Returns the first API client's
-// token (apiClients[0].Token) when auth is enabled, or "" when auth is disabled
-// — in the latter case the in-VM forwarder calls CP unauthenticated.
+// uses when calling back into the control plane. Returns the first NON-EXPIRED
+// API client's token when auth is enabled, or "" when auth is disabled or every
+// token has expired — in the latter case the in-VM forwarder calls CP
+// unauthenticated (v0.4.1: was blindly clients[0]).
 //
 // Read under clientsMu so SIGHUP-driven ReloadClients is safe.
 func (cp *ControlPlane) controlPlaneTokenForVM() string {
 	cp.clientsMu.RLock()
 	defer cp.clientsMu.RUnlock()
-	if len(cp.clients) == 0 {
-		return ""
+	if c, ok := firstActiveClient(cp.clients); ok {
+		return c.Token
 	}
-	return cp.clients[0].Token
+	return ""
 }
 
 // ReloadClients re-reads API tokens from the environment (or EPHEMERA_API_TOKENS_FILE)
-// and hot-swaps the client list. Called on SIGHUP. Also propagates the new apiClients[0]
-// token to every running flock VM via vsock so the in-VM /townwall/post forwarder keeps
-// authenticating after rotation.
+// and hot-swaps the client list. Called on SIGHUP. Also propagates the first
+// non-expired client's token to every running flock VM via vsock so the in-VM
+// /townwall/post forwarder keeps authenticating after rotation.
 func (cp *ControlPlane) ReloadClients() {
 	newClients := loadAPIClients()
 	cp.clientsMu.Lock()
@@ -445,21 +489,26 @@ func (cp *ControlPlane) ReloadClients() {
 		for i, c := range newClients {
 			names[i] = c.Name
 		}
-		slog.Warn("sighup: token reload complete", "client_count", len(newClients), "clients", strings.Join(names, ", "))
+		expired, expiring := countTokenExpiry(newClients)
+		slog.Warn("sighup: token reload complete", "client_count", len(newClients), "clients", strings.Join(names, ", "), "expired", expired, "expiring_24h", expiring)
 	}
 
 	cp.propagateCPTokenToVMs(newClients)
 	cp.metrics.sighupReload.Inc()
 }
 
-// propagateCPTokenToVMs fans out the new apiClients[0] token to every running VM that
-// has a vsock UDS path. Best-effort: per-VM failure is logged, not propagated. Older
-// (pre-v0.3.4) guests lack the SET_CP_TOKEN handler and will fail here; operators can
-// fall back to POST /flocks/{id}/agents/{agent_id}/restart for those.
+// propagateCPTokenToVMs fans out the first non-expired client's token to every
+// running VM that has a vsock UDS path. Best-effort: per-VM failure is logged, not
+// propagated. Older (pre-v0.3.4) guests lack the SET_CP_TOKEN handler and will fail
+// here; operators can fall back to POST /flocks/{id}/agents/{agent_id}/restart.
+// When auth is enabled but every token has expired, an empty token is propagated
+// (the in-VM forwarder then calls CP unauthenticated) and a warning is logged.
 func (cp *ControlPlane) propagateCPTokenToVMs(clients []APIClient) {
 	newToken := ""
-	if len(clients) > 0 {
-		newToken = clients[0].Token
+	if c, ok := firstActiveClient(clients); ok {
+		newToken = c.Token
+	} else if len(clients) > 0 {
+		slog.Warn("cp token propagation: all api clients expired; propagating empty token (in-VM forwarder will call unauthenticated)")
 	}
 
 	cp.mu.RLock()
@@ -503,7 +552,8 @@ func (cp *ControlPlane) Start() error {
 		for i, c := range clients {
 			names[i] = c.Name
 		}
-		auth = fmt.Sprintf("Bearer token (%d client(s): %s)", len(clients), strings.Join(names, ", "))
+		expired, expiring := countTokenExpiry(clients)
+		auth = fmt.Sprintf("Bearer token (%d client(s): %s; expired=%d expiring_24h=%d)", len(clients), strings.Join(names, ", "), expired, expiring)
 	}
 	slog.Warn("control plane api ready", "addr", apiAddr, "auth", auth)
 	// Endpoints banner — emitted as a single block so JSON-mode log consumers
@@ -539,7 +589,9 @@ func (cp *ControlPlane) Start() error {
 		"  GET    /flocks/{flock_id}/wall           — SSE stream of Town Wall\n" +
 		"  GET    /flocks/{flock_id}/wall/history   — full Town Wall log\n" +
 		"  POST   /flocks/{flock_id}/post           — post message to Town Wall\n" +
-		"  POST   /flocks/{flock_id}/agents/{id}/restart — restart one agent in place"
+		"  POST   /flocks/{flock_id}/agents/{id}/restart — restart one agent in place\n" +
+		"  GET    /audit                            — recent API access log (jsonl, rotated)\n" +
+		"  GET    /metrics                          — Prometheus exposition (auth optional)"
 	slog.Warn(endpoints)
 	if publicURL != "" {
 		slog.Warn("public agent_url base configured", "public_url", publicURL)
@@ -561,6 +613,9 @@ func (cp *ControlPlane) Shutdown() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cp.srv.Shutdown(ctx)
+	if cp.audit != nil {
+		cp.audit.Close()
+	}
 }
 
 // locateFlockAgent maps a vmID back to its (flockID, agentID) by scanning

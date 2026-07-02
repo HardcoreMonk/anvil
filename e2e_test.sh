@@ -56,6 +56,33 @@ agent_token_from_state() {
     jq -r '.agent_token // empty' "$state_path"
 }
 
+# ── Pre-flight: refuse to run against a stale daemon binary ──
+# The e2e runs the pre-built ./anvil-daemon; it does NOT compile (a `go build`
+# here would fail under sudo when go is absent from root's secure PATH). The
+# golden-image staleness check rebuilds in-VM artifacts but NOT this host binary,
+# so an un-rebuilt binary silently invalidates the whole run. Fail fast instead.
+if [ ! -x ./anvil-daemon ]; then
+    echo "✗ ./anvil-daemon not found — build it first:"
+    echo "    go build -o anvil-daemon ./cmd/goose-daemon/"
+    exit 1
+fi
+if find cmd internal -name '*.go' -newer ./anvil-daemon 2>/dev/null | grep -q .; then
+    echo "✗ ./anvil-daemon is older than Go source — rebuild before running e2e:"
+    echo "    go build -o anvil-daemon ./cmd/goose-daemon/"
+    exit 1
+fi
+# ephemera-ctl is exercised by steps 82-83 (v0.4.1 PR-B); it also runs pre-built.
+if [ ! -x ./ephemera-ctl ]; then
+    echo "✗ ./ephemera-ctl not found — build it first:"
+    echo "    go build -o ephemera-ctl ./cmd/ephemera-ctl/"
+    exit 1
+fi
+if find cmd/ephemera-ctl -name '*.go' -newer ./ephemera-ctl 2>/dev/null | grep -q .; then
+    echo "✗ ./ephemera-ctl is older than its Go source — rebuild before running e2e:"
+    echo "    go build -o ephemera-ctl ./cmd/ephemera-ctl/"
+    exit 1
+fi
+
 # ── Pre-flight: clean up any leftover files from previous test runs ──
 cleanup_stale_cow_devices
 rm -f /tmp/goose-workspaces/*.ext4 2>/dev/null || true
@@ -1405,12 +1432,300 @@ echo "$STATS_LIST" | jq -e --arg id "$STATS_VM_ID" '[.[] | select(.vm_id==$id) |
 curl -s -o /dev/null -H "Authorization: Bearer e2e-cp-token-v2" -X DELETE "$API/vms/$STATS_VM_ID"
 ok "stats test VM cleaned up"
 
-# ── 60. Shut down rotation daemon ────────────────────────────────
-step "60. Shut down rotation daemon"
-kill "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null || true
+# ── 75. Shut down rotation daemon ────────────────────────────────
+step "75. Shut down rotation daemon"
+kill "$DAEMON_PID" 2>/dev/null || true; wait "$DAEMON_PID" 2>/dev/null || true
+pkill -f "firecracker --api-sock" 2>/dev/null || true
+sleep 2
+ok "Rotation daemon stopped"
+
+# Helper: (re)launch the daemon with optional extra env, wait until /vms answers.
+# extra_env is intentionally unquoted on the env line so "KEY=VAL" word-splits.
+relaunch_daemon() {
+    local extra_env="$1"
+    env EPHEMERA_API_ADDR=0.0.0.0:3000 $extra_env ./anvil-daemon >>"$LOG" 2>&1 &
+    DAEMON_PID=$!
+    for i in $(seq 1 60); do
+        if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
+            fail "Daemon exited during (re)start (see $LOG)"; exit 1
+        fi
+        if curl -s -o /dev/null "$API/vms" 2>/dev/null; then return 0; fi
+        sleep 1
+    done
+    fail "Daemon did not respond after (re)start (see $LOG)"; exit 1
+}
+
+# ════════════════════════════════════════════════════════════════
+# v0.4.0 PR-B: memory auto-snapshot (item B) + recovery rollback (item D).
+# These run on their own plain-mode, auth-disabled daemon lifecycle
+# (relaunch_daemon) now that the auth-on rotation daemon is down.
+# ════════════════════════════════════════════════════════════════
+
+# ── 76. Memory auto-snapshot: warm restore across a graceful bounce ──
+# Proves a VM started under EPHEMERA_AUTOSNAPSHOT is snapshotted on graceful
+# shutdown and WARM-restored (memory preserved) on the next start, not cold-
+# booted. Also exercises the v0.4.0 signal fix: a forwarded SIGTERM (old
+# behavior) would kill Firecracker mid-snapshot, so the auto/ files below would
+# be absent and the warm-restore log line would never appear. goose-agent has no
+# in-guest exec endpoint, so the daemon log + one-shot deletion are the
+# deterministic warm-vs-cold discriminators.
+step "76. EPHEMERA_AUTOSNAPSHOT: warm restore preserves VM memory across a graceful daemon bounce"
+relaunch_daemon "EPHEMERA_AUTOSNAPSHOT=true"
+ok "Daemon up with EPHEMERA_AUTOSNAPSHOT=true"
+
+WVM_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/vms" -H "Content-Type: application/json")
+check_http "$(echo "$WVM_RESP" | tail -1)" "201" "POST /vms (autosnapshot)"
+WVM_ID=$(echo "$WVM_RESP" | head -1 | jq -r '.vm_id')
+ok "Auto-snapshot test VM: $WVM_ID"
+
+# Wait until the agent answers so there is a live, settled VM to snapshot.
+WVM_UP=false
+for i in $(seq 1 60); do
+    if [ "$(curl -s -o /dev/null -w "%{http_code}" "$API/vms/$WVM_ID/health" 2>/dev/null)" = "200" ]; then
+        WVM_UP=true; break
+    fi
+    sleep 1
+done
+$WVM_UP && ok "Agent healthy before bounce ✓" || fail "Agent did not come up before bounce"
+
+# Graceful SIGTERM bounce. 'wait' blocks until the daemon fully exits, i.e. until
+# DestroyAll (Pause+CreateSnapshot, then StopVMM) has completed for every VM.
+kill "$DAEMON_PID" 2>/dev/null || true
+wait "$DAEMON_PID" 2>/dev/null || true
+pkill -f "firecracker --api-sock" 2>/dev/null || true
+sleep 2
+
+# The memory snapshot must have been written under vms/<id>/auto/.
+if [ -f "$(pwd)/vms/$WVM_ID/auto/memory.bin" ] && [ -f "$(pwd)/vms/$WVM_ID/auto/state.bin" ]; then
+    ok "auto-snapshot written: vms/$WVM_ID/auto/{memory,state}.bin ✓"
+else
+    fail "auto-snapshot missing after graceful shutdown (signal fix or snapshot path broken)"
+fi
+
+# Relaunch: RecoverVMs must WARM-restore, not cold-boot.
+relaunch_daemon "EPHEMERA_AUTOSNAPSHOT=true"
+sleep 3
+
+curl -s "$API/vms" | jq -r '.[].vm_id' | grep -qx "$WVM_ID" \
+    && ok "VM $WVM_ID live after warm restore ✓" \
+    || fail "VM $WVM_ID missing from /vms after warm restore"
+[ "$(curl -s -o /dev/null -w "%{http_code}" "$API/vms/$WVM_ID/health")" = "200" ] \
+    && ok "warm-restored agent /health → 200 ✓" \
+    || fail "warm-restored agent /health not 200"
+
+# The defining warm-vs-cold signal: the daemon takes the RestoreMachine path and
+# logs "vm warm-restored" (a cold boot logs "vm back up").
+grep -q "vm warm-restored.*$WVM_ID" "$LOG" \
+    && ok "daemon took warm-restore path (memory preserved, not cold boot) ✓" \
+    || fail "no warm-restore log line for $WVM_ID (fell back to cold boot?)"
+
+# One-shot: the snapshot is consumed and deleted after a successful restore so a
+# second bounce never rolls the VM back to this now-stale image.
+[ ! -e "$(pwd)/vms/$WVM_ID/auto/memory.bin" ] \
+    && ok "auto-snapshot consumed (one-shot delete) ✓" \
+    || fail "auto-snapshot not deleted after restore (would roll back on next bounce)"
+
+# Metrics record both halves (non-fatal — exposition formatting may evolve).
+AUTO_METRICS=$(curl -s -m 5 "$API/metrics" 2>/dev/null || echo "")
+echo "$AUTO_METRICS" | grep -qE 'ephemera_auto_snapshot_total\{outcome="ok"\} [1-9]' \
+    && ok "metric ephemera_auto_snapshot_total{ok} present ✓" \
+    || ok "auto_snapshot ok metric not matched (non-fatal)"
+echo "$AUTO_METRICS" | grep -qE 'ephemera_auto_restore_total\{outcome="ok"\} [1-9]' \
+    && ok "metric ephemera_auto_restore_total{ok} present ✓" \
+    || ok "auto_restore ok metric not matched (non-fatal)"
+
+# Cleanup (DELETE also clears any residual auto/ via item D R12).
+curl -s -o /dev/null -X DELETE "$API/vms/$WVM_ID" || true
+ok "Auto-snapshot test VM cleaned up"
+
+# ── 77. Recovery: state.json present but disk missing → clean drop ──
+# A flock member whose rootfs vanished while the daemon was down (SIGKILL, so the
+# host TAP is NOT released by DestroyAll and lingers) must, on the next start, be
+# dropped cleanly: stale TAP released, state.json removed, flock agent marked
+# dead, and surfaced in the "failed" list — not dropped silently (item D D.2).
+step "77. Recovery with a missing disk artifact drops state cleanly (TAP released, agent dead, surfaced)"
+kill "$DAEMON_PID" 2>/dev/null || true; wait "$DAEMON_PID" 2>/dev/null || true
+pkill -f "firecracker --api-sock" 2>/dev/null || true
+sleep 2
+relaunch_daemon ""
+ok "Plain-mode daemon up for disk-missing recovery test"
+
+DFLOCK_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/flocks" \
+    -H "Content-Type: application/json" \
+    -d '{"task":"disk-missing recovery","roles":["worker"]}')
+check_http "$(echo "$DFLOCK_RESP" | tail -1)" "201" "POST /flocks (disk-missing)"
+DFLOCK_ID=$(echo "$DFLOCK_RESP" | head -1 | jq -r '.flock_id')
+DVM_ID=$(echo "$DFLOCK_RESP" | head -1 | jq -r '.agents[] | select(.agent_id=="worker-1") | .vm_id')
+ok "Disk-missing flock $DFLOCK_ID, worker VM $DVM_ID"
+
+[ -f "$(pwd)/vms/$DVM_ID/state.json" ] \
+    && ok "worker state.json persisted ✓" \
+    || fail "worker state.json missing (cannot run disk-missing test)"
+DVM_TAP=$(jq -r '.tap_device' "$(pwd)/vms/$DVM_ID/state.json")
+DVM_DISK=$(jq -r '.disk_path' "$(pwd)/vms/$DVM_ID/state.json")
+if ip link show "$DVM_TAP" >/dev/null 2>&1; then
+    ok "host TAP $DVM_TAP present before crash ✓"
+else
+    ok "host TAP $DVM_TAP not visible (continuing; release assertion still valid)"
+fi
+
+# SIGKILL the daemon: DestroyAll does NOT run, so the host TAP lingers and the
+# disk + state.json survive. Kill the orphaned Firecracker too, then delete the
+# rootfs to simulate "state.json exists but artifacts vanished".
+kill -9 "$DAEMON_PID" 2>/dev/null || true; wait "$DAEMON_PID" 2>/dev/null || true
+pkill -9 -f "firecracker --api-sock" 2>/dev/null || true
+sleep 2
+rm -f "$DVM_DISK" || true
+ok "Crashed daemon; deleted worker rootfs $DVM_DISK"
+
+relaunch_daemon ""
+sleep 3
+
+[ ! -f "$(pwd)/vms/$DVM_ID/state.json" ] \
+    && ok "state.json dropped on recovery ✓" \
+    || fail "state.json still present (disk-missing branch did not drop it)"
+curl -s "$API/vms" | jq -r '.[].vm_id' | grep -qx "$DVM_ID" \
+    && fail "dropped VM $DVM_ID unexpectedly live in /vms" \
+    || ok "dropped VM $DVM_ID absent from /vms ✓"
+if ip link show "$DVM_TAP" >/dev/null 2>&1; then
+    fail "stale TAP $DVM_TAP still present after recovery (D.2 release missing)"
+else
+    ok "stale TAP $DVM_TAP released by recovery ✓"
+fi
+DMETA_STATUS=$(jq -r '.agents["worker-1"].status' "$(pwd)/flocks/$DFLOCK_ID/metadata.json" 2>/dev/null || echo "missing")
+[ "$DMETA_STATUS" = "dead" ] \
+    && ok "flock agent worker-1 marked dead in metadata.json ✓" \
+    || fail "flock agent status=$DMETA_STATUS, expected dead"
+grep -q "recovery: disk missing.*$DVM_ID" "$LOG" \
+    && ok "daemon logged disk-missing drop for $DVM_ID ✓" \
+    || fail "no disk-missing log line for $DVM_ID"
+grep -q "vms not cold-restarted" "$LOG" \
+    && ok "drop surfaced in failed[] (vms not cold-restarted) ✓" \
+    || fail "disk-missing drop not surfaced in failed[]"
+
+curl -s -o /dev/null -X DELETE "$API/flocks/$DFLOCK_ID" || true
+ok "Disk-missing flock cleaned up"
+
+# ════════════════════════════════════════════════════════════════
+# v0.4.1 PR-A: client identity in context + access audit log + per-token TTL.
+# Runs on a fresh auth-on daemon (relaunch_daemon sets EPHEMERA_API_ADDR=0.0.0.0).
+# ════════════════════════════════════════════════════════════════
+
+# ── 78. Access audit log records an authenticated request ────────
+step "78. Audit log records an authenticated request (client + status, no secrets)"
+kill "$DAEMON_PID" 2>/dev/null || true; wait "$DAEMON_PID" 2>/dev/null || true
+pkill -f "firecracker --api-sock" 2>/dev/null || true
+sleep 2
+OPS_TOKEN="ops-secret-$$"
+relaunch_daemon "EPHEMERA_API_TOKENS=ops:$OPS_TOKEN"
+ok "Auth-on daemon up (client: ops)"
+
+VMS_CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $OPS_TOKEN" "$API/vms")
+check_http "$VMS_CODE" "200" "GET /vms with valid bearer"
+BOGUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer wrong-token" "$API/vms")
+check_http "$BOGUS_CODE" "401" "GET /vms with bogus bearer"
+
+AUDIT=$(curl -s -H "Authorization: Bearer $OPS_TOKEN" "$API/audit?limit=20")
+echo "$AUDIT" | jq -e '[.[] | select(.path=="/vms" and .method=="GET" and .status==200 and .client=="ops")] | length > 0' >/dev/null 2>&1 \
+    && ok "audit recorded GET /vms 200 by client=ops ✓" \
+    || fail "audit missing the GET /vms 200/ops entry (got: $AUDIT)"
+# The audit log must NEVER contain the token or Authorization material.
+if echo "$AUDIT" | grep -qiE "$OPS_TOKEN|bearer|authorization"; then
+    fail "audit log leaked auth material"
+else
+    ok "audit log contains no token/Authorization material ✓"
+fi
+
+# ── 79. Audit captures unauthorized (401) requests as client=- ───
+step "79. Audit captures a 401 as client=-"
+echo "$AUDIT" | jq -e '[.[] | select(.path=="/vms" and .status==401 and .client=="-")] | length > 0' >/dev/null 2>&1 \
+    && ok "audit recorded the 401 with client=- ✓" \
+    || fail "audit missing the 401/client=- entry (got: $AUDIT)"
+
+# ── 80. Per-token TTL: expired token rejected, primary still works ─
+step "80. Per-token TTL: an expired token is rejected; never-expiring primary keeps working"
+kill "$DAEMON_PID" 2>/dev/null || true; wait "$DAEMON_PID" 2>/dev/null || true
+pkill -f "firecracker --api-sock" 2>/dev/null || true
+sleep 2
+TOKENS_FILE=$(mktemp /tmp/ephemera-ttl-XXXXXX.tokens)
+TEMP_EXPIRY=$(date -u -d '+10 seconds' +%Y-%m-%dT%H:%M:%SZ)
+printf 'ops:%s\ntemp:temp-secret:%s\n' "$OPS_TOKEN" "$TEMP_EXPIRY" > "$TOKENS_FILE"
+relaunch_daemon "EPHEMERA_API_TOKENS_FILE=$TOKENS_FILE"
+ok "Auth-on daemon up with a short-TTL token (temp expires $TEMP_EXPIRY)"
+
+TTL_CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer temp-secret" "$API/vms")
+check_http "$TTL_CODE" "200" "short-TTL token accepted before expiry"
+sleep 11
+TTL_CODE2=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer temp-secret" "$API/vms")
+check_http "$TTL_CODE2" "401" "short-TTL token rejected after expiry"
+PRIMARY_CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $OPS_TOKEN" "$API/vms")
+check_http "$PRIMARY_CODE" "200" "never-expiring primary token still accepted"
+grep -q "token expired" "$LOG" \
+    && ok "daemon logged token expiry ✓" \
+    || fail "no 'token expired' log line in daemon output"
+curl -s -H "Authorization: Bearer $OPS_TOKEN" "$API/metrics" | grep -qE 'ephemera_auth_total\{outcome="expired"\} [1-9]' \
+    && ok "metric ephemera_auth_total{outcome=expired} present ✓" \
+    || fail "expired auth metric missing from /metrics"
+
+# ── 81. SSE Town Wall stream survives the audit ResponseWriter wrap ─
+step "81. SSE /flocks/{id}/wall streams through the audit statusRecorder (Flusher preserved)"
+SSE_FLOCK=$(curl -s -X POST "$API/flocks" -H "Authorization: Bearer $OPS_TOKEN" \
+    -H "Content-Type: application/json" -d '{"task":"sse guard","roles":["worker"]}')
+SSE_FLOCK_ID=$(echo "$SSE_FLOCK" | jq -r '.flock_id // empty')
+if [ -n "$SSE_FLOCK_ID" ]; then
+    ok "SSE guard flock: $SSE_FLOCK_ID"
+    # A broken statusRecorder (no Flush forwarding) makes streamTownWall return
+    # 500 "streaming unsupported"; 200 (stream opened, then closed by -m) is the pass.
+    SSE_CODE=$(curl -s -N -o /dev/null -w "%{http_code}" -m 3 -H "Authorization: Bearer $OPS_TOKEN" "$API/flocks/$SSE_FLOCK_ID/wall" || true)
+    [ "$SSE_CODE" = "200" ] \
+        && ok "GET /flocks/{id}/wall streamed (200; Flusher preserved through audit wrapper) ✓" \
+        || fail "SSE wall returned '$SSE_CODE' (expected 200; statusRecorder may not forward Flusher)"
+    curl -s -o /dev/null -X DELETE "$API/flocks/$SSE_FLOCK_ID" -H "Authorization: Bearer $OPS_TOKEN" || true
+else
+    fail "could not spawn SSE guard flock (resp: $SSE_FLOCK)"
+fi
+
+# ════════════════════════════════════════════════════════════════
+# v0.4.1 PR-B: ephemera-ctl operator CLI, driven against the live (auth-on)
+# daemon still running from steps 80-81 (in-memory ops token = $OPS_TOKEN).
+# ════════════════════════════════════════════════════════════════
+
+# ── 82. ephemera-ctl drives the daemon (spawn → ls → rm) ─────────
+step "82. ephemera-ctl spawn/ls/rm against the live daemon"
+export EPHEMERA_CTL_URL="$API"
+export EPHEMERA_CTL_TOKEN="$OPS_TOKEN"
+CTL_VM=$(./ephemera-ctl vm spawn --json 2>/dev/null | jq -r '.vm_id // empty' || true)
+[ -n "$CTL_VM" ] && ok "ctl vm spawn → $CTL_VM ✓" || fail "ctl vm spawn produced no vm_id"
+./ephemera-ctl vm ls --json 2>/dev/null | jq -e --arg id "$CTL_VM" 'any(.[]; .vm_id==$id)' >/dev/null 2>&1 \
+    && ok "ctl vm ls shows $CTL_VM ✓" || fail "ctl vm ls did not list $CTL_VM"
+if ./ephemera-ctl vm rm "$CTL_VM" >/dev/null 2>&1; then
+    ok "ctl vm rm $CTL_VM ✓"
+else
+    fail "ctl vm rm failed"
+fi
+./ephemera-ctl vm ls --json 2>/dev/null | jq -e --arg id "$CTL_VM" 'all(.[]; .vm_id!=$id)' >/dev/null 2>&1 \
+    && ok "ctl vm rm removed $CTL_VM from ls ✓" || fail "VM still listed after ctl rm"
+# A bogus token must make the CLI exit non-zero (server 401 → exit 1).
+if EPHEMERA_CTL_TOKEN="wrong-token" ./ephemera-ctl vm ls >/dev/null 2>&1; then
+    fail "ctl with a bogus token should exit non-zero"
+else
+    ok "ctl bogus token → non-zero exit ✓"
+fi
+
+# ── 83. ephemera-ctl audit reads the access log ──────────────────
+step "83. ephemera-ctl audit reads the access log"
+./ephemera-ctl audit --limit 30 --method GET --json 2>/dev/null | jq -e 'any(.[]; .path=="/vms" and .method=="GET")' >/dev/null 2>&1 \
+    && ok "ctl audit shows recent GET /vms ✓" || fail "ctl audit did not return the GET /vms entries"
+unset EPHEMERA_CTL_URL EPHEMERA_CTL_TOKEN
+
+rm -f "$TOKENS_FILE" || true
+
+# ── Shut down the last test daemon ───────────────────────────────
+kill "$DAEMON_PID" 2>/dev/null || true; wait "$DAEMON_PID" 2>/dev/null || true
+pkill -f "firecracker --api-sock" 2>/dev/null || true
 
 trap - EXIT
-ok "Rotation daemon stopped"
+ok "v0.4.1 PR-A test daemon stopped"
 
 # ── Result ───────────────────────────────────────────────────────
 echo

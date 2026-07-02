@@ -35,6 +35,7 @@ type daemonMetrics struct {
 	cleanupFailure    *metrics.Counter
 	authFailure       *metrics.Counter
 	cpTokenPropagated *metrics.CounterVec // outcome=ok|fail
+	authTotal         *metrics.CounterVec // outcome=ok|denied|expired (v0.4.1)
 
 	// Histograms (seconds).
 	vmSpawnDuration         *metrics.Histogram
@@ -99,6 +100,11 @@ func newDaemonMetrics(cp *ControlPlane) *daemonMetrics {
 		cpTokenPropagated: r.NewCounterVec(
 			"ephemera_cp_token_propagated_total",
 			"Total CP token propagation attempts to running VMs by outcome.",
+			"outcome",
+		),
+		authTotal: r.NewCounterVec(
+			"ephemera_auth_total",
+			"Total API auth decisions by outcome.",
 			"outcome",
 		),
 

@@ -57,6 +57,42 @@
 - `go build ./cmd/anvil-mcp`
 - `go build ./cmd/goose-daemon`
 
+# v0.4.1 — Operational Interfaces
+
+**Ephemera** v0.4.1 makes the daemon operable as a service: authenticated **client identity** threaded into request handling, a per-request **access audit log** (`GET /audit`), **per-token TTL/rotation**, and a dependency-free **operator CLI** (`ephemera-ctl`). Additive — no wire format changed; the only behavior changes are that an expired token is now rejected (401) and the in-VM CP token is the first non-expired client.
+
+---
+
+## What's New
+
+### Client identity in request context (F1)
+
+- `authMiddleware` now surfaces the authenticated caller: the matched client name is threaded to handlers via the request context and to the outer audit middleware via a request-scoped holder. Timing-safety is preserved: every token is still compared with no early-exit, and the expiry check runs after the constant-time loop.
+
+### Access audit log — `GET /audit` (F2)
+
+- Every API request is appended as one JSON line to `{workDir}/audit/access.jsonl`: `{ts, client, method, path, status, duration_ms, remote_addr, bytes}`. The record never contains tokens, the `Authorization` header, request/response bodies, or the query string. Unauthenticated requests record `client="-"`; `/metrics` is excluded so scrapes do not flood the log.
+- The file is size-rotated (`EPHEMERA_AUDIT_MAX_MIB`, default 100; `EPHEMERA_AUDIT_KEEP`, default 5). On by default; `EPHEMERA_AUDIT_DISABLE=true` turns it off.
+- `GET /audit?limit=&client=&status=&method=` returns recent records as a JSON array, newest first, with limit default 100 and max 1000.
+- `statusRecorder` captures status/bytes and forwards `http.Flusher` so the SSE Town Wall stream keeps working; the audit middleware wraps auth so it also records 401s and final status.
+
+### Per-token TTL + rotation (F3)
+
+- Token entries gain an optional expiry: `name:token:expires` (RFC3339 or Unix seconds). A two-field `name:token` never expires. Tokens may contain `:`; the expiry is recognized only when the trailing colon-separated field parses as a timestamp.
+- Expiry is enforced per request: an expired-but-matched token returns 401 with the same body as an unknown token, distinguished only by the server log and `ephemera_auth_total{outcome="expired"}`.
+- The in-VM control-plane token is now the first non-expired client. If all tokens have expired, an empty unauthenticated token is propagated with a warning.
+- New metric `ephemera_auth_total{outcome=ok|denied|expired}`; startup/SIGHUP banners log expired and expiring-within-24h counts.
+
+### Operator CLI — `ephemera-ctl` (F4)
+
+- New `cmd/ephemera-ctl`, a stdlib-only HTTP wrapper over the control-plane API: `vm spawn/ls/rm/health/stop/task/stats/snapshot`, `flock create/ls/get/rm/post/wall/restart`, `snapshot ls/restore/rm`, `audit`, and `metrics`. Build with `go build -o ephemera-ctl ./cmd/ephemera-ctl/`.
+- Reads `EPHEMERA_CTL_URL` (default `http://127.0.0.1:3000`) and a bearer from `--token`, `EPHEMERA_CTL_TOKEN`, or `EPHEMERA_API_TOKEN`. Human-readable tables are the default; `--json` returns raw output. Non-2xx responses go to stderr and exit non-zero.
+
+### Tests
+
+- Unit: token TTL parsing, `parseExpiry`, `firstActiveClient`, `countTokenExpiry`; `authMiddleware` outcomes and metric behavior; audit rotation/tail filters/no-secret-leak; `statusRecorder` Flusher forwarding; client-identity context; CLI client round-trip, URL/token resolution, and flag parsing.
+- E2E steps 78–83 cover audit records, 401 audit entries, per-token TTL expiry, SSE through the audit wrapper, and `ephemera-ctl` spawn/list/delete plus audit access against the live daemon.
+
 # anvil v0.3.2 — Scheduler replication and flock placement
 
 - Tag: `anvil-v0.3.2`

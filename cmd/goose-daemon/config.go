@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -34,8 +35,9 @@ const (
 // APIClient represents a named caller with its own Bearer token.
 // Using separate tokens per client allows individual revocation and audit logging.
 type APIClient struct {
-	Name  string
-	Token string
+	Name    string
+	Token   string
+	Expires time.Time // zero value = never expires (v0.4.1)
 }
 
 var (
@@ -132,10 +134,25 @@ func loadAPIClients() []APIClient {
 	return nil
 }
 
-// parseAPIClients parses a raw token list. Entries are name:token pairs
-// separated by commas or newlines (operators write one-per-line in files;
-// env stays CSV). Whitespace is trimmed; entries without a ':' or with an
-// empty name are skipped silently.
+// parseAPIClients parses a raw token list. Entries are name:token[:expires]
+// records separated by commas or newlines (operators write one-per-line in
+// files; env stays CSV). Whitespace is trimmed; entries without a ':' or with
+// an empty name/token are skipped silently.
+//
+// The name is everything before the FIRST colon. Both the token and the expiry
+// (RFC3339 contains ':') may contain colons, so the expiry is found by scanning
+// colon boundaries in the remainder left-to-right and taking the FIRST whose
+// suffix parses as a timestamp (RFC3339 or Unix seconds, see parseExpiry). If no
+// such boundary exists, the whole remainder is the token. The remainder is never
+// itself tested as an expiry, so a token that merely looks like a timestamp
+// stays a token. Examples:
+//
+//	alice:tok                          -> name=alice token=tok      never expires
+//	alice:tok:en                       -> name=alice token=tok:en   never expires
+//	alice:tok:en:2026-06-01T00:00:00Z  -> name=alice token=tok:en   expires 2026-06-01
+//	alice:2026-06-01T00:00:00Z         -> name=alice token=<that>   never expires (no 3rd field)
+//
+// A two-field "name:token" has a zero Expires and never expires (back-compat).
 func parseAPIClients(raw string) []APIClient {
 	var clients []APIClient
 	for _, entry := range strings.FieldsFunc(raw, func(r rune) bool {
@@ -146,10 +163,24 @@ func parseAPIClients(raw string) []APIClient {
 		if idx <= 0 {
 			continue
 		}
-		clients = append(clients, APIClient{
-			Name:  entry[:idx],
-			Token: entry[idx+1:],
-		})
+		name := entry[:idx]
+		rest := entry[idx+1:] // token, or token:expires
+		token := rest
+		var expires time.Time
+		for i := 0; i < len(rest); i++ {
+			if rest[i] != ':' {
+				continue
+			}
+			if exp, ok := parseExpiry(rest[i+1:]); ok {
+				token = rest[:i]
+				expires = exp
+				break
+			}
+		}
+		if token == "" {
+			continue
+		}
+		clients = append(clients, APIClient{Name: name, Token: token, Expires: expires})
 	}
 	return clients
 }
@@ -160,6 +191,51 @@ func resolveAgentPort() int {
 
 func resolvePublicURL() string {
 	return strings.TrimRight(envWithAlias(envEphemeraPublicURL, envAnvilPublicURL), "/")
+}
+
+// parseExpiry parses a token-expiry field as RFC3339 or as Unix seconds.
+// Unix seconds must be a plausible epoch (>= 2001-09) so a short numeric token
+// segment is not mistaken for an expiry. Returns ok=false when the field is not
+// a recognized timestamp, so the caller treats it as part of the token.
+func parseExpiry(s string) (time.Time, bool) {
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, true
+	}
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil && n >= 1_000_000_000 {
+		return time.Unix(n, 0).UTC(), true
+	}
+	return time.Time{}, false
+}
+
+// firstActiveClient returns the first client whose token has not expired (a zero
+// Expires never expires). The in-VM control-plane forwarder token is selected
+// this way so an expired primary token does not break in-VM callbacks (v0.4.1).
+func firstActiveClient(clients []APIClient) (APIClient, bool) {
+	now := time.Now()
+	for _, c := range clients {
+		if c.Expires.IsZero() || now.Before(c.Expires) {
+			return c, true
+		}
+	}
+	return APIClient{}, false
+}
+
+// countTokenExpiry returns how many clients are already expired and how many
+// (still valid) expire within the next 24h. Used for startup/SIGHUP banners.
+func countTokenExpiry(clients []APIClient) (expired, expiringSoon int) {
+	now := time.Now()
+	soon := now.Add(24 * time.Hour)
+	for _, c := range clients {
+		if c.Expires.IsZero() {
+			continue
+		}
+		if now.After(c.Expires) {
+			expired++
+		} else if c.Expires.Before(soon) {
+			expiringSoon++
+		}
+	}
+	return expired, expiringSoon
 }
 
 // resolveAPIAddr builds the listen address.

@@ -8,6 +8,7 @@
 /anvil-scheduler
 /e2e-replay-server
 /ephemera-daemon
+/ephemera-ctl
 /goose-daemon
 /cmd/goose-daemon/goose-daemon
 *.exe
@@ -35,6 +36,7 @@ vmlinux*
 /snapshots/
 /flocks/
 /vms/
+/audit/
 /tmp/
 
 # 5. Goose runtime config (contains API keys)
