@@ -773,12 +773,12 @@ func TestControlPlanePerVMMetricsEndpoint(t *testing.T) {
 }
 
 func TestAuthMiddlewareIncrementsAuthFailure(t *testing.T) {
-	var metrics controlPlaneMetrics
+	cp := newTestCP(t)
 	handler := authMiddleware(
 		func() []APIClient {
 			return []APIClient{{Name: "operator", Token: "secret-token"}}
 		},
-		&metrics,
+		cp.metrics.authTotal,
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			t.Fatal("handler should not run for unauthorized request")
 		}),
@@ -790,8 +790,8 @@ func TestAuthMiddlewareIncrementsAuthFailure(t *testing.T) {
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d body = %s, want 401", rr.Code, rr.Body.String())
 	}
-	if got := metrics.snapshot().authFailure; got != 1 {
-		t.Fatalf("authFailure = %d, want 1", got)
+	if got := cp.metrics.authTotal.WithLabelValues("denied").Get(); got != 1 {
+		t.Fatalf("auth denied count = %v, want 1", got)
 	}
 	if strings.Contains(rr.Body.String(), "secret-token") {
 		t.Fatalf("auth failure response leaked token: %s", rr.Body.String())

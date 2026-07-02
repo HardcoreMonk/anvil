@@ -14,6 +14,7 @@ var daemonConfigEnvKeys = []string{
 	"ANVIL_API_TOKENS",
 	"EPHEMERA_API_TOKEN",
 	"ANVIL_API_TOKEN",
+	"EPHEMERA_API_TOKENS_FILE",
 	"EPHEMERA_AGENT_PORT",
 	"ANVIL_AGENT_PORT",
 	"EPHEMERA_PUBLIC_URL",
@@ -155,6 +156,22 @@ func TestLoadAPIClients_FromAnvilMultiTokenAlias(t *testing.T) {
 	}
 	if clients[1].Name != "operator" || clients[1].Token != "tokenB" {
 		t.Errorf("unexpected client[1]: %+v", clients[1])
+	}
+}
+
+func TestLoadAPIClients_AnvilTokenAliasSupportsExpiry(t *testing.T) {
+	clearDaemonConfigEnv(t)
+	t.Setenv("ANVIL_API_TOKENS", "ironclaw:tok:4102444800")
+
+	clients := loadAPIClients()
+	if len(clients) != 1 {
+		t.Fatalf("clients = %d, want 1", len(clients))
+	}
+	if clients[0].Name != "ironclaw" || clients[0].Token != "tok" {
+		t.Fatalf("client = %+v, want ironclaw/tok", clients[0])
+	}
+	if clients[0].Expires.IsZero() {
+		t.Fatal("Expires is zero, want parsed expiry")
 	}
 }
 

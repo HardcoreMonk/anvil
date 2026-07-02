@@ -121,3 +121,60 @@ func TestAuditRecord_NoSecretLeak(t *testing.T) {
 		t.Errorf("audit record must not contain auth material: %s", b)
 	}
 }
+
+func TestAuditMiddleware_AllowedFieldsOnlyAndNoSecretMaterial(t *testing.T) {
+	a := newTestAuditLogger(t, 1<<30, 3)
+	cp := &ControlPlane{audit: a}
+	h := cp.auditMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"agent_token":"response-secret"}`))
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/vms?agent_token=query-secret", strings.NewReader(`{"agent_token":"body-secret"}`))
+	req.Header.Set("Authorization", "Bearer header-secret")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	records, err := a.tail(1, auditFilter{})
+	if err != nil {
+		t.Fatalf("tail audit: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("records = %d, want 1", len(records))
+	}
+	rec := records[0]
+	if rec.Path != "/vms" {
+		t.Fatalf("path = %q, want path without query string", rec.Path)
+	}
+
+	b, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatalf("marshal record: %v", err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(b, &fields); err != nil {
+		t.Fatalf("unmarshal record: %v", err)
+	}
+	allowed := map[string]bool{
+		"ts": true, "client": true, "method": true, "path": true,
+		"status": true, "duration_ms": true, "remote_addr": true, "bytes": true,
+	}
+	if len(fields) != len(allowed) {
+		t.Fatalf("audit fields = %v, want only %v", fields, allowed)
+	}
+	for k := range fields {
+		if !allowed[k] {
+			t.Fatalf("unexpected audit field %q in %s", k, b)
+		}
+	}
+
+	low := strings.ToLower(string(b))
+	for _, forbidden := range []string{
+		"authorization", "bearer", "agent_token",
+		"header-secret", "query-secret", "body-secret", "response-secret",
+	} {
+		if strings.Contains(low, forbidden) {
+			t.Fatalf("audit record leaked %q: %s", forbidden, b)
+		}
+	}
+}
