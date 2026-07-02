@@ -374,6 +374,7 @@ func teardownDMSnapshot(info *DMSnapshotInfo, keepStore bool) error {
 // outputPath must not exist; caller is responsible for cleanup on success.
 func MergeMemoryDiff(baseMemPath, diffMemPath, outputPath string) error {
 	if err := copyFile(baseMemPath, outputPath); err != nil {
+		os.Remove(outputPath)
 		return fmt.Errorf("copy base memory: %w", err)
 	}
 	return overlaySparseDiff(diffMemPath, outputPath)

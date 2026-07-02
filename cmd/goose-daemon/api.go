@@ -268,6 +268,7 @@ type ControlPlane struct {
 
 	allocateForRestore func(tapDeviceName, macAddr string) (tapDevice string, guestIP string, err error)
 	releaseNetwork     func(tapDevice string, guestIP string) error
+	reclaimNetwork     func(tapDevice string, guestIP string, macAddr string) error
 	allocateNetwork    func() (tapDevice string, guestIP string, macAddr string, err error)
 	releaseVMNetwork   func(tapDevice string, guestIP string) error
 	cloneDisk          func(vmID string) (diskPath string, err error)
@@ -1194,6 +1195,12 @@ func (cp *ControlPlane) stopVM(w http.ResponseWriter, vmID string) {
 }
 
 func (cp *ControlPlane) destroyVM(vmID string) {
+	cp.snapshotLifecycleMu.Lock()
+	defer cp.snapshotLifecycleMu.Unlock()
+	cp.destroyVMUnderSnapshotLock(vmID)
+}
+
+func (cp *ControlPlane) destroyVMUnderSnapshotLock(vmID string) {
 	cp.mu.Lock()
 	v, ok := cp.vms[vmID]
 	if ok {
@@ -2474,6 +2481,9 @@ func (cp *ControlPlane) createSnapshot(w http.ResponseWriter, r *http.Request, v
 		return
 	}
 
+	cp.snapshotLifecycleMu.Lock()
+	defer cp.snapshotLifecycleMu.Unlock()
+
 	cp.mu.RLock()
 	v, ok := cp.vms[vmID]
 	cp.mu.RUnlock()
@@ -2489,9 +2499,6 @@ func (cp *ControlPlane) createSnapshot(w http.ResponseWriter, r *http.Request, v
 	if snapshotTenantID == "" {
 		snapshotTenantID = req.TenantID
 	}
-
-	cp.snapshotLifecycleMu.Lock()
-	defer cp.snapshotLifecycleMu.Unlock()
 
 	// Determine snapshot type (full or diff) and base ID first, so the disk pre-flight
 	// can reserve accurately (a diff stores only the changed rootfs blocks).
@@ -2599,7 +2606,7 @@ func (cp *ControlPlane) createSnapshot(w http.ResponseWriter, r *http.Request, v
 		}
 	} else {
 		slog.Warn("snapshot: stop_after, destroying vm", "snapshot_id", snapID, "vm_id", vmID)
-		cp.destroyVM(vmID)
+		cp.destroyVMUnderSnapshotLock(vmID)
 	}
 
 	// Firecracker v1.x embeds the TAP device name AND vsock UDS path in state.bin.
@@ -2845,6 +2852,11 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 	// restoration, deleted right after RestoreMachine loads it).
 	memFileToUse := meta.MemFilePath
 	var mergedMemPath string
+	defer func() {
+		if mergedMemPath != "" {
+			os.Remove(mergedMemPath)
+		}
+	}()
 	if meta.SnapshotType == "diff" {
 		mergedMemPath = pickMergedMemPath(cp.workDir, newVMID)
 		os.MkdirAll(filepath.Dir(mergedMemPath), 0755)
@@ -2881,9 +2893,6 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 	}, memFileToUse, meta.StatFilePath)
 
 	cp.restoreMu.Unlock()
-	if mergedMemPath != "" {
-		os.Remove(mergedMemPath) // temp merged file no longer needed after RestoreMachine
-	}
 
 	if err != nil {
 		cp.cleanupEgressPolicy(newVMID)
@@ -2945,7 +2954,7 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 
 	slog.Warn("restore: waiting for agent", "snapshot_id", snapID, "agent_url", info.AgentURL)
 	if err := cp.waitForRestoredAgent(newGuestIP, 30*time.Second); err != nil {
-		cp.destroyVM(newVMID)
+		cp.destroyVMUnderSnapshotLock(newVMID)
 		writeRestoreError(w, http.StatusInternalServerError, "agent_not_ready", snapID, fmt.Sprintf("goose-agent not ready after restore: %v", err))
 		return
 	}
@@ -2978,6 +2987,11 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 	// Diff memory merge if needed.
 	memFileToUse := meta.MemFilePath
 	var mergedMemPath string
+	defer func() {
+		if mergedMemPath != "" {
+			os.Remove(mergedMemPath)
+		}
+	}()
 	if meta.SnapshotType == "diff" {
 		cp.snapshotsMu.RLock()
 		base, baseOK := cp.snapshots[meta.BaseSnapshotID]
@@ -3017,9 +3031,6 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 		GatewayIP:      "10.0.1.1",
 		VsockUDSPath:   meta.VsockPath,
 	}, memFileToUse, meta.StatFilePath)
-	if mergedMemPath != "" {
-		os.Remove(mergedMemPath)
-	}
 	if err != nil {
 		cp.cleanupEgressPolicy(newVMID)
 		storage.TeardownBindMount(mountTargetPath, newDiskPath)
@@ -3073,7 +3084,7 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 	cp.mu.Unlock()
 
 	if err := cp.waitForRestoredAgent(newGuestIP, 30*time.Second); err != nil {
-		cp.destroyVM(newVMID)
+		cp.destroyVMUnderSnapshotLock(newVMID)
 		writeRestoreError(w, http.StatusInternalServerError, "agent_not_ready", snapID, fmt.Sprintf("goose-agent not ready: %v", err))
 		return
 	}

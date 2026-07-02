@@ -480,6 +480,56 @@ func TestRecoveryDropsRestoredCOWStateWithoutProtectingOrphanResources(t *testin
 	}
 }
 
+func TestRecoveryNetworkReclaimFailureDropsAutoSnapshot(t *testing.T) {
+	cp := newTestCP(t)
+	workspace := t.TempDir()
+	diskPath := filepath.Join(workspace, "vm-reclaim.ext4")
+	if err := os.MkdirAll(workspace, 0700); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	if err := os.WriteFile(diskPath, []byte("rootfs"), 0600); err != nil {
+		t.Fatalf("write disk: %v", err)
+	}
+	vmID := "vm-reclaim"
+	if err := storage.SaveVMState(cp.workDir, storage.VMState{
+		VMID:      vmID,
+		GuestIP:   "10.0.1.55",
+		TapDevice: "tap55",
+		MacAddr:   "AA:FC:00:00:00:37",
+		DiskPath:  diskPath,
+		DiskMode:  storage.DiskModePlain,
+	}); err != nil {
+		t.Fatalf("SaveVMState: %v", err)
+	}
+	memPath, _ := storage.AutoSnapshotPaths(cp.workDir, vmID)
+	if err := os.MkdirAll(filepath.Dir(memPath), 0700); err != nil {
+		t.Fatalf("mkdir auto snapshot dir: %v", err)
+	}
+	if err := os.WriteFile(memPath, []byte("memory"), 0600); err != nil {
+		t.Fatalf("write auto snapshot: %v", err)
+	}
+	cp.reclaimNetwork = func(tapDevice, guestIP, macAddr string) error {
+		return errors.New("tap already allocated")
+	}
+
+	recovered, failed, err := cp.RecoverVMs()
+	if err != nil {
+		t.Fatalf("RecoverVMs: %v", err)
+	}
+	if recovered != 0 {
+		t.Fatalf("recovered = %d, want 0", recovered)
+	}
+	if len(failed) != 1 || failed[0] != vmID {
+		t.Fatalf("failed = %v, want [%s]", failed, vmID)
+	}
+	if storage.VMStateExists(cp.workDir, vmID) {
+		t.Fatal("VM state still exists after reclaim failure")
+	}
+	if storage.AutoSnapshotExists(cp.workDir, vmID) {
+		t.Fatal("auto snapshot still exists after reclaim failure")
+	}
+}
+
 func TestRuntimeAuditAPIListFiltersAndRedacts(t *testing.T) {
 	cp := newTestCP(t)
 	cp.runtimeAuditPath = filepath.Join(cp.workDir, "audit", "runtime-audit.jsonl")
@@ -815,6 +865,25 @@ func (e *recordingEgressEnforcer) Cleanup(vmID string) error {
 	e.events = append(e.events, event)
 	if e.shared != nil {
 		*e.shared = append(*e.shared, event)
+	}
+	return nil
+}
+
+type egressEnforcerFunc struct {
+	apply   func(vmID, tapDevice, guestIP, policy string) error
+	cleanup func(vmID string) error
+}
+
+func (e egressEnforcerFunc) Apply(vmID, tapDevice, guestIP, policy string) error {
+	if e.apply != nil {
+		return e.apply(vmID, tapDevice, guestIP, policy)
+	}
+	return nil
+}
+
+func (e egressEnforcerFunc) Cleanup(vmID string) error {
+	if e.cleanup != nil {
+		return e.cleanup(vmID)
 	}
 	return nil
 }
@@ -2010,6 +2079,95 @@ func TestRestoreSnapshotFirecrackerFailureCleansNetworkAndDMSnapshot(t *testing.
 	cp.snapshotLifecycleMu.Unlock()
 }
 
+func TestRestoreSnapshotDiffMemoryTempRemovedWhenEgressFails(t *testing.T) {
+	cp := newTestCP(t)
+	cp.provisioner = &storage.Provisioner{WorkspaceDir: t.TempDir()}
+	baseID := "snap-base"
+	diffID := "snap-diff"
+	baseDir := storage.SnapshotDir(cp.workDir, baseID)
+	diffDir := storage.SnapshotDir(cp.workDir, diffID)
+	if err := os.MkdirAll(baseDir, 0700); err != nil {
+		t.Fatalf("mkdir base snapshot: %v", err)
+	}
+	if err := os.MkdirAll(diffDir, 0700); err != nil {
+		t.Fatalf("mkdir diff snapshot: %v", err)
+	}
+	baseMem := filepath.Join(baseDir, "memory.bin")
+	diffMem := filepath.Join(diffDir, "memory.bin")
+	if err := os.WriteFile(baseMem, bytes.Repeat([]byte{0x11}, 8192), 0600); err != nil {
+		t.Fatalf("write base memory: %v", err)
+	}
+	if err := os.WriteFile(diffMem, bytes.Repeat([]byte{0x22}, 4096), 0600); err != nil {
+		t.Fatalf("write diff memory: %v", err)
+	}
+
+	baseMeta := testSnapshotMeta(baseID, "vm-source", "full", time.Now().UTC())
+	baseMeta.MemFilePath = baseMem
+	baseMeta.DiskCopyPath = filepath.Join(baseDir, "rootfs.ext4")
+	cp.snapshots[baseID] = baseMeta
+
+	diffMeta := testSnapshotMeta(diffID, "vm-source", "diff", time.Now().UTC())
+	diffMeta.BaseSnapshotID = baseID
+	diffMeta.TapDevice = "tap9"
+	diffMeta.MacAddr = "AA:FC:00:00:00:09"
+	diffMeta.VsockPath = filepath.Join(t.TempDir(), "old.vsock")
+	diffMeta.DiskPath = filepath.Join(t.TempDir(), "source.ext4")
+	diffMeta.DiskCopyPath = filepath.Join(diffDir, "rootfs.ext4")
+	diffMeta.MemFilePath = diffMem
+	diffMeta.StatFilePath = filepath.Join(diffDir, "state.bin")
+	diffMeta.EgressPolicy = "deny_all"
+	cp.snapshots[diffID] = diffMeta
+
+	var mergedMemPath string
+	cp.allocateForRestore = func(string, string) (string, string, error) {
+		return "tap-restored", "10.0.1.44", nil
+	}
+	cp.releaseNetwork = func(string, string) error {
+		return nil
+	}
+	cp.setupDMSnapshot = func(baseDiskPath, exceptionStorePath, mountTargetPath string) (*storage.DMSnapshotInfo, error) {
+		newVMID := strings.TrimSuffix(filepath.Base(exceptionStorePath), ".cow")
+		mergedMemPath = pickMergedMemPath(cp.workDir, newVMID)
+		return &storage.DMSnapshotInfo{
+			DMDevice:       "dm-test",
+			LoopDevice:     "/dev/loop-test-base",
+			COWLoopDevice:  "/dev/loop-test-cow",
+			ExceptionStore: exceptionStorePath,
+			MountTarget:    mountTargetPath,
+		}, nil
+	}
+	cp.teardownDMSnapshot = func(*storage.DMSnapshotInfo) {}
+	cp.egress = egressEnforcerFunc{
+		apply: func(vmID, tapDevice, guestIP, policy string) error {
+			if mergedMemPath == "" {
+				t.Fatal("merged memory path was not captured before egress apply")
+			}
+			if _, err := os.Stat(mergedMemPath); err != nil {
+				t.Fatalf("merged memory temp missing before egress failure: %v", err)
+			}
+			return errors.New("egress failed")
+		},
+		cleanup: func(vmID string) error { return nil },
+	}
+
+	rr := httptest.NewRecorder()
+	cp.restoreSnapshot(rr, diffID)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, body = %q; want %d", rr.Code, rr.Body.String(), http.StatusInternalServerError)
+	}
+	resp := decodeRestoreErrorResponse(t, rr)
+	if resp.Code != "egress_policy_failed" {
+		t.Fatalf("code = %q, want egress_policy_failed", resp.Code)
+	}
+	if mergedMemPath == "" {
+		t.Fatal("merged memory path was not captured")
+	}
+	if _, err := os.Stat(mergedMemPath); !os.IsNotExist(err) {
+		t.Fatalf("merged memory temp still exists after egress failure: err=%v path=%s", err, mergedMemPath)
+	}
+}
+
 func TestRestoreSnapshotDoesNotPersistRecoverableVMState(t *testing.T) {
 	cp := newTestCP(t)
 	cp.provisioner = &storage.Provisioner{WorkspaceDir: t.TempDir()}
@@ -2213,6 +2371,31 @@ func TestRestoreSnapshotUsesSnapshotLifecycleLock(t *testing.T) {
 	}
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, body = %q; want %d", rr.Code, rr.Body.String(), http.StatusNotFound)
+	}
+}
+
+func TestDestroyVMWaitsForSnapshotLifecycleLock(t *testing.T) {
+	cp := newTestCP(t)
+	done := make(chan struct{})
+
+	cp.snapshotLifecycleMu.Lock()
+	go func() {
+		defer close(done)
+		cp.destroyVM("missing-vm")
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("destroyVM finished while snapshotLifecycleMu was held")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	cp.snapshotLifecycleMu.Unlock()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("destroyVM did not finish after snapshotLifecycleMu was released")
 	}
 }
 

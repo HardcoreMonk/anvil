@@ -97,6 +97,27 @@ func TestWriteRootfsDiffSizeMismatch(t *testing.T) {
 	}
 }
 
+func TestMergeMemoryDiffRemovesOutputWhenBaseCopyFails(t *testing.T) {
+	dir := t.TempDir()
+	baseDir := filepath.Join(dir, "base-memory-dir")
+	diff := filepath.Join(dir, "memory.diff")
+	output := filepath.Join(dir, "merged-memory.bin")
+	if err := os.Mkdir(baseDir, 0700); err != nil {
+		t.Fatalf("mkdir base dir: %v", err)
+	}
+	if err := os.WriteFile(diff, []byte("diff"), 0600); err != nil {
+		t.Fatalf("write diff: %v", err)
+	}
+
+	err := MergeMemoryDiff(baseDir, diff, output)
+	if err == nil {
+		t.Fatal("MergeMemoryDiff returned nil error, want base copy failure")
+	}
+	if _, statErr := os.Stat(output); !os.IsNotExist(statErr) {
+		t.Fatalf("merged output still exists after copy failure: err=%v", statErr)
+	}
+}
+
 // TestWriteRootfsDiffIdentical: no changes ⇒ fully sparse (0-byte) diff; merge reproduces base.
 func TestWriteRootfsDiffIdentical(t *testing.T) {
 	dir := t.TempDir()

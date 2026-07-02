@@ -580,6 +580,9 @@ func snapshotBundleFilesForMetadata(meta SnapshotMetadata) ([]string, error) {
 	files := append([]string(nil), snapshotBundleRequiredFiles...)
 	switch {
 	case meta.RootfsDiffPath != "":
+		if meta.SnapshotType != "diff" {
+			return nil, fmt.Errorf("%w: rootfs diff path requires diff snapshot type", ErrSnapshotBundleInvalid)
+		}
 		if meta.DiskCopyPath != "" {
 			return nil, fmt.Errorf("%w: snapshot metadata has both rootfs diff and full rootfs paths", ErrSnapshotBundleInvalid)
 		}

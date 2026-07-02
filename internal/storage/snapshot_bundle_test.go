@@ -325,6 +325,17 @@ func TestImportSnapshotBundleRejectsFullSnapshotWithBaseID(t *testing.T) {
 	}
 }
 
+func TestSnapshotBundleFilesRejectRootfsDiffForNonDiffSnapshot(t *testing.T) {
+	_, err := snapshotBundleFilesForMetadata(SnapshotMetadata{
+		SnapshotID:     "snap-1",
+		SnapshotType:   "full",
+		RootfsDiffPath: "rootfs.diff",
+	})
+	if !errors.Is(err, ErrSnapshotBundleInvalid) {
+		t.Fatalf("snapshotBundleFilesForMetadata error = %v, want ErrSnapshotBundleInvalid", err)
+	}
+}
+
 func TestImportSnapshotBundleRejectsDiffWithInvalidBaseMetadata(t *testing.T) {
 	sourceWorkDir := t.TempDir()
 	writeSnapshotBundleFixture(t, sourceWorkDir, "snap-diff", "diff", "base-1")
