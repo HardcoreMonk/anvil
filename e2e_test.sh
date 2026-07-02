@@ -698,7 +698,7 @@ COW_FINAL_SNAP=$(curl -s "$API/snapshots" | jq 'length')
                              || fail "Expected 0 snapshots, got $COW_FINAL_SNAP"
 
 # ════════════════════════════════════════════════════════════════
-# 44–50. COW spawn cold-restart (v0.4.0 item A) + orphan reclaim (item E).
+# 44a–44g. COW spawn cold-restart (v0.4.0 item A) + orphan reclaim (item E).
 #
 # A daemon launched with EPHEMERA_DISK_MODE=cow provisions spawn disks as
 # dm-snapshot COW views of the golden image. These steps prove such VMs survive
@@ -726,8 +726,8 @@ relaunch_daemon() {
     fail "Daemon did not respond after (re)start (see $LOG)"; exit 1
 }
 
-# ── 40. Relaunch daemon in COW spawn mode + spawn 2 COW VMs ─────
-step "40. Relaunch daemon in COW spawn mode (EPHEMERA_DISK_MODE=cow)"
+# ── 44a. Relaunch daemon in COW spawn mode + spawn 2 COW VMs ────
+step "44a. Relaunch daemon in COW spawn mode (EPHEMERA_DISK_MODE=cow)"
 kill "$DAEMON_PID" 2>/dev/null
 wait "$DAEMON_PID" 2>/dev/null || true
 pkill -f "firecracker --api-sock" 2>/dev/null || true
@@ -743,8 +743,8 @@ check_http "$(echo "$CVM2_RESP" | tail -1)" "201" "POST /vms (cow spawn #2)"
 CVM2_ID=$(echo "$CVM2_RESP" | head -1 | jq -r '.vm_id')
 ok "COW spawn VMs: $CVM1_ID, $CVM2_ID"
 
-# ── 41. Verify COW kernel objects + persisted state ────────────
-step "41. Verify COW dm-snapshot devices + persisted state"
+# ── 44b. Verify COW kernel objects + persisted state ───────────
+step "44b. Verify COW dm-snapshot devices + persisted state"
 CVM_DEV=$(dmsetup ls 2>/dev/null | grep -c "^cow-" || true)
 [ "${CVM_DEV:-0}" -ge "2" ] \
     && ok "dm-snapshot devices active (count: $CVM_DEV) ✓" \
@@ -763,8 +763,8 @@ for VM in $CVM1_ID $CVM2_ID; do
     fi
 done
 
-# ── 42. Graceful shutdown preserves exception stores ───────────
-step "42. Graceful shutdown preserves COW exception stores (keep-store)"
+# ── 44c. Graceful shutdown preserves exception stores ──────────
+step "44c. Graceful shutdown preserves COW exception stores (keep-store)"
 kill "$DAEMON_PID" 2>/dev/null
 wait "$DAEMON_PID" 2>/dev/null || true
 pkill -f "firecracker --api-sock" 2>/dev/null || true
@@ -781,8 +781,8 @@ COW_DEV_DOWN=$(dmsetup ls 2>/dev/null | grep -c "^cow-" || true)
 relaunch_daemon "EPHEMERA_DISK_MODE=cow"
 ok "Daemon back up in COW mode ✓"
 
-# ── 43. COW VMs cold-restarted with same identity + health ─────
-step "43. COW VMs recovered with same vm_id + dm device + health"
+# ── 44d. COW VMs cold-restarted with same identity + health ────
+step "44d. COW VMs recovered with same vm_id + dm device + health"
 sleep 3
 LIVE=$(curl -s "$API/vms" | jq -r '.[].vm_id' | sort -u)
 for VM in $CVM1_ID $CVM2_ID; do
@@ -801,8 +801,8 @@ for VM in $CVM1_ID $CVM2_ID; do
         || fail "Recovered COW VM $VM /health → $HEALTH (expected 200)"
 done
 
-# ── 44. Crash with one VM orphaned (state.json removed) ────────
-step "44. Simulated crash: SIGKILL daemon with $CVM2_ID orphaned"
+# ── 44e. Crash with one VM orphaned (state.json removed) ───────
+step "44e. Simulated crash: SIGKILL daemon with $CVM2_ID orphaned"
 # Remove CVM2's state.json so it is NOT recovered; its still-live dm device +
 # store then become an orphan for RemoveOrphanCOWDevices to reclaim on restart.
 rm -f "$(pwd)/vms/$CVM2_ID/state.json"
@@ -815,8 +815,8 @@ sleep 2
 relaunch_daemon "EPHEMERA_DISK_MODE=cow"
 ok "Daemon back up in COW mode after crash ✓"
 
-# ── 45. Orphan reclaimed; surviving VM crash-recovered ─────────
-step "45. Orphan COW device reclaimed (item E) + survivor recovered (item A)"
+# ── 44f. Orphan reclaimed; surviving VM crash-recovered ────────
+step "44f. Orphan COW device reclaimed (item E) + survivor recovered (item A)"
 sleep 3
 LIVE2=$(curl -s "$API/vms" | jq -r '.[].vm_id' | sort -u)
 echo "$LIVE2" | grep -qx "$CVM1_ID" \
@@ -845,8 +845,8 @@ HEALTH=$(curl -s -o /dev/null -w "%{http_code}" "$API/vms/$CVM1_ID/health")
     && ok "Crash-recovered COW VM $CVM1_ID /health → 200 ✓" \
     || fail "Crash-recovered COW VM $CVM1_ID /health → $HEALTH (expected 200)"
 
-# ── 46. Clean up COW VM and restore plain disk mode ────────────
-step "46. Delete COW VM + return daemon to plain disk mode"
+# ── 44g. Clean up COW VM and restore plain disk mode ───────────
+step "44g. Delete COW VM + return daemon to plain disk mode"
 check_http "$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/vms/$CVM1_ID")" \
            "200" "DELETE COW VM $CVM1_ID"
 COW_DEV_END=$(dmsetup ls 2>/dev/null | grep -c "^cow-" || true)

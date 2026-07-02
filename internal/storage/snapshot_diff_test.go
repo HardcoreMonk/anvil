@@ -2,10 +2,13 @@ package storage
 
 import (
 	"bytes"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // allocatedBytes returns the actual on-disk allocation (sparse-aware) for path.
@@ -26,6 +29,76 @@ func writeSized(t *testing.T, path string, size int, fill byte) {
 	t.Helper()
 	if err := os.WriteFile(path, bytes.Repeat([]byte{fill}, size), 0644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+type fakeRootfsInfo struct {
+	size int64
+	mode fs.FileMode
+}
+
+func (f fakeRootfsInfo) Name() string       { return "rootfs.ext4" }
+func (f fakeRootfsInfo) Size() int64        { return f.size }
+func (f fakeRootfsInfo) Mode() fs.FileMode  { return f.mode }
+func (f fakeRootfsInfo) ModTime() time.Time { return time.Time{} }
+func (f fakeRootfsInfo) IsDir() bool        { return false }
+func (f fakeRootfsInfo) Sys() any           { return nil }
+
+func TestRootfsSizeUsesBlockDeviceHook(t *testing.T) {
+	orig := blockDeviceSizeFn
+	t.Cleanup(func() { blockDeviceSizeFn = orig })
+
+	var called bool
+	blockDeviceSizeFn = func(path string) (int64, error) {
+		called = true
+		if path != "/dev/mapper/cow-vm-test" {
+			t.Fatalf("blockDeviceSizeFn path = %q, want device path", path)
+		}
+		return 8 << 30, nil
+	}
+
+	got, err := rootfsSize("/dev/mapper/cow-vm-test", fakeRootfsInfo{mode: os.ModeDevice})
+	if err != nil {
+		t.Fatalf("rootfsSize returned error: %v", err)
+	}
+	if !called {
+		t.Fatal("blockDeviceSizeFn was not called for device rootfs")
+	}
+	if got != 8<<30 {
+		t.Fatalf("rootfsSize = %d, want %d", got, int64(8<<30))
+	}
+}
+
+func TestRootfsSizePropagatesBlockDeviceHookError(t *testing.T) {
+	orig := blockDeviceSizeFn
+	t.Cleanup(func() { blockDeviceSizeFn = orig })
+
+	wantErr := errors.New("blockdev failed")
+	blockDeviceSizeFn = func(path string) (int64, error) {
+		return 0, wantErr
+	}
+
+	_, err := rootfsSize("/dev/mapper/cow-vm-test", fakeRootfsInfo{mode: os.ModeDevice})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("rootfsSize error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestRootfsSizeUsesStatSizeForRegularFile(t *testing.T) {
+	orig := blockDeviceSizeFn
+	t.Cleanup(func() { blockDeviceSizeFn = orig })
+
+	blockDeviceSizeFn = func(path string) (int64, error) {
+		t.Fatalf("blockDeviceSizeFn called for regular file %s", path)
+		return 0, nil
+	}
+
+	got, err := rootfsSize("rootfs.ext4", fakeRootfsInfo{size: 12345})
+	if err != nil {
+		t.Fatalf("rootfsSize returned error: %v", err)
+	}
+	if got != 12345 {
+		t.Fatalf("rootfsSize = %d, want 12345", got)
 	}
 }
 

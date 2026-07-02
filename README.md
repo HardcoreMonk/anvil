@@ -1927,7 +1927,10 @@ profile 이름에는 `/` 또는 `\`를 사용할 수 없다.
 - daemon restart 후 spawn-path VM은 `vms/<vm_id>/state.json` 기반으로 cold-restart된다.
   같은 VM ID, IP, TAP, MAC, agent token, agent URL을 유지하지만 memory state와
   in-flight task는 보존하지 않는다.
-- COW-mode VM과 snapshot-restored VM은 daemon restart 후 자동 복구 대상이 아니다.
+- snapshot-restored VM은 daemon restart 후 자동 복구 대상이 아니다. 단,
+  `EPHEMERA_DISK_MODE=cow`로 생성된 COW spawn VM은 v0.4.0부터 `state.json`과
+  `.cow` exception store가 남아 있으면 자동 복구된다. restored COW의 stale
+  state는 복구하지 않고 정리한다.
 - watchdog이 표시한 `dead` status는 `flocks/<flock_id>/metadata.json`에
   persist된다. per-agent restart 또는 watchdog auto-heal opt-in이 상태를 다시
   `ready`로 바꾸는 명시 경로다.
@@ -2158,15 +2161,19 @@ What this preserves:
 |-----------|------|
 | `vm_id`, `guest_ip`, `tap_device`, `mac_addr` | In-flight `/tasks` work (memory is not snapshotted) |
 | `agent_token`, `agent_url` | Goose conversation context (in-VM, in-memory) |
-| Disk contents (the rootfs clone is reused, not recreated) | `runningVM.dmSnapshot` info (COW-mode VMs are not auto-recovered) |
+| Disk contents (the rootfs clone, or COW spawn exception store, is reused) | Snapshot-restore dm-snapshot / bind-mount runtime state (snapshot-restored VMs are not auto-recovered) |
 | Flock membership, Town Wall history | (none) |
 | Watchdog `status=dead` markings (v0.3.3 — persisted to `metadata.json`) | |
 
 Callers that need at-most-once semantics across daemon restarts should idempotency-key their `/tasks` calls or poll for completion before retrying.
 
-**Out of scope for v0.3.2**:
-- VMs spawned with `EPHEMERA_DISK_MODE=cow` skip recovery (logged on startup); they require dm-snapshot orphan cleanup that is deferred to a later release.
-- Snapshot-restored VMs (`POST /snapshots/{id}/restore`) are not auto-recovered — restore from the snapshot again after the daemon comes back.
+**Out of scope for v0.3.2, current behavior as of v0.4.0+**:
+- VMs spawned with `EPHEMERA_DISK_MODE=cow` are auto-recovered when
+  `vms/<vm_id>/state.json` and the `.cow` exception store still exist. Stale COW
+  states without recoverable VM state are treated as orphans and cleaned up.
+- Snapshot-restored VMs (`POST /snapshots/{id}/restore`) are not auto-recovered
+  — restore from the snapshot again after the daemon comes back. Restored-COW
+  stale state is dropped/cleaned instead of being cold-restarted.
 
 ### Watchdog dead-status persistence (v0.3.3)
 

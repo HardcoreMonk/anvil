@@ -514,15 +514,9 @@ func WriteRootfsDiff(currentPath, basePath, diffPath string) (changedBytes int64
 	if err != nil {
 		return 0, fmt.Errorf("stat base rootfs: %w", err)
 	}
-	size := curInfo.Size()
-	// COW spawn VMs expose the rootfs as a dm-snapshot block device (bind mount),
-	// whose Stat().Size() reports 0. Query the real device size so the diff against
-	// the base (a regular rootfs.ext4 file) lines up instead of failing size-mismatch.
-	if curInfo.Mode()&os.ModeDevice != 0 {
-		size, err = blockDeviceSize(currentPath)
-		if err != nil {
-			return 0, fmt.Errorf("size of current rootfs block device: %w", err)
-		}
+	size, err := rootfsSize(currentPath, curInfo)
+	if err != nil {
+		return 0, err
 	}
 	if size != baseInfo.Size() {
 		return 0, fmt.Errorf("rootfs size mismatch: current %d != base %d", size, baseInfo.Size())
@@ -582,6 +576,22 @@ func WriteRootfsDiff(currentPath, basePath, diffPath string) (changedBytes int64
 	}
 	return changedBytes, nil
 }
+
+func rootfsSize(path string, info os.FileInfo) (int64, error) {
+	// COW spawn VMs expose the rootfs as a dm-snapshot block device (bind mount),
+	// whose Stat().Size() reports 0. Query the real device size so the diff against
+	// the base (a regular rootfs.ext4 file) lines up instead of failing size-mismatch.
+	if info.Mode()&os.ModeDevice != 0 {
+		size, err := blockDeviceSizeFn(path)
+		if err != nil {
+			return 0, fmt.Errorf("size of current rootfs block device: %w", err)
+		}
+		return size, nil
+	}
+	return info.Size(), nil
+}
+
+var blockDeviceSizeFn = blockDeviceSize
 
 // blockDeviceSize returns a block device's size in bytes via `blockdev --getsize64`.
 // A regular file's size comes from Stat, but a block device reports 0 there; this is
