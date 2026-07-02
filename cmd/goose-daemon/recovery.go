@@ -16,6 +16,8 @@ import (
 	firecracker "github.com/firecracker-microvm/firecracker-go-sdk"
 )
 
+var removeOrphanCOWDevices = storage.RemoveOrphanCOWDevices
+
 // RecoverVMs brings every previously-spawned VM whose state.json is still on
 // disk back up after a daemon restart, reusing the same IP, TAP, MAC, and agent
 // token so external callers and any flock association stay stable.
@@ -49,10 +51,13 @@ func (cp *ControlPlane) RecoverVMs() (recovered int, failed []string, err error)
 	// the recovery loop below to handle (v0.4.0 E).
 	liveVMIDs := make(map[string]struct{}, len(states))
 	for _, s := range states {
+		if strings.TrimSpace(s.SourceSnapshotID) != "" {
+			continue
+		}
 		liveVMIDs[s.VMID] = struct{}{}
 	}
 	if cp.provisioner != nil {
-		if n := storage.RemoveOrphanCOWDevices(cp.provisioner.WorkspaceDir, liveVMIDs); n > 0 {
+		if n := removeOrphanCOWDevices(cp.provisioner.WorkspaceDir, liveVMIDs); n > 0 {
 			slog.Warn("recovery: reclaimed orphan cow devices", "count", n)
 		}
 	}
@@ -60,7 +65,7 @@ func (cp *ControlPlane) RecoverVMs() (recovered int, failed []string, err error)
 	for _, s := range states {
 		if strings.TrimSpace(s.SourceSnapshotID) != "" {
 			slog.Warn("recovery: restored vm state is not recoverable in v0.4.0 slice, dropping state", "vm_id", s.VMID, "source_snapshot_id", s.SourceSnapshotID)
-			cp.netManager.Release(s.TapDevice, s.GuestIP)
+			cp.releaseRecoveryNetwork(s.TapDevice, s.GuestIP)
 			storage.DeleteVMState(cp.workDir, s.VMID)
 			storage.RemoveAutoSnapshot(cp.workDir, s.VMID)
 			cp.markFlockAgentDead(s.FlockID, s.AgentID)
@@ -75,7 +80,7 @@ func (cp *ControlPlane) RecoverVMs() (recovered int, failed []string, err error)
 			// dropping it silently. Release is idempotent (no allocation reclaimed
 			// for this VM yet, so it just deletes the leftover host link).
 			slog.Warn("recovery: disk missing, dropping state", "vm_id", s.VMID, "disk_path", s.DiskPath)
-			cp.netManager.Release(s.TapDevice, s.GuestIP)
+			cp.releaseRecoveryNetwork(s.TapDevice, s.GuestIP)
 			storage.DeleteVMState(cp.workDir, s.VMID)
 			storage.RemoveAutoSnapshot(cp.workDir, s.VMID)
 			cp.markFlockAgentDead(s.FlockID, s.AgentID)
@@ -106,7 +111,7 @@ func (cp *ControlPlane) RecoverVMs() (recovered int, failed []string, err error)
 		if s.DiskMode == storage.DiskModeCOW {
 			if cp.provisioner == nil {
 				slog.Warn("recovery: cow state requires provisioner, dropping state", "vm_id", s.VMID)
-				cp.netManager.Release(s.TapDevice, s.GuestIP)
+				cp.releaseRecoveryNetwork(s.TapDevice, s.GuestIP)
 				storage.DeleteVMState(cp.workDir, s.VMID)
 				failed = append(failed, s.VMID)
 				cp.markFlockAgentDead(s.FlockID, s.AgentID)
@@ -127,7 +132,7 @@ func (cp *ControlPlane) RecoverVMs() (recovered int, failed []string, err error)
 			dmSnap, setupErr := storage.SetupDMSnapshot(cp.provisioner.GoldenImagePath, exceptionStore, s.DiskPath)
 			if setupErr != nil {
 				slog.Warn("recovery: cow dm-snapshot setup failed, dropping state", "vm_id", s.VMID, "err", setupErr)
-				cp.netManager.Release(s.TapDevice, s.GuestIP)
+				cp.releaseRecoveryNetwork(s.TapDevice, s.GuestIP)
 				storage.DeleteVMState(cp.workDir, s.VMID)
 				failed = append(failed, s.VMID)
 				cp.markFlockAgentDead(s.FlockID, s.AgentID)
@@ -204,7 +209,7 @@ func (cp *ControlPlane) RecoverVMs() (recovered int, failed []string, err error)
 			if dmInfo != nil {
 				storage.TeardownDMSnapshot(dmInfo)
 			}
-			cp.netManager.Release(s.TapDevice, s.GuestIP)
+			cp.releaseRecoveryNetwork(s.TapDevice, s.GuestIP)
 			storage.DeleteVMState(cp.workDir, s.VMID)
 			failed = append(failed, s.VMID)
 			cp.markFlockAgentDead(s.FlockID, s.AgentID)
@@ -219,7 +224,7 @@ func (cp *ControlPlane) RecoverVMs() (recovered int, failed []string, err error)
 			if dmInfo != nil {
 				storage.TeardownDMSnapshot(dmInfo)
 			}
-			cp.netManager.Release(s.TapDevice, s.GuestIP)
+			cp.releaseRecoveryNetwork(s.TapDevice, s.GuestIP)
 			storage.DeleteVMState(cp.workDir, s.VMID)
 			failed = append(failed, s.VMID)
 			cp.markFlockAgentDead(s.FlockID, s.AgentID)
@@ -231,6 +236,21 @@ func (cp *ControlPlane) RecoverVMs() (recovered int, failed []string, err error)
 		recovered++
 	}
 	return recovered, failed, nil
+}
+
+func (cp *ControlPlane) releaseRecoveryNetwork(tapDevice, guestIP string) {
+	if cp.releaseVMNetwork != nil {
+		if err := cp.releaseVMNetwork(tapDevice, guestIP); err != nil {
+			slog.Warn("recovery: network release failed", "tap", tapDevice, "guest_ip", guestIP, "err", err)
+		}
+		return
+	}
+	if cp.netManager == nil {
+		return
+	}
+	if err := cp.netManager.Release(tapDevice, guestIP); err != nil {
+		slog.Warn("recovery: network release failed", "tap", tapDevice, "guest_ip", guestIP, "err", err)
+	}
 }
 
 // registerRecoveredVM adds a recovered machine to cp.vms and flips its flock

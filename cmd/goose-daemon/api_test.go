@@ -411,6 +411,75 @@ func TestSpawnVMRollbackCleansEgressAndReleasesNetworkOnce(t *testing.T) {
 	}
 }
 
+func TestRecoveryDropsRestoredCOWStateWithoutProtectingOrphanResources(t *testing.T) {
+	cp := newTestCP(t)
+	workspace := t.TempDir()
+	cp.provisioner = &storage.Provisioner{WorkspaceDir: workspace}
+
+	vmID := "vm-restored"
+	if err := storage.SaveVMState(cp.workDir, storage.VMState{
+		VMID:             vmID,
+		GuestIP:          "10.0.1.99",
+		TapDevice:        "tap99",
+		MacAddr:          "AA:FC:00:00:00:63",
+		DiskPath:         filepath.Join(workspace, vmID+".ext4"),
+		DiskMode:         storage.DiskModeCOW,
+		SourceSnapshotID: "snap-source",
+	}); err != nil {
+		t.Fatalf("SaveVMState: %v", err)
+	}
+	memPath, _ := storage.AutoSnapshotPaths(cp.workDir, vmID)
+	if err := os.MkdirAll(filepath.Dir(memPath), 0700); err != nil {
+		t.Fatalf("mkdir auto snapshot dir: %v", err)
+	}
+	if err := os.WriteFile(memPath, []byte("memory"), 0600); err != nil {
+		t.Fatalf("write auto snapshot: %v", err)
+	}
+
+	oldRemoveOrphans := removeOrphanCOWDevices
+	var sawOrphanCleanup bool
+	removeOrphanCOWDevices = func(workspaceDir string, liveVMIDs map[string]struct{}) int {
+		sawOrphanCleanup = true
+		if workspaceDir != workspace {
+			t.Fatalf("workspaceDir = %q, want %q", workspaceDir, workspace)
+		}
+		if _, ok := liveVMIDs[vmID]; ok {
+			t.Fatalf("restored COW state %q was protected from orphan cleanup by live set %v", vmID, liveVMIDs)
+		}
+		return 1
+	}
+	defer func() { removeOrphanCOWDevices = oldRemoveOrphans }()
+
+	var releases []string
+	cp.releaseVMNetwork = func(tapDevice, guestIP string) error {
+		releases = append(releases, tapDevice+" "+guestIP)
+		return nil
+	}
+
+	recovered, failed, err := cp.RecoverVMs()
+	if err != nil {
+		t.Fatalf("RecoverVMs: %v", err)
+	}
+	if recovered != 0 {
+		t.Fatalf("recovered = %d, want 0", recovered)
+	}
+	if len(failed) != 1 || failed[0] != vmID {
+		t.Fatalf("failed = %v, want [%s]", failed, vmID)
+	}
+	if !sawOrphanCleanup {
+		t.Fatal("RemoveOrphanCOWDevices was not called")
+	}
+	if len(releases) != 1 || releases[0] != "tap99 10.0.1.99" {
+		t.Fatalf("network releases = %v, want restored VM release", releases)
+	}
+	if storage.VMStateExists(cp.workDir, vmID) {
+		t.Fatal("restored VM state still exists after recovery drop")
+	}
+	if storage.AutoSnapshotExists(cp.workDir, vmID) {
+		t.Fatal("restored VM auto snapshot still exists after recovery drop")
+	}
+}
+
 func TestRuntimeAuditAPIListFiltersAndRedacts(t *testing.T) {
 	cp := newTestCP(t)
 	cp.runtimeAuditPath = filepath.Join(cp.workDir, "audit", "runtime-audit.jsonl")
