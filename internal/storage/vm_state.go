@@ -13,9 +13,9 @@ import (
 // Bump when the wire layout changes in a way that needs migration logic.
 const vmStateSchemaVersion = 1
 
-// Disk mode tags recorded in VMState.DiskMode. Cold-restart recovery in v0.3.2
-// only handles "plain"; "cow" entries are skipped with a warning since dm-snapshot
-// orphan cleanup is out of scope for the first cut.
+// Disk mode tags recorded in VMState.DiskMode. Cold-restart recovery handles both:
+// "plain" boots the full rootfs clone, "cow" re-layers the preserved dm-snapshot
+// exception store over the golden image (v0.4.0).
 const (
 	DiskModePlain = "plain"
 	DiskModeCOW   = "cow"
@@ -25,31 +25,69 @@ const (
 // previously-running VM back after a daemon restart (graceful or crash).
 // Persisted per-VM at workDir/vms/<vm_id>/state.json.
 //
-// Memory state is NOT preserved; cold-restart boots the VM from its rootfs clone
-// and re-attaches the same network identity and agent token.
+// Memory state is NOT preserved in state.json; cold-restart boots the VM from
+// its rootfs clone and re-attaches the same network identity and agent token.
+// (Opt-in EPHEMERA_AUTOSNAPSHOT additionally writes a separate memory snapshot
+// under auto/ for warm restore — see AutoSnapshotDir.)
 type VMState struct {
-	SchemaVersion int       `json:"schema_version"`
-	VMID          string    `json:"vm_id"`
-	GuestIP       string    `json:"guest_ip"`
-	TapDevice     string    `json:"tap_device"`
-	MacAddr       string    `json:"mac_addr"`
-	VsockPath     string    `json:"vsock_path"`
-	SocketPath    string    `json:"socket_path"`
-	AgentToken    string    `json:"agent_token"`
-	DiskPath      string    `json:"disk_path"`
-	DiskMode      string    `json:"disk_mode"` // "plain" | "cow"
-	Profile       string    `json:"profile,omitempty"`
-	VcpuCount     int64     `json:"vcpu_count"`
-	MemSizeMib    int64     `json:"mem_size_mib"`
-	FlockID       string    `json:"flock_id,omitempty"`
-	AgentID       string    `json:"agent_id,omitempty"`
-	AgentURL      string    `json:"agent_url"`
-	CreatedAt     time.Time `json:"created_at"`
+	SchemaVersion int    `json:"schema_version"`
+	VMID          string `json:"vm_id"`
+	GuestIP       string `json:"guest_ip"`
+	TapDevice     string `json:"tap_device"`
+	MacAddr       string `json:"mac_addr"`
+	VsockPath     string `json:"vsock_path"`
+	SocketPath    string `json:"socket_path"`
+	AgentToken    string `json:"agent_token"`
+	DiskPath      string `json:"disk_path"`
+	DiskMode      string `json:"disk_mode"` // "plain" | "cow"
+	Profile       string `json:"profile,omitempty"`
+	TenantID      string `json:"tenant_id,omitempty"`
+	EgressPolicy  string `json:"egress_policy,omitempty"`
+	// SourceSnapshotID records the full/diff snapshot a restored VM depends on.
+	// Snapshot GC must keep this source while the restored VM state is live.
+	SourceSnapshotID string    `json:"source_snapshot_id,omitempty"`
+	VcpuCount        int64     `json:"vcpu_count"`
+	MemSizeMib       int64     `json:"mem_size_mib"`
+	FlockID          string    `json:"flock_id,omitempty"`
+	AgentID          string    `json:"agent_id,omitempty"`
+	AgentURL         string    `json:"agent_url"`
+	CreatedAt        time.Time `json:"created_at"`
 }
 
 // vmStatePath returns the per-VM state.json location under workDir.
 func vmStatePath(workDir, vmID string) string {
 	return filepath.Join(workDir, "vms", vmID, "state.json")
+}
+
+// AutoSnapshotDir returns the per-VM memory auto-snapshot directory under
+// workDir — a subdirectory of the VM's state directory (v0.4.0). When
+// EPHEMERA_AUTOSNAPSHOT is enabled, the graceful-shutdown path writes a
+// memory+state snapshot here and RecoverVMs warm-restores from it.
+func AutoSnapshotDir(workDir, vmID string) string {
+	return filepath.Join(workDir, "vms", vmID, "auto")
+}
+
+// AutoSnapshotPaths returns the memory and state file paths inside a VM's
+// auto-snapshot directory.
+func AutoSnapshotPaths(workDir, vmID string) (memPath, statPath string) {
+	dir := AutoSnapshotDir(workDir, vmID)
+	return filepath.Join(dir, "memory.bin"), filepath.Join(dir, "state.bin")
+}
+
+// AutoSnapshotExists reports whether a usable memory auto-snapshot is present
+// for vmID (the memory file is the load-bearing artifact for a warm restore).
+func AutoSnapshotExists(workDir, vmID string) bool {
+	memPath, _ := AutoSnapshotPaths(workDir, vmID)
+	_, err := os.Stat(memPath)
+	return err == nil
+}
+
+// RemoveAutoSnapshot deletes a VM's auto-snapshot directory (best-effort).
+// Auto-snapshots are one-shot: consumed on a restore attempt and rewritten by
+// the next graceful shutdown, so a stale image is never reused. Call this
+// whenever a VM's state.json is dropped so an orphaned auto/ does not linger.
+func RemoveAutoSnapshot(workDir, vmID string) {
+	os.RemoveAll(AutoSnapshotDir(workDir, vmID))
 }
 
 // SaveVMState writes state atomically (tmp + rename). Not safe for concurrent
@@ -89,6 +127,15 @@ func LoadVMState(workDir, vmID string) (VMState, error) {
 		return VMState{}, fmt.Errorf("vm_state: unmarshal: %w", err)
 	}
 	return s, nil
+}
+
+// VMStateExists reports whether a persisted state.json is present for vmID. Only
+// spawn VMs persist state (SaveVMState), so a present file means RecoverVMs will
+// bring the VM back — the graceful-shutdown path uses this to decide whether to
+// preserve a COW exception store or tear it down.
+func VMStateExists(workDir, vmID string) bool {
+	_, err := os.Stat(vmStatePath(workDir, vmID))
+	return err == nil
 }
 
 // DeleteVMState removes a VM's state.json and its parent directory if empty.
