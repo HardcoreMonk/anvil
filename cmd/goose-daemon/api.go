@@ -107,15 +107,16 @@ type VMSpawnRequest struct {
 
 type runningVM struct {
 	VMInfo
-	agentToken      string                  // per-VM bearer token; only returned at spawn time, never re-serialized
-	startedAt       time.Time               // host-local start time for structured VM metrics
-	diskPath        string                  // actual disk file to delete on teardown (spawned) or exception store (COW-restored)
-	bindMountTarget string                  // non-empty for bind-mount restored VMs (legacy path)
-	dmSnapshot      *storage.DMSnapshotInfo // non-nil for COW-restored VMs; replaces bindMountTarget
-	vsockPath       string                  // host-side UDS for Firecracker vsock proxy; cleaned up on teardown
-	machine         *firecracker.Machine
-	tapDevice       string
-	socketPath      string
+	agentToken       string                  // per-VM bearer token; only returned at spawn time, never re-serialized
+	startedAt        time.Time               // host-local start time for structured VM metrics
+	diskPath         string                  // actual disk file to delete on teardown (spawned) or exception store (COW-restored)
+	bindMountTarget  string                  // non-empty for bind-mount restored VMs (legacy path)
+	dmSnapshot       *storage.DMSnapshotInfo // non-nil for COW-restored VMs; replaces bindMountTarget
+	sourceSnapshotID string                  // non-empty for restored VMs; protects the source snapshot while live
+	vsockPath        string                  // host-side UDS for Firecracker vsock proxy; cleaned up on teardown
+	machine          *firecracker.Machine
+	tapDevice        string
+	socketPath       string
 	// v0.3.5 additions for /vms/{vm_id}/stats. memSizeMib mirrors VMState.MemSizeMib,
 	// spawnedAt mirrors VMState.CreatedAt, and fcPID caches the Firecracker child
 	// PID resolved via /proc/net/unix on first stats request. atomic stores so
@@ -267,11 +268,18 @@ type ControlPlane struct {
 
 	allocateForRestore func(tapDeviceName, macAddr string) (tapDevice string, guestIP string, err error)
 	releaseNetwork     func(tapDevice string, guestIP string) error
+	allocateNetwork    func() (tapDevice string, guestIP string, macAddr string, err error)
+	releaseVMNetwork   func(tapDevice string, guestIP string) error
+	cloneDisk          func(vmID string) (diskPath string, err error)
+	prepareVM          func(vmID string, opts storage.VMPrepareOptions) error
+	startMachine       func(ctx context.Context, cfg vm.VMConfig) (*firecracker.Machine, error)
 	setupDMSnapshot    func(baseDiskPath, exceptionStorePath, mountTargetPath string) (*storage.DMSnapshotInfo, error)
 	teardownDMSnapshot func(info *storage.DMSnapshotInfo)
 	setupBindMount     func(baseDiskPath, newDiskPath, mountTargetPath string) error
 	restoreMachine     func(ctx context.Context, cfg vm.VMConfig, memFilePath, snapshotPath string) (*firecracker.Machine, error)
 	setGuestAgentToken func(vsockPath, token string) error
+	reconfigureGuestIP func(vsockPath, ipCIDR, gateway string) error
+	waitForAgent       func(guestIP string, timeout time.Duration) error
 
 	stopCh chan struct{}
 	srv    *http.Server
@@ -908,16 +916,16 @@ func (cp *ControlPlane) spawnVMInternal(opts spawnVMOptions) (*VMInfo, string, e
 		}
 	}()
 
-	tapDevice, guestIP, macAddr, err := cp.netManager.Allocate()
+	tapDevice, guestIP, macAddr, err := cp.allocateVMNetwork()
 	if err != nil {
 		return nil, "", fmt.Errorf("network allocation: %w", err)
 	}
-	rollback = append(rollback, func() { cp.netManager.Release(tapDevice, guestIP) })
+	rollback = append(rollback, func() { cp.releaseAllocatedVMNetwork(tapDevice, guestIP) })
 
 	if err := cp.applyEgressPolicy(vmID, tapDevice, guestIP, opts.EgressPolicy, opts.Profile); err != nil {
-		cp.netManager.Release(tapDevice, guestIP)
 		return nil, "", fmt.Errorf("egress policy: %w", err)
 	}
+	rollback = append(rollback, func() { cp.cleanupEgressPolicy(vmID) })
 
 	// Disk provisioning: full clone (default) vs dm-snapshot COW (env-gated).
 	// COW mode trades per-VM ~700 MiB of writes for a sparse exception store
@@ -934,14 +942,14 @@ func (cp *ControlPlane) spawnVMInternal(opts spawnVMOptions) (*VMInfo, string, e
 		}
 		rollback = append(rollback, func() { storage.TeardownDMSnapshot(dmInfo) })
 	} else {
-		diskPath, err = cp.provisioner.CloneDisk(vmID)
+		diskPath, err = cp.cloneVMDisk(vmID)
 		if err != nil {
 			return nil, "", fmt.Errorf("disk provisioning: %w", err)
 		}
 		rollback = append(rollback, func() { cp.provisioner.CleanupDisk(vmID) })
 	}
 
-	if err := cp.provisioner.PrepareVM(vmID, storage.VMPrepareOptions{
+	if err := cp.prepareVMFiles(vmID, storage.VMPrepareOptions{
 		HostConfigPath:    opts.ConfigPath,
 		HostSecretsPath:   opts.SecretsPath,
 		AgentToken:        agentToken,
@@ -957,7 +965,7 @@ func (cp *ControlPlane) spawnVMInternal(opts spawnVMOptions) (*VMInfo, string, e
 	vsockPath := fmt.Sprintf("/tmp/firecracker-vsock-%s.sock", vmID)
 	os.Remove(socketPath)
 
-	machine, err := vm.StartMachine(context.Background(), vm.VMConfig{
+	machine, err := cp.startVMMachine(context.Background(), vm.VMConfig{
 		VMID:           vmID,
 		SocketPath:     socketPath,
 		FirecrackerBin: cp.firecrackerPath,
@@ -1651,20 +1659,26 @@ func (cp *ControlPlane) planSnapshotGC(policy SnapshotGCPolicy, now time.Time) S
 	for _, meta := range snapshots {
 		byID[meta.SnapshotID] = meta
 	}
-	if states, err := storage.ListVMState(cp.workDir); err == nil {
-		for _, state := range states {
-			sourceID := strings.TrimSpace(state.SourceSnapshotID)
-			if sourceID == "" {
+	for snapshotID := range cp.liveRestoredSourceSnapshotRefs() {
+		if _, exists := protected[snapshotID]; exists {
+			continue
+		}
+		meta, ok := byID[snapshotID]
+		if !ok {
+			continue
+		}
+		protected[snapshotID] = snapshotGCEntryFrom(meta, snapshotGCReasonSourceSnapshot, nil, sizes[snapshotID])
+	}
+	if stateRefs, err := cp.persistedRestoredSourceSnapshotRefs(); err == nil {
+		for snapshotID := range stateRefs {
+			if _, exists := protected[snapshotID]; exists {
 				continue
 			}
-			if _, exists := protected[sourceID]; exists {
-				continue
-			}
-			meta, ok := byID[sourceID]
+			meta, ok := byID[snapshotID]
 			if !ok {
 				continue
 			}
-			protected[sourceID] = snapshotGCEntryFrom(meta, snapshotGCReasonSourceSnapshot, nil, sizes[sourceID])
+			protected[snapshotID] = snapshotGCEntryFrom(meta, snapshotGCReasonSourceSnapshot, nil, sizes[snapshotID])
 		}
 	} else {
 		slog.Warn("snapshot gc: list vm state failed", "err", err)
@@ -1733,6 +1747,41 @@ func (cp *ControlPlane) planSnapshotGC(policy SnapshotGCPolicy, now time.Time) S
 		}
 	}
 	return resp
+}
+
+func (cp *ControlPlane) liveRestoredSourceSnapshotRefs() map[string][]string {
+	cp.mu.RLock()
+	defer cp.mu.RUnlock()
+	refs := make(map[string][]string)
+	for vmID, vm := range cp.vms {
+		if vm == nil || strings.TrimSpace(vm.sourceSnapshotID) == "" {
+			continue
+		}
+		refs[vm.sourceSnapshotID] = append(refs[vm.sourceSnapshotID], vmID)
+	}
+	for snapshotID := range refs {
+		sort.Strings(refs[snapshotID])
+	}
+	return refs
+}
+
+func (cp *ControlPlane) persistedRestoredSourceSnapshotRefs() (map[string][]string, error) {
+	states, err := storage.ListVMState(cp.workDir)
+	if err != nil {
+		return nil, err
+	}
+	refs := make(map[string][]string)
+	for _, state := range states {
+		sourceID := strings.TrimSpace(state.SourceSnapshotID)
+		if sourceID == "" {
+			continue
+		}
+		refs[sourceID] = append(refs[sourceID], state.VMID)
+	}
+	for snapshotID := range refs {
+		sort.Strings(refs[snapshotID])
+	}
+	return refs, nil
 }
 
 // ---- Snapshot handlers ----
@@ -1986,6 +2035,41 @@ func (cp *ControlPlane) allocateNetworkForRestore(tapDeviceName, macAddr string)
 	return cp.netManager.AllocateForRestore(tapDeviceName, macAddr)
 }
 
+func (cp *ControlPlane) allocateVMNetwork() (string, string, string, error) {
+	if cp.allocateNetwork != nil {
+		return cp.allocateNetwork()
+	}
+	return cp.netManager.Allocate()
+}
+
+func (cp *ControlPlane) releaseAllocatedVMNetwork(tapDevice, guestIP string) error {
+	if cp.releaseVMNetwork != nil {
+		return cp.releaseVMNetwork(tapDevice, guestIP)
+	}
+	return cp.netManager.Release(tapDevice, guestIP)
+}
+
+func (cp *ControlPlane) cloneVMDisk(vmID string) (string, error) {
+	if cp.cloneDisk != nil {
+		return cp.cloneDisk(vmID)
+	}
+	return cp.provisioner.CloneDisk(vmID)
+}
+
+func (cp *ControlPlane) prepareVMFiles(vmID string, opts storage.VMPrepareOptions) error {
+	if cp.prepareVM != nil {
+		return cp.prepareVM(vmID, opts)
+	}
+	return cp.provisioner.PrepareVM(vmID, opts)
+}
+
+func (cp *ControlPlane) startVMMachine(ctx context.Context, cfg vm.VMConfig) (*firecracker.Machine, error) {
+	if cp.startMachine != nil {
+		return cp.startMachine(ctx, cfg)
+	}
+	return vm.StartMachine(ctx, cfg)
+}
+
 func (cp *ControlPlane) releaseRestoreNetwork(tapDevice, guestIP string) error {
 	if cp.releaseNetwork != nil {
 		return cp.releaseNetwork(tapDevice, guestIP)
@@ -2024,6 +2108,20 @@ func (cp *ControlPlane) restoreSnapshotMachine(ctx context.Context, cfg vm.VMCon
 	return vm.RestoreMachine(ctx, cfg, memFilePath, snapshotPath)
 }
 
+func (cp *ControlPlane) reconfigureRestoredGuestIP(vsockPath, ipCIDR, gateway string) error {
+	if cp.reconfigureGuestIP != nil {
+		return cp.reconfigureGuestIP(vsockPath, ipCIDR, gateway)
+	}
+	return vm.ReconfigureGuestIP(vsockPath, ipCIDR, gateway)
+}
+
+func (cp *ControlPlane) waitForRestoredAgent(guestIP string, timeout time.Duration) error {
+	if cp.waitForAgent != nil {
+		return cp.waitForAgent(guestIP, timeout)
+	}
+	return waitForAgent(guestIP, timeout)
+}
+
 func (cp *ControlPlane) agentTokenForRestoredSnapshot(snapID string, meta storage.SnapshotMetadata) (string, error) {
 	if token := strings.TrimSpace(meta.AgentToken); token != "" {
 		return token, nil
@@ -2040,35 +2138,6 @@ func (cp *ControlPlane) agentTokenForRestoredSnapshot(snapID string, meta storag
 		return "", fmt.Errorf("snapshot %s: %w", snapID, err)
 	}
 	return token, nil
-}
-
-func (cp *ControlPlane) persistRestoredVMState(
-	vmID, sourceSnapshotID string,
-	meta storage.SnapshotMetadata,
-	info VMInfo,
-	agentToken, tapDevice, guestIP, socketPath, diskPath, diskMode string,
-	memSizeMib int64,
-) {
-	if err := storage.SaveVMState(cp.workDir, storage.VMState{
-		VMID:             vmID,
-		GuestIP:          guestIP,
-		TapDevice:        tapDevice,
-		MacAddr:          meta.MacAddr,
-		VsockPath:        meta.VsockPath,
-		SocketPath:       socketPath,
-		AgentToken:       agentToken,
-		DiskPath:         diskPath,
-		DiskMode:         diskMode,
-		Profile:          meta.Profile,
-		TenantID:         info.TenantID,
-		EgressPolicy:     info.EgressPolicy,
-		SourceSnapshotID: sourceSnapshotID,
-		MemSizeMib:       memSizeMib,
-		AgentURL:         info.AgentURL,
-		CreatedAt:        time.Now().UTC(),
-	}); err != nil {
-		slog.Warn("persist restored vm state failed", "vm_id", vmID, "snapshot_id", sourceSnapshotID, "err", err)
-	}
 }
 
 // POST /snapshots/gc
@@ -2104,12 +2173,17 @@ func (cp *ControlPlane) handleSnapshotGC(w http.ResponseWriter, r *http.Request)
 		KeepLastPerVM:    req.KeepLastPerVM,
 		MaxTotalBytes:    req.MaxTotalBytes,
 	}
-	resp := cp.planSnapshotGC(policy, time.Now().UTC())
-	resp.Applied = req.Apply
-	if req.Apply {
-		cp.applySnapshotGC(&resp)
-		cp.metrics.IncSnapshotGC()
-	}
+	var resp SnapshotGCResponse
+	func() {
+		cp.snapshotLifecycleMu.Lock()
+		defer cp.snapshotLifecycleMu.Unlock()
+		resp = cp.planSnapshotGC(policy, time.Now().UTC())
+		resp.Applied = req.Apply
+		if req.Apply {
+			cp.applySnapshotGC(&resp)
+			cp.metrics.IncSnapshotGC()
+		}
+	}()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
@@ -2667,6 +2741,7 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 
 	newVMID := fmt.Sprintf("vm-%d", time.Now().UnixNano())
 	exceptionStorePath := filepath.Join(cp.provisioner.WorkspaceDir, newVMID+".cow")
+	restoreDiskPath := filepath.Join(cp.provisioner.WorkspaceDir, newVMID+".ext4")
 	socketPath := fmt.Sprintf("/tmp/firecracker-%s.sock", newVMID)
 	os.Remove(socketPath)
 
@@ -2721,14 +2796,14 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 	}
 
 	slog.Warn("restore: setting up dm-snapshot cow", "snapshot_id", snapID, "base", baseDiskForCOW, "store", exceptionStorePath)
-	dmInfo, err := cp.setupRestoreDMSnapshot(baseDiskForCOW, exceptionStorePath, meta.DiskPath)
+	dmInfo, err := cp.setupRestoreDMSnapshot(baseDiskForCOW, exceptionStorePath, restoreDiskPath)
 	if err != nil {
 		cp.restoreMu.Unlock()
 		slog.Warn("restore: dm-snapshot failed, falling back to bind mount", "snapshot_id", snapID, "err", err)
 		// Fallback: bind-mount the base disk if dm-snapshot is unavailable.
-		newDiskPath := filepath.Join(cp.provisioner.WorkspaceDir, newVMID+".ext4")
+		newDiskPath := filepath.Join(cp.provisioner.WorkspaceDir, newVMID+"-bind.ext4")
 		cp.restoreMu.Lock()
-		if bmErr := cp.setupRestoreBindMount(baseDiskForCOW, newDiskPath, meta.DiskPath); bmErr != nil {
+		if bmErr := cp.setupRestoreBindMount(baseDiskForCOW, newDiskPath, restoreDiskPath); bmErr != nil {
 			cp.restoreMu.Unlock()
 			cp.releaseRestoreNetwork(tapDevice, newGuestIP)
 			if mergedRootfs != "" {
@@ -2743,7 +2818,7 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 			os.Remove(mergedRootfs)
 		}
 		delegated = true
-		cp.restoreLegacyBindMount(w, snapID, meta, newVMID, newDiskPath, tapDevice, newGuestIP, socketPath, restoreTenantID, restoreEgressPolicy)
+		cp.restoreLegacyBindMount(w, snapID, meta, newVMID, newDiskPath, restoreDiskPath, tapDevice, newGuestIP, socketPath, restoreTenantID, restoreEgressPolicy)
 		return
 	}
 	// dm-snapshot pins the merged rootfs via its read-only loop device; unlink the transient
@@ -2783,7 +2858,7 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 		VMID:           newVMID,
 		SocketPath:     socketPath,
 		FirecrackerBin: cp.firecrackerPath,
-		RootfsPath:     meta.DiskPath,
+		RootfsPath:     restoreDiskPath,
 		TapDevice:      tapDevice,
 		MacAddress:     meta.MacAddr,
 		GuestIP:        newGuestIP,
@@ -2806,7 +2881,7 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 
 	// Firecracker has restored vsock at meta.VsockPath. Reconfigure the guest's IP.
 	slog.Warn("restore: reconfiguring guest ip", "snapshot_id", snapID, "old_ip", meta.GuestIP, "new_ip", newGuestIP, "vsock", meta.VsockPath)
-	if err := vm.ReconfigureGuestIP(meta.VsockPath, newGuestIP+"/24", "10.0.1.1"); err != nil {
+	if err := cp.reconfigureRestoredGuestIP(meta.VsockPath, newGuestIP+"/24", "10.0.1.1"); err != nil {
 		slog.Warn("restore: vsock ip reconfigure failed", "snapshot_id", snapID, "err", err)
 		machine.StopVMM()
 		cp.cleanupEgressPolicy(newVMID)
@@ -2839,23 +2914,23 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 
 	cp.mu.Lock()
 	cp.vms[newVMID] = &runningVM{
-		VMInfo:     info,
-		agentToken: restoredAgentToken,
-		startedAt:  time.Now().UTC(),
-		diskPath:   exceptionStorePath, // only the COW store needs cleanup (not a full disk copy)
-		dmSnapshot: dmInfo,
-		vsockPath:  meta.VsockPath,
-		machine:    machine,
-		tapDevice:  tapDevice,
-		socketPath: socketPath,
-		memSizeMib: 2048, // restore default; meta does not carry per-snapshot sizing
-		spawnedAt:  time.Now().UTC(),
+		VMInfo:           info,
+		agentToken:       restoredAgentToken,
+		startedAt:        time.Now().UTC(),
+		diskPath:         exceptionStorePath, // only the COW store needs cleanup (not a full disk copy)
+		dmSnapshot:       dmInfo,
+		sourceSnapshotID: snapID,
+		vsockPath:        meta.VsockPath,
+		machine:          machine,
+		tapDevice:        tapDevice,
+		socketPath:       socketPath,
+		memSizeMib:       2048, // restore default; meta does not carry per-snapshot sizing
+		spawnedAt:        time.Now().UTC(),
 	}
 	cp.mu.Unlock()
-	cp.persistRestoredVMState(newVMID, snapID, meta, info, restoredAgentToken, tapDevice, newGuestIP, socketPath, meta.DiskPath, storage.DiskModeCOW, 2048)
 
 	slog.Warn("restore: waiting for agent", "snapshot_id", snapID, "agent_url", info.AgentURL)
-	if err := waitForAgent(newGuestIP, 30*time.Second); err != nil {
+	if err := cp.waitForRestoredAgent(newGuestIP, 30*time.Second); err != nil {
 		cp.destroyVM(newVMID)
 		writeRestoreError(w, http.StatusInternalServerError, "agent_not_ready", snapID, fmt.Sprintf("goose-agent not ready after restore: %v", err))
 		return
@@ -2877,7 +2952,7 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 func (cp *ControlPlane) restoreLegacyBindMount(
 	w http.ResponseWriter,
 	snapID string, meta storage.SnapshotMetadata,
-	newVMID, newDiskPath, tapDevice, newGuestIP, socketPath string,
+	newVMID, newDiskPath, mountTargetPath, tapDevice, newGuestIP, socketPath string,
 	restoreTenantID, restoreEgressPolicy string,
 ) {
 	start := time.Now()
@@ -2894,7 +2969,7 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 		base, baseOK := cp.snapshots[meta.BaseSnapshotID]
 		cp.snapshotsMu.RUnlock()
 		if !baseOK {
-			storage.TeardownBindMount(meta.DiskPath, newDiskPath)
+			storage.TeardownBindMount(mountTargetPath, newDiskPath)
 			cp.releaseRestoreNetwork(tapDevice, newGuestIP)
 			writeRestoreError(w, http.StatusConflict, "diff_base_missing", snapID, fmt.Sprintf("base snapshot %s not found", meta.BaseSnapshotID))
 			return
@@ -2902,7 +2977,7 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 		mergedMemPath = pickMergedMemPath(cp.workDir, newVMID)
 		os.MkdirAll(filepath.Dir(mergedMemPath), 0755)
 		if err := storage.MergeMemoryDiff(base.MemFilePath, meta.MemFilePath, mergedMemPath); err != nil {
-			storage.TeardownBindMount(meta.DiskPath, newDiskPath)
+			storage.TeardownBindMount(mountTargetPath, newDiskPath)
 			cp.releaseRestoreNetwork(tapDevice, newGuestIP)
 			writeRestoreError(w, http.StatusInternalServerError, "memory_merge_failed", snapID, fmt.Sprintf("failed to merge diff: %v", err))
 			return
@@ -2911,7 +2986,7 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 	}
 
 	if err := cp.applyEgressPolicy(newVMID, tapDevice, newGuestIP, restoreEgressPolicy, meta.Profile); err != nil {
-		storage.TeardownBindMount(meta.DiskPath, newDiskPath)
+		storage.TeardownBindMount(mountTargetPath, newDiskPath)
 		cp.releaseRestoreNetwork(tapDevice, newGuestIP)
 		writeRestoreError(w, http.StatusInternalServerError, "egress_policy_failed", snapID, fmt.Sprintf("egress policy failed: %v", err))
 		return
@@ -2921,7 +2996,7 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 		VMID:           newVMID,
 		SocketPath:     socketPath,
 		FirecrackerBin: cp.firecrackerPath,
-		RootfsPath:     meta.DiskPath,
+		RootfsPath:     mountTargetPath,
 		TapDevice:      tapDevice,
 		MacAddress:     meta.MacAddr,
 		GuestIP:        newGuestIP,
@@ -2933,16 +3008,16 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 	}
 	if err != nil {
 		cp.cleanupEgressPolicy(newVMID)
-		storage.TeardownBindMount(meta.DiskPath, newDiskPath)
+		storage.TeardownBindMount(mountTargetPath, newDiskPath)
 		cp.releaseRestoreNetwork(tapDevice, newGuestIP)
 		writeRestoreError(w, http.StatusInternalServerError, "firecracker_restore_failed", snapID, fmt.Sprintf("failed to restore VM: %v", err))
 		return
 	}
 
-	if err := vm.ReconfigureGuestIP(meta.VsockPath, newGuestIP+"/24", "10.0.1.1"); err != nil {
+	if err := cp.reconfigureRestoredGuestIP(meta.VsockPath, newGuestIP+"/24", "10.0.1.1"); err != nil {
 		machine.StopVMM()
 		cp.cleanupEgressPolicy(newVMID)
-		storage.TeardownBindMount(meta.DiskPath, newDiskPath)
+		storage.TeardownBindMount(mountTargetPath, newDiskPath)
 		cp.releaseRestoreNetwork(tapDevice, newGuestIP)
 		writeRestoreError(w, http.StatusInternalServerError, "guest_reconfigure_failed", snapID, fmt.Sprintf("vsock IP reconfigure failed: %v", err))
 		return
@@ -2952,7 +3027,7 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 	if err != nil {
 		machine.StopVMM()
 		cp.cleanupEgressPolicy(newVMID)
-		storage.TeardownBindMount(meta.DiskPath, newDiskPath)
+		storage.TeardownBindMount(mountTargetPath, newDiskPath)
 		cp.releaseRestoreNetwork(tapDevice, newGuestIP)
 		writeRestoreError(w, http.StatusInternalServerError, "guest_reconfigure_failed", snapID, fmt.Sprintf("vsock agent token update failed: %v", err))
 		return
@@ -2968,22 +3043,22 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 	}
 	cp.mu.Lock()
 	cp.vms[newVMID] = &runningVM{
-		VMInfo:          info,
-		agentToken:      restoredAgentToken,
-		startedAt:       time.Now().UTC(),
-		diskPath:        newDiskPath,
-		bindMountTarget: meta.DiskPath,
-		vsockPath:       meta.VsockPath,
-		machine:         machine,
-		tapDevice:       tapDevice,
-		socketPath:      socketPath,
-		memSizeMib:      2048,
-		spawnedAt:       time.Now().UTC(),
+		VMInfo:           info,
+		agentToken:       restoredAgentToken,
+		startedAt:        time.Now().UTC(),
+		diskPath:         newDiskPath,
+		bindMountTarget:  mountTargetPath,
+		sourceSnapshotID: snapID,
+		vsockPath:        meta.VsockPath,
+		machine:          machine,
+		tapDevice:        tapDevice,
+		socketPath:       socketPath,
+		memSizeMib:       2048,
+		spawnedAt:        time.Now().UTC(),
 	}
 	cp.mu.Unlock()
-	cp.persistRestoredVMState(newVMID, snapID, meta, info, restoredAgentToken, tapDevice, newGuestIP, socketPath, newDiskPath, storage.DiskModePlain, 2048)
 
-	if err := waitForAgent(newGuestIP, 30*time.Second); err != nil {
+	if err := cp.waitForRestoredAgent(newGuestIP, 30*time.Second); err != nil {
 		cp.destroyVM(newVMID)
 		writeRestoreError(w, http.StatusInternalServerError, "agent_not_ready", snapID, fmt.Sprintf("goose-agent not ready: %v", err))
 		return
@@ -3000,9 +3075,6 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 }
 
 func (cp *ControlPlane) deleteSnapshotByID(snapID string) (storage.SnapshotMetadata, int, error) {
-	cp.snapshotLifecycleMu.Lock()
-	defer cp.snapshotLifecycleMu.Unlock()
-
 	cp.snapshotsMu.RLock()
 	for id, snap := range cp.snapshots {
 		if snap.BaseSnapshotID == snapID {
@@ -3014,6 +3086,16 @@ func (cp *ControlPlane) deleteSnapshotByID(snapID string) (storage.SnapshotMetad
 	cp.snapshotsMu.RUnlock()
 	if !ok {
 		return storage.SnapshotMetadata{}, http.StatusNotFound, fmt.Errorf("snapshot not found")
+	}
+	if vmIDs := cp.liveRestoredSourceSnapshotRefs()[snapID]; len(vmIDs) > 0 {
+		return storage.SnapshotMetadata{}, http.StatusConflict, fmt.Errorf("cannot delete: snapshot %s is referenced by restored VM %s", snapID, vmIDs[0])
+	}
+	stateRefs, err := cp.persistedRestoredSourceSnapshotRefs()
+	if err != nil {
+		return storage.SnapshotMetadata{}, http.StatusInternalServerError, fmt.Errorf("cannot verify restored VM snapshot dependencies: %w", err)
+	}
+	if vmIDs := stateRefs[snapID]; len(vmIDs) > 0 {
+		return storage.SnapshotMetadata{}, http.StatusConflict, fmt.Errorf("cannot delete: snapshot %s is referenced by restored VM %s", snapID, vmIDs[0])
 	}
 
 	snapDir := storage.SnapshotDir(cp.workDir, snapID)
@@ -3032,6 +3114,8 @@ func (cp *ControlPlane) deleteSnapshotByID(snapID string) (storage.SnapshotMetad
 // DELETE /snapshots/{snapshot_id}
 func (cp *ControlPlane) deleteSnapshot(w http.ResponseWriter, snapID string) {
 	defer cp.observeLifecycle("snapshot_delete")()
+	cp.snapshotLifecycleMu.Lock()
+	defer cp.snapshotLifecycleMu.Unlock()
 	meta, status, err := cp.deleteSnapshotByID(snapID)
 	if err != nil {
 		if status == http.StatusNotFound {

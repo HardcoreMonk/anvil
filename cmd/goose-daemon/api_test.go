@@ -292,6 +292,54 @@ func TestCommandEgressEnforcerAllowAllIsNoop(t *testing.T) {
 	}
 }
 
+func TestSpawnVMRollbackCleansEgressAndReleasesNetworkOnce(t *testing.T) {
+	cp := newTestCP(t)
+	workspace := t.TempDir()
+	golden := filepath.Join(workspace, "golden.ext4")
+	if err := os.WriteFile(golden, []byte("golden"), 0600); err != nil {
+		t.Fatalf("write golden image: %v", err)
+	}
+	cp.provisioner = &storage.Provisioner{GoldenImagePath: golden, WorkspaceDir: workspace}
+	var events []string
+	recorder := &recordingEgressEnforcer{shared: &events}
+	cp.egress = recorder
+	cp.allocateNetwork = func() (string, string, string, error) {
+		events = append(events, "allocate")
+		return "tap-test", "10.0.1.77", "AA:FC:00:00:00:4D", nil
+	}
+	cp.releaseVMNetwork = func(tapDevice, guestIP string) error {
+		events = append(events, "release:"+tapDevice+":"+guestIP)
+		return nil
+	}
+	cp.cloneDisk = func(vmID string) (string, error) {
+		events = append(events, "clone-fail")
+		return "", errors.New("clone failed")
+	}
+
+	_, _, err := cp.spawnVMInternal(spawnVMOptions{
+		Profile:      "dev",
+		ConfigPath:   cp.gooseConfigPath,
+		SecretsPath:  cp.gooseSecretsPath,
+		EgressPolicy: "deny_all",
+	})
+	if err == nil {
+		t.Fatal("spawnVMInternal returned nil error, want clone failure")
+	}
+	gotEvents := strings.Join(events, ",")
+	if !strings.HasPrefix(gotEvents, "allocate,apply:") {
+		t.Fatalf("events = %s, want allocate then egress apply", gotEvents)
+	}
+	if !strings.Contains(gotEvents, ",clone-fail,cleanup:") {
+		t.Fatalf("events = %s, want clone failure followed by egress cleanup", gotEvents)
+	}
+	if !strings.HasSuffix(gotEvents, ",release:tap-test:10.0.1.77") {
+		t.Fatalf("events = %s, want network release last", gotEvents)
+	}
+	if strings.Count(gotEvents, "release:") != 1 {
+		t.Fatalf("events = %s, want exactly one network release", gotEvents)
+	}
+}
+
 func TestRuntimeAuditAPIListFiltersAndRedacts(t *testing.T) {
 	cp := newTestCP(t)
 	cp.runtimeAuditPath = filepath.Join(cp.workDir, "audit", "runtime-audit.jsonl")
@@ -606,6 +654,29 @@ func gcEntryByID(entries []SnapshotGCEntry, snapshotID string) (SnapshotGCEntry,
 		}
 	}
 	return SnapshotGCEntry{}, false
+}
+
+type recordingEgressEnforcer struct {
+	events []string
+	shared *[]string
+}
+
+func (e *recordingEgressEnforcer) Apply(vmID, tapDevice, guestIP, policy string) error {
+	event := "apply:" + vmID + ":" + tapDevice + ":" + guestIP + ":" + policy
+	e.events = append(e.events, event)
+	if e.shared != nil {
+		*e.shared = append(*e.shared, event)
+	}
+	return nil
+}
+
+func (e *recordingEgressEnforcer) Cleanup(vmID string) error {
+	event := "cleanup:" + vmID
+	e.events = append(e.events, event)
+	if e.shared != nil {
+		*e.shared = append(*e.shared, event)
+	}
+	return nil
 }
 
 func decodeGCResponse(t *testing.T, rr *httptest.ResponseRecorder) SnapshotGCResponse {
@@ -982,6 +1053,30 @@ func TestPlanSnapshotGCKeepsSourceSnapshotForRestoredVM(t *testing.T) {
 	}
 }
 
+func TestPlanSnapshotGCKeepsLiveRestoredSourceSnapshotWithoutVMState(t *testing.T) {
+	now := time.Now().UTC()
+	cp := newTestCP(t)
+
+	sourceID := "snap-source"
+	addTestSnapshot(t, cp, testSnapshotMeta(sourceID, "vm-source", "full", now.Add(-48*time.Hour)))
+	addTestSnapshot(t, cp, testSnapshotMeta("snap-old", "vm-other", "full", now.Add(-72*time.Hour)))
+	cp.vms["vm-restored"] = &runningVM{
+		VMInfo:           VMInfo{VMID: "vm-restored"},
+		sourceSnapshotID: sourceID,
+	}
+
+	got := cp.planSnapshotGC(SnapshotGCPolicy{
+		OlderThanSeconds: int64((24 * time.Hour) / time.Second),
+		KeepLastPerVM:    0,
+	}, now)
+	if _, ok := gcEntryByID(got.Candidates, sourceID); ok {
+		t.Fatalf("live restored source snapshot %q selected for GC", sourceID)
+	}
+	if _, ok := gcEntryByID(got.Candidates, "snap-old"); !ok {
+		t.Fatalf("unreferenced old snapshot not selected; candidates=%v", snapshotIDs(got.Candidates))
+	}
+}
+
 func TestPlanSnapshotGCMaxTotalBytesSelectsOldestUnprotected(t *testing.T) {
 	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
 	cp := newTestCP(t)
@@ -1025,6 +1120,33 @@ func TestPlanSnapshotGCMaxTotalBytesSelectsOldestUnprotected(t *testing.T) {
 	}
 	if protected.SizeBytes != 22 {
 		t.Fatalf("protected size_bytes = %d, want 22", protected.SizeBytes)
+	}
+}
+
+func TestApplySnapshotGCRechecksLiveRestoredSourceSnapshot(t *testing.T) {
+	now := time.Now().UTC()
+	cp := newTestCP(t)
+	meta := testSnapshotMeta("snap-source", "vm-source", "full", now.Add(-72*time.Hour))
+	addTestSnapshot(t, cp, meta)
+	cp.vms["vm-restored"] = &runningVM{
+		VMInfo:           VMInfo{VMID: "vm-restored"},
+		sourceSnapshotID: "snap-source",
+	}
+
+	resp := SnapshotGCResponse{
+		Applied:    true,
+		Candidates: []SnapshotGCEntry{snapshotGCEntryFrom(meta, snapshotGCReasonOlderThan, nil, 0)},
+	}
+	cp.applySnapshotGC(&resp)
+
+	if len(resp.Deleted) != 0 {
+		t.Fatalf("deleted = %v, want no deletion of live restored source", snapshotIDs(resp.Deleted))
+	}
+	if len(resp.Errors) != 1 || !strings.Contains(resp.Errors[0].Error, "referenced by restored VM") {
+		t.Fatalf("errors = %+v, want restored VM dependency error", resp.Errors)
+	}
+	if _, ok := cp.snapshots["snap-source"]; !ok {
+		t.Fatal("live restored source snapshot was removed from snapshot map")
 	}
 }
 
@@ -1510,6 +1632,53 @@ func TestDeleteSnapshotStillProtectsDiffBase(t *testing.T) {
 	}
 }
 
+func TestDeleteSnapshotProtectsLiveRestoredSourceSnapshot(t *testing.T) {
+	now := time.Now().UTC()
+	cp := newTestCP(t)
+	meta := testSnapshotMeta("snap-source", "vm-source", "full", now.Add(-10*24*time.Hour))
+	addTestSnapshot(t, cp, meta)
+	cp.vms["vm-restored"] = &runningVM{
+		VMInfo:           VMInfo{VMID: "vm-restored"},
+		sourceSnapshotID: "snap-source",
+	}
+
+	rr := httptest.NewRecorder()
+	cp.deleteSnapshot(rr, "snap-source")
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, body = %q; want 409", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "referenced by restored VM vm-restored") {
+		t.Fatalf("body = %q, want restored VM dependency error", rr.Body.String())
+	}
+	if _, ok := cp.snapshots["snap-source"]; !ok {
+		t.Fatal("protected source snapshot was removed from map")
+	}
+}
+
+func TestDeleteSnapshotProtectsPersistedRestoredSourceSnapshot(t *testing.T) {
+	now := time.Now().UTC()
+	cp := newTestCP(t)
+	meta := testSnapshotMeta("snap-source", "vm-source", "full", now.Add(-10*24*time.Hour))
+	addTestSnapshot(t, cp, meta)
+	if err := storage.SaveVMState(cp.workDir, storage.VMState{
+		VMID:             "vm-restored",
+		SourceSnapshotID: "snap-source",
+	}); err != nil {
+		t.Fatalf("SaveVMState: %v", err)
+	}
+
+	rr := httptest.NewRecorder()
+	cp.deleteSnapshot(rr, "snap-source")
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, body = %q; want 409", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "referenced by restored VM vm-restored") {
+		t.Fatalf("body = %q, want restored VM state dependency error", rr.Body.String())
+	}
+}
+
 func TestCreateSnapshotRejectsMalformedJSONWithJSONError(t *testing.T) {
 	cp := newTestCP(t)
 	rr := httptest.NewRecorder()
@@ -1624,17 +1793,21 @@ func TestRestoreSnapshotFirecrackerFailureCleansNetworkAndDMSnapshot(t *testing.
 		if baseDiskPath != meta.DiskCopyPath {
 			t.Fatalf("baseDiskPath = %q, want %q", baseDiskPath, meta.DiskCopyPath)
 		}
-		if mountTargetPath != meta.DiskPath {
-			t.Fatalf("mountTargetPath = %q, want %q", mountTargetPath, meta.DiskPath)
+		if mountTargetPath == meta.DiskPath {
+			t.Fatalf("mountTargetPath = %q, must be per-restore path not shared snapshot DiskPath", mountTargetPath)
 		}
+		if !strings.HasPrefix(mountTargetPath, cp.provisioner.WorkspaceDir) || !strings.HasSuffix(mountTargetPath, ".ext4") {
+			t.Fatalf("mountTargetPath = %q, want per-restore ext4 under %q", mountTargetPath, cp.provisioner.WorkspaceDir)
+		}
+		dmInfo.MountTarget = mountTargetPath
 		return dmInfo, nil
 	}
 	cp.teardownDMSnapshot = func(info *storage.DMSnapshotInfo) {
 		tornDown = info
 	}
 	cp.restoreMachine = func(ctx context.Context, cfg vm.VMConfig, memFilePath, snapshotPath string) (*firecracker.Machine, error) {
-		if cfg.RootfsPath != meta.DiskPath {
-			t.Fatalf("RootfsPath = %q, want %q", cfg.RootfsPath, meta.DiskPath)
+		if cfg.RootfsPath != dmInfo.MountTarget {
+			t.Fatalf("RootfsPath = %q, want per-restore mount target %q", cfg.RootfsPath, dmInfo.MountTarget)
 		}
 		if cfg.VsockUDSPath != meta.VsockPath {
 			t.Fatalf("VsockUDSPath = %q, want %q", cfg.VsockUDSPath, meta.VsockPath)
@@ -1684,6 +1857,67 @@ func TestRestoreSnapshotFirecrackerFailureCleansNetworkAndDMSnapshot(t *testing.
 		t.Fatal("snapshotLifecycleMu remained locked after restore failure")
 	}
 	cp.snapshotLifecycleMu.Unlock()
+}
+
+func TestRestoreSnapshotDoesNotPersistRecoverableVMState(t *testing.T) {
+	cp := newTestCP(t)
+	cp.provisioner = &storage.Provisioner{WorkspaceDir: t.TempDir()}
+	snapshotID := "snap-restore-live"
+	meta := testSnapshotMeta(snapshotID, "vm-source", "full", time.Now().UTC())
+	meta.GuestIP = "10.0.1.2"
+	meta.TapDevice = "tap9"
+	meta.MacAddr = "AA:FC:00:00:00:09"
+	meta.VsockPath = filepath.Join(t.TempDir(), "old.vsock")
+	meta.DiskPath = filepath.Join(t.TempDir(), "source.ext4")
+	meta.DiskCopyPath = filepath.Join(t.TempDir(), "rootfs.ext4")
+	meta.MemFilePath = filepath.Join(t.TempDir(), "memory.bin")
+	meta.StatFilePath = filepath.Join(t.TempDir(), "state.bin")
+	meta.AgentToken = "restored-token"
+	cp.snapshots[snapshotID] = meta
+
+	dmInfo := &storage.DMSnapshotInfo{
+		DMDevice:       "dm-test",
+		LoopDevice:     "/dev/loop-test-base",
+		COWLoopDevice:  "/dev/loop-test-cow",
+		ExceptionStore: filepath.Join(t.TempDir(), "restore.cow"),
+	}
+	cp.allocateForRestore = func(string, string) (string, string, error) {
+		return "tap-restored", "10.0.1.44", nil
+	}
+	cp.setupDMSnapshot = func(baseDiskPath, exceptionStorePath, mountTargetPath string) (*storage.DMSnapshotInfo, error) {
+		dmInfo.MountTarget = mountTargetPath
+		return dmInfo, nil
+	}
+	cp.restoreMachine = func(ctx context.Context, cfg vm.VMConfig, memFilePath, snapshotPath string) (*firecracker.Machine, error) {
+		return &firecracker.Machine{}, nil
+	}
+	cp.reconfigureGuestIP = func(vsockPath, ipCIDR, gateway string) error {
+		return nil
+	}
+	cp.waitForAgent = func(guestIP string, timeout time.Duration) error {
+		return nil
+	}
+
+	rr := httptest.NewRecorder()
+	cp.restoreSnapshot(rr, snapshotID)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %q; want 201", rr.Code, rr.Body.String())
+	}
+	var resp VMRestoreResult
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode restore response: %v", err)
+	}
+	if storage.VMStateExists(cp.workDir, resp.VMID) {
+		t.Fatalf("restored VM %q left recoverable state.json", resp.VMID)
+	}
+	restored := cp.vms[resp.VMID]
+	if restored == nil {
+		t.Fatalf("restored VM %q not registered", resp.VMID)
+	}
+	if restored.sourceSnapshotID != snapshotID {
+		t.Fatalf("sourceSnapshotID = %q, want %q", restored.sourceSnapshotID, snapshotID)
+	}
 }
 
 func TestAgentTokenForRestoredSnapshotUsesExistingToken(t *testing.T) {
@@ -1763,8 +1997,11 @@ func TestRestoreSnapshotDMSnapshotFallbackReleasesNetworkOnlyAfterBindMountFailu
 		if !strings.HasPrefix(newDiskPath, cp.provisioner.WorkspaceDir) {
 			t.Fatalf("newDiskPath = %q, want under %q", newDiskPath, cp.provisioner.WorkspaceDir)
 		}
-		if mountTargetPath != meta.DiskPath {
-			t.Fatalf("mountTargetPath = %q, want %q", mountTargetPath, meta.DiskPath)
+		if mountTargetPath == meta.DiskPath {
+			t.Fatalf("mountTargetPath = %q, must be per-restore path not shared snapshot DiskPath", mountTargetPath)
+		}
+		if !strings.HasPrefix(mountTargetPath, cp.provisioner.WorkspaceDir) || !strings.HasSuffix(mountTargetPath, ".ext4") {
+			t.Fatalf("mountTargetPath = %q, want per-restore ext4 under %q", mountTargetPath, cp.provisioner.WorkspaceDir)
 		}
 		return errors.New("bind unavailable")
 	}

@@ -1902,7 +1902,7 @@ kill -HUP $(pgrep ephemera-daemon)
 
 ### goose-agent authentication
 
-Each VM's agent is protected by a unique 32-byte random Bearer token generated at spawn time and written to `/root/.ephemera-agent-token` (mode `0600`) inside the VM disk. The token is returned once in the `POST /vms` response (and again in `POST /snapshots/{id}/restore`).
+Each VM's agent is protected by a unique 32-byte random Bearer token generated at spawn time and written to `/root/.ephemera-agent-token` (mode `0600`) inside the VM disk. The token is returned only in the `POST /vms` response; snapshot restore responses do not expose it.
 
 - `POST /tasks` and `POST /stop` require `Authorization: Bearer <agent_token>`
 - `GET /health` is always open (used by the control plane's internal health poller)

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"ephemera/internal/orchestrator"
@@ -57,6 +58,15 @@ func (cp *ControlPlane) RecoverVMs() (recovered int, failed []string, err error)
 	}
 
 	for _, s := range states {
+		if strings.TrimSpace(s.SourceSnapshotID) != "" {
+			slog.Warn("recovery: restored vm state is not recoverable in v0.4.0 slice, dropping state", "vm_id", s.VMID, "source_snapshot_id", s.SourceSnapshotID)
+			cp.netManager.Release(s.TapDevice, s.GuestIP)
+			storage.DeleteVMState(cp.workDir, s.VMID)
+			storage.RemoveAutoSnapshot(cp.workDir, s.VMID)
+			cp.markFlockAgentDead(s.FlockID, s.AgentID)
+			failed = append(failed, s.VMID)
+			continue
+		}
 		if _, statErr := os.Stat(s.DiskPath); os.IsNotExist(statErr) {
 			// state.json exists but its rootfs vanished (manual delete, partial
 			// crash, etc.): the VM is unrecoverable. Clear the stale host TAP the
