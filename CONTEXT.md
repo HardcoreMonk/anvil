@@ -191,10 +191,12 @@ daemon으로 보내는 outbound Bearer token이다.
   `gtwall`, Goose JSON output parsing은 `adapted` runtime baseline으로 채택한다.
   `gtcall`은 peer agent credential을 노출하지 않고 control-plane proxy token
   injection 경계를 유지한다.
-- upstream `v0.4.0`-`v0.4.5` runtime 안정화 변경은 pre-sync adoption review로
-  예비 분류했다. storage/recovery, auth/audit, COW, flock lifecycle, streaming task,
-  restored VM recovery는 대체로 `adapted` 후보지만 default COW 전환, auto-snapshot
-  public support, broadcast MCP 노출은 별도 검증/설계 전까지 deferred로 둔다.
+- upstream `v0.4.0`-`v0.4.3` runtime 안정화 변경은 현재 sync branch baseline으로
+  채택됐다. storage/recovery, auth/audit, COW, single-host flock lifecycle은
+  anvil 보안/운영 계약에 맞춰 `adapted` 상태다. default COW 전환과 auto-snapshot
+  public support는 별도 검증/설계 전까지 deferred로 둔다.
+- upstream `v0.4.4`-`v0.4.5` streaming task, restored VM recovery는 다음 sync
+  후보이며, broadcast MCP 노출은 anvil 공개 경계 검토 전까지 deferred로 둔다.
 - upstream `v0.5.0`-`v0.7.0`은 아직 anvil baseline으로 병합하지 않았다.
   `v0.5.x`는 Web UI/productization, `v0.6.x`는 MCP Gateway, `v0.7.0`은
   installer/transcript/hardening 성격으로 별도 adoption review가 필요하다. 단,
@@ -206,7 +208,7 @@ daemon으로 보내는 outbound Bearer token이다.
 
 남은 후속 후보:
 
-- upstream ephemera `v0.4.0`-`v0.4.5` runtime 안정화 변경의 sync branch 작성,
+- upstream ephemera `v0.4.4`-`v0.4.5` runtime 안정화 변경의 sync branch 작성,
   충돌 해결, KVM 검증, 문서 반영
 - upstream ephemera `v0.5.0`-`v0.7.0` product/MCP gateway/installer 계열 변경의
   별도 adoption review와 anvil 공개 경계 분류

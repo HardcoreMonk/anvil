@@ -90,9 +90,10 @@ wire format changed.
 
 - `POST /flocks/{id}/pause` / `POST /flocks/{id}/resume` — pause/resume **all**
   member VMs via Firecracker PauseVM/ResumeVM. **Runtime-only**: agent status
-  flips to `paused`/`ready` and `Flock.Paused` toggles, but nothing is persisted
-  (a daemon restart brings members back running). A partial pause failure rolls
-  back (resumes already-paused members).
+  flips to `paused` while paused, then resumes to the pre-pause lifecycle status;
+  `Flock.Paused` toggles, but nothing is persisted (a daemon restart brings
+  members back running). A partial pause failure rolls back (resumes
+  already-paused members and restores their prior statuses).
 - The health watchdog **skips dead-marking `paused` agents** — a paused VM
   intentionally doesn't answer `/health`, so it must not be marked dead.
 - `POST /flocks` accepts `max_agents` — a per-flock agent cap (default 20),

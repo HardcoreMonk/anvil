@@ -883,7 +883,7 @@ rate limit에 따라 보통 15-30분 이상 걸릴 수 있다.
 | 56a | **Town Wall query filters** (v0.4.3) — `?agent_id=` returns only that agent's entries; `?contains=` returns only matching bodies |
 | 57 | `GET /flocks` lists the new flock |
 | 57a–c | **Dynamic agent membership** (v0.4.3) — `POST /flocks/{id}/agents` adds `worker-2` (count→6, `/health` 200); `PATCH …/agents/worker-2` `{role:reviewer}` recreates the VM (vm_id swap, role updated); `DELETE …/agents/worker-2` (count→5, VM torn down) |
-| 57d–f | **Pause/resume + max_agents** (v0.4.3) — `POST /flocks/{id}/pause` (members → `paused`; watchdog leaves them alone past its threshold), `/resume` (→ `ready`, `/health` 200); `POST /flocks {roles:3, max_agents:2}` → 400 |
+| 57d–f | **Pause/resume + max_agents** (v0.4.3) — `POST /flocks/{id}/pause` (members → runtime-only `paused`; watchdog leaves them alone past its threshold), `/resume` (pre-pause status restored, `/health` 200 for running members); `POST /flocks {roles:3, max_agents:2}` → 400 |
 | 58 | **Flock teardown** — `DELETE /flocks/{id}` returns 200; all 5 VMs and the flock registry entry are gone |
 | 59 | Create a separate resilience flock (3 agents) |
 | 60 | **SSE seq monotonicity** — successive `POST /flocks/{id}/post` responses carry strictly increasing `seq` |

@@ -502,7 +502,7 @@ func flockResume(args []string) {
 func flockWall(args []string) {
 	jsonOut, tok, rest := extractCommon(args)
 	fs := flag.NewFlagSet("flock wall", flag.ExitOnError)
-	history := fs.Bool("history", false, "print finite history instead of streaming")
+	history := fs.Bool("history", false, "print active Town Wall history instead of streaming")
 	fs.Parse(rest)
 	id := fs.Arg(0)
 	if id == "" {
