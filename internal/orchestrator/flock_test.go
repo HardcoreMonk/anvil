@@ -37,6 +37,27 @@ func TestFlockManager_CreateGetDelete(t *testing.T) {
 	}
 }
 
+func TestFlockManager_NewUnregisteredIsHiddenUntilRegister(t *testing.T) {
+	tmp := t.TempDir()
+	fm := NewFlockManager(tmp)
+
+	f, err := fm.NewUnregistered("flock-hidden", "test task", filepath.Join(tmp, "flock-hidden", "wall.log"))
+	if err != nil {
+		t.Fatalf("NewUnregistered: %v", err)
+	}
+	if _, ok := fm.Get("flock-hidden"); ok {
+		t.Fatal("unregistered flock should not be visible via Get")
+	}
+	if all := fm.List(); len(all) != 0 {
+		t.Fatalf("unregistered flock visible via List: %d", len(all))
+	}
+
+	fm.Register(f)
+	if got, ok := fm.Get("flock-hidden"); !ok || got != f {
+		t.Fatal("registered flock not visible via Get")
+	}
+}
+
 func TestFlockManager_CreateStoresTenantAndEgress(t *testing.T) {
 	tmp := t.TempDir()
 	fm := NewFlockManager(tmp)

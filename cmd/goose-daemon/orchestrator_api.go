@@ -167,7 +167,7 @@ func (cp *ControlPlane) createFlock(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err)
 		return
 	}
-	flock, err := cp.flockMgr.Create(flockID, req.Task, req.TenantID, req.EgressPolicy, townWallPath)
+	flock, err := cp.flockMgr.NewUnregistered(flockID, req.Task, req.TenantID, req.EgressPolicy, townWallPath)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err)
 		return
@@ -226,6 +226,7 @@ func (cp *ControlPlane) createFlock(w http.ResponseWriter, r *http.Request) {
 	if err := flock.Persist(cp.workDir); err != nil {
 		slog.Warn("flock: persist metadata failed (still in memory)", "flock_id", flockID, "err", err)
 	}
+	cp.flockMgr.Register(flock)
 
 	resp := FlockCreateResponse{
 		FlockID:      flockID,

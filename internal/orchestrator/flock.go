@@ -354,11 +354,10 @@ func envIntDefault(key string, def int) int {
 // WorkDir returns the directory used to root flock-local files.
 func (fm *FlockManager) WorkDir() string { return fm.workDir }
 
-// Create allocates a flock, opens its Town Wall, and registers it.
-// Supported call forms:
-//   - Create(flockID, task, townWallPath)
-//   - Create(flockID, task, tenantID, egressPolicy, townWallPath)
-func (fm *FlockManager) Create(flockID, task string, args ...string) (*Flock, error) {
+// NewUnregistered allocates a flock and opens its Town Wall without adding it to
+// the manager registry. Use when a caller must finish a multi-step spawn before
+// list/get/delete can see the flock.
+func (fm *FlockManager) NewUnregistered(flockID, task string, args ...string) (*Flock, error) {
 	var tenantID, egressPolicy, townWallPath string
 	switch len(args) {
 	case 1:
@@ -366,14 +365,14 @@ func (fm *FlockManager) Create(flockID, task string, args ...string) (*Flock, er
 	case 3:
 		tenantID, egressPolicy, townWallPath = args[0], args[1], args[2]
 	default:
-		return nil, fmt.Errorf("Create expects townWallPath or tenantID, egressPolicy, townWallPath")
+		return nil, fmt.Errorf("NewUnregistered expects townWallPath or tenantID, egressPolicy, townWallPath")
 	}
 	tw, err := NewTownWall(flockID, townWallPath)
 	if err != nil {
 		return nil, err
 	}
 	tw.SetRotation(fm.townWallMaxBytes, fm.townWallKeep)
-	f := &Flock{
+	return &Flock{
 		ID:           flockID,
 		Task:         task,
 		TenantID:     tenantID,
@@ -381,10 +380,26 @@ func (fm *FlockManager) Create(flockID, task string, args ...string) (*Flock, er
 		Agents:       make(map[string]*AgentInfo),
 		TownWall:     tw,
 		CreatedAt:    time.Now().UTC(),
-	}
+	}, nil
+}
+
+// Register adds a fully initialized flock to the manager registry.
+func (fm *FlockManager) Register(f *Flock) {
 	fm.mu.Lock()
-	fm.flocks[flockID] = f
+	fm.flocks[f.ID] = f
 	fm.mu.Unlock()
+}
+
+// Create allocates a flock, opens its Town Wall, and registers it.
+// Supported call forms:
+//   - Create(flockID, task, townWallPath)
+//   - Create(flockID, task, tenantID, egressPolicy, townWallPath)
+func (fm *FlockManager) Create(flockID, task string, args ...string) (*Flock, error) {
+	f, err := fm.NewUnregistered(flockID, task, args...)
+	if err != nil {
+		return nil, err
+	}
+	fm.Register(f)
 	return f, nil
 }
 
