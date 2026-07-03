@@ -172,6 +172,12 @@ func (cp *ControlPlane) createFlock(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err)
 		return
 	}
+	unlock, ok := flock.BeginMutation()
+	if !ok {
+		writeJSONError(w, http.StatusNotFound, fmt.Errorf("flock not found"))
+		return
+	}
+	defer unlock()
 	flock.MaxAgents = maxAgents
 
 	// Spawn each VM sequentially. On failure, tear everything down so we don't
@@ -795,13 +801,13 @@ func (cp *ControlPlane) pauseFlock(w http.ResponseWriter, flockID string) {
 			slog.Warn("flock pause: vm not found, skipping", "flock_id", flockID, "agent_id", a.AgentID, "vm_id", a.VMID)
 			continue
 		}
+		f.MarkAgentPaused(a.AgentID)
+		paused = append(paused, pausedAgent{vmID: a.VMID, agentID: a.AgentID})
 		if err := v.machine.PauseVM(context.Background()); err != nil {
 			rollback()
 			writeJSONError(w, http.StatusInternalServerError, fmt.Errorf("pause %s: %w", a.AgentID, err))
 			return
 		}
-		paused = append(paused, pausedAgent{vmID: a.VMID, agentID: a.AgentID})
-		f.MarkAgentPaused(a.AgentID)
 	}
 	f.SetPaused(true)
 	if _, err := f.TownWall.Post("orchestrator", fmt.Sprintf("Flock paused (%d agents)", len(paused))); err != nil {

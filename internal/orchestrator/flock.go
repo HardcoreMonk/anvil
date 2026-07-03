@@ -266,6 +266,9 @@ func (f *Flock) ToMetadata() FlockMetadata {
 	agents := make(map[string]*AgentInfo, len(f.Agents))
 	for k, v := range f.Agents {
 		copy := *v
+		if copy.Status == AgentStatusSpawning && copy.VMID == "" {
+			continue
+		}
 		if copy.Status == AgentStatusPaused {
 			if prev, ok := f.pausedPrevStatus[k]; ok {
 				copy.Status = prev

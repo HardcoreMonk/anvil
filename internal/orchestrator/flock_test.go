@@ -238,3 +238,20 @@ func TestFlock_BeginDeleteRejectsFutureMutation(t *testing.T) {
 		t.Fatal("second BeginDelete unexpectedly succeeded")
 	}
 }
+
+func TestFlock_ToMetadataOmitsReservedPlaceholder(t *testing.T) {
+	tmp := t.TempDir()
+	fm := NewFlockManager(tmp)
+	f, err := fm.Create("flock-reserve", "task", filepath.Join(tmp, "flock-reserve", "wall.log"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if _, err := f.ReserveAgent("worker", 2); err != nil {
+		t.Fatalf("ReserveAgent: %v", err)
+	}
+	meta := f.ToMetadata()
+	if len(meta.Agents) != 0 {
+		t.Fatalf("reserved placeholder persisted in metadata: %+v", meta.Agents)
+	}
+}
