@@ -604,7 +604,12 @@ func (cp *ControlPlane) Start() error {
 		"  GET    /flocks/{flock_id}/wall           — SSE stream of Town Wall\n" +
 		"  GET    /flocks/{flock_id}/wall/history   — active Town Wall log\n" +
 		"  POST   /flocks/{flock_id}/post           — post message to Town Wall\n" +
+		"  POST   /flocks/{flock_id}/agents         — add one flock agent\n" +
+		"  DELETE /flocks/{flock_id}/agents/{id}    — remove one flock agent\n" +
+		"  PATCH  /flocks/{flock_id}/agents/{id}    — change one agent role\n" +
 		"  POST   /flocks/{flock_id}/agents/{id}/restart — restart one agent in place\n" +
+		"  POST   /flocks/{flock_id}/pause          — pause all flock agents\n" +
+		"  POST   /flocks/{flock_id}/resume         — resume all flock agents\n" +
 		"  GET    /audit                            — recent API access log (jsonl, rotated)\n" +
 		"  GET    /metrics                          — Prometheus exposition (auth optional)"
 	slog.Warn(endpoints)

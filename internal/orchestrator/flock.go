@@ -222,6 +222,23 @@ func (f *Flock) RestorePausedAgentStatus(agentID, fallback string) {
 	}
 }
 
+// MarkAgentDeadIfNotPaused sets an agent dead only if it is not currently in the
+// runtime-only paused state. This closes the race where the watchdog crossed its
+// threshold just as flock pause was marking the member paused.
+func (f *Flock) MarkAgentDeadIfNotPaused(agentID string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	a, ok := f.Agents[agentID]
+	if !ok || a.Status == AgentStatusPaused {
+		return false
+	}
+	a.Status = AgentStatusDead
+	if f.pausedPrevStatus != nil {
+		delete(f.pausedPrevStatus, agentID)
+	}
+	return true
+}
+
 // AgentStatus returns an agent's current status under a read lock, or "" when
 // the agent is unknown. Used by the watchdog to skip dead-marking paused agents.
 func (f *Flock) AgentStatus(agentID string) string {

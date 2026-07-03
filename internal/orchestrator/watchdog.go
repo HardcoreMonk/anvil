@@ -261,7 +261,12 @@ func (wd *Watchdog) onFailure(v VMRef) {
 		return
 	}
 
-	flock.UpdateAgentStatus(agentID, AgentStatusDead)
+	if !flock.MarkAgentDeadIfNotPaused(agentID) {
+		wd.mu.Lock()
+		delete(wd.failCount, v.VMID)
+		wd.mu.Unlock()
+		return
+	}
 	if err := flock.Persist(wd.flockMgr.WorkDir()); err != nil {
 		// The in-memory mark already took effect; a missed disk write means
 		// the dead state will be lost on the next daemon restart, which the

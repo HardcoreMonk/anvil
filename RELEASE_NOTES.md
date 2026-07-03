@@ -40,9 +40,9 @@
     한다.
   - `EPHEMERA_HOME`으로 daemon work directory를 명시할 수 있다. unset이면 기존처럼
     process current working directory를 사용한다.
-- 2026-07-02 기준 upstream latest observed는 `v0.7.0`이지만 anvil runtime
-  baseline은 계속 `v0.3.6`이다. `v0.4.0`-`v0.4.5`는 planned sync 후보,
-  `v0.5.0`-`v0.7.0`은 별도 adoption review backlog로 둔다.
+- 현재 sync branch의 anvil runtime baseline은 upstream `v0.4.3`까지 반영한다.
+  2026-07-02 기준 upstream latest observed는 `v0.7.0`이며, `v0.4.4`-`v0.4.5`는
+  다음 sync 후보, `v0.5.0`-`v0.7.0`은 별도 adoption review backlog로 둔다.
 
 ## 검증됨
 
@@ -183,8 +183,8 @@ device-mapper dependency explicitly. Additive — no wire format changed.
 - Target commit: `18b4506204a68a8fd9e3608976727953869f94a6`
 
 `anvil-v0.3.2`는 `anvil-v0.3.1` 이후 scheduler 기반 runtime 운영성을 확장한
-release다. upstream ephemera runtime baseline은 계속 `v0.3.6`이다. upstream
-`v0.4.0` PR-A storage/recovery 변경은 포함하지 않는다.
+historical release다. 해당 release의 upstream ephemera runtime baseline은
+`v0.3.6`이며, upstream `v0.4.0` PR-A storage/recovery 변경은 포함하지 않는다.
 
 ## 추가됨
 

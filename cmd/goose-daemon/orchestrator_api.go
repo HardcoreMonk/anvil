@@ -846,7 +846,7 @@ func (cp *ControlPlane) resumeFlock(w http.ResponseWriter, flockID string) {
 			continue
 		}
 		resumed++
-		f.UpdateAgentStatus(a.AgentID, orchestrator.AgentStatusReady)
+		f.RestorePausedAgentStatus(a.AgentID, orchestrator.AgentStatusReady)
 		if cp.watchdog != nil {
 			cp.watchdog.ForgetVM(a.VMID)
 		}

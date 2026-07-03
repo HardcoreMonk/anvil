@@ -230,6 +230,16 @@ func TestFlock_PausedAndAgentStatus(t *testing.T) {
 	if got := f.AgentStatus("worker-1"); got != AgentStatusReady {
 		t.Errorf("RestorePausedAgentStatus = %q, want ready", got)
 	}
+	if !f.MarkAgentDeadIfNotPaused("worker-1") {
+		t.Fatal("MarkAgentDeadIfNotPaused returned false for ready agent")
+	}
+	if got := f.AgentStatus("worker-1"); got != AgentStatusDead {
+		t.Errorf("MarkAgentDeadIfNotPaused status = %q, want dead", got)
+	}
+	f.MarkAgentPaused("worker-1")
+	if f.MarkAgentDeadIfNotPaused("worker-1") {
+		t.Fatal("MarkAgentDeadIfNotPaused should reject paused agent")
+	}
 	f.SetPaused(false)
 	if f.Paused {
 		t.Error("SetPaused(false) had no effect")

@@ -47,13 +47,13 @@ daemon 이름, HTTP API, 일부 환경 변수에는 `ephemera` 또는 `goose` �
 있다. README에서는 `anvil`을 IronClaw 통합 프로젝트로, `ephemera`를 분리된 기반
 runtime으로 구분한다.
 
-버전별 ephemera 소스 snapshot은 Git tag로 공개된다. 현재 `main`의 anvil runtime
-baseline은 upstream ephemera `v0.3.6`까지 병합한 상태다. 이 병합은 MicroVM
-lifecycle, flock resilience, token rotation, observability 같은 runtime substrate를
-끌어올린 것이며, anvil의 제품 정체성을 ephemera로 바꾸는 작업이 아니다.
-2026-07-02 기준 upstream `main`과 최신 upstream tag는 `v0.7.0`이지만, anvil
-`main`의 runtime baseline은 계속 `v0.3.6`이다. `v0.4.0`-`v0.4.5` runtime 안정화는
-다음 sync 후보이고, `v0.5.0`-`v0.7.0`은 별도 adoption review가 필요한 backlog다.
+버전별 ephemera 소스 snapshot은 Git tag로 공개된다. 현재 sync branch의 anvil runtime
+baseline은 upstream ephemera `v0.4.3`까지 병합한 상태다. 이 병합은 MicroVM
+lifecycle, flock resilience, token rotation, observability, v0.4 runtime 안정화,
+single-host flock lifecycle 같은 runtime substrate를 끌어올린 것이며, anvil의 제품
+정체성을 ephemera로 바꾸는 작업이 아니다. 2026-07-02 기준 upstream `main`과 최신
+upstream tag는 `v0.7.0`이며, `v0.4.4`-`v0.4.5`는 다음 sync 후보이고,
+`v0.5.0`-`v0.7.0`은 별도 adoption review가 필요한 backlog다.
 upstream `v0.7.0`의 kernel SHA 검증, `waitForAgent` per-probe timeout,
 `EPHEMERA_HOME` hardening은 선별 backport됐지만 baseline sync 완료를 의미하지
 않는다.
@@ -102,12 +102,12 @@ anvil은 ephemera를 이름만 바꾼 프로젝트가 아니다. anvil은 IronCl
 
 ### Runtime Baseline
 
-`sync/ephemera-v0.3.6`은 upstream ephemera `v0.3.6`을 runtime baseline으로 사용한다.
+현재 sync branch는 upstream ephemera `v0.4.3`까지를 runtime baseline으로 사용한다.
 
 | 구분 | 현재 기준 | anvil에서의 의미 |
 |---|---|---|
-| ephemera runtime baseline | `v0.3.6` | Firecracker VM lifecycle, cold-restart, flock recovery, token rotation, `/metrics`, `/stats`, `slog`, in-VM `gtcall`, webdev demo 기반 |
-| upstream latest observed | `v0.7.0` (2026-07-02 확인) | 아직 anvil baseline으로 병합하지 않음. `v0.4.0`-`v0.4.5`는 planned sync, `v0.5.0`-`v0.7.0`은 별도 검토 backlog |
+| ephemera runtime baseline | `v0.4.3` | Firecracker VM lifecycle, cold-restart, flock recovery, token rotation, `/metrics`, `/stats`, `slog`, in-VM `gtcall`, webdev demo, v0.4.0-v0.4.3 runtime 안정화 기반 |
+| upstream latest observed | `v0.7.0` (2026-07-02 확인) | `v0.4.4`-`v0.4.5`는 next sync 후보, `v0.5.0`-`v0.7.0`은 별도 검토 backlog |
 | anvil product surface | `anvil_*` MCP tool, scheduler, tenant/egress, workload runner | IronClaw가 직접 사용하는 공개 실행 계약 |
 | namespace policy | `EPHEMERA_*`, `goose-*`, `ephemera_*` 유지 | upstream runtime 호환성. anvil 이름으로 일괄 rename하지 않는다. |
 

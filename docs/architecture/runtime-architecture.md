@@ -2,15 +2,17 @@
 
 ## 상태
 
-- 기준 버전: upstream ephemera `v0.3.6` + anvil runtime control-plane updates
+- 기준 버전: upstream ephemera `v0.4.3` + anvil runtime control-plane updates
 - anvil 관점: ephemera runtime은 IronClaw 결합 프로젝트의 기반 실행 계층
 - upstream: `https://github.com/steve-seungeui/ephemera`. anvil fork network를
   유지하며 ephemera runtime version을 merge로 반영한다.
-- upstream `v0.3.2`-`v0.3.6`은 현재 sync branch baseline으로 반영되어 있다. `v0.3.2`는
+- upstream `v0.3.2`-`v0.4.3`은 현재 sync branch baseline으로 반영되어 있다. `v0.3.2`는
   cold-restart, `v0.3.3`은 watchdog/restart/CP-token polish, `v0.3.4`는 token
   hot rotation과 watchdog tunable, `v0.3.5`는 metrics/stats/slog 관측성,
   `v0.3.6`은 in-VM `gtcall`, multi-line-safe `gtwall`, Goose JSON output parsing,
-  autonomous webdev demo를 제공한다.
+  autonomous webdev demo를 제공한다. `v0.4.0`-`v0.4.3`은 memory auto-snapshot,
+  diff/COW rootfs, auth/audit, COW spawn, dynamic flock lifecycle, pause/resume,
+  `max_agents`, Town Wall filter/rotation을 제공한다.
 - 저장소/모듈 이름: `ephemera`
 - 런타임 소유 파일:
   - `cmd/goose-daemon/`

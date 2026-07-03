@@ -32,15 +32,14 @@ IronClaw 실행 계층으로 통합하는 downstream product fork다. 이 저장
 경로와 기존 API/환경 변수에는 `ephemera` 또는 `goose` 이름이 남아 있다. anvil
 통합 릴리즈는 ephemera runtime tag와 충돌하지 않도록 `anvil-v0.1.0`처럼 별도
 prefix를 사용한다. 현재 최신 anvil 공개 integration tag는 `anvil-v0.3.2`이고,
-tag target은 `18b4506204a68a8fd9e3608976727953869f94a6`다. 현재 `main`의 anvil
-runtime baseline은 upstream ephemera `v0.3.6` 병합분이며, `anvil-v0.3.2`는 그
-baseline 위에 scheduler control loop, scheduler `/metrics`, manual cross-host
-snapshot replication, scheduler-aware single-host flock placement를 추가한다.
-2026-07-02 기준 upstream `main`과 최신 upstream tag는 `v0.7.0`까지 진행되어 있다.
-anvil `main`은 아직 `v0.4.0` 이후 upstream tag를 runtime baseline으로 병합하지
-않았다. `v0.4.0`-`v0.4.5` runtime 안정화 변경은 pre-sync adoption review와 sync
-계획을 완료한 다음 후보이고, `v0.5.0`-`v0.7.0`은 별도 adoption review가 필요한
-미병합 backlog다. 단, upstream `v0.7.0`의 kernel SHA 검증, `waitForAgent`
+tag target은 `18b4506204a68a8fd9e3608976727953869f94a6`다. 현재 작업 브랜치의
+anvil runtime baseline은 upstream ephemera `v0.4.3` 병합분이며, `anvil-v0.3.2`
+이후의 scheduler control loop, scheduler `/metrics`, manual cross-host snapshot
+replication, scheduler-aware single-host flock placement 위에 `v0.4.0`-`v0.4.3`
+runtime 안정화 변경을 더한다. 2026-07-02 기준 upstream `main`과 최신 upstream tag는
+`v0.7.0`까지 진행되어 있다. `v0.4.4`-`v0.4.5`는 다음 sync 후보이고,
+`v0.5.0`-`v0.7.0`은 별도 adoption review가 필요한 미병합 backlog다. 단,
+upstream `v0.7.0`의 kernel SHA 검증, `waitForAgent`
 per-probe timeout, `EPHEMERA_HOME` work directory 지정은 baseline sync와 독립적인
 hardening backport로 반영됐다. 문서에서는 anvil과 ephemera를 같은 이름으로
 취급하지 않는다.
@@ -63,7 +62,7 @@ hardening backport로 반영됐다. 문서에서는 anvil과 ephemera를 같은 
 | anvil | IronClaw와 ephemera를 결합하는 새 프로젝트 이름 | project-wide |
 | IronClaw | MCP client/orchestration 계층. anvil VM 실행 기능을 사용하는 상위 시스템 | 외부/상위 통합 |
 | OpenClaw | anvil의 통합 대상이 아님. anvil 문서와 구현은 OpenClaw 운영 계약을 제공하지 않음 | 제외 범위 |
-| ephemera | Firecracker MicroVM 기반 격리 실행 runtime. 현재 `main`의 anvil baseline은 upstream `v0.3.6` 병합분이고, 2026-07-02 기준 upstream latest observed는 `v0.7.0`이다. `v0.4.0`-`v0.4.5`는 다음 sync 후보, `v0.5.0`-`v0.7.0`은 별도 검토 backlog다. | `cmd/goose-daemon`, `internal/*` |
+| ephemera | Firecracker MicroVM 기반 격리 실행 runtime. 현재 작업 브랜치의 anvil baseline은 upstream `v0.4.3` 병합분이고, 2026-07-02 기준 upstream latest observed는 `v0.7.0`이다. `v0.4.4`-`v0.4.5`는 다음 sync 후보, `v0.5.0`-`v0.7.0`은 별도 검토 backlog다. | `cmd/goose-daemon`, `internal/*` |
 | ephemera control plane | VM 생성, 삭제, snapshot, restore, proxy를 담당하는 호스트 daemon | `cmd/goose-daemon` |
 | MicroVM | Firecracker + KVM으로 실행되는 ephemera 격리 실행 환경 | `internal/vm` |
 | goose-agent | VM 안에서 prompt 실행, health, stop API를 제공하는 HTTP agent | `cmd/goose-agent` |
