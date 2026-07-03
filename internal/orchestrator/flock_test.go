@@ -194,12 +194,20 @@ func TestFlock_PausedAndAgentStatus(t *testing.T) {
 	if !f.Paused {
 		t.Error("SetPaused(true) had no effect")
 	}
-	f.UpdateAgentStatus("worker-1", AgentStatusPaused)
+	f.MarkAgentPaused("worker-1")
 	if got := f.AgentStatus("worker-1"); got != AgentStatusPaused {
 		t.Errorf("AgentStatus = %q, want %q", got, AgentStatusPaused)
 	}
 	if got := f.AgentStatus("nobody"); got != "" {
 		t.Errorf("AgentStatus(unknown) = %q, want empty", got)
+	}
+	meta := f.ToMetadata()
+	if got := meta.Agents["worker-1"].Status; got != AgentStatusReady {
+		t.Errorf("ToMetadata paused status = %q, want pre-pause ready", got)
+	}
+	f.RestorePausedAgentStatus("worker-1", AgentStatusReady)
+	if got := f.AgentStatus("worker-1"); got != AgentStatusReady {
+		t.Errorf("RestorePausedAgentStatus = %q, want ready", got)
 	}
 	f.SetPaused(false)
 	if f.Paused {

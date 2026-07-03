@@ -273,7 +273,7 @@ ephemera control plane :3000
   POST   /flocks/{id}/post     -> Town Wall message append
   GET    /flocks/{id}/wall     -> Town Wall SSE stream
   GET    /flocks/{id}/wall/history
-                                -> Town Wall 전체 history 조회
+                                -> active Town Wall history 조회
 
       |
       | Firecracker SDK, KVM, TAP, rootfs, snapshot files
@@ -422,7 +422,8 @@ DELETE /vms/{id}
 
 - **Town Wall sequence**:
   Town Wall message는 per-flock monotonic `seq`를 포함해 subscriber가 gap을
-  감지하고 history로 복구할 수 있다.
+  감지하고 active history로 복구할 수 있다. size rotation 이후 API history는
+  rotated backup을 스캔하지 않는다.
 
 - **역할별 resource profile**:
   `researcher`, `reviewer`, `worker`, `orchestrator`, `builder` 역할은
@@ -464,7 +465,7 @@ Upstream ephemera feature matrix:
 | **SIGHUP token hot reload** | API token list can be updated without restarting the daemon or interrupting running VMs |
 | **VM health watchdog** (v0.3.1) | Polls every flock-member `/health` every 5 s; 3 consecutive failures → agent `status=dead` + auto Town Wall notice. See [Resilience](#resilience). |
 | **Flock metadata persistence** (v0.3.1) | `flocks/<id>/metadata.json` written atomically on spawn; daemon startup re-registers every flock and reopens its Town Wall log. |
-| **Monotonic Town Wall seq** (v0.3.1) | Every `Message` carries `seq` (uint64, 1-based per flock); subscribers can detect dropped messages and recover from `/wall/history`. |
+| **Monotonic Town Wall seq** (v0.3.1) | Every `Message` carries `seq` (uint64, 1-based per flock); subscribers can detect dropped messages and recover active-log entries from `/wall/history`. |
 | **Fatal-on-bind daemon startup** (v0.3.1) | Daemon `log.Fatalf` if the API listener fails to bind (e.g. port already in use), so a stale process never silently masks a fresh one. |
 | **Live VM cold-restart** (v0.3.2) | `vms/<vm_id>/state.json` written on every spawn; daemon startup cleans orphan Firecracker processes, re-reserves the original TAP/IP/MAC, and boots each VM from its existing rootfs clone. Same `vm_id`, same agent token, same `agent_url` across the restart. Memory state is not preserved. See [Resilience](#resilience). |
 | **Watchdog dead-status persistence** (v0.3.3) | When the watchdog marks an agent `dead`, the new status is written to `flocks/<id>/metadata.json` (via `Flock.Persist`, serialized by a per-flock `writeMu`). Daemon restart and cold-restart both preserve the marking, so a once-dead agent stays dead until explicitly restarted. |
@@ -2336,13 +2337,13 @@ Watchdog started (interval=5s, timeout=1s, threshold=3, auto_heal=false)
 
 ### Flock state persistence
 
-`POST /flocks` writes `flocks/<flock-id>/metadata.json` atomically (tmp + rename) before returning the response. On daemon startup the file is rescanned and every flock is re-registered in memory. The Town Wall log is reopened in append mode so full message history is preserved across restarts; `seq` numbering continues monotonically.
+`POST /flocks` writes `flocks/<flock-id>/metadata.json` atomically (tmp + rename) before returning the response. On daemon startup the file is rescanned and every flock is re-registered in memory. The active Town Wall log is reopened in append mode; when v0.4.3 size rotation is enabled, rotated backups remain on disk but `/wall/history` reads the active `TOWN_WALL.log` only. `seq` numbering continues monotonically within the active log.
 
 > **Recovery scope (v0.3.2)**: flock metadata is restored here; the live VMs are brought back via the cold-restart path described above. After daemon restart, recovered flocks are fully interactive (`/tasks`, `/stop`, `/post`, `/wall`, `DELETE` all work), with the caveat that in-VM memory state is lost — agents resume from a fresh boot, not from where they left off.
 
 ### Monotonic message sequence numbers
 
-Each Town Wall `Message` carries a `seq` field starting at 1 per flock. A subscriber that reconnects after a network blip can compare its last received `seq` against the newest message it sees and detect any gap; missing entries can be fetched from `/flocks/{id}/wall/history` and filtered by `seq`.
+Each Town Wall `Message` carries a `seq` field starting at 1 per flock. A subscriber that reconnects after a network blip can compare its last received `seq` against the newest message it sees and detect any gap; missing active-log entries can be fetched from `/flocks/{id}/wall/history` and filtered client-side by `seq`. After size rotation, `/wall/history` does not scan rotated backups.
 
 ```bash
 LAST_SEQ=42

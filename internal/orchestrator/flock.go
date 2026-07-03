@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -17,7 +18,7 @@ const (
 	AgentStatusBusy     = "busy"
 	AgentStatusDone     = "done"
 	AgentStatusDead     = "dead"   // assigned by the health watchdog after consecutive probe failures
-	AgentStatusPaused   = "paused" // set by flock pause; the watchdog skips dead-marking these (v0.4.3)
+	AgentStatusPaused   = "paused" // runtime-only pause state; scrubbed from metadata persistence (v0.4.3)
 )
 
 // AgentInfo is the per-agent record exposed via flock APIs.
@@ -49,6 +50,9 @@ type Flock struct {
 	// deliberately NOT persisted (Firecracker pause is a runtime state); a daemon
 	// restart brings members back running. Exposed via MarshalJSON, not ToMetadata.
 	Paused bool `json:"-"`
+	// pausedPrevStatus keeps the pre-pause status so pause rollback and metadata
+	// persistence can preserve the non-runtime lifecycle state.
+	pausedPrevStatus map[string]string
 }
 
 // AddAgent inserts or replaces an agent record under lock.
@@ -58,6 +62,33 @@ func (f *Flock) AddAgent(a *AgentInfo) {
 	f.Agents[a.AgentID] = a
 }
 
+// ReserveAgent atomically allocates the next role-N id and inserts a spawning
+// placeholder. It serializes max_agents enforcement and id assignment so
+// concurrent add-agent requests cannot overrun the cap or collide on the same id.
+func (f *Flock) ReserveAgent(role string, maxAgents int) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if maxAgents > 0 && len(f.Agents)+1 > maxAgents {
+		return "", fmt.Errorf("flock at max_agents (%d)", maxAgents)
+	}
+	max := 0
+	prefix := role + "-"
+	for _, a := range f.Agents {
+		if strings.HasPrefix(a.AgentID, prefix) {
+			if n, err := strconv.Atoi(strings.TrimPrefix(a.AgentID, prefix)); err == nil && n > max {
+				max = n
+			}
+		}
+	}
+	agentID := fmt.Sprintf("%s-%d", role, max+1)
+	f.Agents[agentID] = &AgentInfo{
+		AgentID: agentID,
+		Role:    role,
+		Status:  AgentStatusSpawning,
+	}
+	return agentID, nil
+}
+
 // UpdateAgentStatus updates the status of an existing agent.
 // No-op when the agent ID is unknown.
 func (f *Flock) UpdateAgentStatus(agentID, status string) {
@@ -65,6 +96,9 @@ func (f *Flock) UpdateAgentStatus(agentID, status string) {
 	defer f.mu.Unlock()
 	if a, ok := f.Agents[agentID]; ok {
 		a.Status = status
+		if status != AgentStatusPaused && f.pausedPrevStatus != nil {
+			delete(f.pausedPrevStatus, agentID)
+		}
 	}
 }
 
@@ -90,6 +124,9 @@ func (f *Flock) RemoveAgent(agentID string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.Agents, agentID)
+	if f.pausedPrevStatus != nil {
+		delete(f.pausedPrevStatus, agentID)
+	}
 }
 
 // ChangeAgentRole updates the role label of an existing agent under lock. No-op
@@ -109,6 +146,45 @@ func (f *Flock) SetPaused(paused bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Paused = paused
+}
+
+// MarkAgentPaused changes an agent to the runtime-only paused state while
+// remembering the pre-pause status for rollback and metadata scrubbing.
+func (f *Flock) MarkAgentPaused(agentID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	a, ok := f.Agents[agentID]
+	if !ok {
+		return
+	}
+	if a.Status != AgentStatusPaused {
+		if f.pausedPrevStatus == nil {
+			f.pausedPrevStatus = make(map[string]string)
+		}
+		f.pausedPrevStatus[agentID] = a.Status
+	}
+	a.Status = AgentStatusPaused
+}
+
+// RestorePausedAgentStatus restores an agent to its pre-pause status. fallback is
+// used for old in-memory states that do not have a recorded previous status.
+func (f *Flock) RestorePausedAgentStatus(agentID, fallback string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	a, ok := f.Agents[agentID]
+	if !ok {
+		return
+	}
+	if f.pausedPrevStatus != nil {
+		if prev, ok := f.pausedPrevStatus[agentID]; ok {
+			a.Status = prev
+			delete(f.pausedPrevStatus, agentID)
+			return
+		}
+	}
+	if a.Status == AgentStatusPaused {
+		a.Status = fallback
+	}
 }
 
 // AgentStatus returns an agent's current status under a read lock, or "" when
@@ -155,6 +231,13 @@ func (f *Flock) ToMetadata() FlockMetadata {
 	agents := make(map[string]*AgentInfo, len(f.Agents))
 	for k, v := range f.Agents {
 		copy := *v
+		if copy.Status == AgentStatusPaused {
+			if prev, ok := f.pausedPrevStatus[k]; ok {
+				copy.Status = prev
+			} else {
+				copy.Status = AgentStatusReady
+			}
+		}
 		agents[k] = &copy
 	}
 	return FlockMetadata{

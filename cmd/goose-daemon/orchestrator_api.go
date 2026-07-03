@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -320,7 +319,11 @@ func (cp *ControlPlane) townWallHistory(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	q := r.URL.Query()
-	history = filterTownWall(history, q.Get("agent_id"), q.Get("since"), q.Get("until"), q.Get("contains"))
+	history, err = filterTownWall(history, q.Get("agent_id"), q.Get("since"), q.Get("until"), q.Get("contains"))
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err)
+		return
+	}
 	if history == nil {
 		history = []orchestrator.Message{}
 	}
@@ -328,30 +331,54 @@ func (cp *ControlPlane) townWallHistory(w http.ResponseWriter, r *http.Request, 
 }
 
 // filterTownWall applies optional Town Wall history query filters (v0.4.3):
-// agent_id (exact match), since/until (RFC3339, inclusive — UTC strings sort in
-// time order so a lexical compare suffices), and contains (substring of body).
+// agent_id (exact match), since/until (RFC3339, inclusive), and contains
+// (substring of body).
 // An all-empty filter set returns msgs unchanged.
-func filterTownWall(msgs []orchestrator.Message, agentID, since, until, contains string) []orchestrator.Message {
+func filterTownWall(msgs []orchestrator.Message, agentID, since, until, contains string) ([]orchestrator.Message, error) {
 	if agentID == "" && since == "" && until == "" && contains == "" {
-		return msgs
+		return msgs, nil
+	}
+	var sinceTime, untilTime time.Time
+	var sinceSet, untilSet bool
+	if since != "" {
+		var err error
+		sinceTime, err = time.Parse(time.RFC3339Nano, since)
+		if err != nil {
+			return nil, fmt.Errorf("invalid since: must be RFC3339")
+		}
+		sinceSet = true
+	}
+	if until != "" {
+		var err error
+		untilTime, err = time.Parse(time.RFC3339Nano, until)
+		if err != nil {
+			return nil, fmt.Errorf("invalid until: must be RFC3339")
+		}
+		untilSet = true
 	}
 	out := make([]orchestrator.Message, 0, len(msgs))
 	for _, m := range msgs {
 		if agentID != "" && m.AgentID != agentID {
 			continue
 		}
-		if since != "" && m.Timestamp < since {
-			continue
-		}
-		if until != "" && m.Timestamp > until {
-			continue
+		if sinceSet || untilSet {
+			msgTime, err := time.Parse(time.RFC3339Nano, m.Timestamp)
+			if err != nil {
+				continue
+			}
+			if sinceSet && msgTime.Before(sinceTime) {
+				continue
+			}
+			if untilSet && msgTime.After(untilTime) {
+				continue
+			}
 		}
 		if contains != "" && !strings.Contains(m.Body, contains) {
 			continue
 		}
 		out = append(out, m)
 	}
-	return out
+	return out, nil
 }
 
 // streamTownWall streams new Town Wall messages as Server-Sent Events.
@@ -521,22 +548,6 @@ type FlockAddAgentResponse struct {
 	AgentURL string `json:"agent_url"`
 }
 
-// nextAgentID returns the next "<role>-N" id for a role within a flock, using
-// max(existing N for that role)+1 so ids stay stable and never collide with a
-// live agent (matches createFlock's per-role indexing).
-func nextAgentID(f *orchestrator.Flock, role string) string {
-	max := 0
-	prefix := role + "-"
-	for _, a := range f.Snapshot() {
-		if strings.HasPrefix(a.AgentID, prefix) {
-			if n, err := strconv.Atoi(strings.TrimPrefix(a.AgentID, prefix)); err == nil && n > max {
-				max = n
-			}
-		}
-	}
-	return fmt.Sprintf("%s-%d", role, max+1)
-}
-
 // addFlockAgent spawns one new VM and registers it as a member of an existing
 // flock. POST /flocks/{id}/agents  {"role":"worker"}. The per-VM agent_token is
 // kept internally for proxy injection and restart identity, but is not returned.
@@ -551,28 +562,25 @@ func (cp *ControlPlane) addFlockAgent(w http.ResponseWriter, r *http.Request, fl
 		writeJSONError(w, http.StatusBadRequest, err)
 		return
 	}
-	if req.Role == "" {
-		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("role required"))
+	roles, err := normalizeDaemonFlockRoles([]string{req.Role})
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err)
 		return
 	}
-	if len(f.Snapshot())+1 > flockMax(f) {
-		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("flock at max_agents (%d)", flockMax(f)))
+	req.Role = roles[0]
+	agentID, err := f.ReserveAgent(req.Role, flockMax(f))
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err)
 		return
 	}
 
-	agentID := nextAgentID(f, req.Role)
 	vmInfo, _, err := cp.spawnVMForFlock(flockID, agentID, req.Role, f.TenantID, f.EgressPolicy)
 	if err != nil {
+		f.RemoveAgent(agentID)
 		writeJSONError(w, http.StatusInternalServerError, fmt.Errorf("spawn %s: %w", agentID, err))
 		return
 	}
-	f.AddAgent(&orchestrator.AgentInfo{
-		AgentID:  agentID,
-		Role:     req.Role,
-		VMID:     vmInfo.VMID,
-		AgentURL: vmInfo.AgentURL,
-		Status:   orchestrator.AgentStatusReady,
-	})
+	f.UpdateAgentVM(agentID, vmInfo.VMID, vmInfo.AgentURL)
 	if err := f.Persist(cp.workDir); err != nil {
 		slog.Warn("add agent: persist failed", "flock_id", flockID, "agent_id", agentID, "err", err)
 	}
@@ -637,10 +645,12 @@ func (cp *ControlPlane) changeFlockAgentRole(w http.ResponseWriter, r *http.Requ
 		writeJSONError(w, http.StatusBadRequest, err)
 		return
 	}
-	if req.Role == "" {
-		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("role required"))
+	roles, err := normalizeDaemonFlockRoles([]string{req.Role})
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err)
 		return
 	}
+	req.Role = roles[0]
 
 	var oldVMID, curRole string
 	for _, a := range f.Snapshot() {
@@ -659,6 +669,13 @@ func (cp *ControlPlane) changeFlockAgentRole(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	configPath, secretsPath, err := cp.profileConfigPaths(req.Role)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err)
+		return
+	}
+	profile := LookupProfile(req.Role)
+
 	// Token must be read before destroyVM removes the runningVM entry.
 	cp.mu.RLock()
 	var oldToken string
@@ -670,16 +687,6 @@ func (cp *ControlPlane) changeFlockAgentRole(w http.ResponseWriter, r *http.Requ
 	cp.destroyVM(oldVMID)
 	cp.watchdog.ForgetVM(oldVMID)
 
-	configPath, secretsPath, err := cp.profileConfigPaths(req.Role)
-	if err != nil {
-		f.UpdateAgentStatus(agentID, orchestrator.AgentStatusDead)
-		if perr := f.Persist(cp.workDir); perr != nil {
-			slog.Warn("change role: persist dead status failed", "agent_id", agentID, "err", perr)
-		}
-		writeJSONError(w, http.StatusInternalServerError, err)
-		return
-	}
-	profile := LookupProfile(req.Role)
 	info, _, err := cp.spawnVMInternal(spawnVMOptions{
 		Profile:           req.Role,
 		ConfigPath:        configPath,
@@ -724,15 +731,20 @@ func (cp *ControlPlane) pauseFlock(w http.ResponseWriter, flockID string) {
 		writeJSONError(w, http.StatusNotFound, fmt.Errorf("flock not found"))
 		return
 	}
-	var paused []string
+	type pausedAgent struct {
+		vmID    string
+		agentID string
+	}
+	var paused []pausedAgent
 	rollback := func() {
 		for i := len(paused) - 1; i >= 0; i-- {
 			cp.mu.RLock()
-			v, ok := cp.vms[paused[i]]
+			v, ok := cp.vms[paused[i].vmID]
 			cp.mu.RUnlock()
 			if ok {
 				_ = v.machine.ResumeVM(context.Background())
 			}
+			f.RestorePausedAgentStatus(paused[i].agentID, orchestrator.AgentStatusReady)
 		}
 	}
 	for _, a := range f.Snapshot() {
@@ -748,8 +760,8 @@ func (cp *ControlPlane) pauseFlock(w http.ResponseWriter, flockID string) {
 			writeJSONError(w, http.StatusInternalServerError, fmt.Errorf("pause %s: %w", a.AgentID, err))
 			return
 		}
-		paused = append(paused, a.VMID)
-		f.UpdateAgentStatus(a.AgentID, orchestrator.AgentStatusPaused)
+		paused = append(paused, pausedAgent{vmID: a.VMID, agentID: a.AgentID})
+		f.MarkAgentPaused(a.AgentID)
 	}
 	f.SetPaused(true)
 	if _, err := f.TownWall.Post("orchestrator", fmt.Sprintf("Flock paused (%d agents)", len(paused))); err != nil {

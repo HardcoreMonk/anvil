@@ -9,10 +9,10 @@ import (
 	"ephemera/internal/orchestrator"
 )
 
-// TestNextAgentID covers the per-role "<role>-N" id allocation used by
-// addFlockAgent (v0.4.3): next = max(existing N for that role) + 1, and a role
-// with no existing agents starts at 1.
-func TestNextAgentID(t *testing.T) {
+// TestReserveAgent covers the atomic per-role "<role>-N" id allocation used by
+// addFlockAgent (v0.4.3): next = max(existing N for that role) + 1, a role with
+// no existing agents starts at 1, and max_agents is enforced before spawn.
+func TestReserveAgent(t *testing.T) {
 	f := &orchestrator.Flock{Agents: map[string]*orchestrator.AgentInfo{
 		"worker-1":   {AgentID: "worker-1", Role: "worker"},
 		"worker-3":   {AgentID: "worker-3", Role: "worker"},
@@ -24,9 +24,16 @@ func TestNextAgentID(t *testing.T) {
 		"builder":  "builder-1", // none yet
 	}
 	for role, want := range cases {
-		if got := nextAgentID(f, role); got != want {
-			t.Errorf("nextAgentID(%q) = %q, want %q", role, got, want)
+		got, err := f.ReserveAgent(role, 10)
+		if err != nil {
+			t.Fatalf("ReserveAgent(%q): %v", role, err)
 		}
+		if got != want {
+			t.Errorf("ReserveAgent(%q) = %q, want %q", role, got, want)
+		}
+	}
+	if _, err := f.ReserveAgent("worker", len(f.Snapshot())); err == nil {
+		t.Fatal("ReserveAgent over cap returned nil error")
 	}
 }
 
@@ -76,19 +83,25 @@ func TestFilterTownWall(t *testing.T) {
 		{AgentID: "worker-2", Timestamp: "2026-05-28T11:00:00Z", Body: "goodbye"},
 		{AgentID: "worker-1", Timestamp: "2026-05-28T12:00:00Z", Body: "world again"},
 	}
-	if got := filterTownWall(msgs, "", "", "", ""); len(got) != 3 {
+	if got, err := filterTownWall(msgs, "", "", "", ""); err != nil || len(got) != 3 {
 		t.Errorf("no filter: got %d, want 3", len(got))
 	}
-	if got := filterTownWall(msgs, "worker-1", "", "", ""); len(got) != 2 {
+	if got, err := filterTownWall(msgs, "worker-1", "", "", ""); err != nil || len(got) != 2 {
 		t.Errorf("agent_id: got %d, want 2", len(got))
 	}
-	if got := filterTownWall(msgs, "", "", "", "world"); len(got) != 2 {
+	if got, err := filterTownWall(msgs, "", "", "", "world"); err != nil || len(got) != 2 {
 		t.Errorf("contains: got %d, want 2", len(got))
 	}
-	if got := filterTownWall(msgs, "", "2026-05-28T10:30:00Z", "2026-05-28T11:30:00Z", ""); len(got) != 1 {
+	if got, err := filterTownWall(msgs, "", "2026-05-28T10:30:00Z", "2026-05-28T11:30:00Z", ""); err != nil || len(got) != 1 {
 		t.Errorf("since/until: got %d, want 1", len(got))
 	}
-	if got := filterTownWall(msgs, "worker-1", "", "", "again"); len(got) != 1 {
+	if got, err := filterTownWall(msgs, "worker-1", "", "", "again"); err != nil || len(got) != 1 {
 		t.Errorf("agent_id+contains: got %d, want 1", len(got))
+	}
+	if got, err := filterTownWall(msgs, "", "2026-05-28T06:30:00-04:00", "2026-05-28T07:30:00-04:00", ""); err != nil || len(got) != 1 {
+		t.Errorf("since/until with offset: got %d, err=%v, want 1", len(got), err)
+	}
+	if _, err := filterTownWall(msgs, "", "not-a-time", "", ""); err == nil {
+		t.Fatal("invalid since returned nil error")
 	}
 }
