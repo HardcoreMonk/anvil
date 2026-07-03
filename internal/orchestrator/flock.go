@@ -76,13 +76,18 @@ func (f *Flock) BeginMutation() (unlock func(), ok bool) {
 
 // BeginDelete marks the flock as deleted under the mutation lock. It blocks
 // until any in-flight mutation finishes and prevents future mutations from
-// starting.
-func (f *Flock) BeginDelete() func() {
+// starting. If another delete already won the race, ok is false.
+func (f *Flock) BeginDelete() (unlock func(), ok bool) {
 	f.opMu.Lock()
 	f.mu.Lock()
+	if f.deleted {
+		f.mu.Unlock()
+		f.opMu.Unlock()
+		return nil, false
+	}
 	f.deleted = true
 	f.mu.Unlock()
-	return f.opMu.Unlock
+	return f.opMu.Unlock, true
 }
 
 // AddAgent inserts or replaces an agent record under lock.

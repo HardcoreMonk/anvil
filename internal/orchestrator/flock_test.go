@@ -223,11 +223,18 @@ func TestFlock_BeginDeleteRejectsFutureMutation(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	unlockDelete := f.BeginDelete()
+	unlockDelete, ok := f.BeginDelete()
+	if !ok {
+		t.Fatal("BeginDelete unexpectedly failed")
+	}
 	unlockDelete()
 
 	if unlock, ok := f.BeginMutation(); ok {
 		unlock()
 		t.Fatal("BeginMutation succeeded after BeginDelete")
+	}
+	if unlock, ok := f.BeginDelete(); ok {
+		unlock()
+		t.Fatal("second BeginDelete unexpectedly succeeded")
 	}
 }

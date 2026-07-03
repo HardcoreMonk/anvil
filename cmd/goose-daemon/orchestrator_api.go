@@ -255,7 +255,11 @@ func (cp *ControlPlane) deleteFlock(w http.ResponseWriter, flockID string) {
 		writeJSONError(w, http.StatusNotFound, fmt.Errorf("flock not found"))
 		return
 	}
-	unlockDelete := f.BeginDelete()
+	unlockDelete, ok := f.BeginDelete()
+	if !ok {
+		writeJSONError(w, http.StatusNotFound, fmt.Errorf("flock not found"))
+		return
+	}
 	defer unlockDelete()
 	cp.flockMgr.Delete(flockID)
 	agents := f.Snapshot()
