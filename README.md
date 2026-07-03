@@ -2224,7 +2224,7 @@ Every successful spawn writes `vms/<vm_id>/state.json` (atomic tmp + rename) cap
 1. **Orphan cleanup** — any leftover Firecracker process bound to the persisted API socket is sent SIGTERM, then SIGKILL after a 1.5 s grace. Stale socket / log FIFO / vsock UDS files are removed. (After a graceful shutdown this is a no-op because the previous daemon already stopped them; after a SIGKILL / crash it does the actual cleanup.)
 2. **Network re-reservation** — the original TAP device is recreated with the same name and MAC, and the original IP is re-marked as in-use in the pool.
 3. **Cold boot** — Firecracker is restarted against the same rootfs clone; `goose-agent` is waited for on `/health` up to 60 s.
-4. **Flock association** — if the VM belonged to a flock, the agent's status is flipped back to `"ready"`. If recovery fails, the agent is marked `"dead"` and a `<orchestrator>` notice is posted to the Town Wall.
+4. **Flock association** — VM이 flock에 속해 있었다면 agent status를 `"ready"`로 되돌린다. daemon이 VM state persistence와 flock metadata persistence 사이에서 crash되어 flock metadata가 없거나 해당 agent가 빠져 있으면, recovery는 `state.json`의 `flock_id` / `agent_id`를 기준으로 member를 재연결하고 repaired flock metadata를 다시 persist한다. recovery가 실패하면 agent를 `"dead"`로 표시하고 Town Wall에 `<orchestrator>` notice를 남긴다.
 
 The daemon-side shutdown path is designed to feed cold-restart:
 

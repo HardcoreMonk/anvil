@@ -40,6 +40,12 @@
     한다.
   - `EPHEMERA_HOME`으로 daemon work directory를 명시할 수 있다. unset이면 기존처럼
     process current working directory를 사용한다.
+- recovery는 VM `state.json`의 `flock_id` / `agent_id`를 flock membership의
+  fallback source로 사용한다. daemon crash가 VM state persistence와 flock metadata
+  persistence 사이에서 발생해도, 다음 startup에서 missing flock 또는 missing agent를
+  재연결하고 repaired metadata를 다시 persist한다.
+- `webdev_demo.sh`는 `POST /flocks` 응답의 `agent_tokens`를 읽지 않고, orchestrator
+  `vm_id`를 사용해 control-plane proxy `POST /vms/{vm_id}/tasks`로 brief를 보낸다.
 - 현재 sync branch의 anvil runtime baseline은 upstream `v0.4.3`까지 반영한다.
   2026-07-02 기준 upstream latest observed는 `v0.7.0`이며, `v0.4.4`-`v0.4.5`는
   다음 sync 후보, `v0.5.0`-`v0.7.0`은 별도 adoption review backlog로 둔다.

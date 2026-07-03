@@ -585,6 +585,100 @@ func TestRecoveryNetworkReclaimFailureDropsAutoSnapshot(t *testing.T) {
 	}
 }
 
+func TestRegisterRecoveredVMRecreatesMissingFlockFromVMState(t *testing.T) {
+	cp := newTestCP(t)
+	state := storage.VMState{
+		VMID:         "vm-recovered",
+		GuestIP:      "10.0.1.77",
+		AgentToken:   "agent-token",
+		DiskPath:     filepath.Join(cp.workDir, "vm-recovered.ext4"),
+		Profile:      "worker",
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+		FlockID:      "flock-recovered",
+		AgentID:      "worker-1",
+		CreatedAt:    time.Date(2026, 7, 3, 1, 2, 3, 0, time.UTC),
+	}
+
+	cp.registerRecoveredVM(state, nil, nil)
+
+	flock, ok := cp.flockMgr.Get("flock-recovered")
+	if !ok {
+		t.Fatal("missing flock was not recreated from VM state")
+	}
+	agents := flock.Snapshot()
+	if len(agents) != 1 {
+		t.Fatalf("recovered agents = %d, want 1", len(agents))
+	}
+	agent := agents[0]
+	if agent.AgentID != "worker-1" || agent.Role != "worker" || agent.VMID != "vm-recovered" || agent.AgentURL != "http://10.0.1.77:8080" || agent.Status != orchestrator.AgentStatusReady {
+		t.Fatalf("recovered agent = %+v, want worker-1/worker/vm-recovered/ready", agent)
+	}
+	if flock.TenantID != "tenant-1" || flock.EgressPolicy != "profile" {
+		t.Fatalf("recovered flock tenant/egress = %q/%q, want tenant-1/profile", flock.TenantID, flock.EgressPolicy)
+	}
+	meta, err := orchestrator.LoadFlockMetadata(cp.workDir, "flock-recovered")
+	if err != nil {
+		t.Fatalf("LoadFlockMetadata: %v", err)
+	}
+	if _, ok := meta.Agents["worker-1"]; !ok {
+		t.Fatalf("persisted metadata missing recovered worker-1: %+v", meta.Agents)
+	}
+	if meta.Agents["worker-1"].AgentURL != "http://10.0.1.77:8080" {
+		t.Fatalf("persisted recovered agent_url = %q, want private IP fallback", meta.Agents["worker-1"].AgentURL)
+	}
+}
+
+func TestRegisterRecoveredVMAddsMissingAgentToExistingFlock(t *testing.T) {
+	cp := newTestCP(t)
+	flock, err := cp.flockMgr.Create("flock-existing", "existing task", "tenant-1", "profile", filepath.Join(cp.workDir, "flocks", "flock-existing", "TOWN_WALL.log"))
+	if err != nil {
+		t.Fatalf("Create flock: %v", err)
+	}
+	flock.AddAgent(&orchestrator.AgentInfo{AgentID: "orchestrator-1", Role: "orchestrator", VMID: "vm-orch", Status: orchestrator.AgentStatusReady})
+	if err := flock.Persist(cp.workDir); err != nil {
+		t.Fatalf("Persist existing flock: %v", err)
+	}
+	state := storage.VMState{
+		VMID:         "vm-worker",
+		GuestIP:      "10.0.1.78",
+		AgentURL:     "http://10.0.1.78:8080",
+		AgentToken:   "agent-token",
+		DiskPath:     filepath.Join(cp.workDir, "vm-worker.ext4"),
+		Profile:      "worker",
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+		FlockID:      "flock-existing",
+		AgentID:      "worker-1",
+		CreatedAt:    time.Date(2026, 7, 3, 1, 2, 3, 0, time.UTC),
+	}
+
+	cp.registerRecoveredVM(state, nil, nil)
+
+	agents := map[string]*orchestrator.AgentInfo{}
+	for _, agent := range flock.Snapshot() {
+		copy := *agent
+		agents[agent.AgentID] = &copy
+	}
+	if len(agents) != 2 {
+		t.Fatalf("agents = %d, want 2: %+v", len(agents), agents)
+	}
+	worker := agents["worker-1"]
+	if worker == nil {
+		t.Fatalf("missing recovered worker-1: %+v", agents)
+	}
+	if worker.Role != "worker" || worker.VMID != "vm-worker" || worker.AgentURL != "http://10.0.1.78:8080" || worker.Status != orchestrator.AgentStatusReady {
+		t.Fatalf("recovered worker = %+v, want worker/vm-worker/ready", worker)
+	}
+	meta, err := orchestrator.LoadFlockMetadata(cp.workDir, "flock-existing")
+	if err != nil {
+		t.Fatalf("LoadFlockMetadata: %v", err)
+	}
+	if _, ok := meta.Agents["worker-1"]; !ok {
+		t.Fatalf("persisted metadata missing recovered worker-1: %+v", meta.Agents)
+	}
+}
+
 func TestRuntimeAuditAPIListFiltersAndRedacts(t *testing.T) {
 	cp := newTestCP(t)
 	cp.runtimeAuditPath = filepath.Join(cp.workDir, "audit", "runtime-audit.jsonl")

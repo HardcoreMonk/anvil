@@ -277,12 +277,16 @@ func (cp *ControlPlane) registerRecoveredVM(s storage.VMState, machine *firecrac
 	if memSize == 0 {
 		memSize = 2048
 	}
+	agentURL := strings.TrimSpace(s.AgentURL)
+	if agentURL == "" {
+		agentURL = buildAgentURL(s.VMID, s.GuestIP)
+	}
 	cp.mu.Lock()
 	cp.vms[s.VMID] = &runningVM{
 		VMInfo: VMInfo{
 			VMID:         s.VMID,
 			GuestIP:      s.GuestIP,
-			AgentURL:     s.AgentURL,
+			AgentURL:     agentURL,
 			Profile:      s.Profile,
 			TenantID:     s.TenantID,
 			EgressPolicy: s.EgressPolicy,
@@ -299,16 +303,71 @@ func (cp *ControlPlane) registerRecoveredVM(s storage.VMState, machine *firecrac
 	}
 	cp.mu.Unlock()
 
-	if s.FlockID != "" && s.AgentID != "" {
-		if f, ok := cp.flockMgr.Get(s.FlockID); ok {
-			f.UpdateAgentStatus(s.AgentID, orchestrator.AgentStatusReady)
-			// Persist so a future LoadFromDisk reads ready rather than the dead
-			// state left by the previous daemon's watchdog.
-			if err := f.Persist(cp.workDir); err != nil {
-				slog.Warn("recovery: persist ready status failed", "agent_id", s.AgentID, "err", err)
-			}
+	cp.reconcileRecoveredFlockAgent(s, agentURL)
+}
+
+func (cp *ControlPlane) reconcileRecoveredFlockAgent(s storage.VMState, agentURL string) {
+	if cp.flockMgr == nil {
+		return
+	}
+	flockID := strings.TrimSpace(s.FlockID)
+	agentID := strings.TrimSpace(s.AgentID)
+	if flockID == "" || agentID == "" {
+		return
+	}
+
+	f, ok := cp.flockMgr.Get(flockID)
+	if !ok {
+		twPath := filepath.Join(cp.workDir, "flocks", flockID, "TOWN_WALL.log")
+		recovered, err := cp.flockMgr.NewUnregistered(flockID, fmt.Sprintf("recovered flock %s", flockID), s.TenantID, s.EgressPolicy, twPath)
+		if err != nil {
+			slog.Warn("recovery: recreate flock metadata failed", "flock_id", flockID, "agent_id", agentID, "err", err)
+			return
+		}
+		if !s.CreatedAt.IsZero() {
+			recovered.CreatedAt = s.CreatedAt
+		}
+		cp.flockMgr.Register(recovered)
+		f = recovered
+		slog.Warn("recovery: recreated missing flock metadata from vm state", "flock_id", flockID, "agent_id", agentID, "vm_id", s.VMID)
+	}
+
+	found := false
+	for _, agent := range f.Snapshot() {
+		if agent.AgentID == agentID {
+			found = true
+			break
 		}
 	}
+	if found {
+		f.UpdateAgentVM(agentID, s.VMID, agentURL)
+	} else {
+		f.AddAgent(&orchestrator.AgentInfo{
+			AgentID:  agentID,
+			Role:     recoveredAgentRole(s),
+			VMID:     s.VMID,
+			AgentURL: agentURL,
+			Status:   orchestrator.AgentStatusReady,
+		})
+		slog.Warn("recovery: reattached missing flock agent from vm state", "flock_id", flockID, "agent_id", agentID, "vm_id", s.VMID)
+	}
+
+	// Persist so a future LoadFromDisk reads the recovered membership and ready
+	// status rather than the dead or incomplete state left before restart.
+	if err := f.Persist(cp.workDir); err != nil {
+		slog.Warn("recovery: persist recovered flock agent failed", "flock_id", flockID, "agent_id", agentID, "err", err)
+	}
+}
+
+func recoveredAgentRole(s storage.VMState) string {
+	if profile := strings.TrimSpace(s.Profile); profile != "" {
+		return profile
+	}
+	agentID := strings.TrimSpace(s.AgentID)
+	if idx := strings.LastIndex(agentID, "-"); idx > 0 {
+		return agentID[:idx]
+	}
+	return "recovered"
 }
 
 // markFlockAgentDead flips a flock agent's status to dead when its VM could

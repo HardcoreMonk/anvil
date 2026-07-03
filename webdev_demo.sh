@@ -53,8 +53,8 @@ HARVEST_PID=""
 FLOCK_ID=""
 DEMO_OK=true
 PROFILES_SWAPPED=false
+ORCH_VM_ID=""
 ORCH_URL=""
-ORCH_TOK=""
 
 # ── Output helpers ───────────────────────────────────────────────
 step()  { printf "\n━━━ %s ━━━\n" "$*"; }
@@ -306,15 +306,15 @@ create_flock() {
     [ -n "$FLOCK_ID" ] && [ "$FLOCK_ID" != "null" ] || fatal "flock_id missing in response"
     ok "Flock spawned: ${FLOCK_ID}"
 
-    ORCH_URL=$(jq -r '.agents[] | select(.role=="orchestrator") | .agent_url' "$resp_file")
     local orch_id
     orch_id=$(jq -r '.agents[] | select(.role=="orchestrator") | .agent_id' "$resp_file")
-    ORCH_TOK=$(jq -r --arg id "$orch_id" '.agent_tokens[$id]' "$resp_file")
+    ORCH_VM_ID=$(jq -r '.agents[] | select(.role=="orchestrator") | .vm_id' "$resp_file")
+    ORCH_URL="${API}/vms/${ORCH_VM_ID}"
 
-    for var in ORCH_URL ORCH_TOK; do
+    for var in ORCH_VM_ID ORCH_URL; do
         [ -n "${!var}" ] && [ "${!var}" != "null" ] || fatal "Missing $var in flock response."
     done
-    ok "Orchestrator: ${ORCH_URL}  id=${orch_id}"
+    ok "Orchestrator: ${ORCH_URL}  id=${orch_id}  vm=${ORCH_VM_ID}"
 
     # Surface worker + reviewer agent_id so the user can correlate Town Wall
     # entries with peers. The orchestrator references them as worker-1 / reviewer-1
@@ -417,7 +417,6 @@ dispatch_orchestrator() {
     http_code=$(curl -s -o "$resp_file" -w '%{http_code}' \
         --max-time "$ORCH_TIMEOUT" \
         -X POST "${ORCH_URL}/tasks" \
-        -H "Authorization: Bearer ${ORCH_TOK}" \
         -H "Content-Type: application/json" \
         -d @"$req_file" || echo "000")
     local elapsed=$(( $(date +%s) - t0 ))
