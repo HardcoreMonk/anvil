@@ -37,7 +37,7 @@ func TestToolRegistrationsIncludeSnapshotTools(t *testing.T) {
 		"anvil_get_flock":                   "Return a Goosetown flock and its agent status by flock_id.",
 		"anvil_delete_flock":                "Delete a Goosetown flock and let the daemon tear down member VMs.",
 		"anvil_post_townwall":               "Append a message to a Goosetown flock Town Wall.",
-		"anvil_get_townwall_history":        "Return the full Town Wall history for a Goosetown flock.",
+		"anvil_get_townwall_history":        "Return the active Town Wall history for a Goosetown flock.",
 	}
 
 	for _, registration := range registrations {

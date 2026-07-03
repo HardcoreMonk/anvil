@@ -228,18 +228,10 @@ func (wd *Watchdog) onSuccess(vmID string) {
 }
 
 // onFailure increments the fail counter and, on the threshold transition,
-// updates the agent status and posts a Town Wall notice exactly once.
+// updates the agent status and posts a Town Wall notice exactly once. Paused
+// agents are skipped before counting because Firecracker pause intentionally
+// makes /health unavailable.
 func (wd *Watchdog) onFailure(v VMRef) {
-	wd.mu.Lock()
-	wd.failCount[v.VMID]++
-	count := wd.failCount[v.VMID]
-	alreadyMarked := wd.deadMarked[v.VMID]
-	wd.mu.Unlock()
-
-	if alreadyMarked || count < wd.dyingThreshold {
-		return
-	}
-
 	flockID, agentID, ok := wd.locator(v.VMID)
 	if !ok {
 		// Not a flock member — standalone VMs aren't watchdog targets.
@@ -252,9 +244,23 @@ func (wd *Watchdog) onFailure(v VMRef) {
 	}
 	if flock.AgentStatus(agentID) == AgentStatusPaused {
 		// A paused flock member intentionally doesn't answer /health (v0.4.3);
-		// don't mark it dead. resume restores ready + clears the fail counter.
+		// don't count this as a failure or mark it dead.
+		wd.mu.Lock()
+		delete(wd.failCount, v.VMID)
+		wd.mu.Unlock()
 		return
 	}
+
+	wd.mu.Lock()
+	wd.failCount[v.VMID]++
+	count := wd.failCount[v.VMID]
+	alreadyMarked := wd.deadMarked[v.VMID]
+	wd.mu.Unlock()
+
+	if alreadyMarked || count < wd.dyingThreshold {
+		return
+	}
+
 	flock.UpdateAgentStatus(agentID, AgentStatusDead)
 	if err := flock.Persist(wd.flockMgr.WorkDir()); err != nil {
 		// The in-memory mark already took effect; a missed disk write means

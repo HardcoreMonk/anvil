@@ -250,11 +250,14 @@ func (cp *ControlPlane) getFlock(w http.ResponseWriter, flockID string) {
 // deleteFlock removes a flock from the registry and tears down all its VMs.
 // VM teardowns happen in parallel so a 5-agent flock destroys in ~1s, not 5s.
 func (cp *ControlPlane) deleteFlock(w http.ResponseWriter, flockID string) {
-	f, ok := cp.flockMgr.Delete(flockID)
+	f, ok := cp.flockMgr.Get(flockID)
 	if !ok {
 		writeJSONError(w, http.StatusNotFound, fmt.Errorf("flock not found"))
 		return
 	}
+	unlockDelete := f.BeginDelete()
+	defer unlockDelete()
+	cp.flockMgr.Delete(flockID)
 	agents := f.Snapshot()
 	var wg sync.WaitGroup
 	for _, a := range agents {
@@ -466,6 +469,12 @@ func (cp *ControlPlane) restartAgent(w http.ResponseWriter, flockID, agentID str
 		writeJSONError(w, http.StatusNotFound, fmt.Errorf("flock not found"))
 		return
 	}
+	unlock, ok := f.BeginMutation()
+	if !ok {
+		writeJSONError(w, http.StatusNotFound, fmt.Errorf("flock not found"))
+		return
+	}
+	defer unlock()
 
 	var oldVMID, role string
 	for _, a := range f.Snapshot() {
@@ -557,6 +566,12 @@ func (cp *ControlPlane) addFlockAgent(w http.ResponseWriter, r *http.Request, fl
 		writeJSONError(w, http.StatusNotFound, fmt.Errorf("flock not found"))
 		return
 	}
+	unlock, ok := f.BeginMutation()
+	if !ok {
+		writeJSONError(w, http.StatusNotFound, fmt.Errorf("flock not found"))
+		return
+	}
+	defer unlock()
 	var req AgentRoleRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err)
@@ -577,6 +592,9 @@ func (cp *ControlPlane) addFlockAgent(w http.ResponseWriter, r *http.Request, fl
 	vmInfo, _, err := cp.spawnVMForFlock(flockID, agentID, req.Role, f.TenantID, f.EgressPolicy)
 	if err != nil {
 		f.RemoveAgent(agentID)
+		if perr := f.Persist(cp.workDir); perr != nil {
+			slog.Warn("add agent: persist reservation rollback failed", "flock_id", flockID, "agent_id", agentID, "err", perr)
+		}
 		writeJSONError(w, http.StatusInternalServerError, fmt.Errorf("spawn %s: %w", agentID, err))
 		return
 	}
@@ -605,6 +623,12 @@ func (cp *ControlPlane) removeFlockAgent(w http.ResponseWriter, flockID, agentID
 		writeJSONError(w, http.StatusNotFound, fmt.Errorf("flock not found"))
 		return
 	}
+	unlock, ok := f.BeginMutation()
+	if !ok {
+		writeJSONError(w, http.StatusNotFound, fmt.Errorf("flock not found"))
+		return
+	}
+	defer unlock()
 	var vmID string
 	for _, a := range f.Snapshot() {
 		if a.AgentID == agentID {
@@ -640,6 +664,12 @@ func (cp *ControlPlane) changeFlockAgentRole(w http.ResponseWriter, r *http.Requ
 		writeJSONError(w, http.StatusNotFound, fmt.Errorf("flock not found"))
 		return
 	}
+	unlock, ok := f.BeginMutation()
+	if !ok {
+		writeJSONError(w, http.StatusNotFound, fmt.Errorf("flock not found"))
+		return
+	}
+	defer unlock()
 	var req AgentRoleRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err)
@@ -731,6 +761,12 @@ func (cp *ControlPlane) pauseFlock(w http.ResponseWriter, flockID string) {
 		writeJSONError(w, http.StatusNotFound, fmt.Errorf("flock not found"))
 		return
 	}
+	unlock, ok := f.BeginMutation()
+	if !ok {
+		writeJSONError(w, http.StatusNotFound, fmt.Errorf("flock not found"))
+		return
+	}
+	defer unlock()
 	type pausedAgent struct {
 		vmID    string
 		agentID string
@@ -779,6 +815,12 @@ func (cp *ControlPlane) resumeFlock(w http.ResponseWriter, flockID string) {
 		writeJSONError(w, http.StatusNotFound, fmt.Errorf("flock not found"))
 		return
 	}
+	unlock, ok := f.BeginMutation()
+	if !ok {
+		writeJSONError(w, http.StatusNotFound, fmt.Errorf("flock not found"))
+		return
+	}
+	defer unlock()
 	resumed := 0
 	for _, a := range f.Snapshot() {
 		cp.mu.RLock()
@@ -794,6 +836,9 @@ func (cp *ControlPlane) resumeFlock(w http.ResponseWriter, flockID string) {
 		}
 		resumed++
 		f.UpdateAgentStatus(a.AgentID, orchestrator.AgentStatusReady)
+		if cp.watchdog != nil {
+			cp.watchdog.ForgetVM(a.VMID)
+		}
 	}
 	f.SetPaused(false)
 	if _, err := f.TownWall.Post("orchestrator", fmt.Sprintf("Flock resumed (%d agents)", resumed)); err != nil {

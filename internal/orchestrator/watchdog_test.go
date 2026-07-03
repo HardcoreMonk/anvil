@@ -271,6 +271,35 @@ func TestWatchdog_ForgetVM_ClearsState(t *testing.T) {
 	}
 }
 
+func TestWatchdog_PausedAgentFailureDoesNotAccumulate(t *testing.T) {
+	tmp := t.TempDir()
+	fm := NewFlockManager(tmp)
+	flock, _ := fm.Create("flock-paused", "test", filepath.Join(tmp, "flock-paused", "TOWN_WALL.log"))
+	flock.AddAgent(&AgentInfo{AgentID: "w", Role: "worker", VMID: "vm-1", Status: AgentStatusReady})
+	flock.MarkAgentPaused("w")
+
+	locator := func(string) (string, string, bool) { return "flock-paused", "w", true }
+	wd := NewWatchdog(fm, locator, func() []VMRef { return nil }, 8080)
+	wd.dyingThreshold = 1
+	wd.failCount["vm-1"] = 2
+
+	wd.onFailure(VMRef{VMID: "vm-1", GuestIP: "127.0.0.1"})
+
+	if got := flock.AgentStatus("w"); got != AgentStatusPaused {
+		t.Fatalf("paused failure changed status to %q", got)
+	}
+	wd.mu.Lock()
+	_, hasFail := wd.failCount["vm-1"]
+	_, hasDead := wd.deadMarked["vm-1"]
+	wd.mu.Unlock()
+	if hasFail {
+		t.Fatal("paused failure should clear accumulated fail count")
+	}
+	if hasDead {
+		t.Fatal("paused failure should not mark dead")
+	}
+}
+
 // TestWatchdog_Configure_AppliesTunables verifies the public Configure
 // entry-point lands all four tunables and clamps interval >= httpTimeout.
 func TestWatchdog_Configure_AppliesTunables(t *testing.T) {

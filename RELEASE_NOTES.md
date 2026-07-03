@@ -104,7 +104,7 @@ wire format changed.
 
 - `GET /flocks/{id}/wall/history` accepts filters: `agent_id` (exact),
   `since`/`until` (RFC3339, inclusive), `contains` (body substring). Combinable;
-  an all-empty filter returns the full history.
+  an all-empty filter returns the active-log history.
 - The Town Wall log now **rotates by size**: past `EPHEMERA_TOWNWALL_MAX_MIB`
   (default 10) the active log shifts to `.1` (…→`EPHEMERA_TOWNWALL_KEEP`,
   default 3) and a fresh file continues. `History` reflects the active file
@@ -1306,7 +1306,7 @@ Two safety nets also landed alongside: `SetGuestCPToken`'s retry budget moved fr
 
 - `POST /flocks` writes `flocks/<flock-id>/metadata.json` atomically (tmp + rename) before returning the response
 - `DELETE /flocks/{id}` removes the metadata file (the `TOWN_WALL.log` is kept as an audit artifact)
-- Daemon startup scans `flocks/*/metadata.json` and re-registers every flock in memory; the Town Wall log is reopened in append mode so full history (and `seq` numbering) continues across restarts
+- Daemon startup scans `flocks/*/metadata.json` and re-registers every flock in memory; the active Town Wall log is reopened in append mode so active history (and `seq` numbering) continues across restarts
 - Recovered flocks are read-mostly: their VM IDs no longer correspond to live Firecracker processes (those died with the previous daemon), so `/tasks` against them will fail; `/post`, `/wall`, `/wall/history`, and `DELETE` continue to work
 - Schema versioned (`schema_version: 1`) for future migrations
 - Live VM auto-restart is deferred to v0.3.2
@@ -1370,7 +1370,7 @@ These items extend the v0.3.0 work to cover what the original e2e couldn't:
 ### Town Wall — Per-Flock Append-Only Log
 
 - `POST /flocks/{id}/post` — append a message (`{agent_id, body}`) to the flock's shared log
-- `GET /flocks/{id}/wall` — **SSE stream** that emits full history once, then forwards every new post live
+- `GET /flocks/{id}/wall` — **SSE stream** that emits active-log history once, then forwards every new post live
 - `GET /flocks/{id}/wall/history` — one-shot dump of the log as JSON
 - Backed by `flocks/<flock-id>/TOWN_WALL.log` on disk (kept as an audit artifact after `DELETE`)
 - Mutex-serialized writes with a buffered subscriber fan-out — slow subscribers are dropped from the current message rather than blocking the writer

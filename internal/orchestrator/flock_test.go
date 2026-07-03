@@ -214,3 +214,20 @@ func TestFlock_PausedAndAgentStatus(t *testing.T) {
 		t.Error("SetPaused(false) had no effect")
 	}
 }
+
+func TestFlock_BeginDeleteRejectsFutureMutation(t *testing.T) {
+	tmp := t.TempDir()
+	fm := NewFlockManager(tmp)
+	f, err := fm.Create("flock-delete", "task", filepath.Join(tmp, "flock-delete", "wall.log"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	unlockDelete := f.BeginDelete()
+	unlockDelete()
+
+	if unlock, ok := f.BeginMutation(); ok {
+		unlock()
+		t.Fatal("BeginMutation succeeded after BeginDelete")
+	}
+}

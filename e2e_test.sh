@@ -1016,6 +1016,18 @@ TARGET_GUEST_IP=$(curl -s "$API/vms" | jq -r ".[] | select(.vm_id==\"$TARGET_VM_
     && ok "Resolved private IP for $TARGET_AGENT_ID: $TARGET_GUEST_IP" \
     || fail "could not resolve guest_ip for $TARGET_VM_ID"
 TARGET_DIRECT_URL="http://${TARGET_GUEST_IP}:8080"
+TARGET_AGENT_TOKEN=$(agent_token_from_state "$TARGET_VM_ID" || true)
+[ -n "$TARGET_AGENT_TOKEN" ] \
+    && ok "Got agent_token for $TARGET_AGENT_ID from local state (${#TARGET_AGENT_TOKEN} chars)" \
+    || fail "Could not read local agent_token for $TARGET_AGENT_ID"
+UNIQUE_BODY="agent forward body $(date +%s%N)"
+UNIQUE_PAYLOAD=$(jq -nc --arg body "$UNIQUE_BODY" '{body:$body}')
+AUTH_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+    -X POST "$TARGET_DIRECT_URL/townwall/post" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $TARGET_AGENT_TOKEN" \
+    -d "$UNIQUE_PAYLOAD")
+check_http "$AUTH_CODE" "200" "POST $TARGET_DIRECT_URL/townwall/post"
 
 # Verify the auth wrapper rejects unauthenticated posts.
 NOAUTH_CODE=$(curl -s -o /dev/null -w "%{http_code}" \

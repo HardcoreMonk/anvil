@@ -33,6 +33,9 @@ type AgentInfo struct {
 // Flock is a named group of agents sharing one Town Wall.
 type Flock struct {
 	mu sync.RWMutex
+	// opMu serializes long-running flock lifecycle mutations that must not
+	// overlap: add-agent, role-change, pause/resume, and delete.
+	opMu sync.Mutex
 	// writeMu serializes metadata.json writes against any concurrent Persist
 	// caller (createFlock, watchdog.onFailure, recovery.markFlockAgentDead,
 	// per-agent restart). Held only for the duration of ToMetadata + tmp+rename
@@ -53,6 +56,33 @@ type Flock struct {
 	// pausedPrevStatus keeps the pre-pause status so pause rollback and metadata
 	// persistence can preserve the non-runtime lifecycle state.
 	pausedPrevStatus map[string]string
+	deleted          bool
+}
+
+// BeginMutation serializes a long-running lifecycle operation and rejects new
+// operations once the flock is being deleted. Callers must invoke the returned
+// unlock function exactly once when ok is true.
+func (f *Flock) BeginMutation() (unlock func(), ok bool) {
+	f.opMu.Lock()
+	f.mu.RLock()
+	deleted := f.deleted
+	f.mu.RUnlock()
+	if deleted {
+		f.opMu.Unlock()
+		return nil, false
+	}
+	return f.opMu.Unlock, true
+}
+
+// BeginDelete marks the flock as deleted under the mutation lock. It blocks
+// until any in-flight mutation finishes and prevents future mutations from
+// starting.
+func (f *Flock) BeginDelete() func() {
+	f.opMu.Lock()
+	f.mu.Lock()
+	f.deleted = true
+	f.mu.Unlock()
+	return f.opMu.Unlock
 }
 
 // AddAgent inserts or replaces an agent record under lock.

@@ -602,7 +602,7 @@ func (cp *ControlPlane) Start() error {
 		"  GET    /flocks/{flock_id}                — describe flock\n" +
 		"  DELETE /flocks/{flock_id}                — destroy flock\n" +
 		"  GET    /flocks/{flock_id}/wall           — SSE stream of Town Wall\n" +
-		"  GET    /flocks/{flock_id}/wall/history   — full Town Wall log\n" +
+		"  GET    /flocks/{flock_id}/wall/history   — active Town Wall log\n" +
 		"  POST   /flocks/{flock_id}/post           — post message to Town Wall\n" +
 		"  POST   /flocks/{flock_id}/agents/{id}/restart — restart one agent in place\n" +
 		"  GET    /audit                            — recent API access log (jsonl, rotated)\n" +
