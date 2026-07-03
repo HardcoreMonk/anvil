@@ -1067,6 +1067,9 @@ check_http "$(echo "$ADD_RESP" | tail -1)" "201" "POST /flocks/$FLOCK_ID/agents 
 ADD_BODY=$(echo "$ADD_RESP" | head -1)
 NEW_AGENT_ID=$(echo "$ADD_BODY" | jq -r '.agent_id')
 NEW_VM_ID=$(echo   "$ADD_BODY" | jq -r '.vm_id')
+[ "$(echo "$ADD_BODY" | jq -r 'has("agent_tokens") or has("agent_token")')" = "false" ] \
+    && ok "Add-agent response omits agent token fields ✓" \
+    || fail "Add-agent response unexpectedly exposed agent token fields"
 # flock created one worker (worker-1), so the added one is worker-2
 [ "$NEW_AGENT_ID" = "worker-2" ] \
     && ok "agent_id follows role-N indexing: $NEW_AGENT_ID ✓" \

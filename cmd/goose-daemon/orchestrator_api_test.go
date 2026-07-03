@@ -1,6 +1,9 @@
 package main
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"ephemera/internal/orchestrator"
@@ -37,6 +40,32 @@ func TestFlockMax(t *testing.T) {
 	f.MaxAgents = 5
 	if got := flockMax(f); got != 5 {
 		t.Errorf("flockMax(5) = %d, want 5", got)
+	}
+}
+
+func TestFlockAddAgentResponseOmitsAgentTokenFields(t *testing.T) {
+	resp := FlockAddAgentResponse{
+		AgentID:  "worker-2",
+		Role:     "worker",
+		VMID:     "vm-added",
+		AgentURL: "http://127.0.0.1:8080",
+	}
+	rr := httptest.NewRecorder()
+	writeJSON(rr, http.StatusCreated, resp)
+
+	var body map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("response JSON did not decode: %v", err)
+	}
+	for _, key := range []string{"agent_id", "role", "vm_id", "agent_url"} {
+		if _, ok := body[key]; !ok {
+			t.Fatalf("response missing %q: %s", key, rr.Body.String())
+		}
+	}
+	for _, key := range []string{"agent_token", "agent_tokens"} {
+		if _, ok := body[key]; ok {
+			t.Fatalf("response exposed %q: %s", key, rr.Body.String())
+		}
 	}
 }
 

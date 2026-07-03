@@ -1891,7 +1891,7 @@ curl http://localhost:3000/flocks/$FLOCK_ID -H "Authorization: Bearer $TOKEN"
 #### Add, remove, or change an agent (v0.4.3)
 
 ```bash
-# Add an agent — role-N id auto-assigned, agent_token returned once (20-agent cap)
+# Add an agent — role-N id auto-assigned; anvil omits guest token fields from the response
 curl -X POST http://localhost:3000/flocks/$FLOCK_ID/agents \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"role":"worker"}'

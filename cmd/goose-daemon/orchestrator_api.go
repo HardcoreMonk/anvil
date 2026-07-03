@@ -511,6 +511,16 @@ type AgentRoleRequest struct {
 	Role string `json:"role"`
 }
 
+// FlockAddAgentResponse is returned by POST /flocks/{id}/agents. The daemon
+// keeps the guest token internally; public add-agent responses must not expose
+// agent_token or agent_tokens.
+type FlockAddAgentResponse struct {
+	AgentID  string `json:"agent_id"`
+	Role     string `json:"role"`
+	VMID     string `json:"vm_id"`
+	AgentURL string `json:"agent_url"`
+}
+
 // nextAgentID returns the next "<role>-N" id for a role within a flock, using
 // max(existing N for that role)+1 so ids stay stable and never collide with a
 // live agent (matches createFlock's per-role indexing).
@@ -529,7 +539,7 @@ func nextAgentID(f *orchestrator.Flock, role string) string {
 
 // addFlockAgent spawns one new VM and registers it as a member of an existing
 // flock. POST /flocks/{id}/agents  {"role":"worker"}. The per-VM agent_token is
-// returned once (as in POST /flocks); it is not persisted on the flock.
+// kept internally for proxy injection and restart identity, but is not returned.
 func (cp *ControlPlane) addFlockAgent(w http.ResponseWriter, r *http.Request, flockID string) {
 	f, ok := cp.flockMgr.Get(flockID)
 	if !ok {
@@ -551,7 +561,7 @@ func (cp *ControlPlane) addFlockAgent(w http.ResponseWriter, r *http.Request, fl
 	}
 
 	agentID := nextAgentID(f, req.Role)
-	vmInfo, agentToken, err := cp.spawnVMForFlock(flockID, agentID, req.Role, f.TenantID, f.EgressPolicy)
+	vmInfo, _, err := cp.spawnVMForFlock(flockID, agentID, req.Role, f.TenantID, f.EgressPolicy)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, fmt.Errorf("spawn %s: %w", agentID, err))
 		return
@@ -570,12 +580,11 @@ func (cp *ControlPlane) addFlockAgent(w http.ResponseWriter, r *http.Request, fl
 		slog.Warn("add agent: town wall post failed", "flock_id", flockID, "err", err)
 	}
 	slog.Warn("flock: agent added", "flock_id", flockID, "agent_id", agentID, "role", req.Role, "vm_id", vmInfo.VMID)
-	writeJSON(w, http.StatusCreated, map[string]string{
-		"agent_id":    agentID,
-		"role":        req.Role,
-		"vm_id":       vmInfo.VMID,
-		"agent_url":   vmInfo.AgentURL,
-		"agent_token": agentToken,
+	writeJSON(w, http.StatusCreated, FlockAddAgentResponse{
+		AgentID:  agentID,
+		Role:     req.Role,
+		VMID:     vmInfo.VMID,
+		AgentURL: vmInfo.AgentURL,
 	})
 }
 

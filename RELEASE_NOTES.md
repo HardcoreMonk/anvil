@@ -71,8 +71,9 @@ wire format changed.
 ### Dynamic flock agent management (PR-A)
 
 - `POST /flocks/{id}/agents` `{"role":"worker"}` — spawn and attach a new
-  agent. The `agent_id` follows the per-role `role-N` rule (max existing N + 1)
-  and the one-time `agent_token` is returned. The 20-agent-per-flock cap is
+  agent. The `agent_id` follows the per-role `role-N` rule (max existing N + 1).
+  In anvil, the daemon keeps the one-time guest token internally and omits
+  `agent_token`/`agent_tokens` from this response. The 20-agent-per-flock cap is
   enforced.
 - `DELETE /flocks/{id}/agents/{agent_id}` — tear down the agent's VM and remove
   it from the flock. Removing the last agent leaves an empty flock (recoverable
