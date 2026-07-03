@@ -88,6 +88,9 @@ cross-host snapshot replication, scheduler-aware single-host flock placement를
 - **ephemera**: Firecracker MicroVM 생성, agent proxy, snapshot/restore,
   host resource 정리를 담당한다. 구현 위치는 `cmd/goose-daemon`, `internal/vm`,
   `internal/storage`, `internal/network`다.
+  v0.4.3 single-host control plane은 `/flocks/{id}/agents`, `/pause`,
+  `/resume`, `max_agents`, Town Wall history filter를 daemon-local lifecycle로
+  제공한다.
 
 - **guest runtime**: VM 내부 task 실행, health, graceful stop을 담당한다.
   구현 위치는 `cmd/goose-agent`, `cmd/micro-init`이다.
@@ -466,6 +469,9 @@ Upstream ephemera feature matrix:
 | **Live VM cold-restart** (v0.3.2) | `vms/<vm_id>/state.json` written on every spawn; daemon startup cleans orphan Firecracker processes, re-reserves the original TAP/IP/MAC, and boots each VM from its existing rootfs clone. Same `vm_id`, same agent token, same `agent_url` across the restart. Memory state is not preserved. See [Resilience](#resilience). |
 | **Watchdog dead-status persistence** (v0.3.3) | When the watchdog marks an agent `dead`, the new status is written to `flocks/<id>/metadata.json` (via `Flock.Persist`, serialized by a per-flock `writeMu`). Daemon restart and cold-restart both preserve the marking, so a once-dead agent stays dead until explicitly restarted. |
 | **Per-agent restart** (v0.3.3) | `POST /flocks/{id}/agents/{agent_id}/restart` tears down one flock member's VM and respawns it with the same `agent_id`, role, and `agent_token` (callers' cached tokens keep working). The new VM gets a fresh `vm_id` / `guest_ip`; the agent's status resets to `ready`. |
+| **Dynamic flock membership** (v0.4.3) | `POST /flocks/{id}/agents` adds an agent (per-role `role-N` id, returns `agent_token`, 20-agent cap); `DELETE /flocks/{id}/agents/{agent_id}` removes one (empty flock allowed); `PATCH …/agents/{agent_id}` changes role by recreating the VM under the new sizing/prompt (`agent_id` + token preserved). CLI: `ephemera-ctl flock add-agent`/`rm-agent`/`set-role`. |
+| **Flock pause/resume + max_agents** (v0.4.3) | `POST /flocks/{id}/pause` · `/resume` pause/resume **all** member VMs via Firecracker (runtime-only — not persisted; the watchdog skips dead-marking paused agents). `POST /flocks` accepts `max_agents` for a per-flock cap (default 20), enforced on create and add. CLI: `ephemera-ctl flock pause`/`resume`, `create --max-agents`. |
+| **Town Wall query + rotation** (v0.4.3) | `GET /flocks/{id}/wall/history` filters: `?agent_id=` / `since=` / `until=` (RFC3339) / `contains=`. The log rotates by size (`EPHEMERA_TOWNWALL_MAX_MIB` default 10 MiB, `_KEEP` default 3); history reflects the active file (rotated backups kept on disk). |
 | **Auto-injected control-plane token** (v0.3.3) | When `EPHEMERA_API_TOKENS` is set, the host writes the first non-expired client's token (`apiClients[0]` until v0.4.1's per-token TTL) into each flock VM at `/root/.ephemera-cp-token` (mode 0600); the in-VM `/townwall/post` forwarder reads it automatically. No more manual `EPHEMERA_CONTROL_PLANE_TOKEN` env inside every VM. |
 | **CP token hot rotation** (v0.3.4) | `EPHEMERA_API_TOKENS_FILE=/path/to/tokens` enables true hot rotation: edit the file, send SIGHUP, and the daemon both swaps `cp.clients` and fans the new token out to every running VM over vsock (`SET_CP_TOKEN` command, atomic file rewrite inside the guest). No per-VM restart needed for the in-VM forwarder to pick up the new bearer. |
 | **Env-tunable watchdog** (v0.3.4) | `EPHEMERA_WATCHDOG_INTERVAL_SEC` / `_TIMEOUT_SEC` / `_THRESHOLD` override the 5 s / 1 s / 3-fail defaults at startup. `EPHEMERA_WATCHDOG_AUTO_HEAL=true` opts in to self-healing — a `dead` agent that resumes responding is auto-marked `ready` (default off preserves sticky-dead). |
@@ -851,44 +857,49 @@ rate limit에 따라 보통 15-30분 이상 걸릴 수 있다.
 |-------|----------|
 | 1–5 | Daemon startup, single VM lifecycle (create → task → stop → delete) |
 | 6–9 | Two VMs in parallel — concurrent task execution |
-| 11–17 | Full snapshot lifecycle: create with `stop_after`, list, restore, verify agent token and new IP, delete |
-| 19–24 | **Concurrent restore** — two different snapshots restored simultaneously; verifies both VMs run at the same time with independent IPs and disks |
-| 26–28 | **Diff snapshot creation** — auto-detection: first snapshot → `full`, second → `diff` with correct `base_snapshot_id` |
-| 29 | **Diff size verification** — `stat -c%b` confirms Diff `memory.bin` allocates fewer disk blocks than Full (sparse file) |
-| 30–32 | Diff snapshot restore — merged memory applied, agent responds, token preserved |
-| 33 | **Dependency protection** — deleting the Full base while Diff references it returns `409 Conflict` |
-| 34 | Ordered cleanup: delete Diff → delete Full (now unblocked) |
-| 36–37 | **COW rootfs** — create VM, take snapshot |
-| 38–40 | Restore via dm-snapshot: verify `/dev/mapper/cow-*` device active; exception store initially ≈ 0 MB actual disk usage |
-| 41 | Restored agent `/health` responds |
-| 42 | Delete restored VM: verify dm device, loop devices, and `.cow` file all cleaned up |
-| 43 | Delete snapshot and verify empty |
-| 45–47 | **Agent proxy** — `GET /vms/{id}/health`, `POST /vms/{id}/stop` via control plane proxy; no direct VM IP access |
-| 48–49 | **`EPHEMERA_PUBLIC_URL`** — restart daemon with var set; verify `agent_url` becomes proxy path; use `agent_url` for health + stop |
-| 51 | Prep role profile yaml files from `.example` placeholders |
-| 52 | **Flock spawn** — `POST /flocks` with 5 roles (orchestrator/researcher×2/worker/reviewer) returns 201, `agents.length == 5`, valid `townwall_url` |
-| 53 | `GET /vms` shows all 5 flock members |
-| 54 | `POST /flocks/{id}/post` accepts a message and persists it |
-| 54b | **In-VM forwarding** — direct `POST $agent_url/townwall/post` (the chain that `gtwall` uses) round-trips through goose-agent → control plane; unauthenticated probe rejected with 401 |
-| 55 | `GET /flocks/{id}/wall/history` returns ≥ 3 entries (orchestrator init + step 54 + step 54b) and the 54b body (escaped quote + backslash) matches verbatim |
-| 56 | `GET /flocks` lists the new flock |
-| 57 | **Flock teardown** — `DELETE /flocks/{id}` returns 200; all 5 VMs and the flock registry entry are gone |
-| 57a | Create a separate resilience flock (3 agents) |
-| 57b | **SSE seq monotonicity** — successive `POST /flocks/{id}/post` responses carry strictly increasing `seq` |
-| 57c | **Flock persistence** — `flocks/<id>/metadata.json` exists with correct `flock_id` and `schema_version: 1` |
-| 57d | **Recovery setup** — verify `vms/<vm_id>/state.json` for each agent; kill daemon (and Firecrackers); restart with `EPHEMERA_API_ADDR=0.0.0.0:3000`; flock metadata reloaded; Town Wall history preserved with seq continuity |
-| 57e | **Cold-restart VM IDs preserved** — every pre-restart `vm_id` reappears in `GET /vms` with same identity |
-| 57f | **Recovered VM `/health` responds** — proxy `GET /vms/{id}/health` returns 200 for each cold-restarted member |
-| 57g | `DELETE` on a recovered flock removes its `metadata.json` |
-| 57h | Daemon log shows the `watchdog started` slog line for each daemon invocation (lowercase since the v0.3.5 slog migration) |
-| 57i | **Watchdog persists dead status to disk** (v0.3.3) — kill an in-VM agent, watchdog marks `dead`, `flocks/{id}/metadata.json` on disk reflects `dead` before the next probe (Persist hook fired). Daemon restart is intentionally not part of this step because cold-restart of a healthy guest legitimately re-flips to `ready`. |
-| 57j | **Per-agent restart preserves identity + token** (v0.3.3) — `POST /flocks/{id}/agents/{agent_id}/restart` swaps `vm_id`, keeps role/token; new VM's `/townwall/post` accepts the OLD token |
-| 58 | Daemon graceful shutdown |
-| 58b | **Auth-on CP token auto-injection** (v0.3.3) — restart daemon with `EPHEMERA_API_TOKENS` set; flock VM's `/townwall/post` forward to CP returns 200 without any in-VM env setup |
-| 59 | **Real-LLM round-trip** (v0.3.3) — when `GOOGLE_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` is in env, spawn researcher, send `/tasks`, verify `ROUNDTRIP_OK` reaches Town Wall via `gtwall`. Skipped (ok) when no key. |
-| 58c | **CP token hot rotation via SIGHUP** (v0.3.4) — restart daemon with `EPHEMERA_API_TOKENS_FILE`; spawn flock under v1; edit file to v2 + SIGHUP; verify post-rotation `/townwall/post` still 200 (in-VM `/root/.ephemera-cp-token` rewritten via vsock), v1 operator bearer now 401, and the daemon log carries `msg="sighup: cp token propagated" ok=N total=M` (slog form since v0.3.5). |
-| 61 | **`/metrics` endpoint format** (v0.3.5) — `GET /metrics` returns 200 unauthenticated, `Content-Type: text/plain; version=0.0.4`, body contains `# HELP`/`# TYPE` lines plus `ephemera_vm_count` gauge and `ephemera_sighup_reload_total` counter samples. |
-| 62 | **Per-VM `/stats` endpoint + `?stats=true`** (v0.3.5) — spawn a VM, `GET /vms/{vm_id}/stats` returns a JSON snapshot with `uptime_seconds ≥ 0`, `mem_total_mib > 0`, numeric `cpu_percent`; `GET /vms?stats=true` inlines the same `stats` block on every VM list entry. |
+| 10–16 | Full snapshot lifecycle: create with `stop_after`, list, restore, verify agent token and new IP, delete |
+| 17–22 | **Concurrent restore** — two different snapshots restored simultaneously; verifies both VMs run at the same time with independent IPs and disks |
+| 23–25 | **Diff snapshot creation** — auto-detection: first snapshot → `full`, second → `diff` with correct `base_snapshot_id` |
+| 26 | **Diff size verification** — `stat -c%b` confirms Diff `memory.bin` allocates fewer disk blocks than Full (sparse file) |
+| 26b | **Diff rootfs is a sparse delta** (v0.4.0) — Diff snapshot stores `rootfs.diff` (no full `rootfs.ext4`); `stat -c%b` confirms far fewer blocks than the Full snapshot's rootfs |
+| 27–29 | Diff snapshot restore — merged memory applied, agent responds, token preserved |
+| 30 | **Dependency protection** — deleting the Full base while Diff references it returns `409 Conflict` |
+| 31 | Ordered cleanup: delete Diff → delete Full (now unblocked) |
+| 32–33 | **COW rootfs** — create VM, take snapshot |
+| 34–36 | Restore via dm-snapshot: verify `/dev/mapper/cow-*` device active; exception store initially ≈ 0 MB actual disk usage |
+| 37 | Restored agent `/health` responds |
+| 38 | Delete restored VM: verify dm device, loop devices, and `.cow` file all cleaned up |
+| 39 | Delete snapshot and verify empty |
+| 40–46 | **COW spawn cold-restart** (v0.4.0) — relaunch daemon with `EPHEMERA_DISK_MODE=cow`; spawn 2 COW VMs; graceful restart preserves each `.cow` store and re-creates the dm device (same `vm_id`, `/health` 200); then a SIGKILL crash with one `state.json` removed proves `RemoveOrphanCOWDevices` reclaims the orphan while the survivor is cold-restarted; restores plain disk mode |
+| 47–49 | **Agent proxy** — `GET /vms/{id}/health`, `POST /vms/{id}/stop` via control plane proxy; no direct VM IP access |
+| 50–51 | **`EPHEMERA_PUBLIC_URL`** — restart daemon with var set; verify `agent_url` becomes proxy path; use `agent_url` for health + stop |
+| 52 | Prep role profile yaml files from `.example` placeholders |
+| 53 | **Flock spawn** — `POST /flocks` with 5 roles (orchestrator/researcher×2/worker/reviewer) returns 201, `agents.length == 5`, valid `townwall_url` |
+| 54 | `GET /vms` shows all 5 flock members |
+| 55 | `POST /flocks/{id}/post` accepts a message and persists it |
+| 55a | **In-VM forwarding** — direct `POST $agent_url/townwall/post` (the chain that `gtwall` uses) round-trips through goose-agent → control plane; unauthenticated probe rejected with 401 |
+| 56 | `GET /flocks/{id}/wall/history` returns ≥ 3 entries (orchestrator init + step 55 + step 55a) and the 55a body (escaped quote + backslash) matches verbatim |
+| 56a | **Town Wall query filters** (v0.4.3) — `?agent_id=` returns only that agent's entries; `?contains=` returns only matching bodies |
+| 57 | `GET /flocks` lists the new flock |
+| 57a–c | **Dynamic agent membership** (v0.4.3) — `POST /flocks/{id}/agents` adds `worker-2` (count→6, `/health` 200); `PATCH …/agents/worker-2` `{role:reviewer}` recreates the VM (vm_id swap, role updated); `DELETE …/agents/worker-2` (count→5, VM torn down) |
+| 57d–f | **Pause/resume + max_agents** (v0.4.3) — `POST /flocks/{id}/pause` (members → `paused`; watchdog leaves them alone past its threshold), `/resume` (→ `ready`, `/health` 200); `POST /flocks {roles:3, max_agents:2}` → 400 |
+| 58 | **Flock teardown** — `DELETE /flocks/{id}` returns 200; all 5 VMs and the flock registry entry are gone |
+| 59 | Create a separate resilience flock (3 agents) |
+| 60 | **SSE seq monotonicity** — successive `POST /flocks/{id}/post` responses carry strictly increasing `seq` |
+| 61 | **Flock persistence** — `flocks/<id>/metadata.json` exists with correct `flock_id` and `schema_version: 1` |
+| 62 | **Recovery setup** — verify `vms/<vm_id>/state.json` for each agent; kill daemon (and Firecrackers); restart with `EPHEMERA_API_ADDR=0.0.0.0:3000`; flock metadata reloaded; Town Wall history preserved with seq continuity |
+| 63 | **Cold-restart VM IDs preserved** — every pre-restart `vm_id` reappears in `GET /vms` with same identity |
+| 64 | **Recovered VM `/health` responds** — proxy `GET /vms/{id}/health` returns 200 for each cold-restarted member |
+| 65 | `DELETE` on a recovered flock removes its `metadata.json` |
+| 66 | Daemon log shows the `watchdog started` slog line for each daemon invocation (lowercase since the v0.3.5 slog migration) |
+| 67 | **Watchdog persists dead status to disk** (v0.3.3) — kill an in-VM agent, watchdog marks `dead`, `flocks/{id}/metadata.json` on disk reflects `dead` before the next probe (Persist hook fired). Daemon restart is intentionally not part of this step because cold-restart of a healthy guest legitimately re-flips to `ready`. |
+| 68 | **Per-agent restart preserves identity + token** (v0.3.3) — `POST /flocks/{id}/agents/{agent_id}/restart` swaps `vm_id`, keeps role/token; new VM's `/townwall/post` accepts the OLD token |
+| 69 | Daemon graceful shutdown |
+| 70 | **Auth-on CP token auto-injection** (v0.3.3) — restart daemon with `EPHEMERA_API_TOKENS` set; flock VM's `/townwall/post` forward to CP returns 200 without any in-VM env setup |
+| 71 | **Real-LLM round-trip** (v0.3.3) — when `GOOGLE_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` is in env, spawn researcher, send `/tasks`, verify `ROUNDTRIP_OK` reaches Town Wall via `gtwall`. Skipped (ok) when no key. |
+| 72 | **CP token hot rotation via SIGHUP** (v0.3.4) — restart daemon with `EPHEMERA_API_TOKENS_FILE`; spawn flock under v1; edit file to v2 + SIGHUP; verify post-rotation `/townwall/post` still 200 (in-VM `/root/.ephemera-cp-token` rewritten via vsock), v1 operator bearer now 401, and the daemon log carries `msg="sighup: cp token propagated" ok=N total=M` (slog form since v0.3.5). |
+| 73 | **`/metrics` endpoint format** (v0.3.5) — `GET /metrics` returns 200 unauthenticated, `Content-Type: text/plain; version=0.0.4`, body contains `# HELP`/`# TYPE` lines plus `ephemera_vm_count` gauge and `ephemera_sighup_reload_total` counter samples. |
+| 74 | **Per-VM `/stats` endpoint + `?stats=true`** (v0.3.5) — spawn a VM, `GET /vms/{vm_id}/stats` returns a JSON snapshot with `uptime_seconds ≥ 0`, `mem_total_mib > 0`, numeric `cpu_percent`; `GET /vms?stats=true` inlines the same `stats` block on every VM list entry. |
 | 75 | Rotation daemon shutdown |
 | 76 | **Memory auto-snapshot warm restore** (v0.4.0) — spawn a VM under `EPHEMERA_AUTOSNAPSHOT=true`; graceful SIGTERM bounce writes `vms/{id}/auto/{memory,state}.bin`; the next start warm-restores it (same `vm_id`, `/health` 200, daemon logs `vm warm-restored` rather than `vm back up`) and deletes the one-shot snapshot. Also gates the `forwardSignals` SIGTERM fix — a forwarded SIGTERM would kill Firecracker mid-snapshot. |
 | 77 | **Recovery disk-missing clean drop** (v0.4.0) — spawn a 1-agent flock, SIGKILL the daemon (host TAP lingers), delete the worker's rootfs, restart: `state.json` dropped, VM absent from `/vms`, stale TAP released, flock agent marked `dead` in `metadata.json`, and surfaced via the `vms not cold-restarted` log (not a silent drop). |
@@ -1141,6 +1152,7 @@ control plane으로 전달할 때 Bearer token으로 첨부한다.
 | `EPHEMERA_AUDIT_DISABLE` | `false` | Set to `true` to turn off the access audit log (v0.4.1). When enabled (the default), every API request is appended as one JSON line to `{workDir}/audit/access.jsonl` (method, path, client name, status, latency — never tokens or bodies) and is queryable via `GET /audit`. |
 | `EPHEMERA_AUDIT_MAX_MIB` | `100` | Active audit file size (MiB) that triggers rotation to `access.jsonl.1` (v0.4.1). |
 | `EPHEMERA_AUDIT_KEEP` | `5` | Number of rotated audit files to retain; older ones are deleted (v0.4.1). Disk ceiling ≈ `MAX_MIB × (KEEP + 1)`. |
+| `EPHEMERA_TOWNWALL_MAX_MIB` / `_KEEP` | `10` / `3` | Town Wall log size-based rotation (v0.4.3): once the active `TOWN_WALL.log` passes `MAX_MIB` it shifts to `.1`…`.KEEP` and a fresh file continues. `GET /flocks/{id}/wall/history` reflects the active file. |
 | `EPHEMERA_CTL_URL` | `http://127.0.0.1:3000` | Base URL the `ephemera-ctl` operator CLI dials (v0.4.1). Not derived from `EPHEMERA_API_ADDR` — that is a bind address and `0.0.0.0` is not dialable. |
 | `EPHEMERA_CTL_TOKEN` | *(unset)* | Bearer token for `ephemera-ctl`; falls back to `EPHEMERA_API_TOKEN`. A `--token` flag overrides both (v0.4.1). |
 
@@ -1168,6 +1180,10 @@ ephemera-ctl flock ls | get <id> | rm <id>
 ephemera-ctl flock post <id> --agent worker-1 --body "msg"
 ephemera-ctl flock wall <id> [--history]      # stream Town Wall SSE, or print history
 ephemera-ctl flock restart <id> <agent_id>
+ephemera-ctl flock add-agent <id> <role>      # v0.4.3: add / remove / role-change
+ephemera-ctl flock rm-agent <id> <agent_id>
+ephemera-ctl flock set-role <id> <agent_id> <role>
+ephemera-ctl flock pause <id> | resume <id>   # v0.4.3: pause/resume all members
 
 ephemera-ctl snapshot ls | restore <id> | rm <id>
 ephemera-ctl audit [--limit N] [--client C] [--status S] [--method M]
@@ -1845,10 +1861,71 @@ curl -X POST http://localhost:3000/vms/$VM_ID/tasks \
 
 curl -X POST http://localhost:3000/vms/$VM_ID/stop \
   -H "Authorization: Bearer $TOKEN"
+# Filters (v0.4.3, combinable): ?agent_id=worker-1 · ?since= / ?until= (RFC3339) · ?contains=text
+curl "http://localhost:3000/flocks/$FLOCK_ID/wall/history?agent_id=worker-1&contains=build" \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 외부 client는 control-plane token만 사용한다. daemon이 guest agent token을
 내부적으로 주입한다.
+
+```json
+[
+  { "timestamp":"...","agent_id":"orchestrator","body":"Flock spawned with 5 agents: [...]" },
+  { "timestamp":"...","agent_id":"researcher-1","body":"Found existing dark mode CSS variables" }
+]
+```
+
+#### List flocks
+
+```bash
+curl http://localhost:3000/flocks -H "Authorization: Bearer $TOKEN"
+```
+
+#### Describe a flock
+
+```bash
+curl http://localhost:3000/flocks/$FLOCK_ID -H "Authorization: Bearer $TOKEN"
+```
+
+#### Add, remove, or change an agent (v0.4.3)
+
+```bash
+# Add an agent — role-N id auto-assigned, agent_token returned once (20-agent cap)
+curl -X POST http://localhost:3000/flocks/$FLOCK_ID/agents \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"role":"worker"}'
+
+# Change an agent's role — VM recreated under the new role (agent_id + token kept)
+curl -X PATCH http://localhost:3000/flocks/$FLOCK_ID/agents/worker-2 \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"role":"reviewer"}'
+
+# Remove an agent — VM torn down; removing the last agent leaves an empty flock
+curl -X DELETE http://localhost:3000/flocks/$FLOCK_ID/agents/worker-2 \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+#### Pause or resume a flock (v0.4.3)
+
+```bash
+# Pause all members (runtime-only — a daemon restart brings them back running)
+curl -X POST http://localhost:3000/flocks/$FLOCK_ID/pause -H "Authorization: Bearer $TOKEN"
+# Resume all members
+curl -X POST http://localhost:3000/flocks/$FLOCK_ID/resume -H "Authorization: Bearer $TOKEN"
+```
+
+> A per-flock agent cap is set at creation: `POST /flocks {"…", "max_agents": N}` (default 20), enforced on create and on add.
+
+#### Tear down a flock
+
+```bash
+curl -X DELETE http://localhost:3000/flocks/$FLOCK_ID \
+  -H "Authorization: Bearer $TOKEN"
+# {"status":"deleted","flock_id":"flock-..."}
+```
+
+Destroys every member VM in parallel and removes the flock from the registry. The Town Wall log on disk (`flocks/<id>/TOWN_WALL.log`) is left in place as an audit artifact.
 
 #### Restart a single agent (v0.3.3)
 

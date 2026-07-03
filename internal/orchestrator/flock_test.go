@@ -133,3 +133,76 @@ func TestFlock_MarshalJSON(t *testing.T) {
 		t.Errorf("MarshalJSON should not expose TownWall: %s", s)
 	}
 }
+
+func TestFlock_RemoveAgent(t *testing.T) {
+	tmp := t.TempDir()
+	fm := NewFlockManager(tmp)
+	f, err := fm.Create("flock-rm", "task", filepath.Join(tmp, "flock-rm", "wall.log"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	f.AddAgent(&AgentInfo{AgentID: "worker-1", Role: "worker"})
+	f.AddAgent(&AgentInfo{AgentID: "worker-2", Role: "worker"})
+
+	f.RemoveAgent("worker-1")
+	if n := len(f.Snapshot()); n != 1 {
+		t.Errorf("expected 1 agent after remove, got %d", n)
+	}
+	for _, a := range f.Snapshot() {
+		if a.AgentID == "worker-1" {
+			t.Error("worker-1 should be removed")
+		}
+	}
+	f.RemoveAgent("nonexistent") // no-op, must not panic
+}
+
+func TestFlock_ChangeAgentRole(t *testing.T) {
+	tmp := t.TempDir()
+	fm := NewFlockManager(tmp)
+	f, err := fm.Create("flock-role", "task", filepath.Join(tmp, "flock-role", "wall.log"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	f.AddAgent(&AgentInfo{AgentID: "worker-1", Role: "worker"})
+
+	f.ChangeAgentRole("worker-1", "reviewer")
+	role := ""
+	for _, a := range f.Snapshot() {
+		if a.AgentID == "worker-1" {
+			role = a.Role
+		}
+	}
+	if role != "reviewer" {
+		t.Errorf("role not changed: %q", role)
+	}
+	f.ChangeAgentRole("nonexistent", "x") // no-op, must not panic
+}
+
+func TestFlock_PausedAndAgentStatus(t *testing.T) {
+	tmp := t.TempDir()
+	fm := NewFlockManager(tmp)
+	f, err := fm.Create("flock-p", "task", filepath.Join(tmp, "flock-p", "wall.log"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	f.AddAgent(&AgentInfo{AgentID: "worker-1", Role: "worker", Status: AgentStatusReady})
+
+	if f.Paused {
+		t.Error("new flock should not be paused")
+	}
+	f.SetPaused(true)
+	if !f.Paused {
+		t.Error("SetPaused(true) had no effect")
+	}
+	f.UpdateAgentStatus("worker-1", AgentStatusPaused)
+	if got := f.AgentStatus("worker-1"); got != AgentStatusPaused {
+		t.Errorf("AgentStatus = %q, want %q", got, AgentStatusPaused)
+	}
+	if got := f.AgentStatus("nobody"); got != "" {
+		t.Errorf("AgentStatus(unknown) = %q, want empty", got)
+	}
+	f.SetPaused(false)
+	if f.Paused {
+		t.Error("SetPaused(false) had no effect")
+	}
+}

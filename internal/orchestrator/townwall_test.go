@@ -1,6 +1,8 @@
 package orchestrator
 
 import (
+	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -151,5 +153,32 @@ func TestParseLine(t *testing.T) {
 		if m.AgentID != c.agent || m.Body != c.body {
 			t.Errorf("parseLine(%q) = %+v, want agent=%q body=%q", c.in, m, c.agent, c.body)
 		}
+	}
+}
+
+// TestTownWall_Rotation verifies size-based rotation (v0.4.3): once the active
+// log passes maxBytes it shifts to .1 and a fresh active file continues.
+func TestTownWall_Rotation(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "TOWN_WALL.log")
+	tw, err := NewTownWall("flock-rot", path)
+	if err != nil {
+		t.Fatalf("NewTownWall: %v", err)
+	}
+	tw.SetRotation(300, 2) // small threshold forces rotation within a few posts
+	for i := 0; i < 60; i++ {
+		if _, err := tw.Post("worker-1", fmt.Sprintf("padded message body number %d", i)); err != nil {
+			t.Fatalf("Post %d: %v", i, err)
+		}
+	}
+	if _, err := os.Stat(path + ".1"); err != nil {
+		t.Errorf("expected rotated backup %s.1: %v", path, err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat active: %v", err)
+	}
+	if fi.Size() >= 300*4 {
+		t.Errorf("active file should have rotated; size=%d", fi.Size())
 	}
 }

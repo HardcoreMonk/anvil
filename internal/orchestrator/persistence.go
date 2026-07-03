@@ -17,6 +17,7 @@ type FlockMetadata struct {
 	Task          string                `json:"task"`
 	TenantID      string                `json:"tenant_id,omitempty"`
 	EgressPolicy  string                `json:"egress_policy,omitempty"`
+	MaxAgents     int                   `json:"max_agents"` // per-flock agent cap (v0.4.3); 0 = use default
 	Agents        map[string]*AgentInfo `json:"agents"`
 	CreatedAt     time.Time             `json:"created_at"`
 	SchemaVersion int                   `json:"schema_version"`

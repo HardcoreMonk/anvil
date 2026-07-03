@@ -57,6 +57,60 @@
 - `go build ./cmd/anvil-mcp`
 - `go build ./cmd/goose-daemon`
 
+# v0.4.3 — Flock Lifecycle
+
+**Ephemera** v0.4.3 makes flocks adjustable at runtime: **PR-A** dynamic agent
+membership (add/remove/role-change), **PR-B** flock pause/resume + per-flock
+agent cap, **PR-C** Town Wall history filters + log rotation. Additive — no
+wire format changed.
+
+---
+
+## What's New
+
+### Dynamic flock agent management (PR-A)
+
+- `POST /flocks/{id}/agents` `{"role":"worker"}` — spawn and attach a new
+  agent. The `agent_id` follows the per-role `role-N` rule (max existing N + 1)
+  and the one-time `agent_token` is returned. The 20-agent-per-flock cap is
+  enforced.
+- `DELETE /flocks/{id}/agents/{agent_id}` — tear down the agent's VM and remove
+  it from the flock. Removing the last agent leaves an empty flock (recoverable
+  via add; use `DELETE /flocks/{id}` for the whole flock).
+- `PATCH /flocks/{id}/agents/{agent_id}` `{"role":"reviewer"}` — change an
+  agent's role. Because role binds VM sizing + system prompt at spawn time, the
+  VM is recreated under the new role (`agent_id` and `agent_token` preserved,
+  like restart).
+- `ephemera-ctl flock add-agent`/`rm-agent`/`set-role` wrap the three endpoints.
+- Each membership change is posted to the Town Wall; the watchdog auto-discovers
+  added VMs and forgets removed ones.
+
+### Flock pause/resume + per-flock max_agents (PR-B)
+
+- `POST /flocks/{id}/pause` / `POST /flocks/{id}/resume` — pause/resume **all**
+  member VMs via Firecracker PauseVM/ResumeVM. **Runtime-only**: agent status
+  flips to `paused`/`ready` and `Flock.Paused` toggles, but nothing is persisted
+  (a daemon restart brings members back running). A partial pause failure rolls
+  back (resumes already-paused members).
+- The health watchdog **skips dead-marking `paused` agents** — a paused VM
+  intentionally doesn't answer `/health`, so it must not be marked dead.
+- `POST /flocks` accepts `max_agents` — a per-flock agent cap (default 20),
+  enforced on create **and** on `POST /flocks/{id}/agents`. Persisted in
+  metadata (backward-compatible; an absent/0 value falls back to the default).
+- `ephemera-ctl flock pause`/`resume`; `flock create --max-agents N`.
+
+### Town Wall query filters + log rotation (PR-C)
+
+- `GET /flocks/{id}/wall/history` accepts filters: `agent_id` (exact),
+  `since`/`until` (RFC3339, inclusive), `contains` (body substring). Combinable;
+  an all-empty filter returns the full history.
+- The Town Wall log now **rotates by size**: past `EPHEMERA_TOWNWALL_MAX_MIB`
+  (default 10) the active log shifts to `.1` (…→`EPHEMERA_TOWNWALL_KEEP`,
+  default 3) and a fresh file continues. `History` reflects the active file
+  (rotated backups stay on disk, mirroring the audit log).
+
+---
+
 # v0.4.2 — COW Spawn Support Without Default Flip
 
 **anvil**은 upstream ephemera v0.4.2의 COW spawn rootfs와 COW+Diff snapshot 지원을

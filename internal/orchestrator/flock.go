@@ -3,7 +3,9 @@ package orchestrator
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -14,7 +16,8 @@ const (
 	AgentStatusReady    = "ready"
 	AgentStatusBusy     = "busy"
 	AgentStatusDone     = "done"
-	AgentStatusDead     = "dead" // assigned by the health watchdog after consecutive probe failures
+	AgentStatusDead     = "dead"   // assigned by the health watchdog after consecutive probe failures
+	AgentStatusPaused   = "paused" // set by flock pause; the watchdog skips dead-marking these (v0.4.3)
 )
 
 // AgentInfo is the per-agent record exposed via flock APIs.
@@ -38,9 +41,14 @@ type Flock struct {
 	Task         string                `json:"task"`
 	TenantID     string                `json:"tenant_id,omitempty"`
 	EgressPolicy string                `json:"egress_policy,omitempty"`
+	MaxAgents    int                   `json:"max_agents"` // per-flock agent cap (v0.4.3); 0 means use the default
 	Agents       map[string]*AgentInfo `json:"agents"`
 	TownWall     *TownWall             `json:"-"`
 	CreatedAt    time.Time             `json:"created_at"`
+	// Paused is a runtime-only flag set by flock pause/resume (v0.4.3). It is
+	// deliberately NOT persisted (Firecracker pause is a runtime state); a daemon
+	// restart brings members back running. Exposed via MarshalJSON, not ToMetadata.
+	Paused bool `json:"-"`
 }
 
 // AddAgent inserts or replaces an agent record under lock.
@@ -73,6 +81,45 @@ func (f *Flock) UpdateAgentVM(agentID, newVMID, newAgentURL string) {
 		a.AgentURL = newAgentURL
 		a.Status = AgentStatusReady
 	}
+}
+
+// RemoveAgent deletes an agent record from the flock under lock. No-op when the
+// agent ID is unknown. The agent's Town Wall messages are intentionally left in
+// place — a membership change is not an audit erasure.
+func (f *Flock) RemoveAgent(agentID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.Agents, agentID)
+}
+
+// ChangeAgentRole updates the role label of an existing agent under lock. No-op
+// when the agent ID is unknown. Because role is bound at spawn time (VM sizing +
+// system prompt), callers that need the new role to take effect must also
+// recreate the agent's VM.
+func (f *Flock) ChangeAgentRole(agentID, newRole string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if a, ok := f.Agents[agentID]; ok {
+		a.Role = newRole
+	}
+}
+
+// SetPaused sets the runtime-only paused flag under lock (v0.4.3).
+func (f *Flock) SetPaused(paused bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Paused = paused
+}
+
+// AgentStatus returns an agent's current status under a read lock, or "" when
+// the agent is unknown. Used by the watchdog to skip dead-marking paused agents.
+func (f *Flock) AgentStatus(agentID string) string {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if a, ok := f.Agents[agentID]; ok {
+		return a.Status
+	}
+	return ""
 }
 
 // Persist atomically writes the flock's current metadata to disk. Holds
@@ -115,6 +162,7 @@ func (f *Flock) ToMetadata() FlockMetadata {
 		Task:          f.Task,
 		TenantID:      f.TenantID,
 		EgressPolicy:  f.EgressPolicy,
+		MaxAgents:     f.MaxAgents,
 		Agents:        agents,
 		CreatedAt:     f.CreatedAt,
 		SchemaVersion: currentSchemaVersion,
@@ -132,6 +180,8 @@ func (f *Flock) MarshalJSON() ([]byte, error) {
 		Task         string                `json:"task"`
 		TenantID     string                `json:"tenant_id,omitempty"`
 		EgressPolicy string                `json:"egress_policy,omitempty"`
+		MaxAgents    int                   `json:"max_agents"`
+		Paused       bool                  `json:"paused"`
 		Agents       map[string]*AgentInfo `json:"agents"`
 		CreatedAt    time.Time             `json:"created_at"`
 	}
@@ -140,6 +190,8 @@ func (f *Flock) MarshalJSON() ([]byte, error) {
 		Task:         f.Task,
 		TenantID:     f.TenantID,
 		EgressPolicy: f.EgressPolicy,
+		MaxAgents:    f.MaxAgents,
+		Paused:       f.Paused,
 		Agents:       f.Agents,
 		CreatedAt:    f.CreatedAt,
 	})
@@ -150,15 +202,32 @@ type FlockManager struct {
 	mu      sync.RWMutex
 	flocks  map[string]*Flock
 	workDir string
+
+	townWallMaxBytes int64 // Town Wall rotation threshold (v0.4.3); 0 = off
+	townWallKeep     int   // rotated Town Wall backups to retain
 }
 
 // NewFlockManager returns an empty manager rooted at workDir.
 // workDir is where per-flock subdirectories (TOWN_WALL.log, handoff/) live.
 func NewFlockManager(workDir string) *FlockManager {
 	return &FlockManager{
-		flocks:  make(map[string]*Flock),
-		workDir: workDir,
+		flocks:           make(map[string]*Flock),
+		workDir:          workDir,
+		townWallMaxBytes: int64(envIntDefault("EPHEMERA_TOWNWALL_MAX_MIB", 10)) << 20,
+		townWallKeep:     envIntDefault("EPHEMERA_TOWNWALL_KEEP", 3),
 	}
+}
+
+// envIntDefault parses a positive int env var, falling back to def. The daemon's
+// envInt lives in package main; this mirrors it for Town Wall rotation config
+// (v0.4.3) since the orchestrator package can't import it.
+func envIntDefault(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return def
 }
 
 // WorkDir returns the directory used to root flock-local files.
@@ -182,6 +251,7 @@ func (fm *FlockManager) Create(flockID, task string, args ...string) (*Flock, er
 	if err != nil {
 		return nil, err
 	}
+	tw.SetRotation(fm.townWallMaxBytes, fm.townWallKeep)
 	f := &Flock{
 		ID:           flockID,
 		Task:         task,
@@ -249,11 +319,13 @@ func (fm *FlockManager) LoadFromDisk() (recovered int, failed []string, err erro
 			failed = append(failed, meta.FlockID)
 			continue
 		}
+		tw.SetRotation(fm.townWallMaxBytes, fm.townWallKeep)
 		f := &Flock{
 			ID:           meta.FlockID,
 			Task:         meta.Task,
 			TenantID:     meta.TenantID,
 			EgressPolicy: meta.EgressPolicy,
+			MaxAgents:    meta.MaxAgents,
 			Agents:       meta.Agents,
 			TownWall:     tw,
 			CreatedAt:    meta.CreatedAt,

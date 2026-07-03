@@ -1033,14 +1033,106 @@ HIST_COUNT=$(echo "$HIST" | jq 'length')
 [ "$HIST_COUNT" -ge "2" ] && ok "Town Wall has $HIST_COUNT entries" \
                           || fail "Expected ≥2 entries, got $HIST_COUNT"
 
-# ── 56. List flocks ──────────────────────────────────────────────
-step "56. Verify GET /flocks lists the new flock"
+# Verify the in-VM /townwall/post entry survives the agent → CP forward
+# with the correct agent_id (resolved from /root/.ephemera-flock) and body
+# (escaped through the JSON chain).
+MATCH=$(echo "$HIST" | jq --arg id "$TARGET_AGENT_ID" --arg body "$UNIQUE_BODY" \
+    '[.[] | select(.agent_id == $id and .body == $body)] | length')
+[ "$MATCH" = "1" ] \
+    && ok "In-VM /townwall/post entry round-tripped (agent_id+body match) ✓" \
+    || fail "In-VM /townwall/post entry not found in history (exact matches: $MATCH)"
+
+step "56a. Town Wall history query filters (v0.4.3 PR-C)"
+BY_AGENT=$(curl -s "$API/flocks/$FLOCK_ID/wall/history?agent_id=$TARGET_AGENT_ID")
+BY_AGENT_N=$(echo "$BY_AGENT" | jq 'length')
+BY_AGENT_WRONG=$(echo "$BY_AGENT" | jq --arg id "$TARGET_AGENT_ID" '[.[] | select(.agent_id != $id)] | length')
+[ "$BY_AGENT_N" -ge "1" ] && [ "$BY_AGENT_WRONG" = "0" ] \
+    && ok "?agent_id=$TARGET_AGENT_ID → $BY_AGENT_N entries, all match ✓" \
+    || fail "agent_id filter: $BY_AGENT_N entries, $BY_AGENT_WRONG wrong"
+CONTAINS_N=$(curl -s "$API/flocks/$FLOCK_ID/wall/history?contains=spawned" | jq 'length')
+[ "$CONTAINS_N" -ge "1" ] && ok "?contains=spawned → $CONTAINS_N entries ✓" \
+    || fail "contains filter returned $CONTAINS_N"
+
+# ── 57. List flocks ──────────────────────────────────────────────
+step "57. Verify GET /flocks lists the new flock"
 FLOCK_LIST_COUNT=$(curl -s "$API/flocks" | jq 'length')
 [ "$FLOCK_LIST_COUNT" -ge "1" ] && ok "GET /flocks returns $FLOCK_LIST_COUNT entry(ies)" \
                                 || fail "Expected ≥1 flock listed"
 
-# ── 57. Delete flock and verify cleanup ──────────────────────────
-step "57. Delete flock and verify all member VMs are torn down"
+# ── 57a-c. Dynamic flock agent management (v0.4.3) ───────────────
+step "57a. Add an agent to the flock (POST /flocks/{id}/agents)"
+ADD_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/flocks/$FLOCK_ID/agents" \
+            -H "Content-Type: application/json" -d '{"role":"worker"}')
+check_http "$(echo "$ADD_RESP" | tail -1)" "201" "POST /flocks/$FLOCK_ID/agents (add worker)"
+ADD_BODY=$(echo "$ADD_RESP" | head -1)
+NEW_AGENT_ID=$(echo "$ADD_BODY" | jq -r '.agent_id')
+NEW_VM_ID=$(echo   "$ADD_BODY" | jq -r '.vm_id')
+# flock created one worker (worker-1), so the added one is worker-2
+[ "$NEW_AGENT_ID" = "worker-2" ] \
+    && ok "agent_id follows role-N indexing: $NEW_AGENT_ID ✓" \
+    || fail "expected worker-2, got $NEW_AGENT_ID"
+AGENT_COUNT=$(curl -s "$API/flocks/$FLOCK_ID" | jq '.agents | length')
+[ "$AGENT_COUNT" = "6" ] && ok "Flock grew to 6 agents ✓" \
+                         || fail "expected 6 agents, got $AGENT_COUNT"
+check_http "$(curl -s -o /dev/null -w "%{http_code}" "$API/vms/$NEW_VM_ID/health")" \
+    "200" "added agent /health → 200"
+
+step "57b. Change the agent's role (PATCH → reviewer; VM recreated)"
+PATCH_RESP=$(curl -s -w "\n%{http_code}" -X PATCH "$API/flocks/$FLOCK_ID/agents/$NEW_AGENT_ID" \
+            -H "Content-Type: application/json" -d '{"role":"reviewer"}')
+check_http "$(echo "$PATCH_RESP" | tail -1)" "200" "PATCH /flocks/$FLOCK_ID/agents/$NEW_AGENT_ID"
+PATCH_VM_ID=$(echo "$PATCH_RESP" | head -1 | jq -r '.vm_id')
+[ "$PATCH_VM_ID" != "$NEW_VM_ID" ] && [ "$PATCH_VM_ID" != "null" ] \
+    && ok "VM recreated on role change ($NEW_VM_ID → $PATCH_VM_ID) ✓" \
+    || fail "vm_id not swapped on role change (got $PATCH_VM_ID)"
+PATCH_ROLE=$(curl -s "$API/flocks/$FLOCK_ID" | jq -r ".agents[\"$NEW_AGENT_ID\"].role")
+[ "$PATCH_ROLE" = "reviewer" ] && ok "agent role updated to reviewer ✓" \
+                               || fail "role not updated (got $PATCH_ROLE)"
+check_http "$(curl -s -o /dev/null -w "%{http_code}" "$API/vms/$PATCH_VM_ID/health")" \
+    "200" "recreated agent /health → 200"
+
+step "57c. Remove the agent (DELETE /flocks/{id}/agents/{agent_id})"
+check_http "$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/flocks/$FLOCK_ID/agents/$NEW_AGENT_ID")" \
+    "200" "DELETE /flocks/$FLOCK_ID/agents/$NEW_AGENT_ID"
+AGENT_COUNT2=$(curl -s "$API/flocks/$FLOCK_ID" | jq '.agents | length')
+[ "$AGENT_COUNT2" = "5" ] && ok "Flock back to 5 agents after remove ✓" \
+                          || fail "expected 5 agents, got $AGENT_COUNT2"
+sleep 2
+curl -s "$API/vms" | jq -r '.[].vm_id' | grep -q "$PATCH_VM_ID" \
+    && fail "removed agent VM $PATCH_VM_ID still present" \
+    || ok "removed agent VM torn down ✓"
+
+# ── 57d-f. Flock pause/resume + per-flock max_agents (v0.4.3 PR-B) ─
+step "57d. Pause the flock (POST /flocks/{id}/pause)"
+check_http "$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/flocks/$FLOCK_ID/pause")" \
+    "200" "POST /flocks/$FLOCK_ID/pause"
+PAUSED_FLAG=$(curl -s "$API/flocks/$FLOCK_ID" | jq -r '.paused')
+[ "$PAUSED_FLAG" = "true" ] && ok "flock.paused = true ✓" || fail "paused flag not set (got $PAUSED_FLAG)"
+PAUSED_STATUS=$(curl -s "$API/flocks/$FLOCK_ID" | jq -r '[.agents[].status] | unique | .[0]')
+[ "$PAUSED_STATUS" = "paused" ] && ok "all members status = paused ✓" || fail "members not all paused (got $PAUSED_STATUS)"
+# Watchdog must NOT mark a paused member dead (wait past threshold ~15s).
+sleep 18
+WD_STATUS=$(curl -s "$API/flocks/$FLOCK_ID" | jq -r '[.agents[].status] | unique | join(",")')
+[ "$WD_STATUS" = "paused" ] && ok "watchdog left paused members alone (not dead) ✓" \
+                            || fail "paused members changed to '$WD_STATUS' (watchdog should skip)"
+
+step "57e. Resume the flock (POST /flocks/{id}/resume)"
+check_http "$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/flocks/$FLOCK_ID/resume")" \
+    "200" "POST /flocks/$FLOCK_ID/resume"
+RESUMED_FLAG=$(curl -s "$API/flocks/$FLOCK_ID" | jq -r '.paused')
+[ "$RESUMED_FLAG" = "false" ] && ok "flock.paused = false after resume ✓" || fail "paused still set (got $RESUMED_FLAG)"
+RVM=$(curl -s "$API/flocks/$FLOCK_ID" | jq -r '[.agents[].vm_id][0]')
+check_http "$(curl -s -o /dev/null -w "%{http_code}" "$API/vms/$RVM/health")" \
+    "200" "resumed member /health → 200"
+
+step "57f. Per-flock max_agents enforced (POST /flocks max_agents)"
+OVER_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/flocks" \
+    -H "Content-Type: application/json" \
+    -d '{"task":"cap test","roles":["worker","worker","worker"],"max_agents":2}')
+[ "$OVER_CODE" = "400" ] && ok "roles > max_agents rejected (400) ✓" || fail "expected 400, got $OVER_CODE"
+
+# ── 58. Delete flock and verify cleanup ──────────────────────────
+step "58. Delete flock and verify all member VMs are torn down"
 DEL_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/flocks/$FLOCK_ID")
 check_http "$DEL_CODE" "200" "DELETE /flocks/$FLOCK_ID"
 # Allow the parallel destroyVM goroutines to finish their teardown.
