@@ -99,12 +99,11 @@ type agentInfo struct {
 }
 
 type flockCreateResponse struct {
-	FlockID     string            `json:"flock_id"`
-	Task        string            `json:"task"`
-	Agents      []agentInfo       `json:"agents"`
-	AgentTokens map[string]string `json:"agent_tokens"`
-	TownWallURL string            `json:"townwall_url"`
-	PostURL     string            `json:"post_url"`
+	FlockID     string      `json:"flock_id"`
+	Task        string      `json:"task"`
+	Agents      []agentInfo `json:"agents"`
+	TownWallURL string      `json:"townwall_url"`
+	PostURL     string      `json:"post_url"`
 }
 
 // flock is the GET /flocks (list) and GET /flocks/{id} shape — note agents is a

@@ -296,9 +296,9 @@ func flockCreate(args []string) {
 	}
 	fmt.Printf("flock_id:     %s\ntownwall_url: %s\n", r.FlockID, r.TownWallURL)
 	tw := newTab()
-	fmt.Fprintln(tw, "AGENT_ID\tROLE\tVM_ID\tAGENT_TOKEN")
+	fmt.Fprintln(tw, "AGENT_ID\tROLE\tVM_ID")
 	for _, a := range r.Agents {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", a.AgentID, a.Role, a.VMID, r.AgentTokens[a.AgentID])
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", a.AgentID, a.Role, a.VMID)
 	}
 	tw.Flush()
 }
@@ -424,15 +424,14 @@ func flockAddAgent(args []string) {
 		return
 	}
 	var r struct {
-		AgentID    string `json:"agent_id"`
-		Role       string `json:"role"`
-		VMID       string `json:"vm_id"`
-		AgentToken string `json:"agent_token"`
+		AgentID string `json:"agent_id"`
+		Role    string `json:"role"`
+		VMID    string `json:"vm_id"`
 	}
 	if err := json.Unmarshal(data, &r); err != nil {
 		die(err)
 	}
-	fmt.Printf("agent_id:    %s\nrole:        %s\nvm_id:       %s\nagent_token: %s\n", r.AgentID, r.Role, r.VMID, r.AgentToken)
+	fmt.Printf("agent_id:    %s\nrole:        %s\nvm_id:       %s\n", r.AgentID, r.Role, r.VMID)
 }
 
 // flock rm-agent <flock_id> <agent_id> — DELETE /flocks/{id}/agents/{agent_id} (v0.4.3).

@@ -1315,7 +1315,7 @@ check_http "$(echo "$WD_RESP" | tail -1)" "201" "POST /flocks (watchdog persist)
 WD_BODY=$(echo "$WD_RESP" | head -1)
 WD_FLOCK_ID=$(echo "$WD_BODY" | jq -r '.flock_id')
 WD_VM_ID=$(echo "$WD_BODY" | jq -r '.agents[] | select(.agent_id=="worker-1") | .vm_id')
-WD_TOKEN=$(echo "$WD_BODY" | jq -r '.agent_tokens["worker-1"]')
+WD_TOKEN=$(agent_token_from_state "$WD_VM_ID" || true)
 
 # /stop tells goose-agent to gracefully exit (auth required).
 curl -s -o /dev/null -X POST "$API/vms/$WD_VM_ID/stop" \
