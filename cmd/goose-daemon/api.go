@@ -360,6 +360,27 @@ type ControlPlane struct {
 	srv    *http.Server
 }
 
+// newAgentHTTPClient builds the HTTP client used to proxy control-plane requests
+// to per-VM goose-agents. No global timeout — request lifetimes are bounded by
+// the incoming request's context (long agent tasks may run for minutes).
+//
+// Keep-alive connection pooling is DISABLED. The daemon addresses agents by guest
+// IP:port, but that pool is small and IPs are recycled across VM destroy/create/
+// restore. A pooled keep-alive connection to a destroyed VM survives half-open in
+// the transport's idle pool — the guest is force-stopped (StopVMM) before its
+// delayed srv.Shutdown can FIN the connection, a window widened by the v0.5.x
+// gracefulAgentStop teardown probe. When a new VM (spawned or snapshot-restored)
+// reuses that IP, the next proxied request can reuse the stale connection; since
+// the proxied POST body is not rewindable, net/http cannot retry, so the failure
+// surfaces as a 502 (peer RST) or an unbounded hang (black-holed packets). Dialing
+// fresh per request — like waitForAgent's throwaway probe client — removes the
+// reuse hazard entirely at negligible cost for this low-volume control path.
+func newAgentHTTPClient() *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.DisableKeepAlives = true
+	return &http.Client{Transport: tr}
+}
+
 func NewControlPlane(
 	provisioner *storage.Provisioner,
 	netManager *network.Manager,
@@ -382,7 +403,7 @@ func NewControlPlane(
 		workDir:          workDir,
 		snapshotDir:      snapshotDir,
 		flockMgr:         orchestrator.NewFlockManager(workDir),
-		agentHTTPClient:  &http.Client{},
+		agentHTTPClient:  newAgentHTTPClient(),
 		stopCh:           make(chan struct{}, 1),
 		useCOW:           resolveDiskModeCOW(storage.DMSnapshotAvailable),
 	}
