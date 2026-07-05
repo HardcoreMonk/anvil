@@ -235,7 +235,7 @@ func vmSnapshot(args []string) {
 
 func flockCmd(args []string) {
 	if len(args) == 0 {
-		die(fmt.Errorf("flock: missing verb (create|ls|get|rm|post|wall|restart|add-agent|rm-agent|set-role|pause|resume)"))
+		die(fmt.Errorf("flock: missing verb (create|ls|get|rm|post|wall|restart|add-agent|rm-agent|set-role|pause|resume|broadcast)"))
 	}
 	verb, rest := args[0], args[1:]
 	switch verb {
@@ -263,6 +263,8 @@ func flockCmd(args []string) {
 		flockPause(rest)
 	case "resume":
 		flockResume(rest)
+	case "broadcast":
+		flockBroadcast(rest)
 	default:
 		die(fmt.Errorf("flock: unknown verb %q", verb))
 	}
@@ -497,6 +499,45 @@ func flockResume(args []string) {
 		die(err)
 	}
 	confirm(jsonOut, data, fmt.Sprintf("flock %s resumed", flockID))
+}
+
+// flock broadcast <flock_id> <message...> — POST /flocks/{id}/broadcast (v0.4.4).
+// Fans the message out to every member agent's /tasks and prints each agent's
+// outcome. Trailing words are joined so the message need not be quoted.
+func flockBroadcast(args []string) {
+	jsonOut, tok, rest := extractCommon(args)
+	if len(rest) < 2 {
+		die(fmt.Errorf("usage: flock broadcast <flock_id> <message>"))
+	}
+	flockID, message := rest[0], strings.Join(rest[1:], " ")
+	data, err := mkClient(tok).do("POST", "/flocks/"+flockID+"/broadcast", map[string]string{"body": message})
+	if err != nil {
+		die(err)
+	}
+	if jsonOut {
+		printJSON(data)
+		return
+	}
+	var r struct {
+		Agents  int `json:"agents"`
+		Sent    int `json:"sent"`
+		Skipped int `json:"skipped"`
+		Failed  int `json:"failed"`
+		Results map[string]struct {
+			Status string `json:"status"`
+			Error  string `json:"error"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(data, &r); err != nil {
+		die(err)
+	}
+	fmt.Printf("broadcast to %d agents: %d sent, %d busy, %d failed\n", r.Agents, r.Sent, r.Skipped, r.Failed)
+	tw := newTab()
+	fmt.Fprintln(tw, "AGENT_ID\tSTATUS\tERROR")
+	for agentID, res := range r.Results {
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", agentID, res.Status, res.Error)
+	}
+	tw.Flush()
 }
 
 func flockWall(args []string) {

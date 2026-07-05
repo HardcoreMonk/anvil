@@ -448,6 +448,7 @@ func NewControlPlane(
 	internalMux.HandleFunc("/snapshots/import", cp.handleSnapshotImport)
 	internalMux.HandleFunc("/snapshots/", cp.handleSnapshotItem)
 	internalMux.HandleFunc("/audit", cp.handleAudit)
+	internalMux.HandleFunc("/watchdog/status", cp.handleWatchdogStatus)
 	cp.registerOrchestratorRoutes(internalMux)
 
 	externalMux := http.NewServeMux()
@@ -801,6 +802,8 @@ func (cp *ControlPlane) proxyAgentEndpoint(w http.ResponseWriter, r *http.Reques
 	}
 
 	targetURL := fmt.Sprintf("http://%s:%d%s", v.GuestIP, agentPort, agentPath)
+	// Forward the query string so agent-side switches reach goose-agent
+	// (e.g. /tasks?stream=1 selects the NDJSON streaming path, v0.4.4).
 	if r.URL.RawQuery != "" {
 		targetURL += "?" + r.URL.RawQuery
 	}
@@ -818,6 +821,26 @@ func (cp *ControlPlane) proxyAgentEndpoint(w http.ResponseWriter, r *http.Reques
 		proxyReq.Header.Set("Authorization", "Bearer "+v.agentToken)
 	}
 
+	// Nested-invocation depth guard (v0.4.4). Only /tasks is a task hop; the
+	// incoming header is the current depth (absent → 0). At/over the cap we
+	// refuse with 508 Loop Detected (distinct from the agent's own 503-busy);
+	// otherwise forward depth+1 so the next hop accumulates.
+	if agentPath == "/tasks" {
+		depth := 0
+		if h := r.Header.Get("X-Ephemera-Task-Depth"); h != "" {
+			if n, err := strconv.Atoi(h); err == nil && n > 0 {
+				depth = n
+			}
+		}
+		if depth >= maxTaskDepth {
+			slog.Warn("task depth exceeded", "vm_id", vmID, "depth", depth, "max", maxTaskDepth)
+			w.Header().Set("Content-Type", "application/json")
+			http.Error(w, fmt.Sprintf(`{"error":"max task depth %d exceeded"}`, maxTaskDepth), http.StatusLoopDetected)
+			return
+		}
+		proxyReq.Header.Set("X-Ephemera-Task-Depth", strconv.Itoa(depth+1))
+	}
+
 	resp, err := cp.agentHTTPClient.Do(proxyReq)
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":"agent unreachable: %v"}`, err), http.StatusBadGateway)
@@ -831,7 +854,38 @@ func (cp *ControlPlane) proxyAgentEndpoint(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	// Flush per chunk so a streaming agent response (NDJSON /tasks?stream=1,
+	// v0.4.4) reaches the caller incrementally rather than sitting in net/http's
+	// write buffer. statusRecorder forwards Flush to the real ResponseWriter
+	// (the same plumbing the Town Wall SSE stream relies on). Harmless for
+	// buffered/small responses.
+	flusher, _ := w.(http.Flusher)
+	buf := make([]byte, 32*1024)
+	for {
+		n, rerr := resp.Body.Read(buf)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				return
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		if rerr != nil {
+			return
+		}
+	}
+}
+
+// handleWatchdogStatus serves GET /watchdog/status (v0.4.4): a JSON snapshot of
+// the health watchdog's tunables and current per-VM failure/dead state.
+// Registered on internalMux so it is always behind authMiddleware.
+func (cp *ControlPlane) handleWatchdogStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":"GET required"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, http.StatusOK, cp.watchdog.Status())
 }
 
 // buildAgentURL returns the agent_url field for VMInfo.

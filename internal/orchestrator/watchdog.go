@@ -300,3 +300,43 @@ func (wd *Watchdog) ForgetVM(vmID string) {
 	delete(wd.failCount, vmID)
 	delete(wd.deadMarked, vmID)
 }
+
+// WatchdogStatus is a point-in-time snapshot of the watchdog's tunables and
+// per-VM health state, served by GET /watchdog/status (v0.4.4). VMFailCounts
+// holds only VMs with a non-zero consecutive-failure count; VMDeadMarked lists
+// VMs the watchdog has marked dead. Both are empty when every agent is healthy.
+type WatchdogStatus struct {
+	IntervalSec    int            `json:"interval_sec"`
+	TimeoutSec     int            `json:"timeout_sec"`
+	DyingThreshold int            `json:"dying_threshold"`
+	AutoHeal       bool           `json:"auto_heal"`
+	VMFailCounts   map[string]int `json:"vm_fail_counts"`
+	VMDeadMarked   []string       `json:"vm_dead_marked"`
+}
+
+// Status returns a deep-copied snapshot of the watchdog's current configuration
+// and per-VM health state under the same lock the polling loop uses, so a
+// concurrent tick can never observe a half-built response. Safe to call any
+// time after construction.
+func (wd *Watchdog) Status() WatchdogStatus {
+	wd.mu.Lock()
+	defer wd.mu.Unlock()
+	failCounts := make(map[string]int, len(wd.failCount))
+	for vmID, n := range wd.failCount {
+		failCounts[vmID] = n
+	}
+	dead := make([]string, 0, len(wd.deadMarked))
+	for vmID, marked := range wd.deadMarked {
+		if marked {
+			dead = append(dead, vmID)
+		}
+	}
+	return WatchdogStatus{
+		IntervalSec:    int(wd.interval.Seconds()),
+		TimeoutSec:     int(wd.httpTimeout.Seconds()),
+		DyingThreshold: wd.dyingThreshold,
+		AutoHeal:       wd.autoHeal,
+		VMFailCounts:   failCounts,
+		VMDeadMarked:   dead,
+	}
+}

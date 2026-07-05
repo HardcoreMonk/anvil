@@ -439,6 +439,71 @@ func TestWatchdog_AutoHeal_ResetsDeadMark(t *testing.T) {
 	}
 }
 
+// TestWatchdog_Status verifies the GET /watchdog/status snapshot reflects the
+// configured tunables and the live per-VM health state: a failing VM appears in
+// VMDeadMarked once the threshold is crossed, and the returned maps are copies
+// (mutating them does not corrupt the watchdog's internal state).
+func TestWatchdog_Status(t *testing.T) {
+	tmp := t.TempDir()
+	fm := NewFlockManager(tmp)
+	flock, err := fm.Create("flock-status", "test", filepath.Join(tmp, "flock-status", "TOWN_WALL.log"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	flock.AddAgent(&AgentInfo{AgentID: "worker-1", Role: "worker", VMID: "vm-1", Status: AgentStatusReady})
+
+	agent := newTestAgent(t)
+	locator := func(vmID string) (string, string, bool) {
+		if vmID == "vm-1" {
+			return "flock-status", "worker-1", true
+		}
+		return "", "", false
+	}
+	lister := func() []VMRef { return []VMRef{{VMID: "vm-1", GuestIP: "127.0.0.1"}} }
+
+	wd := NewWatchdog(fm, locator, lister, agent.port)
+	wd.Configure(50*time.Millisecond, 50*time.Millisecond, 3, true)
+
+	// Config must be reflected before any probe runs.
+	st := wd.Status()
+	if st.DyingThreshold != 3 || !st.AutoHeal {
+		t.Fatalf("status config mismatch: %+v", st)
+	}
+	if st.VMDeadMarked == nil || len(st.VMDeadMarked) != 0 {
+		t.Errorf("expected empty (non-nil) dead-marked list, got %+v", st.VMDeadMarked)
+	}
+
+	agent.setFail(true)
+	wd.Start()
+	defer wd.Stop()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if flock.Snapshot()[0].Status == AgentStatusDead {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	st = wd.Status()
+	foundDead := false
+	for _, vmID := range st.VMDeadMarked {
+		if vmID == "vm-1" {
+			foundDead = true
+		}
+	}
+	if !foundDead {
+		t.Errorf("expected vm-1 in dead-marked list, got %+v", st.VMDeadMarked)
+	}
+
+	// The returned maps must be copies — mutating them must not affect the
+	// watchdog's internal state observed by a subsequent Status() call.
+	st.VMFailCounts["vm-1"] = 9999
+	if again := wd.Status(); again.VMFailCounts["vm-1"] == 9999 {
+		t.Error("Status() leaked its internal failCount map (not a copy)")
+	}
+}
+
 func TestWatchdog_StopReleasesGoroutine(t *testing.T) {
 	tmp := t.TempDir()
 	fm := NewFlockManager(tmp)

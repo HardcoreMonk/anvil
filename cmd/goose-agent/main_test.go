@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -727,5 +728,101 @@ func TestExtractGooseJSONText_StripsBannerPrefix(t *testing.T) {
 		`{"messages":[{"role":"assistant","content":[{"type":"text","text":"hi"}]}]}`)
 	if got := extractGooseJSONText(in); got != "hi" {
 		t.Errorf("expected %q after banner strip, got %q", "hi", got)
+	}
+}
+
+// TestRunTaskStreaming_Frames exercises the NDJSON streaming path (v0.4.4)
+// without invoking the real goose binary: a stub command writes two stderr
+// lines (relayed as progress frames) and a goose-shaped JSON envelope on stdout
+// (parsed into the final result frame). httptest.ResponseRecorder satisfies
+// http.Flusher, so the streaming branch is taken end to end.
+func TestRunTaskStreaming_Frames(t *testing.T) {
+	script := `echo "thinking..." >&2; echo "tool call" >&2; ` +
+		`printf '%s' '{"messages":[{"role":"assistant","content":[{"type":"text","text":"hello"}]}]}'`
+	cmd := exec.Command("sh", "-c", script)
+
+	w := httptest.NewRecorder()
+	runTaskStreaming(w, cmd)
+
+	if ct := w.Header().Get("Content-Type"); ct != "application/x-ndjson" {
+		t.Errorf("expected NDJSON content-type, got %q", ct)
+	}
+
+	var frames []streamFrame
+	for _, line := range strings.Split(strings.TrimRight(w.Body.String(), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		var fr streamFrame
+		if err := json.Unmarshal([]byte(line), &fr); err != nil {
+			t.Fatalf("frame is not valid JSON (%q): %v", line, err)
+		}
+		frames = append(frames, fr)
+	}
+	if len(frames) == 0 {
+		t.Fatal("no frames emitted")
+	}
+
+	// The last frame must be the result with the parsed assistant text.
+	last := frames[len(frames)-1]
+	if last.Type != "result" {
+		t.Errorf("last frame type = %q, want result", last.Type)
+	}
+	if last.Output != "hello" {
+		t.Errorf("result output = %q, want hello", last.Output)
+	}
+	if last.Error != "" {
+		t.Errorf("result error = %q, want empty", last.Error)
+	}
+
+	// At least the first stderr line must have arrived as a progress frame.
+	sawProgress := false
+	for _, fr := range frames {
+		if fr.Type == "progress" && fr.Text == "thinking..." {
+			sawProgress = true
+		}
+	}
+	if !sawProgress {
+		t.Error("expected a progress frame carrying the stderr line \"thinking...\"")
+	}
+}
+
+// TestRunTaskBuffered_DefaultShape locks in the buffered /tasks contract that the
+// default (no ?stream=1) path must preserve: a single JSON object
+// {"output","error"} with Content-Type application/json — NOT newline-delimited
+// stream frames. A stub cmd emits a goose-shaped envelope on stdout so no real
+// goose binary is needed. Regression guard for the v0.4.4 streaming split.
+func TestRunTaskBuffered_DefaultShape(t *testing.T) {
+	cmd := exec.Command("sh", "-c",
+		`printf '%s' '{"messages":[{"role":"assistant","content":[{"type":"text","text":"hello"}]}]}'`)
+
+	w := httptest.NewRecorder()
+	runTaskBuffered(w, cmd)
+
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("buffered Content-Type = %q, want application/json", ct)
+	}
+	body := strings.TrimSpace(w.Body.String())
+	// Exactly one JSON object — no newline-delimited frames.
+	if strings.Contains(body, "\n") {
+		t.Fatalf("buffered body must be a single JSON object, got multiple lines: %q", body)
+	}
+	var res TaskResult
+	if err := json.Unmarshal([]byte(body), &res); err != nil {
+		t.Fatalf("buffered body is not a single JSON object (%q): %v", body, err)
+	}
+	if res.Output != "hello" {
+		t.Errorf("buffered output = %q, want hello", res.Output)
+	}
+	if res.Error != "" {
+		t.Errorf("buffered error = %q, want empty", res.Error)
+	}
+	// The buffered object must not carry stream-frame typing.
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(body), &raw); err != nil {
+		t.Fatalf("buffered body not decodable as object (%q): %v", body, err)
+	}
+	if _, ok := raw["type"]; ok {
+		t.Errorf("buffered object unexpectedly has a stream-frame 'type' field: %v", raw)
 	}
 }

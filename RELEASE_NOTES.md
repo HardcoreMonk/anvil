@@ -46,9 +46,14 @@
   재연결하고 repaired metadata를 다시 persist한다.
 - `webdev_demo.sh`는 `POST /flocks` 응답의 `agent_tokens`를 읽지 않고, orchestrator
   `vm_id`를 사용해 control-plane proxy `POST /vms/{vm_id}/tasks`로 brief를 보낸다.
-- 현재 sync branch의 anvil runtime baseline은 upstream `v0.4.3`까지 반영한다.
-  2026-07-02 기준 upstream latest observed는 `v0.7.0`이며, `v0.4.4`-`v0.4.5`는
-  다음 sync 후보, `v0.5.0`-`v0.7.0`은 별도 adoption review backlog로 둔다.
+- 현재 sync branch의 anvil runtime baseline은 upstream `v0.4.4`까지 반영한다.
+  2026-07-02 기준 upstream latest observed는 `v0.7.0`이며, `v0.4.5`는 다음 sync
+  후보, `v0.5.0`-`v0.7.0`은 별도 adoption review backlog로 둔다.
+- upstream `v0.4.4` (streaming `/tasks`, nested-invocation depth guard,
+  watchdog status route, flock broadcast, goose-agent slog migration)를 sync
+  한다. anvil adaptation: buffered `POST /vms/{id}/tasks` 기본 계약(`stream=1`
+  없으면 `{"output","error"}`)을 그대로 유지하고, flock broadcast는 daemon-only
+  endpoint로만 두며 `anvil_*` MCP tool로 노출하지 않는다.
 
 ## 검증됨
 
@@ -62,6 +67,45 @@
 - `go build ./cmd/anvil-scheduler`
 - `go build ./cmd/anvil-mcp`
 - `go build ./cmd/goose-daemon`
+
+---
+
+# v0.4.4 — Feature Extensions
+
+**Ephemera** v0.4.4 is the last single-host cycle, rounding out the operator surface: **PR-A** flock broadcast + a watchdog status route; **PR-B** streaming `/tasks`, the `goose-agent` slog migration, and a nested-invocation depth guard. Additive — no wire format changed.
+
+---
+
+## What's New
+
+### Flock broadcast (PR-A)
+
+- `POST /flocks/{id}/broadcast` `{"body":"…"}` scatters one prompt to **every** member agent's `/tasks` endpoint in parallel and gathers each agent's result (scatter-gather). The response carries a `sent`/`skipped`/`failed` tally plus a per-agent `results` map (`status` = `ok`/`busy`/`error`, with `output`/`error`). Agents already running a task answer `503` and are reported `busy` (skipped); unreachable agents are `error`. The call blocks until every agent finishes, like calling `/tasks` on each — cancellation rides on the request context.
+- The broadcast is also recorded once on the Town Wall (`orchestrator` author) so observers see it happened.
+- `ephemera-ctl flock broadcast <flock_id> <message>` wraps the endpoint (trailing words are joined, so the message need not be quoted).
+
+### Watchdog status route (PR-A)
+
+- `GET /watchdog/status` exposes the health watchdog's tunables (`interval_sec`, `timeout_sec`, `dying_threshold`, `auto_heal`) and live per-VM state (`vm_fail_counts` — VMs with a non-zero consecutive-failure count; `vm_dead_marked` — VMs the watchdog has marked dead). Read-only, behind the same auth as the other internal routes. The watchdog has run since v0.3.4 but had no status route until now; the snapshot is taken under the same lock the polling loop uses, and the returned maps are copies.
+
+### Streaming `/tasks` (PR-B)
+
+- `POST /vms/{id}/tasks?stream=1` streams the task as **newline-delimited JSON** over chunked transfer instead of buffering the whole result: zero or more `{"type":"progress","text":"…"}` frames (relayed from goose's stderr activity, plus a 15s heartbeat) followed by exactly one `{"type":"result","output":"…","error":"…"}` frame that mirrors the legacy `TaskResult`. The default (no `stream=1`) path is **unchanged** — full backward compatibility. The control-plane proxy now flushes per chunk (the same `http.Flusher` plumbing the Town Wall SSE stream relies on), so the stream reaches the caller incrementally.
+- **Caveat**: streaming commits a `200` before goose runs, so a goose failure can no longer be a `500` — the error rides in the `result` frame's `error` field. Streaming clients must inspect `result.error`, not the status code. The buffered path keeps its `500`.
+
+### Nested-invocation depth guard (PR-B)
+
+- Agent→agent dispatch (`gtcall`) is now loop-guarded. The control plane reads `X-Ephemera-Task-Depth` on every proxied `/tasks` hop (absent → 0), refuses a hop at/over `EPHEMERA_MAX_TASK_DEPTH` (default 5) with **`508 Loop Detected`**, and forwards `depth+1`. `goose-agent` injects the incoming depth into the goose subprocess environment (`EPHEMERA_TASK_DEPTH`), and `gtcall` re-sends it as the header, so depth accumulates across the whole nested call tree. Distinct from the agent's own `503` busy response.
+
+### `goose-agent` slog migration (PR-B)
+
+- The in-VM `goose-agent` moved off the plain `log` package to `log/slog`, mirroring the host daemon's `EPHEMERA_LOG_FORMAT` (text|json) / `EPHEMERA_LOG_LEVEL` handling (default level Warn). Completes the slog migration begun in v0.3.5.
+
+> **Golden-image rebake**: PR-B edits `cmd/goose-agent` and `scripts/gtcall`, so the daemon rebuilds the golden image on first start after the change (mtime check in `EnsureGoldenImage`).
+
+> **anvil adaptation**: The buffered `POST /vms/{id}/tasks` contract is preserved verbatim — without `?stream=1` the daemon still returns the single `{"output","error"}` object, and anvil's MCP stdio tools keep calling the buffered path. `POST /flocks/{id}/broadcast` stays a **daemon-only** endpoint; it is **not** registered as an `anvil_*` MCP tool in this phase, so the IronClaw tool schema carries no broadcast tool.
+
+---
 
 # v0.4.3 — Flock Lifecycle
 
