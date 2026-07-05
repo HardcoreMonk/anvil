@@ -83,9 +83,9 @@ upstream 변경 자체와 anvil에서 해결한 conflict/적응 작업을 review
 
 ## 현재 runtime baseline
 
-현재 sync branch는 upstream ephemera `v0.4.5` tag까지 병합·적응한 runtime baseline을
-사용한다. `v0.3.2`-`v0.3.6`은 이전 release(`anvil-v0.3.x`)에서 채택한 baseline이고,
-`v0.4.0`-`v0.4.5`는 이 sync branch에서 병합·적응해 full KVM gate로 검증한 baseline이다.
+anvil main runtime baseline은 upstream ephemera `v0.4.5` tag까지 병합·적응한 runtime을
+포함한다. `v0.3.2`-`v0.3.6`은 이전 release(`anvil-v0.3.x`)에서 채택한 baseline이고,
+`v0.4.0`-`v0.4.5`는 이 v0.4 sync로 병합·적응해 full KVM gate로 검증한 baseline이다.
 2026-07-02 기준 upstream `main`과 최신 upstream tag는 `v0.7.0`까지 진행되어 있다.
 `v0.3.2`-`v0.3.5` 병합 commit은 `1ebe201 Merge upstream/main`이고, `v0.3.6`은
 `v0.3.6` tag commit을 merge한다.
@@ -98,7 +98,7 @@ upstream 변경 자체와 anvil에서 해결한 conflict/적응 작업을 review
 | `v0.3.5` | `7a6d42dd56361719bc4fb592e75e0c8d8d9cf211` | `/metrics`, `/vms/{vm_id}/stats`, `log/slog`, observability demo | 병합됨, `adapted` |
 | `v0.3.6` | `4bd5e8c3d94fbfb862de116caa7417f7b640b325` | autonomous webdev demo, in-VM `gtcall`, multi-line-safe `gtwall`, Goose JSON output parsing | sync branch에서 병합, `adapted` |
 
-`v0.4.0`-`v0.4.5` 채택 상태(peeled upstream SHA 대신 이 sync branch의 merge/adapt
+`v0.4.0`-`v0.4.5` 채택 상태(peeled upstream SHA 대신 이 v0.4 sync의 merge/adapt
 commit 기준으로 기록한다):
 
 | tag | 상태 | anvil adaptation 요지 |
@@ -127,7 +127,7 @@ historical analysis로 보존한다. 현재 채택 상태는
 
 1. `v0.4.0`-`v0.4.5` runtime 안정화 변경은
    [`docs/superpowers/plans/2026-06-10-ephemera-v0.4-runtime-sync.md`](../superpowers/plans/2026-06-10-ephemera-v0.4-runtime-sync.md)의
-   계획대로 이 sync branch에서 병합/적응·검증을 마쳤다(위 채택 상태 표 참조).
+   계획대로 이 v0.4 sync에서 병합/적응·검증을 마쳤다(위 채택 상태 표 참조).
    남은 항목은 `v0.4.2` default COW 전환과 `v0.4.4` flock broadcast의 MCP tool
    노출이며, 각각 KVM burn-in과 tenant/rate/audit 설계 뒤 결정한다.
 2. `v0.5.0`-`v0.7.0`은 product/operator Web UI, MCP Gateway,

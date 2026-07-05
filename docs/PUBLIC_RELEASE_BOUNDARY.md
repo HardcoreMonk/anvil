@@ -104,7 +104,7 @@ upstream ephemera 변경을 병합할 때는 다음 상태 중 하나로 분류�
 `adapted`, `excluded`, `deferred` 판단은 README나 RELEASE_NOTES만으로 처리하지
 말고 ADR 또는 ADR_INDEX에 남긴다.
 
-현재 sync branch의 upstream runtime baseline 채택 상태:
+현재 anvil main runtime baseline의 upstream runtime 채택 상태:
 
 | upstream tag | 주요 변경 | 현재 anvil 분류 |
 |---|---|---|
@@ -121,7 +121,7 @@ upstream ephemera 변경을 병합할 때는 다음 상태 중 하나로 분류�
 | `v0.4.5` | snapshot-restore auto-recovery | `adapted` — restore state persist + token redaction 유지. live·persisted restored VM이 참조하는 source snapshot `DELETE`는 `409`로 보호(upstream e2e 46c의 `200` orphan과 의도적 divergent) |
 
 2026-07-02 기준 upstream `main`과 최신 upstream tag는 `v0.7.0`이다. `v0.4.0`-`v0.4.5`는
-현재 sync branch에 병합·적응되어 full KVM gate로 검증한 runtime baseline이며(위 표),
+anvil main runtime baseline으로 병합·적응되어 full KVM gate로 검증됐으며(위 표),
 `v0.5.0`-`v0.7.0`은 별도 adoption review 전까지 조건부/제외 표면 후보로 둔다.
 
 | upstream tag 범위 | 공개 경계 판단 |

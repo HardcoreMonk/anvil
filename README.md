@@ -47,12 +47,12 @@ daemon 이름, HTTP API, 일부 환경 변수에는 `ephemera` 또는 `goose` �
 있다. README에서는 `anvil`을 IronClaw 통합 프로젝트로, `ephemera`를 분리된 기반
 runtime으로 구분한다.
 
-버전별 ephemera 소스 snapshot은 Git tag로 공개된다. 현재 sync branch의 anvil runtime
-baseline은 upstream ephemera `v0.4.5`까지 병합한 상태다. 이 병합은 MicroVM
+버전별 ephemera 소스 snapshot은 Git tag로 공개된다. anvil main runtime baseline은
+upstream ephemera `v0.4.5`까지 병합·적응한 상태를 포함한다. 이 병합은 MicroVM
 lifecycle, flock resilience, token rotation, observability, v0.4 runtime 안정화,
 single-host flock lifecycle, streaming task, snapshot-restore auto-recovery 같은
 runtime substrate를 끌어올린 것이며, anvil의 제품 정체성을 ephemera로 바꾸는 작업이
-아니다. 즉 anvil runtime baseline은 upstream ephemera `v0.4.5` adapted runtime
+아니다. 즉 anvil main runtime baseline은 upstream ephemera `v0.4.5` adapted runtime
 stabilization을 포함하는 것이지, 수정 없는 ephemera `v0.4.5`가 아니다.
 `v0.4.0`-`v0.4.5`는 full KVM gate로 검증했고 `v0.4.4` flock broadcast의 MCP tool
 노출과 `v0.4.2` default COW 전환만 deferred다. 2026-07-02 기준 upstream `main`과
@@ -106,7 +106,7 @@ anvil은 ephemera를 이름만 바꾼 프로젝트가 아니다. anvil은 IronCl
 
 ### Runtime Baseline
 
-현재 sync branch는 upstream ephemera `v0.4.5`까지를 runtime baseline으로 사용한다.
+anvil main runtime baseline은 upstream ephemera `v0.4.5`까지를 포함한다.
 
 | 구분 | 현재 기준 | anvil에서의 의미 |
 |---|---|---|
@@ -695,7 +695,7 @@ artifacts/            Auto-populated at runtime (gitignored)
 
 - [RELEASE_NOTES.md](RELEASE_NOTES.md):
   anvil product release note와 upstream ephemera runtime release note를 분리해
-  기록한다. 현재 sync branch는 `v0.3.2`-`v0.4.5` upstream runtime baseline을
+  기록한다. anvil main runtime baseline은 `v0.3.2`-`v0.4.5` upstream runtime을
   adopted/adapted로 기록한다.
 
 - [docs/architecture/runtime-architecture.md](docs/architecture/runtime-architecture.md):

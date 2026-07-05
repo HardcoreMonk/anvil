@@ -135,9 +135,9 @@ scripts/anvil-mcp-e2e.sh flock
 
 ### 현재 upstream runtime baseline
 
-현재 sync branch는 upstream ephemera `v0.4.5`까지 병합·적응한 runtime baseline을
-사용한다. `v0.3.2`-`v0.3.6`은 이전 release가 채택한 baseline이고, `v0.4.0`-`v0.4.5`는
-이 sync branch에서 병합·적응해 full KVM gate로 검증했다. upstream `main`과 최신
+anvil main runtime baseline은 upstream ephemera `v0.4.5`까지 병합·적응한 runtime을
+포함한다. `v0.3.2`-`v0.3.6`은 이전 release가 채택한 baseline이고, `v0.4.0`-`v0.4.5`는
+이 v0.4 sync에서 병합·적응해 full KVM gate로 검증했다. upstream `main`과 최신
 upstream tag는 `v0.7.0`까지 진행되어 있으나 `v0.5.0`-`v0.7.0`은 아직 anvil baseline으로
 병합하지 않았다. 새 anvil release 후보가 이 baseline을 포함한다면 release 본문에는
 upstream runtime 변경과 anvil product 변경을 분리해서 적는다.

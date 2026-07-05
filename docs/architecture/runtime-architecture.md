@@ -6,7 +6,7 @@
 - anvil 관점: ephemera runtime은 IronClaw 결합 프로젝트의 기반 실행 계층
 - upstream: `https://github.com/steve-seungeui/ephemera`. anvil fork network를
   유지하며 ephemera runtime version을 merge로 반영한다.
-- upstream `v0.3.2`-`v0.4.5`는 현재 sync branch baseline으로 반영되어 있다. `v0.3.2`는
+- upstream `v0.3.2`-`v0.4.5`는 anvil main runtime baseline으로 반영되어 있다. `v0.3.2`는
   cold-restart, `v0.3.3`은 watchdog/restart/CP-token polish, `v0.3.4`는 token
   hot rotation과 watchdog tunable, `v0.3.5`는 metrics/stats/slog 관측성,
   `v0.3.6`은 in-VM `gtcall`, multi-line-safe `gtwall`, Goose JSON output parsing,
