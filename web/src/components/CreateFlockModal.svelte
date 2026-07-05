@@ -1,5 +1,5 @@
 <script>
-  import { createEventDispatcher } from 'svelte'
+  import { createEventDispatcher, onMount } from 'svelte'
   import { get } from 'svelte/store'
   import { _ } from 'svelte-i18n'
   import { apiJSON } from '../lib/api.js'
@@ -8,27 +8,45 @@
   const dispatch = createEventDispatcher()
 
   let task = ''
-  let roles = [''] // dynamic role inputs; the daemon spawns one VM per role
+  // Each row: { role: free-text label, profile: profile name }. One VM per row.
+  let roles = [{ role: '', profile: 'default' }]
+  let profiles = [] // [{ name, provider, model, ... }] from GET /config/profiles
   let maxAgents = '' // optional per-flock cap; blank → daemon default (20)
   let busy = false
   let result = null // FlockCreateResponse once created (carries one-time agent_tokens)
 
+  onMount(async () => {
+    try {
+      const data = await apiJSON('/config/profiles')
+      profiles = Array.isArray(data) ? data : []
+    } catch (e) {
+      // Non-fatal: leave the list empty; the role name then serves as the profile.
+    }
+  })
+
+  // New rows default to the first listed profile ("default" if present).
+  $: defaultProfile = profiles.length ? profiles[0].name : 'default'
+
   function addRole() {
-    roles = [...roles, '']
+    roles = [...roles, { role: '', profile: defaultProfile }]
   }
   function removeRole(i) {
     roles = roles.filter((_, idx) => idx !== i)
   }
 
   async function create() {
-    const cleanRoles = roles.map((r) => r.trim()).filter(Boolean)
-    if (!cleanRoles.length) {
+    const rows = roles.filter((r) => r.role.trim())
+    if (!rows.length) {
       toast(get(_)('createFlockModal.rolesRequired'), 'error')
       return
     }
     busy = true
     try {
-      const body = { task: task.trim(), roles: cleanRoles }
+      const body = {
+        task: task.trim(),
+        roles: rows.map((r) => r.role.trim()),
+        profiles: rows.map((r) => r.profile),
+      }
       const n = parseInt(maxAgents, 10)
       if (!Number.isNaN(n)) body.max_agents = n
       // One VM per role spawns sequentially server-side, so a large group can
@@ -70,9 +88,14 @@
       </div>
       <div class="field">
         <div class="muted" style="margin-bottom:6px;">{$_('createFlockModal.rolesLabel')}</div>
-        {#each roles as role, i}
+        {#each roles as row, i}
           <div class="row" style="gap:8px; margin-bottom:8px;">
-            <input bind:value={roles[i]} placeholder={$_('createFlockModal.rolePlaceholder')} />
+            <input bind:value={roles[i].role} placeholder={$_('createFlockModal.rolePlaceholder')} style="flex:1;" />
+            <select bind:value={roles[i].profile} title={$_('createFlockModal.profileLabel')} style="flex:1;">
+              {#each (profiles.length ? profiles : [{ name: 'default' }]) as p (p.name)}
+                <option value={p.name}>{p.name}</option>
+              {/each}
+            </select>
             <button class="ghost" on:click={() => removeRole(i)} disabled={roles.length === 1} title={$_('createFlockModal.removeRole')}>✕</button>
           </div>
         {/each}

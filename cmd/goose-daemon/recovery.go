@@ -266,9 +266,13 @@ func (cp *ControlPlane) dropRecoveryState(s storage.VMState) {
 // agent status back to ready. Shared by the cold-boot and warm-restore paths so
 // the two cannot drift; the caller logs the outcome and bumps the recovered count.
 func (cp *ControlPlane) registerRecoveredVM(s storage.VMState, machine *firecracker.Machine, dmInfo *storage.DMSnapshotInfo) {
+	vcpu := s.VcpuCount
+	if vcpu == 0 {
+		vcpu = 1 // matches vm.defaultVcpuCount (unsized VMs cold-boot at the default)
+	}
 	memSize := s.MemSizeMib
 	if memSize == 0 {
-		memSize = 2048
+		memSize = 1024 // matches vm.defaultMemSizeMib
 	}
 	agentURL := strings.TrimSpace(s.AgentURL)
 	if agentURL == "" {
@@ -293,6 +297,7 @@ func (cp *ControlPlane) registerRecoveredVM(s storage.VMState, machine *firecrac
 		machine:          machine,
 		tapDevice:        s.TapDevice,
 		socketPath:       s.SocketPath,
+		vcpuCount:        vcpu,
 		memSizeMib:       memSize,
 		spawnedAt:        s.CreatedAt,
 		sourceSnapshotID: s.SourceSnapshotID,

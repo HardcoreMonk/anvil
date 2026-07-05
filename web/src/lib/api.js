@@ -51,7 +51,9 @@ export async function apiJSON(path, opts) {
   }
   if (!resp.ok) {
     const msg = data && data.error ? data.error : 'HTTP ' + resp.status
-    throw new Error(msg)
+    const err = new Error(msg)
+    err.status = resp.status // let callers special-case e.g. 409 Conflict
+    throw err
   }
   return data
 }

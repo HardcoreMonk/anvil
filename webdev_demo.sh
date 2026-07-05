@@ -9,33 +9,36 @@
 # the Town Wall SSE stream, extracts each sentinel block into site/, then
 # builds and serves the result with vite preview.
 #
-# Designed for a 7.5 GiB RAM laptop: 3 VMs at default 2 GiB each = 6 GiB
-# plus overhead. Set WEBDEV_MIN_MEM_MIB lower (or drop_caches first) if the
-# preflight rejects.
+# Designed for an 8 GiB RAM laptop: 3 VMs total 2 GiB (orchestrator 1024 +
+# worker 512 + reviewer 512 MiB) plus host build overhead. Set WEBDEV_MIN_MEM_MIB
+# lower (or drop_caches first) if the preflight rejects.
 #
 # Usage:
 #   sudo bash webdev_demo.sh
 # Optional env:
 #   WEBDEV_TASK="..."             override the website requirement task
 #   WEBDEV_TIMEOUT_SECS=900       max wallclock for orchestrator to finish (default 15 min)
+#   WEBDEV_ORCH_ATTEMPTS=4        retries on Groq's intermittent tool-call failures
+#   WEBDEV_ORCH_MODEL=...         override a role's Groq model (also WEBDEV_WORKER_MODEL, WEBDEV_REVIEWER_MODEL)
 #   WEBDEV_PREVIEW_PORT=5173      vite preview port
-#   WEBDEV_MIN_MEM_MIB=6500       memory floor before preflight refuses
+#   WEBDEV_MIN_MEM_MIB=3584       memory floor before preflight refuses
 
 set -u
 set -o pipefail
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROFILES_DIR="${REPO_ROOT}/configs/profiles"
+ASSETS_DIR="${REPO_ROOT}/configs/webdev-demo/profiles"
 TEMPLATE_DIR="${REPO_ROOT}/configs/webdev-demo/vite-template"
 GLOBAL_SECRETS="${REPO_ROOT}/configs/goose-secrets.yaml"
 
 API="http://localhost:3000"
 PREVIEW_PORT="${WEBDEV_PREVIEW_PORT:-5173}"
 ORCH_TIMEOUT="${WEBDEV_TIMEOUT_SECS:-900}"
-# Three VMs at default 2 GiB each + a host budget for npm/vite/etc. The
-# preflight uses MemAvailable, which already excludes reclaimable cache,
-# so 6500 is a fair guardrail for a 7.5 GiB laptop with light desktop load.
-MIN_MEM_MIB="${WEBDEV_MIN_MEM_MIB:-6500}"
+# Three VMs total 2 GiB (1024+512+512) + a host budget for npm/vite/node. The
+# preflight uses MemAvailable, which already excludes reclaimable cache, so 3584
+# is a fair guardrail for an 8 GiB laptop with light desktop load.
+MIN_MEM_MIB="${WEBDEV_MIN_MEM_MIB:-3584}"
 
 DEFAULT_TASK="Build a single-page React + Vite portfolio site for a software engineer named Jane Doe. Include exactly four sections: a Hero (name + one-line tagline), About (two short paragraphs), Projects (three project cards with title + one-sentence description), and Contact (mailto link). Modern minimal design using inline styles only — no external CSS frameworks, no extra npm packages, just React + react-dom. Produce these files via your operating loop: src/App.jsx, src/main.jsx, src/index.css, index.html."
 
@@ -52,8 +55,8 @@ PREVIEW_PID=""
 HARVEST_PID=""
 FLOCK_ID=""
 DEMO_OK=true
-PROFILES_SWAPPED=false
 ORCH_VM_ID=""
+PROFILES_INSTALLED=false
 ORCH_URL=""
 
 # ── Output helpers ───────────────────────────────────────────────
@@ -97,9 +100,9 @@ cleanup() {
         kill -0 "$DAEMON_PID" 2>/dev/null && kill -KILL "$DAEMON_PID" 2>/dev/null || true
     fi
 
-    # 5) Restore swapped profile files.
-    if $PROFILES_SWAPPED; then
-        restore_profiles
+    # 5) Remove demo profiles the run installed (and restore any backups).
+    if $PROFILES_INSTALLED; then
+        uninstall_profiles
     fi
 
     if $DEMO_OK; then
@@ -145,13 +148,13 @@ preflight() {
     fi
     ok "Ports 3000 and ${PREVIEW_PORT} are free"
 
-    # Profile dirs + webdev override files exist for every role.
+    # Demo profile assets (system.md + goose.yaml) exist for every role.
     for role in "${ROLES[@]}"; do
-        for f in goose.yaml goose-secrets.yaml system.md goose.webdev.yaml system.webdev.md; do
-            [ -f "${PROFILES_DIR}/${role}/${f}" ] || fatal "Missing ${PROFILES_DIR}/${role}/${f}"
+        for f in goose.yaml system.md; do
+            [ -f "${ASSETS_DIR}/${role}/${f}" ] || fatal "Missing ${ASSETS_DIR}/${role}/${f}"
         done
     done
-    ok "All profile + webdev override files present for ${ROLES[*]}"
+    ok "Demo profile assets present for ${ROLES[*]}"
 
     # vite-template present.
     for f in package.json vite.config.js index.html src/main.jsx src/App.jsx src/index.css; do
@@ -174,14 +177,19 @@ preflight() {
         done
     fi
 
-    # Google API key available (global file).
-    if ! grep -qE '^[^#]*GOOGLE_API_KEY:' "$GLOBAL_SECRETS" 2>/dev/null; then
-        fatal "GOOGLE_API_KEY not set in ${GLOBAL_SECRETS}. Add a line: GOOGLE_API_KEY: \"AIza...\""
-    fi
-    GOOGLE_API_KEY=$(grep -E '^[^#]*GOOGLE_API_KEY:' "$GLOBAL_SECRETS" | head -1 | sed -E 's/^[^:]+:[[:space:]]*"?([^"]*)"?$/\1/')
-    [ -n "$GOOGLE_API_KEY" ] || fatal "GOOGLE_API_KEY value empty in ${GLOBAL_SECRETS}"
-    [ "$GOOGLE_API_KEY" != "your-key-here" ] || fatal "GOOGLE_API_KEY in ${GLOBAL_SECRETS} is still the placeholder."
-    ok "Google API key picked up from ${GLOBAL_SECRETS}"
+    # Hybrid demo: the orchestrator runs on Google Gemini (reliable multi-turn tool
+    # use), worker/reviewer on Groq gpt-oss. Both keys must be in the global keychain —
+    # flock agents read them from there; the demo writes no per-role secrets.
+    local keyname kval
+    for keyname in GROQ_API_KEY GOOGLE_API_KEY; do
+        if ! grep -qE "^[^#]*${keyname}:" "$GLOBAL_SECRETS" 2>/dev/null; then
+            fatal "${keyname} not set in ${GLOBAL_SECRETS}. The hybrid demo needs both GROQ_API_KEY (worker/reviewer) and GOOGLE_API_KEY (orchestrator)."
+        fi
+        kval=$(grep -E "^[^#]*${keyname}:" "$GLOBAL_SECRETS" | head -1 | sed -E 's/^[^:]+:[[:space:]]*"?([^"]*)"?$/\1/')
+        [ -n "$kval" ] || fatal "${keyname} value empty in ${GLOBAL_SECRETS}"
+        case "$kval" in your-key-here|gsk_your-key-here|AIza-your-key-here) fatal "${keyname} in ${GLOBAL_SECRETS} is still the placeholder." ;; esac
+    done
+    ok "API keys present: GROQ_API_KEY (worker/reviewer) + GOOGLE_API_KEY (orchestrator)"
 
     # Memory headroom — autonomous 3-VM flock needs ~6 GiB.
     local avail_mib
@@ -202,44 +210,61 @@ preflight() {
     ok "Runtime directory: $RUNDIR"
 }
 
-# ── 2. Swap webdev overrides into the profiles ───────────────────
-swap_profiles() {
-    step "2. Swap profile files (system.md + goose.yaml + goose-secrets.yaml)"
+# ── 2. Install demo role profiles into configs/profiles/ ─────────
+# Flock spawn resolves each role from configs/profiles/{role}/ — goose.yaml for
+# provider/model/sizing, system.md for behavior. We install the demo assets there
+# for the run and remove them on cleanup. A pre-existing user profile of the same
+# name is backed up to {role}.webdev_bak and restored afterwards. Secrets are NOT
+# written per role — flock agents read the global configs/goose-secrets.yaml.
+install_profiles() {
+    step "2. Install demo role profiles (system.md + goose.yaml)"
 
     for role in "${ROLES[@]}"; do
-        local d="${PROFILES_DIR}/${role}"
+        local src="${ASSETS_DIR}/${role}"
+        local dst="${PROFILES_DIR}/${role}"
 
-        cp -f "${d}/system.md" "${d}/system.md.webdev_bak"
-        cp -f "${d}/goose.yaml" "${d}/goose.yaml.webdev_bak"
-        cp -f "${d}/goose-secrets.yaml" "${d}/goose-secrets.yaml.webdev_bak"
+        # Replace any same-named profile wholesale so no stale files linger;
+        # keep a backup to restore on cleanup.
+        if [ -e "$dst" ]; then
+            rm -rf "${dst}.webdev_bak"
+            mv -f "$dst" "${dst}.webdev_bak"
+            note "${role}: existing profile backed up to ${role}.webdev_bak"
+        fi
 
-        cp -f "${d}/system.webdev.md" "${d}/system.md"
-        cp -f "${d}/goose.webdev.yaml" "${d}/goose.yaml"
+        mkdir -p "$dst"
+        cp -f "${src}/goose.yaml" "${dst}/goose.yaml"
+        cp -f "${src}/system.md" "${dst}/system.md"
 
-        cat > "${d}/goose-secrets.yaml" <<EOF
-# webdev_demo.sh override — restored from goose-secrets.yaml.webdev_bak on cleanup.
-GOOGLE_API_KEY: "${GOOGLE_API_KEY}"
-EOF
-        chmod 0600 "${d}/goose-secrets.yaml"
-
-        ok "${role}: swapped (system.md + goose.yaml + goose-secrets.yaml)"
+        # Optional per-role Groq model override for experimentation:
+        # WEBDEV_ORCH_MODEL / WEBDEV_WORKER_MODEL / WEBDEV_REVIEWER_MODEL. sudo strips
+        # outer env, so pass it inside sudo:
+        #   sudo WEBDEV_ORCH_MODEL=openai/gpt-oss-20b bash webdev_demo.sh
+        local mvar="WEBDEV_$(printf '%s' "$role" | tr '[:lower:]' '[:upper:]' | sed 's/^ORCHESTRATOR$/ORCH/')_MODEL"
+        local override="${!mvar:-}"
+        if [ -n "$override" ]; then
+            sed -i -E "s|^GOOSE_MODEL:.*|GOOSE_MODEL: ${override}|" "${dst}/goose.yaml"
+            ok "${role}: installed (model override → ${override})"
+        else
+            ok "${role}: installed (Groq + sizing from configs/webdev-demo/profiles/${role})"
+        fi
     done
 
-    PROFILES_SWAPPED=true
+    PROFILES_INSTALLED=true
 }
 
-restore_profiles() {
-    note "Restoring original profile files..."
+uninstall_profiles() {
+    note "Removing demo profiles and restoring any backups..."
     for role in "${ROLES[@]}"; do
-        local d="${PROFILES_DIR}/${role}"
-        for f in system.md goose.yaml goose-secrets.yaml; do
-            if [ -f "${d}/${f}.webdev_bak" ]; then
-                mv -f "${d}/${f}.webdev_bak" "${d}/${f}"
-            fi
-        done
-        ok "${role}: profile restored"
+        local dst="${PROFILES_DIR}/${role}"
+        rm -rf "$dst"
+        if [ -e "${dst}.webdev_bak" ]; then
+            mv -f "${dst}.webdev_bak" "$dst"
+            ok "${role}: original profile restored"
+        else
+            ok "${role}: demo profile removed"
+        fi
     done
-    PROFILES_SWAPPED=false
+    PROFILES_INSTALLED=false
 }
 
 # ── 3. Start ephemera daemon ─────────────────────────────────────
@@ -411,22 +436,49 @@ dispatch_orchestrator() {
     local resp_file="${RUNDIR}/orchestrator-task.resp.json"
     jq -n --arg p "$TASK" '{prompt: $p}' > "$req_file"
 
-    note "Brief sent to ${ORCH_URL}/tasks (timeout ${ORCH_TIMEOUT}s)"
-    local t0 http_code
-    t0=$(date +%s)
-    http_code=$(curl -s -o "$resp_file" -w '%{http_code}' \
-        --max-time "$ORCH_TIMEOUT" \
-        -X POST "${ORCH_URL}/tasks" \
-        -H "Content-Type: application/json" \
-        -d @"$req_file" || echo "000")
-    local elapsed=$(( $(date +%s) - t0 ))
+    # Groq + Llama tool calling is intermittently flaky: the model sometimes emits a
+    # non-standard tool-call format Groq rejects ("Failed to call a function"), which
+    # ends the orchestrator's operating loop on its very first command. The
+    # orchestrator runs as a stateless one-shot (no session) and the Town Wall
+    # harvester ignores duplicate <<<FILE:>>> paths, so re-dispatching the whole brief
+    # is safe. Retry a few times; a clean run ends by posting <<<DONE>>>.
+    local max_attempts="${WEBDEV_ORCH_ATTEMPTS:-4}"
+    local attempt=1 t0 http_code elapsed err_summary
+    while [ "$attempt" -le "$max_attempts" ]; do
+        note "Brief → ${ORCH_URL}/tasks (attempt ${attempt}/${max_attempts}, timeout ${ORCH_TIMEOUT}s)"
+        t0=$(date +%s)
+        http_code=$(curl -s -o "$resp_file" -w '%{http_code}' \
+            --max-time "$ORCH_TIMEOUT" \
+            -X POST "${ORCH_URL}/tasks" \
+            -H "Content-Type: application/json" \
+            -d @"$req_file" || echo "000")
+        elapsed=$(( $(date +%s) - t0 ))
 
-    if [ "$http_code" = "200" ]; then
-        ok "Orchestrator completed in ${elapsed}s (response: ${resp_file})"
-    else
-        fail "Orchestrator /tasks returned HTTP ${http_code} after ${elapsed}s"
-        note "Response saved at ${resp_file}; SSE harvester may still emit DONE if files arrived."
-    fi
+        # Success = HTTP 200 and the agent did NOT return a recoverable-error report.
+        # goose prefixes those with "Ran into this error:" — this covers Groq's
+        # "Failed to call a function" (Llama tool-call format) AND "reasoning_content
+        # is unsupported" (gpt-oss multi-turn). The real completion signal is
+        # <<<DONE>>> on the Town Wall (the harvester watches it); this is the fast-fail
+        # gate so a broken run doesn't burn the whole timeout before retrying.
+        if [ "$http_code" = "200" ] && ! grep -q "Ran into this error" "$resp_file" 2>/dev/null; then
+            ok "Orchestrator returned cleanly in ${elapsed}s (attempt ${attempt}; response: ${resp_file})"
+            return
+        fi
+
+        err_summary=$(grep -o "Ran into this error[^\"]*" "$resp_file" 2>/dev/null | head -1 | cut -c1-180)
+        if [ -n "$err_summary" ]; then
+            note "Attempt ${attempt} (${elapsed}s): ${err_summary} — retrying"
+        else
+            note "Attempt ${attempt}: orchestrator HTTP ${http_code} after ${elapsed}s — retrying"
+        fi
+        attempt=$((attempt + 1))
+        [ "$attempt" -le "$max_attempts" ] && sleep 2
+    done
+
+    fail "Orchestrator did not complete after ${max_attempts} attempts. Last error:"
+    note "  ${err_summary:-(HTTP ${http_code}; see ${resp_file})}"
+    note "Adjust the orchestrator model/provider in configs/webdev-demo/profiles/orchestrator/goose.yaml,"
+    note "or override with WEBDEV_ORCH_MODEL. The harvester may have caught partial files."
 }
 
 # ── 8. Build the React site on the host ──────────────────────────
@@ -437,6 +489,17 @@ build_site() {
     note "Files in site/ (post-harvest):"
     find "$site_dir" -type f -not -path '*/node_modules/*' -not -path '*/dist/*' \
         | sort | sed "s|${site_dir}/|      |"
+
+    # Surface a partial run: unfilled template files still carry the PLACEHOLDER
+    # marker. The site still builds (so the result is viewable), but flag that the
+    # agent did not publish everything.
+    local placeholder_files
+    placeholder_files=$(grep -rl "PLACEHOLDER" "$site_dir/src" "$site_dir/index.html" 2>/dev/null || true)
+    if [ -n "$placeholder_files" ]; then
+        fail "Partial run — these files were never published by the agent (still PLACEHOLDER):"
+        printf '%s\n' "$placeholder_files" | sed "s|${site_dir}/|      |"
+        note "See ${RUNDIR}/townwall/harvest.log for what the orchestrator actually published."
+    fi
 
     (
         cd "$site_dir" || exit 1
@@ -490,7 +553,7 @@ EOF
 # ── Entry point ──────────────────────────────────────────────────
 main() {
     preflight
-    swap_profiles
+    install_profiles
     start_daemon
     create_flock
     prepare_site_dir

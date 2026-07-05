@@ -55,18 +55,18 @@ type VMConfig struct {
 	GatewayIP      string
 	VsockUDSPath   string // host-side UDS for Firecracker vsock proxy; enables post-restore IP reconfiguration
 
-	// VcpuCount and MemSizeMib allow per-VM resource sizing. Non-positive values
-	// fall back to the legacy defaults (2 vCPU, 2048 MiB) so existing call sites
-	// stay compatible.
+	// VcpuCount and MemSizeMib allow per-VM resource sizing. Zero values fall back
+	// to the package defaults (1 vCPU, 1024 MiB) so existing call sites stay compatible.
 	VcpuCount  int64
 	MemSizeMib int64
 }
 
 // defaultVcpuCount and defaultMemSizeMib are the fallback values used when a
-// VMConfig leaves the fields zero. They match the historical hardcoded values.
+// VMConfig leaves the fields zero. They match the "Standard" sizing preset — the
+// sizing an agent VM gets when created without an explicit per-profile override.
 const (
-	defaultVcpuCount  int64 = 2
-	defaultMemSizeMib int64 = 2048
+	defaultVcpuCount  int64 = 1
+	defaultMemSizeMib int64 = 1024
 )
 
 // resolveMachineSize returns the vCPU and memory size to use, applying defaults

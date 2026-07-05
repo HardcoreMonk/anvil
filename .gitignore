@@ -44,8 +44,9 @@ vmlinux*
 configs/anvil-mcp.yaml
 configs/goose.yaml
 configs/goose-secrets.yaml
-configs/profiles/*/goose.yaml
-configs/profiles/*/goose-secrets.yaml
+# Runtime profiles (created via Settings UI or installed by webdev_demo.sh).
+# Demo profile assets live under configs/webdev-demo/profiles/ and ARE tracked.
+configs/profiles/
 
 # 6. Claude Code context file
 CLAUDE.md

@@ -1,5 +1,5 @@
 <script>
-  import { createEventDispatcher } from 'svelte'
+  import { createEventDispatcher, onMount } from 'svelte'
   import { get } from 'svelte/store'
   import { _ } from 'svelte-i18n'
   import { apiJSON } from '../lib/api.js'
@@ -10,8 +10,20 @@
   const dispatch = createEventDispatcher()
 
   let role = ''
+  let profile = 'default'
+  let profiles = []
   let busy = false
   let result = null // { agent_id, role, vm_id, agent_url, agent_token }
+
+  onMount(async () => {
+    try {
+      const data = await apiJSON('/config/profiles')
+      profiles = Array.isArray(data) ? data : []
+      if (profiles.length) profile = profiles[0].name
+    } catch (e) {
+      // Non-fatal: leave default; the role name then serves as the profile.
+    }
+  })
 
   async function add() {
     if (!role.trim()) {
@@ -22,7 +34,7 @@
     try {
       result = await apiJSON('/flocks/' + encodeURIComponent(flockId) + '/agents', {
         method: 'POST',
-        body: JSON.stringify({ role: role.trim() }),
+        body: JSON.stringify({ role: role.trim(), profile }),
       })
       toast(get(_)('addAgentModal.addedToast', { values: { id: result.agent_id } }), 'ok')
       dispatch('added')
@@ -55,6 +67,14 @@
         <label for="role">{$_('addAgentModal.roleLabel')}</label>
         <input id="role" bind:value={role} placeholder={$_('addAgentModal.rolePlaceholder')} />
         <div class="muted" style="margin-top:6px; font-size:12px;">{$_('addAgentModal.roleHint')}</div>
+      </div>
+      <div class="field">
+        <label for="aa-profile">{$_('addAgentModal.profileLabel')}</label>
+        <select id="aa-profile" bind:value={profile}>
+          {#each (profiles.length ? profiles : [{ name: 'default' }]) as p (p.name)}
+            <option value={p.name}>{p.name}</option>
+          {/each}
+        </select>
       </div>
       <div class="row between" style="margin-top:18px;">
         <button class="ghost" on:click={close} disabled={busy}>{$_('common.cancel')}</button>

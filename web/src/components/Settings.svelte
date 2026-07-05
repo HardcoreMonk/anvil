@@ -5,9 +5,11 @@
   import { apiJSON } from '../lib/api.js'
   import { toast } from '../lib/store.js'
   import ProfileModal from './ProfileModal.svelte'
+  import ModelPicker from './ModelPicker.svelte'
 
   let profiles = [] // [{ name, provider, model }]
   let providers = [] // [{ id, label, available, default_model, suggested_models }]
+  let presets = [] // [{ id, label, vcpu_count, mem_size_mib }]
   let loading = true
   let savingName = null
   let deletingName = null
@@ -20,12 +22,14 @@
   async function load() {
     loading = true
     try {
-      const [profileData, providerData] = await Promise.all([
+      const [profileData, providerData, presetData] = await Promise.all([
         apiJSON('/config/profiles'),
         apiJSON('/config/providers'),
+        apiJSON('/config/presets'),
       ])
       profiles = Array.isArray(profileData) ? profileData : []
       providers = Array.isArray(providerData) ? providerData : []
+      presets = Array.isArray(presetData) ? presetData : []
     } catch (e) {
       if (e.message !== 'unauthorized') toast(e.message, 'error')
     } finally {
@@ -62,7 +66,11 @@
       confirmName = null
       await load()
     } catch (e) {
-      if (e.message !== 'unauthorized') toast(e.message, 'error')
+      if (e.status === 409) {
+        toast(get(_)('settings.profileInUse', { values: { name: p.name } }), 'error')
+      } else if (e.message !== 'unauthorized') {
+        toast(e.message, 'error')
+      }
     } finally {
       deletingName = null
     }
@@ -105,10 +113,7 @@
               </select>
             </td>
             <td>
-              <input list={'models-' + p.name} bind:value={p.model} />
-              <datalist id={'models-' + p.name}>
-                {#each modelsFor(p.provider) as m}<option value={m}></option>{/each}
-              </datalist>
+              <ModelPicker models={modelsFor(p.provider)} bind:value={p.model} />
             </td>
             <td>
               <div class="row" style="gap:6px;">
@@ -137,7 +142,7 @@
 </div>
 
 {#if showCreate}
-  <ProfileModal providers={availableProviders}
+  <ProfileModal providers={availableProviders} {presets}
     on:created={() => { showCreate = false; load() }}
     on:close={() => (showCreate = false)} />
 {/if}

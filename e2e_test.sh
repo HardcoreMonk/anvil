@@ -557,8 +557,8 @@ ok "Snapshot #2: $DIFF_SNAP_ID"
 # ── 29. Compare memory.bin disk usage (sparse-aware) ─────────────
 # Firecracker writes Diff memory files as sparse files: only dirty pages
 # consume actual disk blocks; clean pages are holes.
-# stat -c%s reports the apparent (logical) size, which equals 2 GB for
-# both Full and Diff. stat -c%b reports the number of 512-byte blocks
+# stat -c%s reports the apparent (logical) size, which equals the VM's RAM
+# for both Full and Diff. stat -c%b reports the number of 512-byte blocks
 # actually allocated on disk — this is the correct metric for sparse files.
 step "29. Verify Diff memory.bin uses fewer disk blocks than Full (sparse-aware)"
 FULL_MEM_PATH="$PWD/snapshots/$FULL_SNAP_ID/memory.bin"
@@ -569,7 +569,7 @@ if [ "$FULL_MEM_BLOCKS" -gt 0 ] && [ "$DIFF_MEM_BLOCKS" -gt 0 ]; then
     FULL_MB=$(( FULL_MEM_BLOCKS * 512 / 1048576 ))
     DIFF_MB=$(( DIFF_MEM_BLOCKS * 512 / 1048576 ))
     ok "Full memory.bin disk usage: ~${FULL_MB} MB  |  Diff memory.bin disk usage: ~${DIFF_MB} MB"
-    ok "(Apparent size is always 2048 MB for both; sparse holes are excluded from block count)"
+    ok "(Apparent size equals the VM's RAM for both; sparse holes are excluded from block count)"
     [ "$DIFF_MEM_BLOCKS" -lt "$FULL_MEM_BLOCKS" ] \
         && ok "Diff allocates fewer blocks than Full ✓" \
         || fail "Diff (~${DIFF_MB} MB blocks) is not smaller than Full (~${FULL_MB} MB blocks)"

@@ -186,7 +186,7 @@ func TestFlock_ChangeAgentRole(t *testing.T) {
 	}
 	f.AddAgent(&AgentInfo{AgentID: "worker-1", Role: "worker"})
 
-	f.ChangeAgentRole("worker-1", "reviewer")
+	f.ChangeAgentRole("worker-1", "reviewer", "reviewer")
 	role := ""
 	for _, a := range f.Snapshot() {
 		if a.AgentID == "worker-1" {
@@ -196,7 +196,7 @@ func TestFlock_ChangeAgentRole(t *testing.T) {
 	if role != "reviewer" {
 		t.Errorf("role not changed: %q", role)
 	}
-	f.ChangeAgentRole("nonexistent", "x") // no-op, must not panic
+	f.ChangeAgentRole("nonexistent", "x", "x") // no-op, must not panic
 }
 
 func TestFlock_PausedAndAgentStatus(t *testing.T) {

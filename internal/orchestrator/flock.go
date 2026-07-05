@@ -23,8 +23,11 @@ const (
 
 // AgentInfo is the per-agent record exposed via flock APIs.
 type AgentInfo struct {
-	AgentID  string `json:"agent_id"` // e.g. "researcher-1"
-	Role     string `json:"role"`     // "researcher" | "worker" | "reviewer" | ...
+	AgentID string `json:"agent_id"` // e.g. "researcher-1"
+	Role    string `json:"role"`     // logical role label, e.g. "researcher"
+	// Profile is the config profile (sizing/model/system prompt) the VM was spawned
+	// with; it may differ from Role. Empty (legacy records) → Role is the profile.
+	Profile  string `json:"profile,omitempty"`
 	VMID     string `json:"vm_id"`
 	AgentURL string `json:"agent_url"`
 	Status   string `json:"status"`
@@ -164,15 +167,16 @@ func (f *Flock) RemoveAgent(agentID string) {
 	}
 }
 
-// ChangeAgentRole updates the role label of an existing agent under lock. No-op
-// when the agent ID is unknown. Because role is bound at spawn time (VM sizing +
-// system prompt), callers that need the new role to take effect must also
+// ChangeAgentRole updates the role label and profile of an existing agent under
+// lock. No-op when the agent ID is unknown. Because both are bound at spawn time
+// (VM sizing + system prompt), callers that need them to take effect must also
 // recreate the agent's VM.
-func (f *Flock) ChangeAgentRole(agentID, newRole string) {
+func (f *Flock) ChangeAgentRole(agentID, newRole, newProfile string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if a, ok := f.Agents[agentID]; ok {
 		a.Role = newRole
+		a.Profile = newProfile
 	}
 }
 

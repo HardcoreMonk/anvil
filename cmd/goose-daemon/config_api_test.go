@@ -226,7 +226,7 @@ func TestCreateProfile_DefaultsModel(t *testing.T) {
 		t.Fatalf("status = %d, want 201; body=%s", rr.Code, rr.Body.String())
 	}
 	out := mustRead(t, filepath.Join(cp.workDir, "configs", "profiles", "groqp", "goose.yaml"))
-	if !strings.Contains(out, "GOOSE_MODEL: llama-3.3-70b-versatile") {
+	if !strings.Contains(out, "GOOSE_MODEL: openai/gpt-oss-120b") {
 		t.Fatalf("expected groq default model:\n%s", out)
 	}
 }
