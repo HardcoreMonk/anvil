@@ -2,10 +2,12 @@ package mcpgateway
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -15,6 +17,50 @@ import (
 	"testing"
 	"time"
 )
+
+// syncBuffer is a goroutine-safe io.Writer that captures slog output written by
+// the asynchronous reap/stderr goroutines under test.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// captureSlog redirects the default slog logger into a buffer for the duration
+// of the test, restoring the previous default afterward.
+func captureSlog(t *testing.T) *syncBuffer {
+	t.Helper()
+	buf := &syncBuffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return buf
+}
+
+// waitForLog polls the captured host log until it contains want (the reap
+// goroutine logs asynchronously, after the caller's error has surfaced).
+func waitForLog(t *testing.T, buf *syncBuffer, want string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(buf.String(), want) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("host log never contained %q; got:\n%s", want, buf.String())
+}
 
 // TestStdioMCPHelper is not a test: it is the fake stdio MCP server the tests
 // below re-exec this test binary as (the os/exec helper-process idiom). Inert
@@ -358,6 +404,7 @@ func TestStdioBackend_CrashRespawnsAfterCooldown(t *testing.T) {
 }
 
 func TestStdioBackend_RespawnCooldownBlocks(t *testing.T) {
+	logs := captureSlog(t)
 	b := helperBackend(t, "crash-after-init", nil)
 	if _, err := b.ListTools(context.Background()); err == nil {
 		t.Fatal("expected the first call to fail")
@@ -368,21 +415,64 @@ func TestStdioBackend_RespawnCooldownBlocks(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "cooling down") {
 		t.Fatalf("expected a cooldown error, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "boom after init") {
-		t.Fatalf("cooldown error should carry the stderr tail, got: %v", err)
+	// The child's stderr tail must NOT leak into the error string (it flows to
+	// the VM verbatim through the gateway); it goes to the host log instead (#32).
+	if strings.Contains(err.Error(), "boom after init") {
+		t.Fatalf("stderr tail leaked into the cooldown error: %v", err)
 	}
+	waitForLog(t, logs, "boom after init")
 }
 
 func TestStdioBackend_SpawnFailureSurfacesStderr(t *testing.T) {
+	// The child writes a sentinel to stderr and exits at startup. Operators must
+	// still see that stderr — now via the host log, not the VM-facing error (#32).
+	logs := captureSlog(t)
 	b := helperBackend(t, "exit-now", nil)
 	if _, err := b.ListTools(context.Background()); err == nil {
 		t.Fatal("expected failure for a child that exits at startup")
 	}
 	time.Sleep(300 * time.Millisecond)
 	_, err := b.ListTools(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "boom: refusing to start") {
-		t.Fatalf("expected the stderr tail in the error, got: %v", err)
+	if err == nil {
+		t.Fatal("expected an error for a child that exits at startup")
 	}
+	if strings.Contains(err.Error(), "boom: refusing to start") {
+		t.Fatalf("stderr tail leaked into the VM-facing error: %v", err)
+	}
+	// The generic exit error still names the failing backend (server name, no stderr).
+	if !strings.Contains(err.Error(), "helper") {
+		t.Fatalf("exit error should name the backend, got: %v", err)
+	}
+	waitForLog(t, logs, "boom: refusing to start")
+}
+
+// TestGateway_ToolCallError_ScrubsBackendStderr is the VM-facing half of #32: a
+// stdio backend that crashes (writing a sentinel to stderr) must produce a
+// generic JSON-RPC error to the VM, with the stderr surfaced only host-side.
+func TestGateway_ToolCallError_ScrubsBackendStderr(t *testing.T) {
+	logs := captureSlog(t)
+	b := helperBackend(t, "exit-now", nil) // stderr "boom: refusing to start", exits at startup
+	reg := &Registry{
+		servers:  []ServerConfig{{ID: "helper", Namespace: "helper", Transport: "stdio", Command: b.spec.Command}},
+		backends: map[string]Backend{"helper": b},
+		byNS:     map[string]Backend{"helper": b},
+	}
+	g := New(Options{
+		Resolver: stubResolver{Caller{VMID: "vm1", Profile: "leader"}},
+		Registry: reg,
+	})
+	resp := doRPC(t, g, "tools/call", toolsCallParams{Name: "helper__echo", Arguments: json.RawMessage(`{}`)})
+	if resp.Error == nil {
+		t.Fatal("expected a JSON-RPC error for a crashed backend")
+	}
+	if strings.Contains(resp.Error.Message, "boom: refusing to start") {
+		t.Fatalf("VM-facing gateway error leaked child stderr: %q", resp.Error.Message)
+	}
+	if !strings.Contains(resp.Error.Message, "tool call failed") {
+		t.Fatalf("expected generic gateway error, got: %q", resp.Error.Message)
+	}
+	// Operator observability: the stderr is still in the host log.
+	waitForLog(t, logs, "boom: refusing to start")
 }
 
 func TestStdioBackend_CloseGraceful(t *testing.T) {

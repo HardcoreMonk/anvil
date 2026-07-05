@@ -38,8 +38,9 @@ const (
 	stdioWriteTimeout = 30 * time.Second
 	// stdioMaxLine caps one stdout JSON-RPC line (mirrors the SSE event cap).
 	stdioMaxLine = 4 * 1024 * 1024
-	// stdioStderrTail / stdioStderrLineMax bound the stderr kept for error
-	// reports (the health endpoint's "error" field).
+	// stdioStderrTail / stdioStderrLineMax bound the child stderr kept for
+	// host-side operator diagnostics: it is logged when the child exits and is
+	// deliberately excluded from VM-facing error strings (#32).
 	stdioStderrTail    = 4
 	stdioStderrLineMax = 512
 )
@@ -390,9 +391,11 @@ func (b *StdioBackend) reap(p *stdioProc) {
 	if werr != nil {
 		msg += ": " + werr.Error()
 	}
-	if tail := p.stderrTail.String(); tail != "" {
-		msg += " (stderr: " + tail + ")"
-	}
+	// The child's stderr tail is deliberately kept OUT of exitErr: the gateway
+	// relays this error to the VM verbatim ("tool call failed: "+err), so a
+	// misbehaving backend must not be able to smuggle stderr bytes into a
+	// VM-facing string. The tail is logged host-side below for operators (#32).
+	tail := p.stderrTail.String()
 	exitErr := errors.New(msg)
 	p.causeMu.Lock()
 	if p.cause != nil {
@@ -404,7 +407,11 @@ func (b *StdioBackend) reap(p *stdioProc) {
 	p.failPending()
 	b.detach(p, exitErr)
 	close(p.dead)
-	slog.Warn("mcp stdio backend process exited", "server", b.id, "err", exitErr)
+	if tail != "" {
+		slog.Warn("mcp stdio backend process exited", "server", b.id, "err", exitErr, "stderr", tail)
+	} else {
+		slog.Warn("mcp stdio backend process exited", "server", b.id, "err", exitErr)
+	}
 }
 
 // detach clears b.proc if it still points at p, so the next call respawns.
