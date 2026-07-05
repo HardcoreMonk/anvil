@@ -46,9 +46,23 @@
   재연결하고 repaired metadata를 다시 persist한다.
 - `webdev_demo.sh`는 `POST /flocks` 응답의 `agent_tokens`를 읽지 않고, orchestrator
   `vm_id`를 사용해 control-plane proxy `POST /vms/{vm_id}/tasks`로 brief를 보낸다.
-- 현재 sync branch의 anvil runtime baseline은 upstream `v0.4.5`까지 반영한다.
-  2026-07-02 기준 upstream latest observed는 `v0.7.0`이며, `v0.5.0`-`v0.7.0`은
+- 현재 sync branch의 anvil runtime baseline은 upstream `v0.5.0`까지 반영한다.
+  2026-07-02 기준 upstream latest observed는 `v0.7.0`이며, `v0.6.0`-`v0.7.0`은
   별도 adoption review backlog로 둔다.
+- upstream `v0.5.0` (operator Web UI + `/config/profiles` + multi-turn agent
+  `session` + graceful VM delete)를 sync 한다. anvil adaptation은 runtime/operator
+  surface를 IronClaw MCP surface와 분리해서 유지한다:
+  - embedded Web UI는 `/ui/`(정적 bundle + login page)만 auth/audit chain 밖에
+    두고, `/config/profiles`를 포함한 모든 data API는 auth 설정 시 bearer 뒤에
+    유지한다(guard `TestConfigProfilesRequireAuthWhenConfigured`). UI bundle은
+    token/secret을 담지 않는다.
+  - profile config handler는 `goose.yaml`의 `GOOSE_PROVIDER`/`GOOSE_MODEL`만
+    read/write하며 `goose-secrets.yaml`은 절대 read/write하지 않는다(guard
+    `TestConfigProfileSurfaceNeverReadsOrWritesSecrets`).
+  - `VMInfo`는 anvil `tenant_id`/`egress_policy` propagation을 유지한 채 upstream의
+    spawn-time `provider`/`model` snapshot 필드를 additive로 추가한다. `cmd/anvil-mcp`
+    tool surface는 그대로다.
+  - anvil `ANVIL_*` alias와 `EPHEMERA_*` canonical env 이름을 유지한다.
 - upstream `v0.4.4` (streaming `/tasks`, nested-invocation depth guard,
   watchdog status route, flock broadcast, goose-agent slog migration)를 sync
   한다. anvil adaptation: buffered `POST /vms/{id}/tasks` 기본 계약(`stream=1`
