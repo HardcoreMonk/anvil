@@ -165,6 +165,12 @@ func (cp *ControlPlane) handleConfigProfile(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		if err := cp.writeProfileConfig(name, provider, model, body.VcpuCount, body.MemSizeMib); err != nil {
+			// A missing goose.yaml means the profile config to update does not
+			// exist — a 404, not a 500 (which reads as an internal failure).
+			if os.IsNotExist(err) {
+				writeJSONError(w, http.StatusNotFound, fmt.Errorf("profile %q has no goose.yaml to update", name))
+				return
+			}
 			if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "invalid") {
 				writeJSONError(w, http.StatusBadRequest, err)
 				return

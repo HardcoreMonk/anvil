@@ -11,6 +11,24 @@ import (
 	"time"
 )
 
+// TestPutDefaultProfileMissingConfigReturns404 locks the error-code polish
+// (#14): PUT /config/profiles/default when the default goose.yaml is absent maps
+// the underlying ReadFile ENOENT to 404 (the config to update does not exist),
+// not a 500 (which reads as an internal failure).
+func TestPutDefaultProfileMissingConfigReturns404(t *testing.T) {
+	cp := newTestCP(t)
+	// Remove the default goose.yaml so writeProfileConfig's ReadFile hits ENOENT.
+	if err := os.Remove(cp.gooseConfigPath); err != nil {
+		t.Fatalf("remove default goose.yaml: %v", err)
+	}
+	rr := httptest.NewRecorder()
+	cp.handleConfigProfile(rr, httptest.NewRequest(http.MethodPut, "/config/profiles/default",
+		strings.NewReader(`{"provider":"openai","model":"gpt-4o"}`)))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("PUT /config/profiles/default with missing config = %d, want 404; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 // writeProfileFixture creates configs/profiles/{name}/goose.yaml under the test
 // ControlPlane's workDir and returns its path.
 func writeProfileFixture(t *testing.T, cp *ControlPlane, name, content string) string {
