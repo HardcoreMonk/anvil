@@ -70,6 +70,42 @@ func TestConfigProfilesRequireAuthWhenConfigured(t *testing.T) {
 	}
 }
 
+// TestConfigSurfacesRequireAuthViaProductionMux extends the auth sentinels
+// (#24, #18) to the remaining operator config surfaces, and — unlike
+// buildProfileAPIChain's rebuilt mux — drives them through the REAL externalMux
+// that NewControlPlane wires (cp.srv.Handler). That closes the rebuilt-mux blind
+// spot: a route accidentally registered outside authMiddleware (e.g. on
+// externalMux) would answer 200 here instead of 401, failing this test.
+func TestConfigSurfacesRequireAuthViaProductionMux(t *testing.T) {
+	cp := newTestControlPlaneWithHandler(t) // auth configured (operator/secret-token)
+	writeProfileFixture(t, cp, "worker", sampleGooseYAML)
+
+	cases := []struct {
+		method, path, body string
+	}{
+		{http.MethodGet, "/config/clients", ""},
+		{http.MethodGet, "/config/providers", ""},
+		{http.MethodDelete, "/config/profiles/worker", ""},
+		{http.MethodPut, "/config/profiles/worker/system", `{"system_md":"hello"}`},
+		{http.MethodDelete, "/config/profiles/worker/system", ""},
+	}
+	for _, c := range cases {
+		rr := httptest.NewRecorder()
+		cp.srv.Handler.ServeHTTP(rr, httptest.NewRequest(c.method, c.path, strings.NewReader(c.body)))
+		if rr.Code != http.StatusUnauthorized {
+			t.Errorf("%s %s without token = %d, want 401 (operator surface must be behind auth)", c.method, c.path, rr.Code)
+		}
+	}
+
+	// Positive control: a valid bearer token reaches a real handler (200),
+	// proving the 401s above are auth enforcement, not a routing miss.
+	rr := httptest.NewRecorder()
+	cp.srv.Handler.ServeHTTP(rr, authorizedRequest(http.MethodGet, "/config/clients", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /config/clients with valid token = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestConfigProfilesAuthDisabledStillServes(t *testing.T) {
 	// When no clients are configured (auth disabled) the surface is reachable
 	// without a token, same as every other data API in that mode.
