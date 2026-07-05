@@ -48,19 +48,21 @@ daemon 이름, HTTP API, 일부 환경 변수에는 `ephemera` 또는 `goose` �
 runtime으로 구분한다.
 
 버전별 ephemera 소스 snapshot은 Git tag로 공개된다. anvil main runtime baseline은
-upstream ephemera `v0.6.4`까지 병합·적응한 상태를 포함한다. 이 병합은 MicroVM
+upstream ephemera `v0.7.0`까지 병합·적응한 상태를 포함한다. 이 병합은 MicroVM
 lifecycle, flock resilience, token rotation, observability, v0.4 runtime 안정화,
 single-host flock lifecycle, streaming task, snapshot-restore auto-recovery,
-v0.5 operator Web UI/config surface, v0.6 runtime MCP Gateway 같은 runtime·operator
-substrate를 끌어올린 것이며, anvil의 제품 정체성을 ephemera로 바꾸는 작업이 아니다.
-즉 anvil main runtime baseline은 upstream ephemera `v0.6.4` adapted runtime·operator
-support를 포함하는 것이지, 수정 없는 ephemera `v0.6.4`가 아니다. `v0.4.0`-`v0.6.4`는
-full KVM gate로 검증했고 `v0.5.0` operator Web UI(`/ui/`, `/config/*`)와 `v0.6.0`
-runtime MCP Gateway(`EPHEMERA_MCP_*`)는 runtime/operator surface로만 채택하며(IronClaw
-MCP surface 아님, `cmd/anvil-mcp` adapter를 대체하지 않음), `v0.4.4` flock broadcast의
-MCP tool 노출과 `v0.4.2` default COW 전환만 deferred다. 2026-07-02 기준 upstream
-`main`과 최신 upstream tag는 `v0.7.0`이며, `v0.7.0`은 별도 adoption review가 필요한
-backlog다.
+v0.5 operator Web UI/config surface, v0.6 runtime MCP Gateway, v0.7 end-user
+installer/transcript restore 같은 runtime·operator substrate를 끌어올린 것이며,
+anvil의 제품 정체성을 ephemera로 바꾸는 작업이 아니다. 즉 anvil main runtime baseline은
+upstream ephemera `v0.7.0` adapted runtime·operator support를 포함하는 것이지, 수정
+없는 ephemera `v0.7.0`가 아니다. `v0.4.0`-`v0.7.0`은 full KVM gate로 검증했고, 이로써
+upstream parity scope(`v0.4.0`-`v0.7.0`)의 코드 편입이 완료됐다. `v0.5.0` operator Web
+UI(`/ui/`, `/config/*`), `v0.6.0` runtime MCP Gateway(`EPHEMERA_MCP_*`), `v0.7.0`
+installer/transcript는 runtime/operator surface로만 채택하며(IronClaw MCP surface 아님,
+`cmd/anvil-mcp` adapter를 대체하지 않음, systemd는 canonical `ephemera` 이름 유지),
+`v0.4.4` flock broadcast의 MCP tool 노출과 `v0.4.2` default COW 전환만 deferred다.
+2026-07-02 기준 upstream `main`과 최신 upstream tag는 `v0.7.0`이며, anvil은 이 관찰
+범위 전체를 병합했다.
 upstream `v0.7.0`의 kernel SHA 검증, `waitForAgent` per-probe timeout,
 `EPHEMERA_HOME` hardening은 선별 backport됐지만 baseline sync 완료를 의미하지
 않는다.
@@ -109,16 +111,16 @@ anvil은 ephemera를 이름만 바꾼 프로젝트가 아니다. anvil은 IronCl
 
 ### Runtime Baseline
 
-anvil main runtime baseline은 upstream ephemera `v0.6.4`까지를 포함한다.
+anvil main runtime baseline은 upstream ephemera `v0.7.0`까지를 포함한다.
 
 | 구분 | 현재 기준 | anvil에서의 의미 |
 |---|---|---|
-| ephemera runtime baseline | `v0.6.4` | Firecracker VM lifecycle, cold-restart, flock recovery, token rotation, `/metrics`, `/stats`, `slog`, in-VM `gtcall`, webdev demo, v0.4.0-v0.4.5 runtime 안정화(auth/audit, COW spawn, dynamic flock lifecycle, streaming task, nested depth guard, watchdog status, snapshot-restore auto-recovery), v0.5.0-v0.5.5 operator support(Web UI `/ui/`, `/config/*`, per-VM sizing `1` vCPU/`1024` MiB default), v0.6.0-v0.6.4 runtime MCP Gateway(`EPHEMERA_MCP_*`, anti-spoof/rate-limit/stdio backends) 기반 |
-| upstream latest observed | `v0.7.0` (2026-07-02 확인) | `v0.7.0`은 별도 검토 backlog |
+| ephemera runtime baseline | `v0.7.0` | Firecracker VM lifecycle, cold-restart, flock recovery, token rotation, `/metrics`, `/stats`, `slog`, in-VM `gtcall`, webdev demo, v0.4.0-v0.4.5 runtime 안정화(auth/audit, COW spawn, dynamic flock lifecycle, streaming task, nested depth guard, watchdog status, snapshot-restore auto-recovery), v0.5.0-v0.5.5 operator support(Web UI `/ui/`, `/config/*`, per-VM sizing `1` vCPU/`1024` MiB default), v0.6.0-v0.6.4 runtime MCP Gateway(`EPHEMERA_MCP_*`, anti-spoof/rate-limit/stdio backends), v0.7.0 end-user installer + conversation transcript restore 기반. upstream parity scope(v0.4.0-v0.7.0) 코드 편입 완료 |
+| upstream latest observed | `v0.7.0` (2026-07-02 확인) | 관찰 범위 전체 병합·적응 완료, pending sync 후보 없음 |
 | anvil product surface | `anvil_*` MCP tool, scheduler, tenant/egress, workload runner | IronClaw가 직접 사용하는 공개 실행 계약 |
 | namespace policy | `EPHEMERA_*`, `goose-*`, `ephemera_*` 유지 | upstream runtime 호환성. anvil 이름으로 일괄 rename하지 않는다. |
 
-ephemera `v0.3.2`-`v0.6.4`는 anvil 안에서 runtime baseline으로 채택/적응된 변경이다.
+ephemera `v0.3.2`-`v0.7.0`는 anvil 안에서 runtime baseline으로 채택/적응된 변경이다.
 `v0.4.4` flock broadcast는 daemon-only이고 `anvil_*` MCP tool로 노출하지 않으며,
 `v0.4.5` snapshot-restore auto-recovery에서 anvil은 live·persisted restored VM이
 참조하는 source snapshot의 `DELETE`를 `409`로 계속 막는다(upstream e2e 46c의 `200`
@@ -131,11 +133,17 @@ agent-proxy 결함은 `64ec57c`가 request마다 fresh dial(`DisableKeepAlives`)
 IronClaw `anvil_*` MCP surface(`ANVIL_MCP_*` adapter)를 대체하지 않는다 — caller
 profile은 source IP로 판정하고, backend credential은 host-side에만 두며(VM엔 gateway
 URL만), audit은 metadata-only이고 profile policy는 서버 목록을 넓힐 수 없다.
+`v0.7.0` end-user installer(`install.sh`/`uninstall.sh`/`ephemera.service.in`)와
+conversation transcript restore도 runtime/operator surface로 채택하며, systemd service는
+canonical `ephemera` 이름을 유지한다(anvil alias wrapper 없음). transcript는 daemon
+proxy(bearer)로 노출하고 payload는 provider key/CP token/`agent_token` sentinel-free다.
 anvil release note에서는 이 내용을 "upstream runtime baseline"으로 분리해 기록하고,
 MCP/scheduler/workload/tenant/egress 같은 anvil 고유 기능과 섞어 제품명처럼 쓰지
 않는다.
-선별 backport된 upstream `v0.7.0` hardening은 현재 baseline 위의 보안/운영 보강으로
-취급하며, `v0.4.x`-`v0.7.x` 전체 sync 완료로 표기하지 않는다.
+`v0.7.0`의 hardening(kernel SHA atomic 검증, `resolveWorkDir`/`EPHEMERA_HOME`,
+`waitForAgent` per-probe)은 sync 전 독립 backport로 먼저 반영돼 있었고 v0.7.0 병합 시
+single definition으로 reconcile됐다. 이로써 upstream parity scope(`v0.4.0`-`v0.7.0`)의
+코드 편입이 완료됐다.
 
 ## Fork와 upstream 관리
 
@@ -524,6 +532,8 @@ Upstream ephemera feature matrix:
 | **MCP Gateway anti-spoof + rate limit** (v0.6.1) | `EPHEMERA_NET_ANTISPOOF` (default on) adds best-effort ebtables MAC/IP anti-spoof so a guest cannot forge another VM's source IP — the gateway's identity signal. Per-(VM, backend server) token-bucket rate limiting via `EPHEMERA_MCP_RATE` (default `0` = unlimited) / `EPHEMERA_MCP_BURST`. |
 | **MCP catalog + granular policy** (v0.6.2) | The gateway aggregates backend **resources** and **prompts** alongside tools; a profile's policy narrows access per-server and per-tool and can only **narrow**, never widen `servers.yaml`. Resources/prompts share the same policy filter and rate-limit bucket as tools (anvil guard). Audit records gain a `kind` field. |
 | **MCP stdio backends** (v0.6.4) | Backends may be spawned as local subprocesses (`transport: stdio`). The child env is rebuilt from scratch (`PATH`/`HOME`/`LANG` + the server's `spec.Env`) so daemon `EPHEMERA_*` vars never leak in (canary test); the credential is passed only through `credential_env` (never argv). When the daemon runs as root the child drops to `EPHEMERA_MCP_STDIO_USER` (default `nobody`) with a `/var/lib/ephemera/mcp-stdio` scratch cwd/HOME, and shutdown reaps the child's process group (pgid-recycling-safe). `GET /config/mcp/servers` exposes transport/command + `has_credential` only (leak guard). *(Upstream has no v0.6.3.)* |
+| **End-user installer** (v0.7.0, runtime/operator surface) | `install.sh` / `uninstall.sh` / `INSTALL.md` install the daemon as a systemd service (`ephemera.service.in` → canonical `ephemera` unit, `EPHEMERA_HOME=@DEST@`), and `scripts/build_release.sh` builds SLIM/FULL release tarballs. This is a **runtime/operator** installer for the ephemera daemon — not an anvil/IronClaw product wrapper; the service keeps the canonical `ephemera` name (no anvil alias). `build_release.sh` re-verifies the downloaded kernel/firecracker with `sha256sum -c` against the pins parsed from `main.go`, closing the FULL-tarball supply-chain gap (runtime `EnsureKernel` `os.Stat`-skips existing files). `uninstall.sh` cleans ephemera-scoped `/tmp` scratch (root-gated, prefix-anchored). Expose the daemon only behind a reverse proxy/TLS or a private network. |
+| **Conversation transcript restore** (v0.7.0) | `GET /vms/{id}/sessions/{name}/transcript` (bearer, via the daemon proxy) returns a prior conversation as `{turns:[{role,text}]}`. The agent serves a cached transcript and, on a cache miss, fills it with a **read-only** `goose session export -n {name} --format json` — no model call. The response schema is auth-free so the Web UI can render it without a daemon token. Four safety guards lock the invariants: the endpoint `401`s without a bearer; the payload is sentinel-free of the provider key / CP token / `agent_token`; a cache hit serves without spawning the agent; and the export argv is exactly `session export -n {name} --format json` (run-token rejected). |
 
 ---
 

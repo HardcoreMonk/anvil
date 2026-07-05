@@ -33,22 +33,29 @@ IronClaw 실행 계층으로 통합하는 downstream product fork다. 이 저장
 통합 릴리즈는 ephemera runtime tag와 충돌하지 않도록 `anvil-v0.1.0`처럼 별도
 prefix를 사용한다. 현재 최신 anvil 공개 integration tag는 `anvil-v0.3.2`이고,
 tag target은 `18b4506204a68a8fd9e3608976727953869f94a6`다. anvil main runtime
-baseline은 upstream ephemera `v0.6.4` 병합·적응분을 포함하며, `anvil-v0.3.2`
+baseline은 upstream ephemera `v0.7.0` 병합·적응분을 포함하며, `anvil-v0.3.2`
 이후의 scheduler control loop, scheduler `/metrics`, manual cross-host snapshot
-replication, scheduler-aware single-host flock placement 위에 `v0.4.0`-`v0.6.4`
+replication, scheduler-aware single-host flock placement 위에 `v0.4.0`-`v0.7.0`
 runtime·operator 변경을 더한다. 즉 anvil main runtime baseline은 upstream ephemera
-`v0.6.4` adapted runtime·operator support를 포함하며, anvil을 수정 없는 ephemera
-`v0.6.4`와 동일시하지 않는다. `v0.4.0`-`v0.6.4`는 full KVM gate로 검증한
-adopted/adapted baseline이고, `v0.5.0` operator Web UI(`/ui/`, `/config/*`)와 `v0.6.0`
-runtime MCP Gateway(`EPHEMERA_MCP_*`, `internal/mcpgateway`)는 runtime/operator
-surface로만 채택해 IronClaw `anvil_*` MCP surface로 노출하지 않으며(runtime MCP
-Gateway는 `cmd/anvil-mcp` IronClaw adapter를 대체하지 않는다), `v0.4.4` flock
-broadcast의 MCP tool 노출과 `v0.4.2` default COW 전환만 deferred로 둔다. 2026-07-02
-기준 upstream `main`과 최신 upstream tag는 `v0.7.0`까지 진행되어 있다. `v0.7.0`은 별도
-adoption review가 필요한 미병합 backlog다. 단,
-upstream `v0.7.0`의 kernel SHA 검증, `waitForAgent`
-per-probe timeout, `EPHEMERA_HOME` work directory 지정은 baseline sync와 독립적인
-hardening backport로 반영됐다. 문서에서는 anvil과 ephemera를 같은 이름으로
+`v0.7.0` adapted runtime·operator support를 포함하며, anvil을 수정 없는 ephemera
+`v0.7.0`와 동일시하지 않는다. `v0.4.0`-`v0.7.0`은 full KVM gate로 검증한
+adopted/adapted baseline이며, 이로써 upstream parity scope(`v0.4.0`-`v0.7.0`)의 코드
+편입이 완료됐다. `v0.5.0` operator Web UI(`/ui/`, `/config/*`), `v0.6.0` runtime MCP
+Gateway(`EPHEMERA_MCP_*`, `internal/mcpgateway`), `v0.7.0` end-user installer
+(`install.sh`/`uninstall.sh`/`ephemera.service.in`)와 transcript restore는
+runtime/operator surface로만 채택해 IronClaw `anvil_*` MCP surface로 노출하지 않으며
+(runtime MCP Gateway는 `cmd/anvil-mcp` IronClaw adapter를 대체하지 않는다), systemd
+service는 canonical `ephemera` 이름을 유지한다(anvil alias wrapper 없음). 남은
+deferred/비목표는 `v0.4.4` flock broadcast의 MCP tool 노출, `v0.4.2` default COW 전환,
+auto-snapshot public support, flock member spawn의 per-profile sizing 존중, runtime MCP
+Gateway의 IronClaw 표면 승격 금지(비목표 유지)이며, 여기에 release-gate 항목(valid
+provider key semantic run, audit-writer sentinel, stdio stderr scrub, `credential_env`
+reserved names, production-mux auth assert)이 남는다. 2026-07-02 기준 upstream `main`과
+최신 upstream tag는 `v0.7.0`까지 진행되어 있다. `v0.7.0`의 kernel SHA 검증,
+`waitForAgent` per-probe timeout, `EPHEMERA_HOME` work directory 지정은 sync 전 독립
+hardening backport로 먼저 반영돼 있었고, v0.7.0 병합 시 upstream 버전과 reconcile해 anvil
+backport(atomic temp+rename 무조건 검증 포함, upstream보다 stricter)가 single definition으로
+남았다(net Go diff는 doc-comment-only). 문서에서는 anvil과 ephemera를 같은 이름으로
 취급하지 않는다.
 
 ## 진실 기준 문서 순서
@@ -69,7 +76,7 @@ hardening backport로 반영됐다. 문서에서는 anvil과 ephemera를 같은 
 | anvil | IronClaw와 ephemera를 결합하는 새 프로젝트 이름 | project-wide |
 | IronClaw | MCP client/orchestration 계층. anvil VM 실행 기능을 사용하는 상위 시스템 | 외부/상위 통합 |
 | OpenClaw | anvil의 통합 대상이 아님. anvil 문서와 구현은 OpenClaw 운영 계약을 제공하지 않음 | 제외 범위 |
-| ephemera | Firecracker MicroVM 기반 격리 실행 runtime. anvil main runtime baseline은 upstream ephemera `v0.6.4` adapted runtime·operator support를 포함하고, 2026-07-02 기준 upstream latest observed는 `v0.7.0`이다. `v0.4.0`-`v0.6.4`는 adopted/adapted baseline, `v0.7.0`은 별도 검토 backlog다. | `cmd/goose-daemon`, `internal/*` |
+| ephemera | Firecracker MicroVM 기반 격리 실행 runtime. anvil main runtime baseline은 upstream ephemera `v0.7.0` adapted runtime·operator support를 포함하고, 2026-07-02 기준 upstream latest observed는 `v0.7.0`이다. `v0.4.0`-`v0.7.0`은 adopted/adapted baseline으로 upstream parity scope 코드 편입이 완료됐다. | `cmd/goose-daemon`, `internal/*` |
 | ephemera control plane | VM 생성, 삭제, snapshot, restore, proxy를 담당하는 호스트 daemon | `cmd/goose-daemon` |
 | MicroVM | Firecracker + KVM으로 실행되는 ephemera 격리 실행 환경 | `internal/vm` |
 | goose-agent | VM 안에서 prompt 실행, health, stop API를 제공하는 HTTP agent | `cmd/goose-agent` |
@@ -260,10 +267,26 @@ daemon으로 보내는 outbound Bearer token이다.
   주입(argv 아님), root일 때 `nobody`로 실행하고 `/var/lib/ephemera/mcp-stdio` scratch를
   cwd·HOME으로 쓰며, shutdown이 stdio process group을 reap한다(pgid recycling-safe).
   `GET /config/mcp/servers`는 transport/command와 `has_credential`만 노출한다(leak guard).
-- upstream `v0.7.0`은 아직 anvil baseline으로 병합하지 않았다.
-  installer/transcript/hardening 성격으로 별도 adoption review가 필요하다. 단,
-  `v0.7.0`의 kernel SHA 검증, `waitForAgent` per-probe timeout, `EPHEMERA_HOME`은
-  baseline sync와 독립적인 hardening backport로 반영됐다.
+- upstream `v0.7.0` 변경은 anvil main runtime baseline으로 채택됐고 full KVM/installer
+  gate로 검증됐다(e2e `334✓/0✗`). 이로써 upstream parity scope(`v0.4.0`-`v0.7.0`) 코드
+  편입이 완료됐다. end-user installer(`install.sh`/`uninstall.sh`/`INSTALL.md`/
+  `ephemera.service.in`)와 release workflow(`scripts/build_release.sh`)는 runtime/operator
+  installer surface로 채택하며 systemd service는 canonical `ephemera` 이름을 유지한다
+  (rule-permitted, anvil alias wrapper 없음). conversation transcript restore는 daemon
+  proxy `GET /vms/{id}/sessions/{name}/transcript`(bearer)로 노출하고, agent export는
+  read-only `goose session export`(model call 없음)이며 응답 schema `{turns:[{role,text}]}`는
+  auth-free여서 Web UI가 daemon token 없이 렌더한다. 4개 transcript-safety guard(bearer
+  없으면 `401`, payload는 provider key/CP token/`agent_token` sentinel-free, cache-hit는
+  agent spawn 없이 serve, export argv는 `session export -n {name} --format json`이며
+  run-token 거부)로 고정한다.
+- v0.7.0 병합 시 sync 전 독립 backport 3종(kernel SHA atomic temp+rename 무조건 검증,
+  `resolveWorkDir`/`EPHEMERA_HOME`, `waitForAgent` per-probe timeout)이 upstream 버전을
+  이기고 single definition으로 남았다(anvil 쪽이 stricter, net Go diff는 doc-comment-only).
+  기존 anvil adaptation(agent-stamp mount skip, restore-over-`meta.DiskPath`,
+  proxy `DisableKeepAlives`)은 하나도 rollback되지 않았다. release build integrity:
+  `build_release.sh`가 다운로드한 kernel/firecracker를 `main.go`에서 parse한 pin과
+  `sha256sum -c`로 검증해, runtime `EnsureKernel`이 기존 파일을 `os.Stat`로 skip하던
+  FULL-tarball supply-chain gap을 닫는다.
 - `scripts/anvil-mcp-e2e.sh flock`, 전체 KVM `sudo bash e2e_test.sh`, script-only
   workload runner E2E가 Goosetown MCP surface, daemon flock lifecycle,
   deterministic workload 검증 경로에 포함된다.
@@ -277,8 +300,12 @@ daemon으로 보내는 outbound Bearer token이다.
 - proxy agent client keep-alive 비활성화(`64ec57c`)의 upstream 기여 검토
 - runtime MCP Gateway backend 운영 정책(어떤 backend server를 profile에 바인딩할지,
   rate-limit·credential 운영)과 실제 operator 배포 검증
-- upstream ephemera `v0.7.0` installer/transcript/hardening 계열 변경의
-  별도 adoption review와 anvil 공개 경계 분류
+- release-gate 항목: valid provider key로 `semantic` run, audit-writer sentinel,
+  stdio stderr scrub, `credential_env` reserved names, production-mux auth assert
+- installer 운영 검증: 실제 systemd host에 `install.sh` 배포와 release build(FULL
+  variant) 검증. `uninstall.sh`의 ephemera-scoped `/tmp` scratch 정리는 의도된 cleanup
+  (root-gated, prefix-anchored)이며 `/tmp/goose-rootfs`는 현재 source에 producer 없는
+  stale no-op이다. 외부 Web UI 노출은 reverse proxy/TLS 또는 private network 뒤에서만 한다
 - scheduler service의 실제 운영 배포와 host inventory polling daemonization
 - snapshot locality의 cross-host snapshot replication
 - scheduler-aware cross-host flock placement

@@ -2,7 +2,7 @@
 
 ## 상태
 
-- 기준 버전: upstream ephemera `v0.6.4` + anvil runtime control-plane updates
+- 기준 버전: upstream ephemera `v0.7.0` + anvil runtime control-plane updates
 - 범위: ephemera daemon HTTP 동작, VM lifecycle, agent proxy, snapshot lifecycle,
   Goosetown flock/Town Wall, tenant/egress/audit/observability endpoint, guest agent 동작
 - 제외 범위: IronClaw MCP client 동작. 해당 내용은
@@ -33,6 +33,7 @@ control plane daemon은 하나의 HTTP service를 노출한다.
 | `/vms/{vm_id}/workspace` | `cmd/goose-daemon/api.go` | guest `/workspace` 단일 파일 read/write proxy |
 | `/vms/{vm_id}/health` | `cmd/goose-daemon/api.go` | guest health proxy |
 | `/vms/{vm_id}/stop` | `cmd/goose-daemon/api.go` | guest agent에 stop 요청 |
+| `/vms/{vm_id}/sessions/{name}/transcript` | `cmd/goose-daemon/api.go` | guest agent `/sessions/{name}/transcript` proxy(bearer). read-only 대화 transcript 복원, 응답 `{turns:[{role,text}]}`(`v0.7.0`) |
 | `/vms/{vm_id}/snapshot` | `cmd/goose-daemon/api.go` | full 또는 diff VM snapshot 생성 |
 | `/snapshots` | `cmd/goose-daemon/api.go` | 저장된 snapshot 목록 |
 | `/snapshots/gc` | `cmd/goose-daemon/api.go` | snapshot retention GC dry-run/apply |
@@ -64,9 +65,19 @@ VM 내부의 `goose-agent`는 다음 endpoint를 제공한다.
 | `GET /health` | 없음 | `idle` 또는 `busy` 반환 |
 | `POST /stop` | VM별 Bearer token | agent HTTP server graceful stop |
 | `POST /townwall/post` | VM별 Bearer token | flock context를 읽어 host Town Wall에 message 전달 |
+| `GET /sessions/{name}/transcript` | VM별 Bearer token | 대화 transcript 복원(`v0.7.0`) |
 
 외부 caller는 private guest IP에 직접 접근하기보다 control plane proxy endpoint를
 사용해야 한다.
+
+conversation transcript restore(`v0.7.0`): `GET /sessions/{name}/transcript`는 캐시된
+transcript를 우선 serve하고, cache-miss일 때만 read-only `goose session export -n
+{name} --format json`(model call 없음)으로 채운다. 응답 schema `{turns:[{role,text}]}`는
+auth-free여서 Web UI가 daemon token 없이 렌더할 수 있다. daemon은 이 endpoint를
+`GET /vms/{vm_id}/sessions/{name}/transcript`로 proxy하며 control-plane bearer를 요구한다.
+4개 transcript-safety guard가 불변식을 고정한다: bearer 없으면 `401`, payload는 provider
+key/CP token/`agent_token` sentinel-free, cache-hit는 agent spawn 없이 serve, export
+argv는 `session export -n {name} --format json`이며 run-token을 거부한다.
 
 ## Runtime 설정 alias
 

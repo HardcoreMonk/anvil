@@ -68,6 +68,7 @@
 | `v0.5.1`-`v0.5.5` | adapted | `/config/providers`(key 존재 여부만), `/config/clients`(이름+만료만)를 sentinel test로 secret 비노출 확인. `system.md`-only prompt 편집(`64 KiB` cap), profile delete in-use → `409`, default profile 예약, traversal 거부. sizing preset + per-VM `VcpuCount`/`MemSizeMib`(snapshot metadata에 기록, legacy → 2/2048 fallback). Town Wall `SystemAuthor` author migration. restore agent-wait 30s→60s. |
 | `v0.6.0` | adapted | runtime MCP Gateway(`internal/mcpgateway`, daemon `/config/mcp`·`/config/mcp/servers`·`/config/mcp/builtins` handler, `configs/mcp/*.example`, Web UI MCP console). **runtime/operator surface이고 IronClaw MCP surface가 아니다 — `cmd/anvil-mcp`를 대체하지 않는다.** 경계는 구조적으로 강제: caller profile은 source IP↔VM registry로 server-side 판정(unknown → `403`), backend credential은 host-side(`configs/mcp/secrets.yaml`, gitignored)에만 있고 VM에는 gateway URL만 주입(`VMPrepareOptions`에 credential 필드 없음), `audit/mcp.jsonl`은 metadata-only(고정 key set, `Err`도 omit), profile policy는 `servers.yaml`을 좁히기만 하고 넓힐 수 없다. anvil boundary guard 4종: IronClaw schema/adapter가 gateway tool 제외, audit metadata-only sentinel, `/config/mcp*` bearer 없으면 `401`, VM은 URL(credential 아님)만 받고 policy는 widen 불가. |
 | `v0.6.1`, `v0.6.2`, `v0.6.4` | adapted | (upstream에 `v0.6.3` 없음) `EPHEMERA_NET_ANTISPOOF` 기본 on(ebtables best-effort); per-(VM,server) token-bucket rate limit(`EPHEMERA_MCP_RATE` 기본 `0`=unlimited, `EPHEMERA_MCP_BURST`); resources/prompts가 tools와 policy·rate bucket 공유(anvil guard); audit `kind` field; `GET /config/mcp/servers`는 transport/command + `has_credential`만 노출(leak guard + sentinel); stdio backend child env를 `[PATH,HOME,LANG]`+`spec.Env`로 재구성(`EPHEMERA_*` canary test), credential은 `credential_env`로만(argv 아님), root면 `nobody`로 실행 + `/var/lib/ephemera/mcp-stdio` scratch, shutdown이 stdio process group reap(pgid recycling-safe). |
+| `v0.7.0` | adapted | end-user installer(`install.sh`/`uninstall.sh`/`INSTALL.md`/`ephemera.service.in`), release workflow(`scripts/build_release.sh`), conversation transcript restore를 채택한다. installer는 runtime/operator surface이고 systemd service는 canonical `ephemera` 이름을 유지한다(rule-permitted, anvil alias wrapper 없음). transcript restore는 daemon proxy `GET /vms/{id}/sessions/{name}/transcript`(bearer)로 노출하며, agent export는 read-only `goose session export`(model call 없음)이고 응답 schema `{turns:[{role,text}]}`는 auth-free여서 Web UI가 daemon token 없이 렌더한다. 4개 transcript-safety guard: bearer 없으면 `401`, payload는 provider key/CP token/`agent_token` sentinel-free, cache-hit는 agent spawn 없이 serve, export argv는 `session export -n {name} --format json`이며 run-token 거부. release build integrity: `build_release.sh`가 kernel/firecracker를 `main.go` pin과 `sha256sum -c`로 검증. 사전 backport 3종(kernel SHA atomic temp+rename, `resolveWorkDir`/`EPHEMERA_HOME`, `waitForAgent` per-probe)이 v0.7.0 reconcile에서 single definition으로 남았고(anvil이 stricter, net Go diff doc-comment-only), 기존 anvil adaptation은 rollback 없음. |
 
 runtime MCP Gateway 경계(요약): `EPHEMERA_MCP_*`(gateway, runtime/operator)와
 `ANVIL_MCP_*`(`cmd/anvil-mcp` IronClaw adapter 설정)는 서로 다른 namespace·surface다.
@@ -75,12 +76,14 @@ gateway는 adapter를 대체하지 않으며, IronClaw tool 목록에 gateway to
 않는다(guard `TestToolRegistrationsExcludeGatewayTools`,
 `TestCurrentIronClawSchemasExcludeGatewayNamespacedTools`).
 
-`v0.4.0`-`v0.6.4`는 anvil main runtime baseline으로 병합·적응되었고 full KVM gate로
-검증됐다(`v0.4.x`는 Task 8, `v0.5.x`는 Task 4, `v0.6.x`는 Task 6 문서 반영 기준).
+`v0.4.0`-`v0.7.0`은 anvil main runtime baseline으로 병합·적응되었고 full KVM gate로
+검증됐다(`v0.4.x`는 Task 8, `v0.5.x`는 Task 4, `v0.6.x`는 Task 6, `v0.7.0`은 Task 7
+문서 반영 기준). 이로써 upstream parity scope(`v0.4.0`-`v0.7.0`) 코드 편입이 완료됐다.
 상세 병합 근거는
 [`docs/analysis/10-v0.4.0-v0.4.5-runtime-stabilization-adoption.md`](analysis/10-v0.4.0-v0.4.5-runtime-stabilization-adoption.md),
 Phase 2 handoff([`docs/operations/2026-07-05-ephemera-v0.5-operator-sync-handoff.md`](operations/2026-07-05-ephemera-v0.5-operator-sync-handoff.md)),
-Phase 3 handoff([`docs/operations/2026-07-05-ephemera-v0.6-mcp-gateway-sync-handoff.md`](operations/2026-07-05-ephemera-v0.6-mcp-gateway-sync-handoff.md))에
+Phase 3 handoff([`docs/operations/2026-07-05-ephemera-v0.6-mcp-gateway-sync-handoff.md`](operations/2026-07-05-ephemera-v0.6-mcp-gateway-sync-handoff.md)),
+Phase 4 handoff([`docs/operations/2026-07-06-ephemera-v0.7-parity-sync-handoff.md`](operations/2026-07-06-ephemera-v0.7-parity-sync-handoff.md))에
 보존한다.
 
 sizing 결정: `v0.5.3`부터 anvil은 upstream default VM sizing `1` vCPU / `1024` MiB를
@@ -101,16 +104,17 @@ connection pooling과의 의도적 divergence이며 upstream 기여 후보다. �
 
 ## 5. 다음 upstream sync 후보 예비 분류
 
-`v0.4.0`-`v0.6.4`는 Section 4의 baseline 채택 상태로 이동했다. 다음 upstream tag는
-아직 anvil runtime baseline으로 병합되지 않았다. 2026-07-02 기준 upstream `main`과
-최신 upstream tag는 `v0.7.0`이다.
+`v0.4.0`-`v0.7.0`은 모두 Section 4의 baseline 채택 상태로 이동했다. 2026-07-02 기준
+upstream `main`과 최신 upstream tag는 `v0.7.0`이며, anvil은 이 관찰 범위 전체를 병합·
+적응했다 — upstream parity scope 코드 편입이 완료돼 현재 pending sync 후보는 없다.
 
-`v0.7.0`은 아직 상세 adoption review가 끝나지 않았다. 다음 분류는 sync 전 backlog
-triage 기준이며, 실제 채택 상태는 별도 analysis 문서와 sync branch 검증 뒤 확정한다.
-
-| upstream tag 범위 | 현재 상태 | 적용 전 검토 요약 |
-|---|---|---|
-| `v0.7.0` | pre-review/backported-hardening | installer, transcript, hardening 계열로 보인다. kernel SHA 검증, `waitForAgent` per-probe timeout, `EPHEMERA_HOME`은 baseline sync와 독립 backport로 반영됐지만, tag 전체는 아직 채택하지 않았다. |
+`v0.7.0` 이후 upstream 태그가 새로 관찰되면 이 인덱스에 pre-review 분류로 다시 추가하고,
+sync 전 backlog triage와 별도 analysis 문서/sync branch 검증 뒤 채택 상태를 확정한다.
+현재 남은 작업은 tag 채택이 아니라 release-gate 항목(valid provider key `semantic` run,
+audit-writer sentinel, stdio stderr scrub, `credential_env` reserved names, production-mux
+auth assert)과 deferred 항목(`v0.4.4` broadcast MCP 노출, `v0.4.2` default COW,
+auto-snapshot public support, flock per-profile sizing, runtime MCP Gateway의 IronClaw
+표면 승격 금지)이다.
 
 ---
 

@@ -135,13 +135,13 @@ scripts/anvil-mcp-e2e.sh flock
 
 ### 현재 upstream runtime baseline
 
-anvil main runtime baseline은 upstream ephemera `v0.6.4`까지 병합·적응한 runtime을
+anvil main runtime baseline은 upstream ephemera `v0.7.0`까지 병합·적응한 runtime을
 포함한다. `v0.3.2`-`v0.3.6`은 이전 release가 채택한 baseline이고, `v0.4.0`-`v0.4.5`는
 v0.4 sync, `v0.5.0`-`v0.5.5`는 v0.5 operator sync, `v0.6.0`-`v0.6.4`는 v0.6 MCP gateway
-sync에서 병합·적응해 full KVM gate로 검증했다. upstream `main`과 최신 upstream tag는
-`v0.7.0`까지 진행되어 있으나 `v0.7.0`은 아직 anvil baseline으로 병합하지 않았다. 새
-anvil release 후보가 이 baseline을 포함한다면 release 본문에는 upstream runtime 변경과
-anvil product 변경을 분리해서 적는다.
+sync, `v0.7.0`은 v0.7 parity sync에서 병합·적응해 full KVM gate로 검증했다 — upstream
+parity scope(`v0.4.0`-`v0.7.0`) 코드 편입이 완료됐다. upstream `main`과 최신 upstream
+tag는 `v0.7.0`까지 진행되어 있다. 새 anvil release 후보가 이 baseline을 포함한다면
+release 본문에는 upstream runtime 변경과 anvil product 변경을 분리해서 적는다.
 
 - upstream `v0.3.2`: live VM cold-restart, `vms/<vm_id>/state.json`, orphan cleanup,
   기존 TAP/IP/MAC 재예약, graceful daemon shutdown 시 rootfs/state 보존.
@@ -184,6 +184,23 @@ anvil product 변경을 분리해서 적는다.
   resources/prompts policy·rate 공유, `GET /config/mcp/servers`는 `has_credential`만,
   stdio backend(`nobody`/`/var/lib/ephemera/mcp-stdio` scratch, `credential_env`,
   child env 재구성, process-group reap).
+- upstream `v0.7.0`: end-user installer(`install.sh`/`uninstall.sh`/`INSTALL.md`/
+  `ephemera.service.in`)와 release workflow(`scripts/build_release.sh`), conversation
+  transcript restore, upstream hardening reconcile. installer는 runtime/operator surface,
+  systemd는 canonical `ephemera`(alias wrapper 없음). transcript는 daemon proxy
+  `GET /vms/{id}/sessions/{name}/transcript`(bearer), agent export read-only(model call
+  없음), 응답 `{turns:[{role,text}]}` auth-free. `uninstall.sh`는 ephemera-scoped `/tmp`
+  scratch(`/tmp/goose-workspaces` 등, stale no-op `/tmp/goose-rootfs` 포함)를 root-gated·
+  prefix-anchored로 정리한다(의도된 cleanup).
+- anvil transcript-safety guard 4종: bearer 없으면 `401`, payload는 provider key/CP
+  token/`agent_token` sentinel-free, cache-hit는 agent spawn 없이 serve, export argv는
+  `session export -n {name} --format json`이며 run-token 거부.
+- anvil backport reconciliation: 사전 backport 3종(kernel SHA atomic temp+rename,
+  `resolveWorkDir`/`EPHEMERA_HOME`, `waitForAgent` per-probe)이 v0.7.0 reconcile에서
+  single definition으로 남았고(anvil stricter, net Go diff doc-comment-only) 기존 anvil
+  adaptation(agent-stamp skip, restore-over-`meta.DiskPath`, `DisableKeepAlives`)은
+  rollback 없음. release build integrity: `build_release.sh`가 kernel/firecracker를
+  `main.go` pin과 `sha256sum -c`로 검증(FULL-tarball supply-chain gap 차단).
 - anvil sizing 결정: default VM sizing `1` vCPU / `1024` MiB(v0.5.3 이전 2/2048,
   KVM 근거로 승인). flock member spawn의 per-profile sizing override 미존중 gap은
   follow-up으로 기록한다.
@@ -219,6 +236,8 @@ scripts/anvil-mcp-e2e.sh lifecycle
 scripts/anvil-mcp-e2e.sh semantic
 scripts/anvil-mcp-e2e.sh flock
 sudo -n bash scripts/vm-workload-e2e.sh
+bash install.sh --help && bash uninstall.sh --help   # installer help, no system mutation (v0.7.0)
+sudo bash scripts/build_release.sh v0.7.0             # FULL+SLIM tarball + .sha256 (dist/ gitignored, v0.7.0)
 ```
 
 Phase 2 결과:
@@ -250,11 +269,27 @@ v0.6 sync Phase 3 KVM gate — gateway steps:
   기본 안전한 bridge IP bind를 override할 수 있고, source-IP `403`이 defense-in-depth로
   남는다.
 
-미병합 upstream review 상태:
+v0.7 sync Phase 4 KVM/installer gate:
 
-- `v0.7.0`: installer/transcript/hardening 계열로 보인다. kernel SHA 검증,
-  `waitForAgent` per-probe timeout, `EPHEMERA_HOME`은 선별 backport됐지만 tag 전체를
-  채택한 것은 아니다.
+- CI-safe gate all green: `git diff --check`, installer `bash -n` ×3(install.sh/
+  uninstall.sh/build_release.sh), targeted test group, full glob EXIT=0, web build drift
+  없음, 3 builds.
+- KVM: `sudo bash e2e_test.sh` `334✓ / 0✗`. `anvil-mcp-e2e.sh` lifecycle+flock PASS,
+  `vm-workload-e2e.sh` PASS. `anvil-mcp-e2e.sh semantic`은 standing provider-key caveat
+  (key-free 구간 `200`, LLM-echo substep만 known-invalid local Google key로 실패).
+- installer/release build: `bash install.sh --help`/`bash uninstall.sh --help` OK(시스템
+  변경 없음). release build를 root로 실행 → SLIM(≈27M) + FULL(≈250M) tarball + `.sha256`
+  checksum(dist/ gitignored). `build_release.sh`가 kernel/firecracker를 `sha256sum -c`로
+  검증한다.
+- 외부 Web UI 노출은 reverse proxy/TLS 또는 private network 뒤에서만 한다.
+
+upstream parity scope 채택 완료:
+
+- `v0.4.0`-`v0.7.0`은 모두 anvil main baseline으로 병합·적응됐다. 2026-07-02 기준 관찰된
+  upstream 최신 tag는 `v0.7.0`이며 pending sync 후보는 없다. `v0.7.0` 이후 새 tag가
+  관찰되면 별도 sync/adoption review로 처리한다.
+- 남은 release-gate 항목: valid provider key로 `semantic` run, audit-writer sentinel,
+  stdio stderr scrub, `credential_env` reserved names, production-mux auth assert.
 
 현재 baseline 기반 upstream E2E는 `/metrics`, `/stats`, streaming/depth/watchdog,
 snapshot-restore recovery, real-LLM smoke, in-VM helper 경로를 포함할 수 있다. provider key가 있는 환경에서는 `GOOGLE_API_KEY`,

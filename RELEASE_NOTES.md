@@ -46,9 +46,35 @@
   재연결하고 repaired metadata를 다시 persist한다.
 - `webdev_demo.sh`는 `POST /flocks` 응답의 `agent_tokens`를 읽지 않고, orchestrator
   `vm_id`를 사용해 control-plane proxy `POST /vms/{vm_id}/tasks`로 brief를 보낸다.
-- anvil main runtime baseline은 upstream ephemera `v0.6.4` adapted runtime·operator
-  support를 포함한다(수정 없는 `v0.6.4`가 아니다). 2026-07-02 기준 upstream latest
-  observed는 `v0.7.0`이며, `v0.7.0`은 별도 adoption review backlog로 둔다.
+- anvil main runtime baseline은 upstream ephemera `v0.7.0` adapted runtime·operator
+  support를 포함한다(수정 없는 `v0.7.0`가 아니다). 2026-07-02 기준 upstream latest
+  observed는 `v0.7.0`이며 anvil은 관찰 범위 전체를 병합했다 — upstream parity
+  scope(`v0.4.0`-`v0.7.0`) 코드 편입이 완료돼 pending sync 후보는 없다.
+- upstream `v0.7.0` (end-user installer + conversation transcript restore + upstream
+  hardening reconcile)를 sync 한다. anvil adaptation:
+  - end-user installer(`install.sh`/`uninstall.sh`/`INSTALL.md`/`ephemera.service.in`)와
+    release workflow(`scripts/build_release.sh`)는 **runtime/operator installer
+    surface**로 채택한다. systemd service는 canonical `ephemera` 이름을 유지한다
+    (rule-permitted, anvil alias wrapper 없음). `uninstall.sh`는 ephemera-scoped `/tmp`
+    scratch(`/tmp/goose-workspaces` 등; stale no-op `/tmp/goose-rootfs` 포함)를
+    root-gated·prefix-anchored로 정리한다. 외부 Web UI 노출은 reverse proxy/TLS 또는
+    private network 뒤에서만 한다.
+  - conversation transcript restore는 daemon proxy `GET /vms/{id}/sessions/{name}/
+    transcript`(bearer)로 노출한다. agent export는 read-only `goose session export`
+    (model call 없음)이고 응답 schema `{turns:[{role,text}]}`는 auth-free여서 Web UI가
+    daemon token 없이 렌더한다. 4개 transcript-safety guard(TDD): endpoint는 bearer
+    없으면 `401`, payload는 provider key/CP token/`agent_token` sentinel-free, cache-hit는
+    agent spawn 없이 serve, export argv는 `session export -n {name} --format json`이며
+    run-token 거부.
+  - release build integrity: `build_release.sh`가 다운로드한 kernel/firecracker를
+    `main.go`에서 parse한 pin과 `sha256sum -c`로 검증해, runtime `EnsureKernel`이 기존
+    파일을 `os.Stat`로 skip하던 FULL-tarball supply-chain gap을 닫는다.
+  - upstream hardening reconcile: 사전 독립 backport 3종(kernel SHA atomic temp+rename
+    무조건 검증, `resolveWorkDir`/`EPHEMERA_HOME`, `waitForAgent` per-probe timeout
+    deadline cap)이 upstream `v0.7.0` 버전을 이기고 single definition으로 남았다(anvil이
+    stricter, net Go diff는 doc-comment-only). 기존 anvil adaptation(agent-stamp mount
+    skip, restore-over-`meta.DiskPath`, proxy `DisableKeepAlives`)은 하나도 rollback되지
+    않았다.
 - upstream `v0.6.0` (runtime MCP Gateway)를 sync 한다. `EPHEMERA_MCP_ENABLED`로 켜는
   host-resident MCP Gateway(`internal/mcpgateway`)가 backend MCP server(tools/
   resources/prompts)를 VM 내부 goose client에 중개한다. **이 gateway는 runtime/operator
@@ -230,6 +256,21 @@ v0.6 sync Phase 3 gate (upstream `v0.6.0`-`v0.6.4` MCP gateway 적응):
 - `anvil-mcp-e2e.sh semantic`은 key-free 구간이 `200`이고 LLM-echo substep만
   known-invalid local Google key로 실패했다(provider-key 의존, Phase 2와 동일한
   release-gate item, 코드 결함 아님).
+
+v0.7 sync Phase 4 gate (upstream `v0.7.0` installer/transcript/hardening 적응 — parity
+scope 코드 편입 완료):
+
+- CI-safe gate all green: `git diff --check`, installer `bash -n` ×3(install.sh/
+  uninstall.sh/build_release.sh), targeted test group(transcript-safety guard 4종 포함),
+  full glob `go test ./... -count=1` EXIT=0, web build drift 없음, 3 builds.
+- 실제 KVM/installer gate: `sudo bash e2e_test.sh` `334✓ / 0✗`("All test steps passed").
+  `anvil-mcp-e2e.sh` lifecycle+flock PASS, `vm-workload-e2e.sh` PASS. `anvil-mcp-e2e.sh
+  semantic`은 standing provider-key caveat(key-free 구간 `200`).
+- installer: `bash install.sh --help`/`bash uninstall.sh --help` OK(시스템 변경 없음).
+  release build를 root로 실행 → SLIM(≈27M) + FULL(≈250M) tarball + `.sha256` checksum
+  (dist/ gitignored). `build_release.sh`가 kernel/firecracker를 `sha256sum -c`로 검증.
+- 남은 release-gate 항목: valid provider key로 `semantic` run, audit-writer sentinel,
+  stdio stderr scrub, `credential_env` reserved names, production-mux auth assert.
 
 ---
 

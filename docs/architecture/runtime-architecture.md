@@ -2,11 +2,11 @@
 
 ## 상태
 
-- 기준 버전: upstream ephemera `v0.6.4` + anvil runtime control-plane updates
+- 기준 버전: upstream ephemera `v0.7.0` + anvil runtime control-plane updates
 - anvil 관점: ephemera runtime은 IronClaw 결합 프로젝트의 기반 실행 계층
 - upstream: `https://github.com/steve-seungeui/ephemera`. anvil fork network를
   유지하며 ephemera runtime version을 merge로 반영한다.
-- upstream `v0.3.2`-`v0.6.4`는 anvil main runtime baseline으로 반영되어 있다. `v0.3.2`는
+- upstream `v0.3.2`-`v0.7.0`는 anvil main runtime baseline으로 반영되어 있다. `v0.3.2`는
   cold-restart, `v0.3.3`은 watchdog/restart/CP-token polish, `v0.3.4`는 token
   hot rotation과 watchdog tunable, `v0.3.5`는 metrics/stats/slog 관측성,
   `v0.3.6`은 in-VM `gtcall`, multi-line-safe `gtwall`, Goose JSON output parsing,
@@ -26,6 +26,14 @@
   Gateway는 모두 runtime/operator surface이고 IronClaw MCP surface가 아니며, runtime
   MCP Gateway(`EPHEMERA_MCP_*`)는 `cmd/anvil-mcp` IronClaw adapter(`ANVIL_MCP_*`)를
   대체하지 않는다. gateway 런타임 동작은 [service-logic.md](service-logic.md)에 정리한다.
+  `v0.7.0`은 end-user installer(`install.sh`/`uninstall.sh`/`ephemera.service.in`,
+  release build `scripts/build_release.sh`)와 conversation transcript restore(daemon
+  proxy `GET /vms/{id}/sessions/{name}/transcript`)를 제공한다. installer/transcript도
+  runtime/operator surface이며, systemd service는 canonical `ephemera` 이름을 유지한다
+  (anvil alias wrapper 없음). 사전 hardening backport(kernel SHA atomic 검증,
+  `resolveWorkDir`/`EPHEMERA_HOME`, `waitForAgent` per-probe)는 v0.7.0 reconcile에서
+  single definition으로 남았다. 이로써 upstream parity scope(`v0.4.0`-`v0.7.0`) 코드
+  편입이 완료됐다.
 - 저장소/모듈 이름: `ephemera`
 - 런타임 소유 파일:
   - `cmd/goose-daemon/`

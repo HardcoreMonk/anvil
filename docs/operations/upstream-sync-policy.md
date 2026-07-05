@@ -83,11 +83,12 @@ upstream 변경 자체와 anvil에서 해결한 conflict/적응 작업을 review
 
 ## 현재 runtime baseline
 
-anvil main runtime baseline은 upstream ephemera `v0.6.4` tag까지 병합·적응한 runtime을
+anvil main runtime baseline은 upstream ephemera `v0.7.0` tag까지 병합·적응한 runtime을
 포함한다. `v0.3.2`-`v0.3.6`은 이전 release(`anvil-v0.3.x`)에서 채택한 baseline이고,
 `v0.4.0`-`v0.4.5`는 v0.4 sync로, `v0.5.0`-`v0.5.5`는 v0.5 operator sync로,
-`v0.6.0`-`v0.6.4`는 v0.6 MCP gateway sync로 병합·적응해 full KVM gate로 검증한
-baseline이다.
+`v0.6.0`-`v0.6.4`는 v0.6 MCP gateway sync로, `v0.7.0`은 v0.7 parity sync로 병합·적응해
+full KVM gate로 검증한 baseline이다. 이로써 upstream parity scope(`v0.4.0`-`v0.7.0`)의
+코드 편입이 완료됐다.
 2026-07-02 기준 upstream `main`과 최신 upstream tag는 `v0.7.0`까지 진행되어 있다.
 `v0.3.2`-`v0.3.5` 병합 commit은 `1ebe201 Merge upstream/main`이고, `v0.3.6`은
 `v0.3.6` tag commit을 merge한다.
@@ -153,6 +154,18 @@ adapter를 대체하지 않고 IronClaw tool 목록에 gateway tool을 추가하
 bridge IP bind를 override할 수 있고 source-IP `403`이 defense-in-depth로 남으며, stdio
 backend 운영 시 `nobody`/scratch default를 확인한다.
 
+`v0.7.0` parity sync 채택 상태(이 v0.7 sync의 merge/adapt commit 기준):
+
+| tag | 상태 | anvil adaptation 요지 |
+|---|---|---|
+| `v0.7.0` | 병합(`b2df010`)/적응(`7b3f009`), `adapted` | end-user installer(`install.sh`/`uninstall.sh`/`INSTALL.md`/`ephemera.service.in`), release workflow(`scripts/build_release.sh`), conversation transcript restore, upstream hardening reconcile. installer는 runtime/operator surface이고 systemd는 canonical `ephemera`(rule-permitted, alias wrapper 없음). transcript는 daemon proxy `GET /vms/{id}/sessions/{name}/transcript`(bearer), agent export read-only(model call 없음), 응답 `{turns:[{role,text}]}` auth-free. 4 transcript-safety guard(bearer 없으면 `401`, payload sentinel-free, cache-hit no-spawn, export argv `session export -n {name} --format json` run-token 거부). release build integrity: `build_release.sh`가 kernel/firecracker를 `main.go` pin과 `sha256sum -c`로 검증(FULL-tarball supply-chain gap 차단). |
+
+backport reconciliation: 사전 독립 backport 3종(kernel SHA atomic temp+rename 무조건
+검증, `resolveWorkDir`/`EPHEMERA_HOME`, `waitForAgent` per-probe timeout deadline cap)이
+v0.7.0 reconcile에서 upstream 버전을 이기고 single definition으로 남았다(anvil이 stricter,
+net Go diff는 doc-comment-only). 기존 anvil adaptation(agent-stamp mount skip,
+restore-over-`meta.DiskPath`, proxy `DisableKeepAlives`)은 하나도 rollback되지 않았다.
+
 `v0.3.2`/`v0.3.3`의 세부 변경 근거와 anvil 채택 검토 포인트는
 [`docs/analysis/08-v0.3.2-v0.3.3-upstream-change-review.md`](../analysis/08-v0.3.2-v0.3.3-upstream-change-review.md)를
 historical analysis로 보존한다. 현재 채택 상태는
@@ -164,15 +177,17 @@ historical analysis로 보존한다. 현재 채택 상태는
 1. `v0.4.0`-`v0.4.5` runtime 안정화 변경은
    [`docs/superpowers/plans/2026-06-10-ephemera-v0.4-runtime-sync.md`](../superpowers/plans/2026-06-10-ephemera-v0.4-runtime-sync.md)
    계획대로 v0.4 sync에서, `v0.5.0`-`v0.5.5` operator support 변경은 v0.5 operator
-   sync에서, `v0.6.0`-`v0.6.4` MCP gateway 변경은 v0.6 MCP gateway sync에서 각각
-   병합/적응·검증을 마쳤다(위 채택 상태 표 참조). 남은 항목은 `v0.4.2` default COW
-   전환, `v0.4.4` flock broadcast의 MCP tool 노출, flock member spawn의 per-profile
-   sizing 존중이며, 각각 KVM burn-in과 tenant/rate/audit·sizing 경로 설계 뒤 결정한다.
-2. `v0.7.0`은 installer/transcript/hardening 계열 변경으로 분류하고, 별도 adoption
-   review 문서를 먼저 작성한다.
-3. upstream `v0.7.0`의 kernel SHA 검증, `waitForAgent` per-probe timeout,
-   `EPHEMERA_HOME`은 baseline sync와 독립적인 hardening backport로 이미 반영됐지만,
-   이것을 `v0.7.0` 전체 채택으로 표기하지 않는다.
+   sync에서, `v0.6.0`-`v0.6.4` MCP gateway 변경은 v0.6 MCP gateway sync에서, `v0.7.0`
+   installer/transcript/hardening 변경은 v0.7 parity sync에서 각각 병합/적응·검증을
+   마쳤다(위 채택 상태 표 참조). 이로써 upstream parity scope 코드 편입이 완료됐다.
+   남은 항목은 tag 채택이 아니라 `v0.4.2` default COW 전환, `v0.4.4` flock broadcast의
+   MCP tool 노출, flock member spawn의 per-profile sizing 존중, release-gate 항목이며,
+   각각 KVM burn-in과 tenant/rate/audit·sizing 경로 설계 뒤 결정한다.
+2. `v0.7.0` 이후 upstream 태그는 2026-07-02 기준 아직 관찰되지 않았다. 새 태그가
+   관찰되면 별도 sync branch에서 병합/적응하고 adoption review 문서를 먼저 작성한다.
+3. `v0.7.0`의 kernel SHA 검증, `waitForAgent` per-probe timeout, `EPHEMERA_HOME`은 sync
+   전 독립 hardening backport로 먼저 반영돼 있었고, v0.7.0 병합 시 reconcile돼 anvil
+   backport가 single definition으로 남았다(위 backport reconciliation 참조).
 
 ## 정체성/namespace 규칙
 
