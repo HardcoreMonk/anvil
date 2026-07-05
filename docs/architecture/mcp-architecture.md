@@ -2,7 +2,7 @@
 
 ## 상태
 
-- 기준 버전: upstream ephemera `v0.3.6` + anvil runtime foundation
+- 기준 버전: upstream ephemera `v0.4.5` + anvil runtime foundation
 - MCP 버전: v1 stdio adapter
 - Entrypoint: `cmd/anvil-mcp`
 - 런타임 대상: ephemera control plane daemon HTTP API
@@ -152,6 +152,14 @@ anvil downstream은 upstream `v0.3.1`의 `agent_tokens` flock response를 MCP ou
 Town Wall의 `GET /flocks/{flock_id}/wall` SSE stream은 MCP tool로 노출하지 않는다.
 stdio-compatible smoke와 inspection에는 `anvil_get_townwall_history`가 사용하는
 history endpoint를 쓴다. 현재 MCP surface에는 flock snapshot/restore가 없다.
+upstream `v0.4.4`의 flock broadcast(daemon `POST /flocks/{id}/broadcast`,
+`ephemera-ctl flock broadcast` CLI)도 이 phase에서 `anvil_*` MCP tool로 노출하지
+않는다. broadcast는 daemon-only runtime operator 표면으로만 두고 MCP 노출은
+tenant/rate/audit 설계 전까지 deferred이며, 이 결정은
+`TestToolRegistrationsExcludeBroadcast`와
+`TestCurrentIronClawSchemasExcludeBroadcastTool`로 고정한다. `anvil_run_task`는
+buffered `POST /vms/{vm_id}/tasks` 계약만 사용하고 `?stream=1` streaming path는
+호출하지 않는다(`TestRunTaskBuffered_DefaultShape`).
 MCP router config가 있을 때 `anvil_spawn_flock`은 scheduler-aware single-host
 placement를 사용할 수 있다. Scheduler service `POST /schedule/flock`은 cross-host
 flock placement plan을 dry-run으로 계산한다. 이 endpoint는 operator planning
@@ -698,6 +706,7 @@ HTTP MCP transport도 이 작업 범위 밖이다. v2 후보 논의에서는 다
 - daemon API 의미 재해석
 - Town Wall SSE stream의 MCP tool 노출
 - flock snapshot/restore
+- flock broadcast의 MCP tool 노출 (daemon-only, 이 phase deferred)
 - flock alias 또는 `session_name` 재사용
 - routed members-only flock의 Town Wall, cross-host `gtcall`, guest flock context
   injection, daemon `FlockManager` registration

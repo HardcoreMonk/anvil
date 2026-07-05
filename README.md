@@ -48,12 +48,16 @@ daemon 이름, HTTP API, 일부 환경 변수에는 `ephemera` 또는 `goose` �
 runtime으로 구분한다.
 
 버전별 ephemera 소스 snapshot은 Git tag로 공개된다. 현재 sync branch의 anvil runtime
-baseline은 upstream ephemera `v0.4.3`까지 병합한 상태다. 이 병합은 MicroVM
+baseline은 upstream ephemera `v0.4.5`까지 병합한 상태다. 이 병합은 MicroVM
 lifecycle, flock resilience, token rotation, observability, v0.4 runtime 안정화,
-single-host flock lifecycle 같은 runtime substrate를 끌어올린 것이며, anvil의 제품
-정체성을 ephemera로 바꾸는 작업이 아니다. 2026-07-02 기준 upstream `main`과 최신
-upstream tag는 `v0.7.0`이며, `v0.4.4`-`v0.4.5`는 다음 sync 후보이고,
-`v0.5.0`-`v0.7.0`은 별도 adoption review가 필요한 backlog다.
+single-host flock lifecycle, streaming task, snapshot-restore auto-recovery 같은
+runtime substrate를 끌어올린 것이며, anvil의 제품 정체성을 ephemera로 바꾸는 작업이
+아니다. 즉 anvil runtime baseline은 upstream ephemera `v0.4.5` adapted runtime
+stabilization을 포함하는 것이지, 수정 없는 ephemera `v0.4.5`가 아니다.
+`v0.4.0`-`v0.4.5`는 full KVM gate로 검증했고 `v0.4.4` flock broadcast의 MCP tool
+노출과 `v0.4.2` default COW 전환만 deferred다. 2026-07-02 기준 upstream `main`과
+최신 upstream tag는 `v0.7.0`이며, `v0.5.0`-`v0.7.0`은 별도 adoption review가 필요한
+backlog다.
 upstream `v0.7.0`의 kernel SHA 검증, `waitForAgent` per-probe timeout,
 `EPHEMERA_HOME` hardening은 선별 backport됐지만 baseline sync 완료를 의미하지
 않는다.
@@ -102,16 +106,20 @@ anvil은 ephemera를 이름만 바꾼 프로젝트가 아니다. anvil은 IronCl
 
 ### Runtime Baseline
 
-현재 sync branch는 upstream ephemera `v0.4.3`까지를 runtime baseline으로 사용한다.
+현재 sync branch는 upstream ephemera `v0.4.5`까지를 runtime baseline으로 사용한다.
 
 | 구분 | 현재 기준 | anvil에서의 의미 |
 |---|---|---|
-| ephemera runtime baseline | `v0.4.3` | Firecracker VM lifecycle, cold-restart, flock recovery, token rotation, `/metrics`, `/stats`, `slog`, in-VM `gtcall`, webdev demo, v0.4.0-v0.4.3 runtime 안정화 기반 |
-| upstream latest observed | `v0.7.0` (2026-07-02 확인) | `v0.4.4`-`v0.4.5`는 next sync 후보, `v0.5.0`-`v0.7.0`은 별도 검토 backlog |
+| ephemera runtime baseline | `v0.4.5` | Firecracker VM lifecycle, cold-restart, flock recovery, token rotation, `/metrics`, `/stats`, `slog`, in-VM `gtcall`, webdev demo, v0.4.0-v0.4.5 runtime 안정화(auth/audit, COW spawn, dynamic flock lifecycle, streaming task, nested depth guard, watchdog status, snapshot-restore auto-recovery) 기반 |
+| upstream latest observed | `v0.7.0` (2026-07-02 확인) | `v0.5.0`-`v0.7.0`은 별도 검토 backlog |
 | anvil product surface | `anvil_*` MCP tool, scheduler, tenant/egress, workload runner | IronClaw가 직접 사용하는 공개 실행 계약 |
 | namespace policy | `EPHEMERA_*`, `goose-*`, `ephemera_*` 유지 | upstream runtime 호환성. anvil 이름으로 일괄 rename하지 않는다. |
 
-ephemera `v0.3.2`-`v0.3.6`은 anvil 안에서 runtime baseline으로 채택/적응된 변경이다.
+ephemera `v0.3.2`-`v0.4.5`는 anvil 안에서 runtime baseline으로 채택/적응된 변경이다.
+`v0.4.4` flock broadcast는 daemon-only이고 `anvil_*` MCP tool로 노출하지 않으며,
+`v0.4.5` snapshot-restore auto-recovery에서 anvil은 live·persisted restored VM이
+참조하는 source snapshot의 `DELETE`를 `409`로 계속 막는다(upstream e2e 46c의 `200`
+orphan과 다른 의도적 divergence).
 anvil release note에서는 이 내용을 "upstream runtime baseline"으로 분리해 기록하고,
 MCP/scheduler/workload/tenant/egress 같은 anvil 고유 기능과 섞어 제품명처럼 쓰지
 않는다.
@@ -416,9 +424,10 @@ DELETE /vms/{id}
 
 - **Flock metadata persistence**:
   `flocks/<flock_id>/metadata.json`을 기록하고 daemon restart 뒤 flock registry와
-  Town Wall log를 복구한다. 현재 upstream `v0.3.6` baseline에서는 spawn-path member
-  VM도 `vms/<vm_id>/state.json` 기반으로 cold-restart된다. memory state와 in-flight
-  task는 보존되지 않는다.
+  Town Wall log를 복구한다. 현재 baseline에서 spawn-path member VM은
+  `vms/<vm_id>/state.json` 기반으로 cold-restart되고, snapshot-restored member VM은
+  `v0.4.5` 이후 source snapshot에서 re-restore로 auto-recovery된다. 두 경우 모두
+  memory state와 in-flight task는 보존되지 않는다.
 
 - **Town Wall sequence**:
   Town Wall message는 per-flock monotonic `seq`를 포함해 subscriber가 gap을
@@ -686,7 +695,8 @@ artifacts/            Auto-populated at runtime (gitignored)
 
 - [RELEASE_NOTES.md](RELEASE_NOTES.md):
   anvil product release note와 upstream ephemera runtime release note를 분리해
-  기록한다. 현재 `v0.3.2`-`v0.3.6`은 `main`에 병합된 anvil runtime baseline이다.
+  기록한다. 현재 sync branch는 `v0.3.2`-`v0.4.5` upstream runtime baseline을
+  adopted/adapted로 기록한다.
 
 - [docs/architecture/runtime-architecture.md](docs/architecture/runtime-architecture.md):
   ephemera daemon, MicroVM, storage, network, guest runtime 구조.

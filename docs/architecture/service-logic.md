@@ -2,7 +2,7 @@
 
 ## 상태
 
-- 기준 버전: upstream ephemera `v0.3.6` + anvil runtime control-plane updates
+- 기준 버전: upstream ephemera `v0.4.5` + anvil runtime control-plane updates
 - 범위: ephemera daemon HTTP 동작, VM lifecycle, agent proxy, snapshot lifecycle,
   Goosetown flock/Town Wall, tenant/egress/audit/observability endpoint, guest agent 동작
 - 제외 범위: IronClaw MCP client 동작. 해당 내용은
@@ -21,13 +21,14 @@ control plane daemon은 하나의 HTTP service를 노출한다.
 | `/health` | `cmd/goose-daemon/api.go` | daemon 상태, VM 수, snapshot 수, auth 활성 여부 |
 | `/metrics` | `cmd/goose-daemon/metrics_handler.go` | Prometheus text 형식 daemon metrics. 기본 unauth, `EPHEMERA_METRICS_REQUIRE_AUTH=true`일 때 Bearer token 필요 |
 | `/metrics/vms` | `cmd/goose-daemon/api.go` | 실행 중인 VM별 legacy JSON metadata metrics |
+| `/watchdog/status` | `cmd/goose-daemon/api.go` | health watchdog tunable과 per-VM fail/dead 상태 read-only 조회 (count/ID/config만) |
 | `/tenants` | `cmd/goose-daemon/api.go` | tenant quota/usage 목록 |
 | `/tenants/{tenant_id}` | `cmd/goose-daemon/api.go` | tenant quota/usage 조회와 quota 설정 |
 | `/audit/runtime` | `cmd/goose-daemon/api.go` | runtime audit 조회 |
 | `/audit/runtime/prune` | `cmd/goose-daemon/api.go` | runtime audit 보관 정책 적용 |
 | `/vms` | `cmd/goose-daemon/api.go` | VM 생성, 목록, 삭제. `?stats=true`면 per-VM stats inline |
 | `/vms/{vm_id}/stats` | `cmd/goose-daemon/stats_handler.go` | VM별 cpu/mem/net/uptime/agent_busy point-in-time stats |
-| `/vms/{vm_id}/tasks` | `cmd/goose-daemon/api.go` | guest agent로 task 실행 proxy |
+| `/vms/{vm_id}/tasks` | `cmd/goose-daemon/api.go` | guest agent로 task 실행 proxy. `?stream=1`이면 NDJSON progress+result streaming, 기본은 buffered `{"output","error"}`. `EPHEMERA_MAX_TASK_DEPTH` depth guard(`508`) 적용 |
 | `/vms/{vm_id}/workloads/run` | `cmd/goose-daemon/api.go` | guest agent로 script-only workload 실행 proxy |
 | `/vms/{vm_id}/workspace` | `cmd/goose-daemon/api.go` | guest `/workspace` 단일 파일 read/write proxy |
 | `/vms/{vm_id}/health` | `cmd/goose-daemon/api.go` | guest health proxy |
@@ -44,6 +45,7 @@ control plane daemon은 하나의 HTTP service를 노출한다.
 | `/flocks/{flock_id}/post` | `cmd/goose-daemon/orchestrator_api.go` | Town Wall message append |
 | `/flocks/{flock_id}/wall` | `cmd/goose-daemon/orchestrator_api.go` | Town Wall SSE stream |
 | `/flocks/{flock_id}/wall/history` | `cmd/goose-daemon/orchestrator_api.go` | Town Wall history 조회 |
+| `/flocks/{flock_id}/broadcast` | `cmd/goose-daemon/orchestrator_api.go` | flock 전 member agent에 prompt scatter-gather. daemon-only endpoint이며 `anvil_*` MCP tool로 노출하지 않는다 |
 
 VM 내부의 `goose-agent`는 다음 endpoint를 제공한다.
 
@@ -81,6 +83,7 @@ Canonical-only upstream runtime 설정:
 |---|---|
 | `EPHEMERA_API_TOKENS_FILE` | `name:token` entry file. 파일 source는 SIGHUP 때 다시 읽히므로 hot rotation의 권장 경로 |
 | `EPHEMERA_HOME` | daemon work directory. `artifacts/`, `configs/`, `snapshots/` 같은 runtime path의 기준 directory |
+| `EPHEMERA_MAX_TASK_DEPTH` | nested `/tasks` dispatch depth 한계, 기본 `5`. 한계 도달 시 `508`, `X-Ephemera-Task-Depth`를 `depth+1`로 forwarding. 신설 canonical env, ANVIL alias 없음 |
 | `EPHEMERA_WATCHDOG_INTERVAL_SEC` | watchdog poll cadence, 기본 `5` |
 | `EPHEMERA_WATCHDOG_TIMEOUT_SEC` | watchdog per-probe HTTP timeout, 기본 `1` |
 | `EPHEMERA_WATCHDOG_THRESHOLD` | dead marking 전 연속 실패 횟수, 기본 `3` |
@@ -364,7 +367,11 @@ Town Wall body는 사용자가 제공한 message다. runtime audit record에는 
 daemon startup은 `flocks/*/metadata.json`을 scan해 flock registry와 Town Wall log를
 복구한 뒤, `vms/<vm_id>/state.json`이 남아 있는 spawn-path VM을 cold-restart한다.
 복구 성공한 flock member VM은 `cp.vms`에 다시 등록되므로 proxy endpoint와 watchdog
-probe 대상이 된다. COW-mode VM과 snapshot-restored VM은 자동 복구 대상이 아니다.
+probe 대상이 된다. spawn-path VM은 plain·COW disk mode 모두 cold-restart되고,
+snapshot-restored VM은 `v0.4.5`부터 `source_snapshot_id`를 담은 `state.json`으로
+source snapshot에서 re-restore(`recoverRestoredVM`/`reRestoreMachine`)된다.
+bind-mount-fallback restore와 source snapshot이 삭제된 restored VM은 복구 대상이
+아니며 drop되어 surface된다.
 
 ## VM 삭제 로직
 
@@ -541,7 +548,15 @@ restore된 VM은 guest agent 연속성을 위해 snapshot metadata의 original a
 내부적으로 유지한다. 외부 client는 guest agent token이 아니라 control-plane
 token과 daemon proxy를 사용해야 한다. restore success response에는
 `source_snapshot_id`, restored VM info, tenant ID, egress policy만 포함하고
-`agent_token`은 포함하지 않는다.
+`agent_token`/`agent_tokens`/`Authorization`/`Bearer`는 포함하지 않는다.
+
+`v0.4.5`부터 restore는 `source_snapshot_id`, `tenant_id`, `egress_policy`
+attribution을 담은 `vms/<new_vm_id>/state.json`을 persist한다. daemon restart 시
+`recoverRestoredVM`이 이 state를 읽어 source snapshot에서 auto-re-restore하며,
+graceful shutdown은 dm device와 transient exception store만 정리하고 `state.json`은
+남긴다. restored VM은 opt-in memory auto-snapshot에서 제외된다(재기동 시 source에서
+re-restore하므로 `auto/` image가 쓰이지 않는다). restore 시 복원되는 상태는
+snapshot-time memory·disk이며 post-restore write는 재기동 후 보존되지 않는다.
 
 restore 실패는 `Content-Type: application/json`인 `RestoreErrorResponse`를
 반환한다.
@@ -650,13 +665,19 @@ Route: `DELETE /snapshots/{id}`
 deleteSnapshot()
   -> cp.snapshots에서 base_snapshot_id == requested ID인 diff 검색
   -> 있으면 409 반환
+  -> live 또는 persisted restored VM state가 이 snapshot을 source로 참조하면
+     409 ("referenced by restored VM ...") 반환
   -> cp.snapshots에서 snapshot metadata 제거
   -> snapshots/<id>/를 disk에서 삭제
   -> {"status":"deleted","snapshot_id":"..."} 반환
 ```
 
-이 규칙은 diff snapshot이 아직 필요로 하는 full snapshot을 삭제하지 못하게
-막는다.
+이 규칙은 diff snapshot이 아직 필요로 하는 full snapshot을, 그리고 live·persisted
+restored VM이 재기동 recovery에 필요로 하는 source snapshot을 삭제하지 못하게
+막는다. upstream e2e 46c는 live restored VM이 참조하는 snapshot의 `DELETE`를 `200`으로
+허용하고 VM을 orphan으로 두지만, anvil은 이 `409` 보호를 유지하고 restored VM을
+먼저 삭제하도록 요구한다(의도적 divergence, `docs/ADR_INDEX.md`·
+`docs/operations/upstream-sync-policy.md`에 `adapted`로 기록).
 
 ## Snapshot GC 로직
 
@@ -710,6 +731,8 @@ response 안의 `errors`에 `snapshot_id: ""`, `error: "write GC audit: ..."` �
 - `apply` 기본값은 `false`다.
 - 응답에 `agent_token`을 포함하지 않는다.
 - diff snapshot이 참조 중인 full snapshot은 삭제하지 않는다.
+- live·persisted restored VM state가 참조하는 source snapshot은 GC 후보에서
+  제외한다(`DELETE`와 동일한 restored-VM dependency 보호).
 - `max_total_bytes`를 만족하지 못하더라도 diff snapshot이 참조 중인 full snapshot은
   보호 상태로 남긴다.
 - 같은 GC 호출에서 diff를 삭제한 뒤 해당 full을 연쇄 삭제하지 않는다.
@@ -821,7 +844,9 @@ micro-init
 
 - Control-plane auth 실패: `401`, body `{"error":"unauthorized"}`
 - VM 없음: 일반적으로 `404`
-- Snapshot base dependency conflict: `409`
+- Snapshot base dependency conflict(diff가 참조하는 full, 또는 live·persisted
+  restored VM이 참조하는 source snapshot): `409`
+- Nested task depth 초과(`EPHEMERA_MAX_TASK_DEPTH` 이상): `508 Loop Detected`
 - Snapshot restore 실패: `{"error":"...","code":"...","source_snapshot_id":"..."}`
   JSON body와 함께 `snapshot_not_found`, `source_vm_running`,
   `network_unavailable`, `diff_base_missing`, `memory_merge_failed`,

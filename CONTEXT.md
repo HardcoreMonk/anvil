@@ -33,12 +33,16 @@ IronClaw 실행 계층으로 통합하는 downstream product fork다. 이 저장
 통합 릴리즈는 ephemera runtime tag와 충돌하지 않도록 `anvil-v0.1.0`처럼 별도
 prefix를 사용한다. 현재 최신 anvil 공개 integration tag는 `anvil-v0.3.2`이고,
 tag target은 `18b4506204a68a8fd9e3608976727953869f94a6`다. 현재 작업 브랜치의
-anvil runtime baseline은 upstream ephemera `v0.4.3` 병합분이며, `anvil-v0.3.2`
+anvil runtime baseline은 upstream ephemera `v0.4.5` 병합분이며, `anvil-v0.3.2`
 이후의 scheduler control loop, scheduler `/metrics`, manual cross-host snapshot
-replication, scheduler-aware single-host flock placement 위에 `v0.4.0`-`v0.4.3`
-runtime 안정화 변경을 더한다. 2026-07-02 기준 upstream `main`과 최신 upstream tag는
-`v0.7.0`까지 진행되어 있다. `v0.4.4`-`v0.4.5`는 다음 sync 후보이고,
-`v0.5.0`-`v0.7.0`은 별도 adoption review가 필요한 미병합 backlog다. 단,
+replication, scheduler-aware single-host flock placement 위에 `v0.4.0`-`v0.4.5`
+runtime 안정화 변경을 더한다. 즉 현재 작업 브랜치의 anvil runtime baseline은
+upstream ephemera `v0.4.5` adapted runtime stabilization을 포함하며, anvil을 수정
+없는 ephemera `v0.4.5`와 동일시하지 않는다. `v0.4.0`-`v0.4.5`는 full KVM gate로
+검증한 adopted/adapted baseline이고, `v0.4.4` flock broadcast의 MCP tool 노출과
+`v0.4.2` default COW 전환만 deferred로 둔다. 2026-07-02 기준 upstream `main`과 최신
+upstream tag는 `v0.7.0`까지 진행되어 있다. `v0.5.0`-`v0.7.0`은 별도 adoption
+review가 필요한 미병합 backlog다. 단,
 upstream `v0.7.0`의 kernel SHA 검증, `waitForAgent`
 per-probe timeout, `EPHEMERA_HOME` work directory 지정은 baseline sync와 독립적인
 hardening backport로 반영됐다. 문서에서는 anvil과 ephemera를 같은 이름으로
@@ -62,7 +66,7 @@ hardening backport로 반영됐다. 문서에서는 anvil과 ephemera를 같은 
 | anvil | IronClaw와 ephemera를 결합하는 새 프로젝트 이름 | project-wide |
 | IronClaw | MCP client/orchestration 계층. anvil VM 실행 기능을 사용하는 상위 시스템 | 외부/상위 통합 |
 | OpenClaw | anvil의 통합 대상이 아님. anvil 문서와 구현은 OpenClaw 운영 계약을 제공하지 않음 | 제외 범위 |
-| ephemera | Firecracker MicroVM 기반 격리 실행 runtime. 현재 작업 브랜치의 anvil baseline은 upstream `v0.4.3` 병합분이고, 2026-07-02 기준 upstream latest observed는 `v0.7.0`이다. `v0.4.4`-`v0.4.5`는 다음 sync 후보, `v0.5.0`-`v0.7.0`은 별도 검토 backlog다. | `cmd/goose-daemon`, `internal/*` |
+| ephemera | Firecracker MicroVM 기반 격리 실행 runtime. 현재 작업 브랜치의 anvil baseline은 upstream `v0.4.5` 병합분이고, 2026-07-02 기준 upstream latest observed는 `v0.7.0`이다. `v0.4.0`-`v0.4.5`는 adopted/adapted baseline, `v0.5.0`-`v0.7.0`은 별도 검토 backlog다. | `cmd/goose-daemon`, `internal/*` |
 | ephemera control plane | VM 생성, 삭제, snapshot, restore, proxy를 담당하는 호스트 daemon | `cmd/goose-daemon` |
 | MicroVM | Firecracker + KVM으로 실행되는 ephemera 격리 실행 환경 | `internal/vm` |
 | goose-agent | VM 안에서 prompt 실행, health, stop API를 제공하는 HTTP agent | `cmd/goose-agent` |
@@ -129,6 +133,8 @@ hardening backport로 반영됐다. 문서에서는 anvil과 ephemera를 같은 
 - guest agent port canonical 환경 변수: `EPHEMERA_AGENT_PORT`
 - guest agent port alias 환경 변수: `ANVIL_AGENT_PORT`
 - daemon work directory canonical 환경 변수: `EPHEMERA_HOME`
+- nested task depth guard canonical 환경 변수: `EPHEMERA_MAX_TASK_DEPTH`
+  (upstream `v0.4.4` 신설, ANVIL alias 없음, 기본값 `5`, 한계 도달 시 `508`)
 - MCP adapter daemon URL 환경 변수: `ANVIL_DAEMON_URL`
 - MCP adapter token 환경 변수: `ANVIL_API_TOKEN`
 - MCP adapter tenant 기본값 환경 변수: `ANVIL_MCP_TENANT_ID`
@@ -191,12 +197,17 @@ daemon으로 보내는 outbound Bearer token이다.
   `gtwall`, Goose JSON output parsing은 `adapted` runtime baseline으로 채택한다.
   `gtcall`은 peer agent credential을 노출하지 않고 control-plane proxy token
   injection 경계를 유지한다.
-- upstream `v0.4.0`-`v0.4.3` runtime 안정화 변경은 현재 sync branch baseline으로
-  채택됐다. storage/recovery, auth/audit, COW, single-host flock lifecycle은
-  anvil 보안/운영 계약에 맞춰 `adapted` 상태다. default COW 전환과 auto-snapshot
-  public support는 별도 검증/설계 전까지 deferred로 둔다.
-- upstream `v0.4.4`-`v0.4.5` streaming task, restored VM recovery는 다음 sync
-  후보이며, broadcast MCP 노출은 anvil 공개 경계 검토 전까지 deferred로 둔다.
+- upstream `v0.4.0`-`v0.4.5` runtime 안정화 변경은 현재 sync branch baseline으로
+  채택됐고 full KVM gate로 검증됐다. storage/recovery, auth/audit, COW,
+  single-host flock lifecycle, streaming task, nested task depth guard, watchdog
+  status, snapshot-restore auto-recovery는 anvil 보안/운영 계약에 맞춰 `adapted`
+  상태다. `v0.4.2` default COW 전환과 auto-snapshot public support, `v0.4.4` flock
+  broadcast의 MCP tool 노출은 별도 검증/설계 전까지 deferred로 둔다.
+- upstream `v0.4.5` snapshot-restore auto-recovery에서 anvil은 live·persisted
+  restored VM이 참조하는 source snapshot의 `DELETE`를 `409`로 계속 보호한다.
+  upstream e2e 46c의 `200` orphan 동작과 의도적으로 다르며, 이 divergence는
+  `docs/ADR_INDEX.md`와 `docs/operations/upstream-sync-policy.md`에 `adapted`로
+  기록한다.
 - upstream `v0.5.0`-`v0.7.0`은 아직 anvil baseline으로 병합하지 않았다.
   `v0.5.x`는 Web UI/productization, `v0.6.x`는 MCP Gateway, `v0.7.0`은
   installer/transcript/hardening 성격으로 별도 adoption review가 필요하다. 단,
@@ -208,8 +219,8 @@ daemon으로 보내는 outbound Bearer token이다.
 
 남은 후속 후보:
 
-- upstream ephemera `v0.4.4`-`v0.4.5` runtime 안정화 변경의 sync branch 작성,
-  충돌 해결, KVM 검증, 문서 반영
+- `v0.4.2` default COW 전환과 auto-snapshot public support의 KVM burn-in 후 결정,
+  `v0.4.4` flock broadcast의 MCP tool 노출을 위한 tenant/rate/audit 설계
 - upstream ephemera `v0.5.0`-`v0.7.0` product/MCP gateway/installer 계열 변경의
   별도 adoption review와 anvil 공개 경계 분류
 - scheduler service의 실제 운영 배포와 host inventory polling daemonization

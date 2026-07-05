@@ -58,25 +58,25 @@
 | `v0.3.4` | adapted | `EPHEMERA_API_TOKENS_FILE`, SIGHUP CP-token vsock fan-out, watchdog tunables/auto-heal, Firecracker SIGHUP forwarding hot-fix는 채택한다. true hot rotation은 token file과 v0.3.4+ guest agent가 있을 때만 보장한다. |
 | `v0.3.5` | adapted | `/metrics`, `/vms/{vm_id}/stats`, `log/slog`, observability demo는 채택한다. `ephemera_*` metric namespace와 `EPHEMERA_*` env는 runtime compatibility namespace로 유지한다. |
 | `v0.3.6` | adapted | autonomous webdev demo, in-VM `gtcall`, multi-line-safe `gtwall`, Goose JSON output parsing은 채택한다. `gtcall`은 peer `agent_token`을 VM 내부에 노출하지 않고 control-plane proxy token injection 경계를 유지한다. |
+| `v0.4.0` | adapted | storage/recovery core(memory auto-snapshot, diff/COW rootfs, spawn-path cold-restart)는 채택한다. `EPHEMERA_AUTOSNAPSHOT=true` auto-snapshot은 opt-in·disk-expensive로 두고 public support로 승격하지 않는다. |
+| `v0.4.1` | adapted | client identity, daemon access audit(`GET /audit`), per-token TTL/rotation은 채택한다. `ephemera-ctl`은 runtime operator CLI로 유지하고 IronClaw MCP tool을 대체하거나 anvil MCP public surface로 승격하지 않는다. |
+| `v0.4.2` | adapted, default cow deferred | COW probe/fallback과 COW+Diff snapshot은 채택한다. `EPHEMERA_DISK_MODE=cow`는 anvil에서 명시적 opt-in이며 default 전환은 KVM burn-in 뒤 결정한다. |
+| `v0.4.3` | adapted | dynamic flock membership, pause/resume, per-flock `max_agents`, Town Wall filter/rotation single-host lifecycle은 채택한다. routed members-only cross-host flock에는 그대로 적용하지 않는다. |
+| `v0.4.4` | adapted, broadcast MCP exposure deferred | streaming `/tasks`(buffered 기본 계약 유지), nested depth guard(`EPHEMERA_MAX_TASK_DEPTH`, `508`), `GET /watchdog/status`, goose-agent slog는 채택한다. flock broadcast는 daemon API/CLI로만 두고 `anvil_*` MCP tool 노출은 tenant/rate/audit 설계 전까지 deferred다(guard로 고정). |
+| `v0.4.5` | adapted | snapshot-restore auto-recovery(`recoverRestoredVM`/`reRestoreMachine`)를 채택하고 restore state에 `tenant_id`/`egress_policy`를 persist하되 응답 token redaction은 유지한다. anvil은 live·persisted restored VM이 참조하는 source snapshot의 `DELETE`를 `409`로 막아 upstream e2e 46c의 `200` orphan 동작과 의도적으로 divergent하다(먼저 VM을 삭제한 뒤 snapshot 삭제). |
+
+`v0.4.0`-`v0.4.5`는 현재 sync branch baseline으로 병합·적응되었고 full KVM gate로
+검증됐다. 위 분류는 Task 8 문서 반영 기준이며, 상세 병합 근거는
+[`docs/analysis/10-v0.4.0-v0.4.5-runtime-stabilization-adoption.md`](analysis/10-v0.4.0-v0.4.5-runtime-stabilization-adoption.md)에
+보존한다.
 
 ---
 
 ## 5. 다음 upstream sync 후보 예비 분류
 
-다음 upstream tag는 아직 anvil runtime baseline으로 병합되지 않았다. 2026-07-02
-기준 upstream `main`과 최신 upstream tag는 `v0.7.0`이지만, anvil `main`의 runtime
-baseline은 계속 `v0.3.6`이다. `v0.4.0`-`v0.4.5`의 예비 분류와 검토 근거는
-[`docs/analysis/10-v0.4.0-v0.4.5-runtime-stabilization-adoption.md`](analysis/10-v0.4.0-v0.4.5-runtime-stabilization-adoption.md)에
-기록한다.
-
-| upstream tag | 예비 상태 | 적용 전 검토 요약 |
-|---|---|---|
-| `v0.4.0` | adapted | storage/recovery core는 채택 후보지만 rootfs diff snapshot, COW recovery, auto-snapshot을 anvil snapshot replication/GC와 맞춰야 한다. |
-| `v0.4.1` | adapted | client identity, daemon access audit, token TTL은 채택 후보다. `ephemera-ctl`은 runtime operator CLI로 유지하고 anvil MCP public surface로 승격하지 않는다. |
-| `v0.4.2` | adapted/deferred | COW probe/fallback과 COW+Diff support는 채택 후보지만 default `EPHEMERA_DISK_MODE=cow` 전환은 KVM burn-in 뒤 결정한다. |
-| `v0.4.3` | adapted | single-host flock lifecycle은 채택 후보지만 routed members-only cross-host flock에는 그대로 적용하지 않는다. |
-| `v0.4.4` | adapted/deferred | streaming task, watchdog status, depth guard는 채택 후보다. flock broadcast의 MCP public exposure는 tenant/rate/audit 설계 전까지 deferred다. |
-| `v0.4.5` | adapted | snapshot-restored VM auto-recovery는 채택 후보지만 live restored VM의 source snapshot dependency를 GC가 보호해야 한다. |
+`v0.4.0`-`v0.4.5`는 Section 4의 baseline 채택 상태로 이동했다. 다음 upstream tag는
+아직 anvil runtime baseline으로 병합되지 않았다. 2026-07-02 기준 upstream `main`과
+최신 upstream tag는 `v0.7.0`이다.
 
 `v0.5.0`-`v0.7.0`은 아직 상세 adoption review가 끝나지 않았다. 다음 분류는 sync
 전 backlog triage 기준이며, 실제 채택 상태는 별도 analysis 문서와 sync branch 검증

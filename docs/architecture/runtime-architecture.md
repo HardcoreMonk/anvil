@@ -2,17 +2,21 @@
 
 ## 상태
 
-- 기준 버전: upstream ephemera `v0.4.3` + anvil runtime control-plane updates
+- 기준 버전: upstream ephemera `v0.4.5` + anvil runtime control-plane updates
 - anvil 관점: ephemera runtime은 IronClaw 결합 프로젝트의 기반 실행 계층
 - upstream: `https://github.com/steve-seungeui/ephemera`. anvil fork network를
   유지하며 ephemera runtime version을 merge로 반영한다.
-- upstream `v0.3.2`-`v0.4.3`은 현재 sync branch baseline으로 반영되어 있다. `v0.3.2`는
+- upstream `v0.3.2`-`v0.4.5`는 현재 sync branch baseline으로 반영되어 있다. `v0.3.2`는
   cold-restart, `v0.3.3`은 watchdog/restart/CP-token polish, `v0.3.4`는 token
   hot rotation과 watchdog tunable, `v0.3.5`는 metrics/stats/slog 관측성,
   `v0.3.6`은 in-VM `gtcall`, multi-line-safe `gtwall`, Goose JSON output parsing,
   autonomous webdev demo를 제공한다. `v0.4.0`-`v0.4.3`은 memory auto-snapshot,
   diff/COW rootfs, auth/audit, COW spawn, dynamic flock lifecycle, pause/resume,
-  `max_agents`, Town Wall filter/rotation을 제공한다.
+  `max_agents`, Town Wall filter/rotation을 제공한다. `v0.4.4`는 streaming
+  `/tasks?stream=1`(buffered 기본 계약 유지), nested task depth guard
+  (`EPHEMERA_MAX_TASK_DEPTH`/`508`), read-only `GET /watchdog/status`, daemon-only
+  flock broadcast를 제공하고, `v0.4.5`는 snapshot-restore auto-recovery
+  (`recoverRestoredVM`/`reRestoreMachine`)를 제공한다.
 - 저장소/모듈 이름: `ephemera`
 - 런타임 소유 파일:
   - `cmd/goose-daemon/`
@@ -354,6 +358,10 @@ mutating guest endpoint는 token file이 없을 때를 제외하면 VM별 agent 
 - 서로 다른 snapshot의 concurrent restore는 지원한다.
 - snapshot restore 전에 source VM을 삭제해야 한다.
 - diff snapshot이 참조 중인 full snapshot은 삭제할 수 없다.
+- live 또는 persisted restored VM state가 참조 중인 source snapshot은 삭제할 수
+  없다. `DELETE /snapshots/{id}`는 참조 중이면 `409`를 반환하므로 restored VM을
+  먼저 삭제한 뒤 source snapshot을 삭제한다. (upstream e2e 46c의 `200` orphan
+  동작과 다른 의도적 anvil divergence.)
 - diff restore에는 임시 merged memory file을 만들 disk space가 필요하다.
 - control-plane auth는 API token file/env가 없으면 비활성화된다.
 - `/metrics`는 Prometheus scrape 관례에 따라 기본적으로 control-plane auth 밖에 있다.
@@ -363,7 +371,12 @@ mutating guest endpoint는 token file이 없을 때를 제외하면 VM별 agent 
   daemon 재시작 뒤 registry와 Town Wall history가 복구된다. spawn-path member VM은
   `vms/<vm_id>/state.json` 기반 cold-restart 대상이며, memory state와 in-flight task는
   보존되지 않는다.
-- COW-mode VM과 snapshot-restored VM은 cold-restart 대상이 아니다.
+- spawn-path VM(plain·COW disk mode 모두)은 `vms/<vm_id>/state.json` 기반
+  cold-restart 대상이다. snapshot-restored VM은 `v0.4.5`부터 `source_snapshot_id`를
+  담은 `state.json`으로 daemon restart 시 source snapshot에서 re-restore된다
+  (snapshot-time memory·disk로 복귀하며 post-restore write는 보존되지 않는다).
+  bind-mount-fallback restore와 source snapshot이 삭제된 restored VM은 recovery
+  대상이 아니며 drop되어 `failed[]`/dead flock agent로 surface된다.
 - `POST /flocks` 응답은 anvil 보안 불변 조건에 따라 `agent_token`/`agent_tokens`를
   노출하지 않는다.
 

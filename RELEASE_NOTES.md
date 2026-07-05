@@ -52,15 +52,47 @@
 - upstream `v0.4.4` (streaming `/tasks`, nested-invocation depth guard,
   watchdog status route, flock broadcast, goose-agent slog migration)를 sync
   한다. anvil adaptation: buffered `POST /vms/{id}/tasks` 기본 계약(`stream=1`
-  없으면 `{"output","error"}`)을 그대로 유지하고, flock broadcast는 daemon-only
-  endpoint로만 두며 `anvil_*` MCP tool로 노출하지 않는다.
+  없으면 `{"output","error"}`)을 그대로 유지하고 MCP stdio tool은 이 phase에서
+  buffered path만 호출한다(guard `TestRunTaskBuffered_DefaultShape`). nested task
+  depth는 신설 canonical env `EPHEMERA_MAX_TASK_DEPTH`(기본 `5`, ANVIL alias
+  없음)로 제한하며 한계 도달 시 `508`, `X-Ephemera-Task-Depth`를 `depth+1`로
+  forwarding하고 header 부재는 `0`으로 취급한다. watchdog 상태는 read-only
+  `GET /watchdog/status`(count/ID/config만)로 노출한다. flock broadcast는
+  daemon API와 `ephemera-ctl flock broadcast` CLI로 채택하되 daemon-only endpoint로
+  두며 `anvil_*` MCP tool로 노출하지 않는다(guard
+  `TestToolRegistrationsExcludeBroadcast`,
+  `TestCurrentIronClawSchemasExcludeBroadcastTool`). goose-agent는 `log/slog`로
+  이전하고 `gtcall`이 depth header를 재전송한다. golden image rebake는 KVM gate에서
+  확인했다.
 - upstream `v0.4.5` (snapshot-restore auto-recovery)를 sync 한다. restore가
-  `source_snapshot_id`를 담은 `state.json`을 persist하고, daemon restart 시
-  `RecoverVMs`가 source snapshot에서 re-restore한다. anvil adaptation: 지속되는
-  restore state에 `tenant_id` / `egress_policy`를 함께 기록하고, restore 응답과
-  MCP restore output은 `agent_token` 계열을 redact한 채 `source_snapshot_id`만
-  노출한다. snapshot GC는 live·persisted restored VM이 참조하는 source snapshot을
-  삭제하지 않는다.
+  `source_snapshot_id`(및 `tenant_id`/`egress_policy` attribution)를 담은
+  `state.json`을 persist하고, daemon restart 시 `recoverRestoredVM`/
+  `reRestoreMachine`이 source snapshot에서 auto-re-restore한다. restore 응답은
+  `source_snapshot_id`/`tenant_id`/`egress_policy`/`profile`/`vm_id`/`guest_ip`/
+  `agent_url`을 포함할 수 있고 `agent_token`/`agent_tokens`/`Authorization`/`Bearer`는
+  절대 노출하지 않는다. snapshot GC와 `DELETE /snapshots/{id}`는 live·persisted
+  restored VM state가 참조하는 source snapshot을 보호하며, 참조 중이면 `DELETE`가
+  `409`를 반환한다. pre-v0.4.5 anvil test의 "restore leaves no recoverable state"
+  assertion은 계획대로 persistence를 검증하도록 반전했고 redaction guard는 그대로
+  유지한다.
+- 의도적 divergence (upstream 대비): upstream e2e 46c는 live restored VM이 참조하는
+  snapshot의 `DELETE`를 `200`으로 허용하고 VM을 orphan으로 둔다. anvil은 그 대신
+  `409` 보호를 유지하고 VM을 먼저 삭제한 뒤 snapshot을 삭제하도록 요구한다. e2e 46c는
+  이 divergence에 맞게 조정했고(commit `63df804`) `e2e_test.sh`에 divergence 주석을
+  남겼다. 이 divergence는 `docs/ADR_INDEX.md`와
+  `docs/operations/upstream-sync-policy.md`에 `adapted`로 기록한다.
+- Phase 1 KVM gate 중 발견해 고친 두 pre-existing latent defect(이번 sync가 만든
+  결함 아님).
+  - `4c1c803`: restore handler가 COW device를 per-restore path 위에 bind-mount하는
+    동안 Firecracker `LoadSnapshot`은 `state.bin`(`meta.DiskPath`)에 기록된 path를
+    연다. source VM 삭제 후의 모든 restore가 v0.4.0 적응 이후 `500`으로 실패하던
+    문제를 `meta.DiskPath` 위로 restore하도록 고쳐 upstream 및 recovery 경로와
+    일치시켰다. 결함을 고정하던 v0.4.0-era test assertion 두 개도 함께 수정했다.
+  - `38fbedc`: anvil 전용 `EnsureGoldenImageGooseAgent`가 시작 시 golden image를
+    무조건 loop-mount해, SIGKILL crash 후 COW VM이 image를 pin한 상태에서 `EBUSY`로
+    죽던 문제를, agent-stamp(source hash + image size + mtimeNs)가 current면 mount를
+    건너뛰도록 고쳤다. live COW VM이 origin을 pin한 채 agent hash가 바뀌는 경우의
+    loud-fail은 의도적으로 유지한다.
 
 ## 검증됨
 
@@ -74,6 +106,19 @@
 - `go build ./cmd/anvil-scheduler`
 - `go build ./cmd/anvil-mcp`
 - `go build ./cmd/goose-daemon`
+
+v0.4 sync Phase 1 gate (upstream `v0.4.4`/`v0.4.5` 적응):
+
+- CI-safe gate all green: `go build ./cmd/{goose-daemon,anvil-mcp,anvil-scheduler}`,
+  `go test ./... -count=1` (EXIT=0).
+- guard test: `TestRunTaskBuffered_DefaultShape`,
+  `TestToolRegistrationsExcludeBroadcast`,
+  `TestCurrentIronClawSchemasExcludeBroadcastTool`, proxy depth `508` guard.
+- 실제 KVM host full e2e `sudo bash e2e_test.sh`: `316✓ / 0✗`
+  ("All test steps passed"). step 59 real-LLM smoke만 provider key 부재로 skip.
+- 전제: KVM gate는 working directory에 gitignore된 로컬 operator 파일
+  `configs/goose.yaml`, `configs/goose-secrets.yaml`이 있어야 한다. 없으면
+  `POST /vms`가 config injection 단계에서 `500`으로 실패한다.
 
 ---
 

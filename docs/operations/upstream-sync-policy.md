@@ -83,10 +83,12 @@ upstream 변경 자체와 anvil에서 해결한 conflict/적응 작업을 review
 
 ## 현재 runtime baseline
 
-2026-07-02 기준 anvil `main`은 upstream ephemera `v0.3.6` tag까지 병합한 runtime
-baseline을 사용한다. merge-base는 `v0.3.6`이며, upstream `main`과 최신 upstream tag는
-`v0.7.0`까지 진행되어 있다. `v0.3.2`-`v0.3.5` 병합 commit은
-`1ebe201 Merge upstream/main`이고, `v0.3.6`은 `v0.3.6` tag commit을 merge한다.
+현재 sync branch는 upstream ephemera `v0.4.5` tag까지 병합·적응한 runtime baseline을
+사용한다. `v0.3.2`-`v0.3.6`은 이전 release(`anvil-v0.3.x`)에서 채택한 baseline이고,
+`v0.4.0`-`v0.4.5`는 이 sync branch에서 병합·적응해 full KVM gate로 검증한 baseline이다.
+2026-07-02 기준 upstream `main`과 최신 upstream tag는 `v0.7.0`까지 진행되어 있다.
+`v0.3.2`-`v0.3.5` 병합 commit은 `1ebe201 Merge upstream/main`이고, `v0.3.6`은
+`v0.3.6` tag commit을 merge한다.
 
 | tag | peeled commit | 요약 | anvil 현재 상태 |
 |---|---|---|---|
@@ -95,6 +97,25 @@ baseline을 사용한다. merge-base는 `v0.3.6`이며, upstream `main`과 최�
 | `v0.3.4` | `5580482c7911d184bcd950347f050642535c431a` | `EPHEMERA_API_TOKENS_FILE`, SIGHUP CP-token fan-out, watchdog tunables/auto-heal, Firecracker SIGHUP hot-fix | 병합됨, `adapted` |
 | `v0.3.5` | `7a6d42dd56361719bc4fb592e75e0c8d8d9cf211` | `/metrics`, `/vms/{vm_id}/stats`, `log/slog`, observability demo | 병합됨, `adapted` |
 | `v0.3.6` | `4bd5e8c3d94fbfb862de116caa7417f7b640b325` | autonomous webdev demo, in-VM `gtcall`, multi-line-safe `gtwall`, Goose JSON output parsing | sync branch에서 병합, `adapted` |
+
+`v0.4.0`-`v0.4.5` 채택 상태(peeled upstream SHA 대신 이 sync branch의 merge/adapt
+commit 기준으로 기록한다):
+
+| tag | 상태 | anvil adaptation 요지 |
+|---|---|---|
+| `v0.4.0` | 병합됨, `adapted` | storage/recovery core. `EPHEMERA_AUTOSNAPSHOT=true` auto-snapshot은 opt-in·disk-expensive로 두고 public support로 승격하지 않는다. |
+| `v0.4.1` | 병합됨, `adapted` | client identity, `GET /audit`, per-token TTL, `ephemera-ctl` operator CLI(IronClaw MCP 대체 아님). |
+| `v0.4.2` | 병합됨, `adapted`, default cow deferred | COW probe/fallback + COW+Diff snapshot. `EPHEMERA_DISK_MODE=cow`는 명시적 opt-in이고 default 전환은 KVM burn-in 뒤 결정한다. |
+| `v0.4.3` | 병합(`aab3299`), `adapted` | dynamic flock membership, pause/resume, per-flock `max_agents`, Town Wall filter/rotation. |
+| `v0.4.4` | 병합(`7d65c12`)/적응(`2ffd282`), `adapted`, broadcast MCP exposure deferred | streaming `/tasks`(buffered 기본 계약 유지), `EPHEMERA_MAX_TASK_DEPTH`/`508` depth guard, `GET /watchdog/status`, goose-agent slog. flock broadcast는 daemon API/`ephemera-ctl` CLI로만 채택하고 `anvil_*` MCP tool로 노출하지 않는다. |
+| `v0.4.5` | 병합(`8bd84ec`)/적응(`8daf6f3`), `adapted` | snapshot-restore auto-recovery(`recoverRestoredVM`/`reRestoreMachine`). restore state에 `tenant_id`/`egress_policy` persist, 응답 token redaction 유지. divergence는 아래 참조. |
+
+의도적 divergence (`adapted`): anvil은 live·persisted restored VM이 참조하는 source
+snapshot의 `DELETE`를 `409`로 막는다. upstream e2e 46c는 이 `DELETE`를 `200`으로
+허용하고 restored VM을 orphan으로 두지만, anvil은 VM을 먼저 삭제한 뒤 snapshot을
+삭제하도록 요구한다. e2e 46c는 이 divergence에 맞게 조정했고(commit `63df804`,
+`e2e_test.sh`에 divergence 주석) 같은 divergence를 [`docs/ADR_INDEX.md`](../ADR_INDEX.md)
+Section 4에도 `v0.4.5` `adapted`로 기록한다.
 
 `v0.3.2`/`v0.3.3`의 세부 변경 근거와 anvil 채택 검토 포인트는
 [`docs/analysis/08-v0.3.2-v0.3.3-upstream-change-review.md`](../analysis/08-v0.3.2-v0.3.3-upstream-change-review.md)를
@@ -106,7 +127,9 @@ historical analysis로 보존한다. 현재 채택 상태는
 
 1. `v0.4.0`-`v0.4.5` runtime 안정화 변경은
    [`docs/superpowers/plans/2026-06-10-ephemera-v0.4-runtime-sync.md`](../superpowers/plans/2026-06-10-ephemera-v0.4-runtime-sync.md)의
-   계획을 기준으로 별도 sync branch에서 병합/적응한다.
+   계획대로 이 sync branch에서 병합/적응·검증을 마쳤다(위 채택 상태 표 참조).
+   남은 항목은 `v0.4.2` default COW 전환과 `v0.4.4` flock broadcast의 MCP tool
+   노출이며, 각각 KVM burn-in과 tenant/rate/audit 설계 뒤 결정한다.
 2. `v0.5.0`-`v0.7.0`은 product/operator Web UI, MCP Gateway,
    installer/transcript/hardening 계열 변경으로 분류하고, `v0.4.x` sync 이후 별도
    adoption review 문서를 먼저 작성한다.
