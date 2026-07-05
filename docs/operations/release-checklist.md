@@ -139,9 +139,13 @@ anvil main runtime baseline은 upstream ephemera `v0.7.0`까지 병합·적응�
 포함한다. `v0.3.2`-`v0.3.6`은 이전 release가 채택한 baseline이고, `v0.4.0`-`v0.4.5`는
 v0.4 sync, `v0.5.0`-`v0.5.5`는 v0.5 operator sync, `v0.6.0`-`v0.6.4`는 v0.6 MCP gateway
 sync, `v0.7.0`은 v0.7 parity sync에서 병합·적응해 full KVM gate로 검증했다 — upstream
-parity scope(`v0.4.0`-`v0.7.0`) 코드 편입이 완료됐다. upstream `main`과 최신 upstream
-tag는 `v0.7.0`까지 진행되어 있다. 새 anvil release 후보가 이 baseline을 포함한다면
-release 본문에는 upstream runtime 변경과 anvil product 변경을 분리해서 적는다.
+parity scope(`v0.4.0`-`v0.7.0`) 코드 편입이 완료됐다. anvil runtime/operator baseline
+supports upstream ephemera v0.7.0 with anvil adaptations for token redaction,
+tenant/egress, scheduler, audit, and IronClaw MCP surface separation. 전 태그별 parity
+matrix는 [`docs/analysis/11-v0.5.0-v0.7.0-core-service-parity-review.md`](../analysis/11-v0.5.0-v0.7.0-core-service-parity-review.md)에
+있다. upstream `main`과 최신 upstream tag는 `v0.7.0`까지 진행되어 있다. 새 anvil release
+후보가 이 baseline을 포함한다면 release 본문에는 upstream runtime 변경과 anvil product
+변경을 분리해서 적는다.
 
 - upstream `v0.3.2`: live VM cold-restart, `vms/<vm_id>/state.json`, orphan cleanup,
   기존 TAP/IP/MAC 재예약, graceful daemon shutdown 시 rootfs/state 보존.

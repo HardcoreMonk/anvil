@@ -132,9 +132,13 @@ upstream ephemera 변경을 병합할 때는 다음 상태 중 하나로 분류�
 
 2026-07-02 기준 upstream `main`과 최신 upstream tag는 `v0.7.0`이다. `v0.4.0`-`v0.7.0`은
 anvil main runtime baseline으로 병합·적응되어 full KVM gate로 검증됐으며(위 표), upstream
-parity scope 코드 편입이 완료됐다. 현재 관찰 범위(`v0.7.0`까지)에는 조건부/제외로 남은
-upstream tag가 없다. `v0.7.0` 이후 새 upstream tag가 관찰되면 별도 adoption review 뒤
-공개 경계를 분류한다.
+parity scope 코드 편입이 완료됐다. anvil runtime/operator baseline supports upstream
+ephemera v0.7.0 with anvil adaptations for token redaction, tenant/egress, scheduler,
+audit, and IronClaw MCP surface separation. 전 태그별 채택/적응/deferred/excluded 분류는
+[`docs/analysis/11-v0.5.0-v0.7.0-core-service-parity-review.md`](analysis/11-v0.5.0-v0.7.0-core-service-parity-review.md)의
+parity matrix에 있다. 현재 관찰 범위(`v0.7.0`까지)에는 조건부/제외로 남은 upstream
+tag가 없다. `v0.7.0` 이후 새 upstream tag가 관찰되면 별도 adoption review 뒤 공개
+경계를 분류한다.
 
 `v0.3.2`/`v0.3.3` 병합 전 검토 근거는
 `docs/analysis/08-v0.3.2-v0.3.3-upstream-change-review.md`에 historical analysis로

@@ -49,7 +49,11 @@
 - anvil main runtime baseline은 upstream ephemera `v0.7.0` adapted runtime·operator
   support를 포함한다(수정 없는 `v0.7.0`가 아니다). 2026-07-02 기준 upstream latest
   observed는 `v0.7.0`이며 anvil은 관찰 범위 전체를 병합했다 — upstream parity
-  scope(`v0.4.0`-`v0.7.0`) 코드 편입이 완료돼 pending sync 후보는 없다.
+  scope(`v0.4.0`-`v0.7.0`) 코드 편입이 완료돼 pending sync 후보는 없다. anvil
+  runtime/operator baseline supports upstream ephemera v0.7.0 with anvil adaptations for
+  token redaction, tenant/egress, scheduler, audit, and IronClaw MCP surface separation.
+  전 태그별 adopted/adapted/deferred/excluded parity matrix는
+  `docs/analysis/11-v0.5.0-v0.7.0-core-service-parity-review.md`에 있다.
 - upstream `v0.7.0` (end-user installer + conversation transcript restore + upstream
   hardening reconcile)를 sync 한다. anvil adaptation:
   - end-user installer(`install.sh`/`uninstall.sh`/`INSTALL.md`/`ephemera.service.in`)와

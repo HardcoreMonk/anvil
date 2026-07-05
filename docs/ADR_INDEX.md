@@ -79,7 +79,11 @@ gateway는 adapter를 대체하지 않으며, IronClaw tool 목록에 gateway to
 `v0.4.0`-`v0.7.0`은 anvil main runtime baseline으로 병합·적응되었고 full KVM gate로
 검증됐다(`v0.4.x`는 Task 8, `v0.5.x`는 Task 4, `v0.6.x`는 Task 6, `v0.7.0`은 Task 7
 문서 반영 기준). 이로써 upstream parity scope(`v0.4.0`-`v0.7.0`) 코드 편입이 완료됐다.
-상세 병합 근거는
+anvil runtime/operator baseline supports upstream ephemera v0.7.0 with anvil adaptations
+for token redaction, tenant/egress, scheduler, audit, and IronClaw MCP surface separation.
+전 태그별 adopted/adapted/deferred/excluded parity matrix는
+[`docs/analysis/11-v0.5.0-v0.7.0-core-service-parity-review.md`](analysis/11-v0.5.0-v0.7.0-core-service-parity-review.md)에
+있다. 상세 병합 근거는
 [`docs/analysis/10-v0.4.0-v0.4.5-runtime-stabilization-adoption.md`](analysis/10-v0.4.0-v0.4.5-runtime-stabilization-adoption.md),
 Phase 2 handoff([`docs/operations/2026-07-05-ephemera-v0.5-operator-sync-handoff.md`](operations/2026-07-05-ephemera-v0.5-operator-sync-handoff.md)),
 Phase 3 handoff([`docs/operations/2026-07-05-ephemera-v0.6-mcp-gateway-sync-handoff.md`](operations/2026-07-05-ephemera-v0.6-mcp-gateway-sync-handoff.md)),

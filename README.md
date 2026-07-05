@@ -56,7 +56,11 @@ installer/transcript restore 같은 runtime·operator substrate를 끌어올린 
 anvil의 제품 정체성을 ephemera로 바꾸는 작업이 아니다. 즉 anvil main runtime baseline은
 upstream ephemera `v0.7.0` adapted runtime·operator support를 포함하는 것이지, 수정
 없는 ephemera `v0.7.0`가 아니다. `v0.4.0`-`v0.7.0`은 full KVM gate로 검증했고, 이로써
-upstream parity scope(`v0.4.0`-`v0.7.0`)의 코드 편입이 완료됐다. `v0.5.0` operator Web
+upstream parity scope(`v0.4.0`-`v0.7.0`)의 코드 편입이 완료됐다. anvil runtime/operator
+baseline supports upstream ephemera v0.7.0 with anvil adaptations for token redaction,
+tenant/egress, scheduler, audit, and IronClaw MCP surface separation. 전 태그별 parity
+분류는 [`docs/analysis/11-v0.5.0-v0.7.0-core-service-parity-review.md`](docs/analysis/11-v0.5.0-v0.7.0-core-service-parity-review.md)에
+있다. `v0.5.0` operator Web
 UI(`/ui/`, `/config/*`), `v0.6.0` runtime MCP Gateway(`EPHEMERA_MCP_*`), `v0.7.0`
 installer/transcript는 runtime/operator surface로만 채택하며(IronClaw MCP surface 아님,
 `cmd/anvil-mcp` adapter를 대체하지 않음, systemd는 canonical `ephemera` 이름 유지),

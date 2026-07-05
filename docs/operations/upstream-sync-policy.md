@@ -88,7 +88,11 @@ anvil main runtime baseline은 upstream ephemera `v0.7.0` tag까지 병합·적�
 `v0.4.0`-`v0.4.5`는 v0.4 sync로, `v0.5.0`-`v0.5.5`는 v0.5 operator sync로,
 `v0.6.0`-`v0.6.4`는 v0.6 MCP gateway sync로, `v0.7.0`은 v0.7 parity sync로 병합·적응해
 full KVM gate로 검증한 baseline이다. 이로써 upstream parity scope(`v0.4.0`-`v0.7.0`)의
-코드 편입이 완료됐다.
+코드 편입이 완료됐다. anvil runtime/operator baseline supports upstream ephemera v0.7.0
+with anvil adaptations for token redaction, tenant/egress, scheduler, audit, and IronClaw
+MCP surface separation. 전 태그별 채택/적응/deferred/excluded 분류는
+[`docs/analysis/11-v0.5.0-v0.7.0-core-service-parity-review.md`](../analysis/11-v0.5.0-v0.7.0-core-service-parity-review.md)의
+parity matrix에 있다.
 2026-07-02 기준 upstream `main`과 최신 upstream tag는 `v0.7.0`까지 진행되어 있다.
 `v0.3.2`-`v0.3.5` 병합 commit은 `1ebe201 Merge upstream/main`이고, `v0.3.6`은
 `v0.3.6` tag commit을 merge한다.
