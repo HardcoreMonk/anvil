@@ -17,6 +17,25 @@ import (
 	"ephemera/internal/orchestrator"
 )
 
+// [학습 주석] cmd/goose-daemon/orchestrator_api.go
+//
+// 이 파일은 단일 호스트 안에서 여러 VM을 하나의 "flock"으로 묶어 관리하는 HTTP
+// 계층이다. upstream v0.4.3에서 add/remove/role-change 같은 동적 멤버십 관리,
+// pause/resume, per-flock max_agents, Town Wall 쿼리 필터가 들어왔고, v0.4.4에서
+// broadcast(모든 에이전트에 같은 프롬프트를 팬아웃)가 추가됐다. anvil은 이 라이프사이클
+// 자체는 그대로 채택하되(docs/analysis 10/11번 문서: "single-host daemon flock에는
+// 채택 가능"), routed members-only cross-host flock 개념과는 별개로 취급한다 — 이
+// 파일의 flockMgr는 "이 데몬 프로세스 하나가 아는 flock"만 다루고, cross-host 라우팅
+// 레지스트리를 되살리지 않는다.
+//
+// 보안 경계: addFlockAgent/FlockAddAgentResponse가 agent_token을 응답에 담지 않는
+// 것이 anvil의 불변 조건이다(POST /vms 응답 외에는 agent_token을 노출하지 않음) —
+// upstream 원본은 add-agent 응답에 one-time agent_token을 포함하지만 anvil은 이를
+// 의도적으로 제거했다.
+//
+// 관련 가드 테스트: TestToolRegistrationsExcludeBroadcast,
+// TestCurrentIronClawSchemasExcludeBroadcastTool (broadcast의 MCP 노출 금지 확인).
+
 // defaultMaxAgentsPerFlock is the per-flock agent cap when a flock does not set
 // its own max_agents (v0.4.3). Limits IP pool / TAP exhaustion from a runaway caller.
 const defaultMaxAgentsPerFlock = 20
@@ -478,6 +497,12 @@ func normalizeDaemonFlockRoles(roles []string) ([]string, error) {
 // keep working across the restart. The new VM gets a fresh vm_id / guest_ip
 // / agent_url. Status flips to ready on success; on spawn failure the agent
 // is marked dead so external callers see the truth.
+// [학습] restart/changeFlockAgentRole 둘 다 "agent_id와 agent_token은 그대로,
+// vm_id/guest_ip/agent_url만 새로 바뀐다"는 동일한 패턴을 따른다 — 그래서
+// destroyVM으로 옛 VM을 지우기 전에 반드시 먼저 cp.vms에서 agentToken을 읽어와야
+// 한다(destroyVM이 그 runningVM 엔트리를 지워버리기 때문). 이 토큰을 재사용하는
+// 이유는 caller(예: 외부 오케스트레이터)가 restart 전에 캐시해 둔 토큰이 restart 후에도
+// 계속 유효하게 하기 위함이다 — 매번 새 토큰을 발급하면 caller가 매번 갱신해야 한다.
 func (cp *ControlPlane) restartAgent(w http.ResponseWriter, flockID, agentID string) {
 	f, ok := cp.flockMgr.Get(flockID)
 	if !ok {
@@ -766,6 +791,12 @@ func (cp *ControlPlane) changeFlockAgentRole(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, info)
 }
 
+// [학습] pause/resume(v0.4.3)는 "런타임 한정"이라는 점이 핵심 함정이다 — Flock.Paused
+// 필드도 agent status도 디스크에 persist되지 않는다. 즉 데몬이 재시작되면 paused
+// 상태는 사라지고 RecoverVMs는 그냥 running으로 복구한다(운영자가 재부팅 후 다시
+// pause를 걸어야 한다는 뜻). watchdog이 paused 상태를 알아야 하는 이유도 여기 있다
+// (Firecracker가 pause된 VM은 /health에 응답하지 않으므로, watchdog이 이를 "dead"로
+// 오판하지 않도록 flock.AgentStatus로 paused 여부를 먼저 확인한다 — watchdog.go 참고).
 // pauseFlock pauses every member VM via Firecracker PauseVM. Runtime-only: agent
 // status flips to "paused" and Flock.Paused is set, but nothing is persisted (a
 // daemon restart brings members back running). On a partial failure the already-
@@ -884,6 +915,13 @@ type broadcastResult struct {
 // "error". The call blocks until every agent finishes, like calling /tasks on
 // each; cancellation rides on the request context.
 // POST /flocks/{id}/broadcast  {"body":"prompt for all agents"}.
+// [학습] v0.4.4에서 추가된 broadcast는 daemon HTTP API로는 채택됐지만(docs/analysis
+// 10/11번 문서: adopted, daemon-only) anvil_* MCP tool로는 노출하지 않는다(deferred) —
+// 한 번의 호출로 flock 전체 에이전트에게 프롬프트를 팬아웃하기 때문에 tenant quota,
+// rate limit, audit, 취소(cancellation) 정책이 아직 설계되지 않았기 때문이다. 이
+// 함수 자체는 goroutine으로 각 에이전트에 병렬 전송하고 전부 끝날 때까지 블록한다 —
+// 개별 /tasks 호출과 동일한 지연 특성을 가지며, 취소는 요청 컨텍스트(r.Context())를
+// 타고 전파된다(개별 goroutine의 dispatchBroadcastTask가 그 컨텍스트를 그대로 쓴다).
 func (cp *ControlPlane) broadcastFlock(w http.ResponseWriter, r *http.Request, flockID string) {
 	f, ok := cp.flockMgr.Get(flockID)
 	if !ok {

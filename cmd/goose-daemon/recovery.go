@@ -1,3 +1,21 @@
+// [학습 주석] cmd/goose-daemon/recovery.go
+//
+// 이 파일은 데몬이 재시작될 때 "state.json이 남아있는 모든 VM"을 되살리는 로직이다.
+// upstream v0.4.0에서 콜드 리스타트(RecoverVMs) + COW 재구성 + orphan 디바이스 정리가
+// 들어왔고, v0.4.5에서 recoverRestoredVM/reRestoreMachine이 추가되어 "스냅샷에서
+// restore된 VM"도 재시작 후 자동 복구 대상이 됐다(그 전까지는 restored VM은 데몬이
+// 죽으면 영영 사라졌다). anvil은 원본 upstream보다 한 단계 더 방어적으로 만들었다:
+// source snapshot이 지워진 restored VM을 드롭할 때도 killStaleFirecracker/
+// removeStaleVMArtifacts/COW 디바이스 정리를 항상 먼저 수행한다(주석 참고,
+// "anvil keeps the hardening" — upstream의 더 가벼운 경로는 이 정리를 생략한다).
+//
+// 핵심 함정: 스냅샷-restore VM은 DiskPath가 "영속 디스크"가 아니라 매번 새로 만들어
+// 버리는 임시 exception store라서, 일반 spawn VM과 같은 "디스크 파일 없으면 드롭"
+// 검사를 SourceSnapshotID 체크보다 먼저 하면 모든 restored VM이 잘못 드롭된다 —
+// 그래서 RecoverVMs 루프 맨 위에서 SourceSnapshotID 분기를 먼저 걸러낸다.
+//
+// 관련 가드 테스트: TestRestoreSnapshotPersistsRecoverableVMState (storage 패키지),
+// recovery_test.go의 cold-restart/COW/warm-restore 케이스들.
 package main
 
 import (
@@ -54,6 +72,9 @@ func (cp *ControlPlane) RecoverVMs() (recovered int, failed []string, err error)
 	// Reclaim COW dm-snapshot + loop devices left behind by a crashed previous
 	// run (no surviving state.json). VMs that still have state are preserved for
 	// the recovery loop below to handle (v0.4.0 E).
+	// [학습] 여기서 liveVMIDs에 없는 VM만 orphan으로 취급해 COW 장치를 회수한다.
+	// state.json이 살아있는 VM은 (COW든 아니든) 아래 루프에서 각자 처리하므로
+	// 이 시점에 손대면 아직 쓰지도 않은 dm 장치를 지워버리는 race가 생긴다.
 	liveVMIDs := make(map[string]struct{}, len(states))
 	for _, s := range states {
 		liveVMIDs[s.VMID] = struct{}{}
@@ -146,6 +167,10 @@ func (cp *ControlPlane) RecoverVMs() (recovered int, failed []string, err error)
 		// and cold. On ANY failure, the one-shot snapshot is deleted and we fall
 		// through to the cold-boot path below, reusing the reclaimed network and
 		// (for COW) dmInfo — so dmInfo is NOT torn down here.
+		// [학습] warm-restore는 "같은 IP/TAP/MAC를 재사용"하는 게 전제다 — 스냅샷
+		// 안에 굳어 있는 게스트 네트워크 상태가 그 IP를 기준으로 만들어졌기 때문에,
+		// cold-restart처럼 IP를 다시 배정하면 게스트 내부 네트워크 설정과 어긋난다.
+		// 그래서 ReconfigureGuestIP 호출이 이 경로에는 없다(cold-restart와의 차이).
 		if enableAutoSnapshot && storage.AutoSnapshotExists(cp.workDir, s.VMID) {
 			memPath, statPath := storage.AutoSnapshotPaths(cp.workDir, s.VMID)
 			machine, restoreErr := vm.RestoreMachine(context.Background(), vm.VMConfig{
@@ -392,6 +417,13 @@ func (cp *ControlPlane) markFlockAgentDead(flockID, agentID string) {
 // original restore are not preserved (identical to a manual re-restore). The
 // exception store is recreated fresh. On any failure the state is dropped, the
 // network released, and the flock agent (if any) marked dead; vmID → failed.
+// [학습] v0.4.5의 핵심 함수. "복구"의 의미가 spawn VM의 cold-restart와 근본적으로
+// 다르다는 점이 이 함수 전체를 관통한다: spawn VM은 디스크를 그대로 재부팅하지만,
+// restored VM은 source snapshot의 메모리+상태를 처음부터 다시 로드한다 — 즉 마지막
+// restore 이후 게스트가 만든 쓰기 내용은 이 재복구로 사라진다(정확히 "수동으로
+// 다시 restore하는 것"과 동일). exceptionStore를 항상 새로 만드는 이유도 여기서
+// 나온다: 예전 store 위에 새 메모리 스냅샷을 얹으면 store 안의 디스크 쓰기 내역과
+// 방금 로드한 메모리 상태가 서로 다른 시점을 가리켜 일관성이 깨진다.
 func (cp *ControlPlane) recoverRestoredVM(s storage.VMState, recovered *int, failed *[]string) {
 	cp.snapshotsMu.RLock()
 	meta, ok := cp.snapshots[s.SourceSnapshotID]
@@ -473,6 +505,12 @@ func (cp *ControlPlane) recoverRestoredVM(s storage.VMState, recovered *int, fai
 // bind-mount fallback and fresh-network allocation. cp.restoreMu serializes the
 // dm-setup + Firecracker-open window. On failure any dm-snapshot created is torn
 // down before returning.
+// [학습] 이 함수는 api.go의 restoreSnapshot(POST /snapshots/{id}/restore) dm-snapshot
+// 성공 경로를 그대로 재현한다 — 유지보수 시 두 곳을 반드시 같이 고쳐야 한다는 뜻이
+// 코드 주석에 명시돼 있다("KEEP THE TWO IN SYNC"). 다만 이 경로는 restore 핸들러의
+// bind-mount fallback이나 "새 네트워크 할당"은 하지 않는다 — 복구는 항상 dm-snapshot
+// 가능한 호스트를 전제하고, 네트워크도 (spawn 때와 마찬가지로) 이미 갖고 있던 IP/TAP를
+// reclaim해서 재사용한다(호출자 recoverRestoredVM 참고).
 func (cp *ControlPlane) reRestoreMachine(meta storage.SnapshotMetadata, vmID, exceptionStore, socketPath, tapDevice, guestIP string) (*firecracker.Machine, *storage.DMSnapshotInfo, error) {
 	var base storage.SnapshotMetadata
 	if meta.SnapshotType == "diff" {

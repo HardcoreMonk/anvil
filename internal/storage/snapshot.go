@@ -1,3 +1,18 @@
+// [학습 주석] internal/storage/snapshot.go
+//
+// 이 파일은 스냅샷의 온디스크 표현(metadata.json)과, 그 스냅샷을 실제 디스크로
+// 되살리는 두 가지 방식 — 레거시 bind-mount(SetupBindMount, 전체 복사)와 v0.4.0에서
+// 새로 들어온 dm-snapshot COW(SetupDMSnapshot, ~0바이트 sparse 증분) — 를 담고 있다.
+// RootfsDiffPath/DiskCopyPath 구분은 "diff 스냅샷"(base snapshot 대비 변경된 4KiB
+// 블록만 저장)과 "full 스냅샷"을 가르는 v0.4.0의 핵심 개념이다: diff 스냅샷은
+// base_snapshot_id로 자신의 base를 가리키고, base가 지워지면 복구 불가능해지므로
+// anvil은 삭제 시 base←diff 참조를 계속 보호해야 한다(api.go의 deleteSnapshotByID).
+//
+// anvil 적응 포인트: SnapshotMetadata.TenantID/EgressPolicy는 anvil이 추가한 필드로,
+// restore 시 요청받은 tenant_id/egress_policy가 스냅샷에 찍힌 값과 충돌하지 않는지
+// 검증하는 근거가 된다(api.go의 restoreTenantAndEgress). AgentToken은 스냅샷 시점의
+// bearer를 그대로 보존하므로, restore 후 별도 회전(rotation)이 없으면 예전 토큰이
+// 계속 살아있다는 점을 문서/README에 명시해야 한다.
 package storage
 
 import (
@@ -217,6 +232,12 @@ type DMSnapshotInfo struct {
 // the losetup/dmsetup/blockdev tools must be on PATH, the device-mapper control
 // node must be usable, and the dm_snapshot target must be loadable. Returns a
 // descriptive error when COW is unsupported so callers can fall back to a full copy.
+// [학습] v0.4.2에서 도입된 probe다. 여기서 실패를 반환하면 호출자(daemon 기동 시
+// resolveDiskModeCOW)는 COW를 켜지 않고 plain full-copy로 조용히 fallback한다 —
+// 즉 이 함수의 반환값 자체가 "이 호스트에서 COW spawn/restore가 가능한가"를 결정하는
+// 유일한 게이트다. dmsetup version까지 확인하는 이유는 losetup/dmsetup 바이너리가
+// PATH에 있어도 커널에 device-mapper 드라이버가 없거나 /dev/mapper/control이 없는
+// 컨테이너/제한된 커널 환경이 있기 때문이다.
 func DMSnapshotAvailable() error {
 	for _, tool := range []string{"losetup", "dmsetup", "blockdev"} {
 		if _, err := exec.LookPath(tool); err != nil {
@@ -247,6 +268,12 @@ func DMSnapshotAvailable() error {
 // in Firecracker state.bin) so that Firecracker can open the path as before.
 //
 // Caller must call TeardownDMSnapshot on VM destroy to release kernel resources.
+// [학습] 함정 포인트 두 가지. (1) mountTargetPath는 Firecracker의 state.bin(스냅샷)
+// 또는 spawn 시 결정한 경로 그대로여야 한다 — Firecracker는 저장된 경로를 그대로
+// 열려고 시도하므로, 여기서 경로가 어긋나면 restore/cold-restart가 조용히 다른 파일을
+// 열거나 실패한다. (2) 실패 시 각 단계가 cleanup 클로저(cleanup/cowCleanup)를 그
+// 자리에서 즉시 호출한다 — 부분 성공 상태(예: loop device는 attach됐는데 dm-snapshot
+// 생성만 실패)가 losetup 리스트에 orphan으로 남지 않도록 하기 위함이다.
 func SetupDMSnapshot(baseDiskPath, exceptionStorePath, mountTargetPath string) (*DMSnapshotInfo, error) {
 	// 1. Create read-only loop device for the snapshot base disk.
 	out, err := exec.Command("losetup", "--read-only", "--find", "--show", baseDiskPath).Output()
@@ -347,6 +374,12 @@ func TeardownDMSnapshotKeepStore(info *DMSnapshotInfo) error {
 // Uses lazy unmount so any Firecracker fd that was already opened continues to work
 // until the process exits, at which point the underlying inode is freed. When
 // keepStore is true the exception store file is left on disk for a later restore.
+// [학습] keepStore=true 분기(TeardownDMSnapshotKeepStore)가 graceful shutdown 때
+// 쓰인다 — dm 장치/loop 장치 같은 "커널 객체"는 정리하지만 exception store 파일은
+// 남겨서, 다음 데몬 기동 때 RecoverVMs가 이 store를 golden image 위에 다시 얹어
+// 쓰기 내용을 보존한 채로 cold-restart할 수 있게 한다. dmsetup remove가 즉시 안 되고
+// 최대 10초까지 재시도하는 이유는 Firecracker 프로세스가 SIGTERM 이후 fd를 닫는 데
+// 시간이 걸릴 수 있어서다(동시에 진행 중인 다른 restore의 teardown과 겹치는 경우 특히).
 func teardownDMSnapshot(info *DMSnapshotInfo, keepStore bool) error {
 	if info == nil {
 		return nil
@@ -422,6 +455,10 @@ func MergeRootfsDiff(baseRootfsPath, diffPath, outputPath string) error {
 // outputPath, which must already contain the base image. It walks the diff with
 // SEEK_DATA/SEEK_HOLE so only written regions are touched, avoiding a full read/write of
 // the base. On error outputPath is removed.
+// [학습] diff 스냅샷 병합의 핵심 트릭: SEEK_DATA/SEEK_HOLE로 diff 파일에서 "실제
+// 데이터가 있는 구간"만 찾아 그 구간만 base 위에 덮어쓴다. diff 파일 자체가 sparse
+// (변경 안 된 블록은 구멍)이기 때문에 가능한 최적화이며, 이 덕분에 diff 병합 비용이
+// "변경된 바이트 수"에 비례하지 base 전체 크기에 비례하지 않는다.
 func overlaySparseDiff(diffPath, outputPath string) error {
 	diff, err := os.Open(diffPath)
 	if err != nil {
@@ -494,6 +531,12 @@ func overlaySparseDiff(diffPath, outputPath string) error {
 // device (COW / restored source VM) yields its full ext4 view correctly — the diff is
 // computed by comparison, never from source sparseness (a block device reports no holes).
 // Returns the number of changed bytes written. On error diffPath is removed if created.
+// [학습] v0.4.0의 "true rootfs diff snapshot" 기능. base와 현재 디스크를 4KiB 단위로
+// 바이트 비교해서 달라진 블록만 diffPath에 쓰고 나머지는 구멍(hole)으로 남긴다.
+// 함정: currentPath가 COW spawn VM의 dm-snapshot 블록 장치(bind mount)일 수 있는데,
+// 이 경우 os.Open으로 읽으면 논리적 내용은 정확히 나오지만 장치 자체의 sparse 여부는
+// 무의미하다 — diff는 항상 "비교"로 계산되지, 소스 파일의 물리적 sparse 구조에서
+// 유추하지 않는다(그래서 블록 장치를 그대로 넘겨도 안전하다).
 func WriteRootfsDiff(currentPath, basePath, diffPath string) (changedBytes int64, err error) {
 	cur, err := os.Open(currentPath)
 	if err != nil {

@@ -35,6 +35,29 @@ import (
 	"ephemera/internal/vm"
 )
 
+// [학습 주석] cmd/goose-daemon/api.go (v0.4.x 관련 부분만)
+//
+// 이 파일은 VM/스냅샷 라이프사이클 전체를 처리하는 control plane HTTP 핸들러다.
+// 이 브랜치가 다루는 v0.4.x 관점에서 핵심은 세 갈래다.
+//  1. restoreSnapshotWithRequest: meta.DiskPath(원본 Firecracker state.bin에 박힌
+//     경로) 위에 dm-snapshot COW를 새로 얹거나(v0.4.0/v0.4.2), 실패 시 레거시
+//     bind-mount로 fallback하는 restore 계약. 성공하면 SourceSnapshotID를 가진
+//     새 state.json을 저장해 v0.4.5 재복구 대상이 되게 한다.
+//  2. deleteSnapshotByID / handleSnapshotGC: 삭제/GC 양쪽 모두 "이 스냅샷을 아직
+//     참조 중인 대상이 있는가"를 409로 막는다 — diff의 base, 그리고 anvil이 강화한
+//     "살아있는 restored VM이 참조 중인 source snapshot"(라이브 cp.vms 스캔 +
+//     state.json 스캔 이중 체크, liveRestoredSourceSnapshotRefs/
+//     persistedRestoredSourceSnapshotRefs). upstream e2e 46c는 이 경우 200으로
+//     고아 스냅샷을 허용하지만 anvil은 의도적으로 409로 막는다(excluded divergence,
+//     docs/analysis/11-*.md 참고 — "VM 먼저 삭제 후 snapshot 삭제 요구").
+//  3. proxyAgentEndpoint의 depth guard: v0.4.4 nested-task 무한루프 방지
+//     (EPHEMERA_MAX_TASK_DEPTH, X-Ephemera-Task-Depth 헤더, 508 Loop Detected).
+//     DestroyAll은 daemon 자체 graceful shutdown 전용 분기로, 명시적 DELETE와
+//     달리 "다음 기동 때 복구 가능한 상태"를 보존한다.
+//
+// 관련 가드 테스트: TestRunTaskBuffered_DefaultShape, proxy_depth_test.go,
+// TestDeleteProfileInUseReturns409류의 409 계열 테스트.
+
 type authFailureRecorder interface {
 	IncAuthFailure()
 }
@@ -825,6 +848,12 @@ func (cp *ControlPlane) proxyAgentEndpoint(w http.ResponseWriter, r *http.Reques
 		proxyReq.Header.Set("Authorization", "Bearer "+v.agentToken)
 	}
 
+	// [학습] 이 depth 값은 goose-agent(cmd/goose-agent/main.go handleTask)가
+	// EPHEMERA_TASK_DEPTH 환경변수로 goose 서브프로세스에 넘기고, 에이전트 안에서
+	// scripts/gtcall이 그 값을 다시 X-Ephemera-Task-Depth 헤더로 되돌려 보내는
+	// 왕복 구조다. 즉 depth 증가는 항상 이 daemon 쪽(proxyAgentEndpoint)에서만
+	// 일어나고, agent/gtcall은 받은 값을 그대로 전달만 한다 — 증가 로직이 두 곳에
+	// 중복되면 depth가 실제보다 빠르게 또는 느리게 누적되는 버그가 생기기 쉽다.
 	// Nested-invocation depth guard (v0.4.4). Only /tasks is a task hop; the
 	// incoming header is the current depth (absent → 0). At/over the cap we
 	// refuse with 508 Loop Detected (distinct from the agent's own 503-busy);
@@ -1333,6 +1362,11 @@ func (cp *ControlPlane) destroyVM(vmID string) {
 	cp.destroyVMUnderSnapshotLock(vmID)
 }
 
+// [학습] state.json을 가장 먼저 지우는 순서가 중요하다: Firecracker StopVMM은 잠깐
+// 시간이 걸릴 수 있는데, 만약 그 사이 데몬이 죽으면 다음 기동 때 RecoverVMs가 이
+// VM을 "아직 살아있다"고 착각해 되살리려 시도할 수 있다 — state.json을 먼저 지워
+// 두면 그 창이 닫힌다. dmSnapshot/bindMountTarget/diskPath 세 분기는 서로 배타적:
+// 어떤 disk provisioning 경로를 탔는지에 따라 정확히 하나만 non-empty다.
 func (cp *ControlPlane) destroyVMUnderSnapshotLock(vmID string) {
 	cp.mu.Lock()
 	v, ok := cp.vms[vmID]
@@ -1431,6 +1465,12 @@ func (cp *ControlPlane) DestroyAll() {
 		if v.vsockPath != "" {
 			os.Remove(v.vsockPath)
 		}
+		// [학습] 아래 4갈래 분기는 모두 "dmSnapshot이 non-nil"이라는 같은 조건에서
+		// 갈라지는데, 구분 기준은 sourceSnapshotID 유무 + state.json 존재 여부다:
+		// COW spawn(둘 다 있음) → store 보존, restored VM(sourceSnapshotID 있음) →
+		// store는 버리고 state.json만 보존, 나머지(state 없음/legacy) → 전부 정리.
+		// 이 셋을 헷갈리면 복구 불가능한 VM의 store가 디스크에 계속 쌓이거나, 반대로
+		// 다음에 복구해야 할 VM의 store가 조기에 지워지는 식으로 새어나간다.
 		if v.dmSnapshot != nil && v.sourceSnapshotID == "" && storage.VMStateExists(cp.workDir, v.VMID) {
 			// COW spawn VM: release the dm-snapshot kernel objects (mount, dm device,
 			// loops) but PRESERVE the exception store + state.json so RecoverVMs can
@@ -2353,6 +2393,11 @@ func (cp *ControlPlane) handleSnapshotGC(w http.ResponseWriter, r *http.Request)
 	json.NewEncoder(w).Encode(resp)
 }
 
+// [학습] GC 후보 선정(planSnapshotGC)은 나이/개수/총용량 정책만 보고 고르지만,
+// 실제 삭제는 deleteSnapshotByID를 그대로 재사용한다 — 즉 diff의 base이거나 살아있는
+// restored VM이 참조하는 snapshot이면 정책상 후보로 뽑혔더라도 여기서 409 에러로
+// 막히고 resp.Errors에 쌓인다(fail-closed). GC가 삭제 보호 로직을 우회할 수 있는
+// 별도 경로가 없다는 뜻이다.
 func (cp *ControlPlane) applySnapshotGC(resp *SnapshotGCResponse) {
 	for _, candidate := range resp.Candidates {
 		_, _, err := cp.deleteSnapshotByID(candidate.SnapshotID)
@@ -2892,6 +2937,19 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 		return
 	}
 
+	// [학습][주의: 이 시점 코드는 잠복 결함] state.bin은 TAP 장치 이름과 vsock UDS
+	// 경로(meta.VsockPath)뿐 아니라 **block device의 backing file 경로(meta.DiskPath)도**
+	// 기록한다 — Firecracker의 LoadSnapshot은 snapshot 시점에 기록된 그 경로를 그대로
+	// 연다. 그런데 이 시점(v0.4.0 적응기~v0.4.5)의 restore 코드는 rootfs를 newVMID 기준의
+	// 새 경로(restoreDiskPath)에 마운트한다. 원본 VM이 이미 삭제된 뒤라면 기록된 경로에
+	// 파일이 없으므로 LoadSnapshot이 "Error manipulating the backing file: No such file
+	// or directory"로 실패한다 — 즉 이 스냅샷 상태에서는 사실상 모든 restore가 500이었다
+	// (parity 사이클 Phase 1 KVM 게이트에서 발견). 이후 4c1c803에서 restored COW 디바이스를
+	// meta.DiskPath 위에 마운트하도록 교정됐고, per-restore 격리는 마운트 타깃이 아니라
+	// 고유 exception store(.cow)가 담당하게 됐다. recovery.go의 reRestoreMachine이
+	// meta.DiskPath를 마운트 타깃으로 쓰는 것이 처음부터 올바른 계약이었다 — upstream
+	// v0.5.x 이후 restore 흐름도 동일하다. 학습 포인트: "동시 restore 안전"은 마운트 경로
+	// 분리가 아니라 exception store 분리로 달성해야 했다.
 	// Prevent restoring if the source VM is still running (its disk is in active use).
 	cp.mu.RLock()
 	for id := range cp.vms {

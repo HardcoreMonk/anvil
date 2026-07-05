@@ -1,3 +1,19 @@
+// [학습 주석] internal/storage/vm_state.go
+//
+// 이 파일은 "콜드 리스타트 복구 계약"의 핵심이다: 데몬이 죽었다 다시 뜰 때 어떤 VM을
+// 어떤 정체성(IP/TAP/MAC/agent token)으로 되살릴지를 결정하는 유일한 소스가
+// workDir/vms/<vm_id>/state.json이다. upstream v0.4.0에서 DiskMode(plain|cow)와
+// 메모리 auto-snapshot(AutoSnapshotDir 계열)이 들어왔고, v0.4.5에서 SourceSnapshotID가
+// 추가되어 "스냅샷에서 restore된 VM"도 재시작 후 복구 대상에 포함되게 됐다.
+// anvil은 여기에 TenantID/EgressPolicy 필드를 얹어서, 데몬 재시작 후에도 tenant 격리와
+// egress 정책이 사라지지 않도록 적응했다(원본 upstream state.json에는 없는 필드).
+//
+// 함정: SourceSnapshotID가 있는 VM은 DiskPath가 "영속적인 디스크"가 아니라 매번
+// graceful shutdown 때 버려지고 재기동 때 새로 만들어지는 임시 exception store다
+// (recovery.go의 recoverRestoredVM 참고) — 이 상태를 spawn VM과 똑같이 취급하면
+// snapshot GC가 아직 살아있는 restored VM의 원본 스냅샷을 지워버릴 수 있다.
+//
+// 관련 가드 테스트: TestRestoreSnapshotPersistsRecoverableVMState.
 package storage
 
 import (
@@ -16,6 +32,9 @@ const vmStateSchemaVersion = 1
 // Disk mode tags recorded in VMState.DiskMode. Cold-restart recovery handles both:
 // "plain" boots the full rootfs clone, "cow" re-layers the preserved dm-snapshot
 // exception store over the golden image (v0.4.0).
+// [학습] 이 두 값은 recovery.go의 RecoverVMs가 분기하는 기준이다: "plain"이면 rootfs
+// 클론 파일을 그대로 재부팅하고, "cow"면 provisioner.CloneDiskCOW가 만든 것과 같은
+// 방식으로 exception store를 golden image 위에 다시 얹는다(SetupDMSnapshot 재호출).
 const (
 	DiskModePlain = "plain"
 	DiskModeCOW   = "cow"
@@ -49,6 +68,10 @@ type VMState struct {
 	// (discarded on shutdown, recreated fresh on re-restore), so the recoverable
 	// artifact is the source snapshot, not the disk. Empty for spawn-path VMs.
 	// Snapshot GC must keep this source while the restored VM state is live.
+	// [학습] 이 필드가 비어있지 않으면 recovery.go의 RecoverVMs는 이 VM을 일반
+	// spawn-path cold-restart 분기가 아니라 recoverRestoredVM 분기로 보낸다 — 그
+	// 분기는 디스크를 그대로 재사용하는 게 아니라 SourceSnapshotID가 가리키는
+	// snapshot에서 메모리+상태를 다시 통째로 불러온다("재복구"이지 "이어붙이기"가 아님).
 	SourceSnapshotID string    `json:"source_snapshot_id,omitempty"`
 	VcpuCount        int64     `json:"vcpu_count"`
 	MemSizeMib       int64     `json:"mem_size_mib"`
@@ -90,10 +113,18 @@ func AutoSnapshotExists(workDir, vmID string) bool {
 // Auto-snapshots are one-shot: consumed on a restore attempt and rewritten by
 // the next graceful shutdown, so a stale image is never reused. Call this
 // whenever a VM's state.json is dropped so an orphaned auto/ does not linger.
+// [학습] anvil은 EPHEMERA_AUTOSNAPSHOT 기본값을 off로 유지한다(docs/analysis 10번
+// 문서: "memory auto-snapshot deferred") — 전체 메모리 이미지를 디스크에 매번 쓰는
+// 비용과 in-flight task 손실 정책이 아직 운영 문서화되지 않았기 때문이다. 코드 경로
+// 자체는 살아있지만 public 지원 대상은 아니다.
 func RemoveAutoSnapshot(workDir, vmID string) {
 	os.RemoveAll(AutoSnapshotDir(workDir, vmID))
 }
 
+// [학습] tmp+rename 패턴이 여기서도 반복된다: state.json을 쓰는 도중 데몬이 죽어도
+// 절반만 쓰인 상태 파일이 남지 않는다(rename은 원자적). 파일 모드가 0600인 이유는
+// AgentToken 필드가 이 JSON 안에 평문으로 들어있기 때문 — state.json 자체가 하나의
+// 시크릿 저장소라는 뜻이다.
 // SaveVMState writes state atomically (tmp + rename). Not safe for concurrent
 // writes to the same VM; the daemon's call sites (spawnVMInternal once,
 // destroyVM once) never overlap.

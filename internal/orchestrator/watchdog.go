@@ -1,3 +1,16 @@
+// [학습 주석] internal/orchestrator/watchdog.go
+//
+// flock 멤버 VM들의 in-guest /health를 주기적으로 찔러보고, 연속 실패가 임계치를
+// 넘으면 해당 에이전트를 dead로 표시하는 백그라운드 폴러다. v0.3.5의 관찰성 훅
+// (OnDead/OnHeal/OnProbeDuration)에 이어 v0.4.3에서 "paused 상태는 실패로 세지 않는다"
+// 는 예외 처리가 들어왔다 — Firecracker pause는 게스트 실행 자체를 멈추므로 /health가
+// 당연히 응답하지 않는데, 이를 실패로 오인하면 pauseFlock으로 잠깐 멈춘 에이전트가
+// watchdog에 의해 dead로 마킹되는 오작동이 생긴다(orchestrator_api.go의 pauseFlock/
+// resumeFlock과 짝을 이룬다). v0.4.4에서 GET /watchdog/status(WatchdogStatus)가
+// 추가되어 운영자가 현재 실패 카운트/사망 마킹 상태를 조회할 수 있게 됐다.
+//
+// anvil은 이 파일 자체를 upstream 그대로 채택했다(adopted) — flock 개념이 anvil에서도
+// 그대로 쓰이기 때문에 별도 적응이 필요 없었다.
 package orchestrator
 
 import (
@@ -231,6 +244,11 @@ func (wd *Watchdog) onSuccess(vmID string) {
 // updates the agent status and posts a Town Wall notice exactly once. Paused
 // agents are skipped before counting because Firecracker pause intentionally
 // makes /health unavailable.
+// [학습] paused 예외 처리가 이 함수 맨 위, failCount를 늘리기도 전에 걸린다는 점이
+// 핵심이다 — paused 상태로 확인되면 실패 카운트를 아예 리셋하고 즉시 반환하므로,
+// pause 도중에는 dyingThreshold를 향한 카운트가 절대 누적되지 않는다. flock이
+// 삭제된 뒤 남은 goroutine이 이 함수를 호출하는 race는 "flockMgr.Get 실패 시 조용히
+// 리턴"으로 허용한다(race-tolerant라고 주석에 명시).
 func (wd *Watchdog) onFailure(v VMRef) {
 	flockID, agentID, ok := wd.locator(v.VMID)
 	if !ok {
@@ -294,6 +312,13 @@ func (wd *Watchdog) onFailure(v VMRef) {
 // destroyed (per-agent restart, DELETE) so a recycled vmID — or a future
 // probe of a long-dead one — does not inherit the previous run's
 // deadMarked bit. Safe to call concurrently with the polling loop.
+// [학습] 함정: vmID는 daemon이 "vm-<UnixNano>" 형태로 매번 새로 발급하므로 실제
+// 충돌 가능성은 희박하지만, restart/removeFlockAgent처럼 "옛 VM을 지우고 같은
+// agent_id에 새 VM을 붙이는" 흐름에서 ForgetVM을 호출하지 않으면 새 VM이 옛 vmID의
+// failCount/deadMarked 상태를 전혀 상속하지 않는 게 아니라(vmID 자체가 다르므로),
+// 오히려 "옛 vmID 엔트리가 map에 영원히 남아 메모리를 누수"하는 문제가 생긴다 —
+// 그래서 restartAgent/removeFlockAgent/changeFlockAgentRole이 destroyVM 직후 반드시
+// ForgetVM을 호출한다.
 func (wd *Watchdog) ForgetVM(vmID string) {
 	wd.mu.Lock()
 	defer wd.mu.Unlock()

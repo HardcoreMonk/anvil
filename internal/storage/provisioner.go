@@ -1,3 +1,20 @@
+// [학습 주석] internal/storage/provisioner.go
+//
+// 이 파일은 MicroVM 하나가 뜰 때 필요한 디스크 준비 작업을 맡는다:
+// golden image 자가 빌드(EnsureGoldenImage), 디스크 복제(CloneDisk / CloneDiskCOW),
+// 그리고 부팅 전 VM별 설정 파일 주입(PrepareVM → injectVMFiles). 이 중 CloneDiskCOW는
+// upstream ephemera v0.4.0에서 처음 들어온 "COW spawn" 경로다 — 이전에는 매 VM마다
+// golden image를 통째로 바이트 복사(CloneDisk)해야 했는데, dm-snapshot 기반 COW 뷰로
+// 바꾸면서 스폰 비용이 "쓰기 바이트만큼"으로 줄었다. anvil은 기본값을 곧바로 cow로
+// 바꾸지 않고 EPHEMERA_DISK_MODE=cow 로 opt-in 시켜 두었다(docs/analysis/10-*.md 참고,
+// KVM burn-in 이후 default flip을 결정하기로 deferred).
+//
+// injectVMFiles가 쓰는 tenant/egress 관련 필드(TenantID, EgressPolicy)는 anvil이
+// VMState/SnapshotMetadata에 추가한 것이지 이 파일 자체에는 없다 — 여기서는 오히려
+// AgentToken/ControlPlaneToken 같은 시크릿을 0600 모드로 심는 지점이 핵심이다(토큰이
+// VM 안에서 다른 프로세스에 노출되지 않도록 하는 anvil의 redaction 정책과 맞물린다).
+//
+// 관련 가드 테스트: provisioner_test.go의 injectVMFiles/CloneDiskCOW 케이스들.
 package storage
 
 import (
@@ -114,6 +131,14 @@ func (p *Provisioner) EnsureGoldenImage() error {
 //
 // Activated via EPHEMERA_DISK_MODE=cow; the default behavior (full copy) is
 // preserved when the variable is unset to keep a safe rollback path.
+// [학습] mountTarget은 처음엔 빈 파일(0바이트)이고, SetupDMSnapshot이 만든 dm 장치를
+// 여기에 bind-mount한다 — Firecracker는 이 mountTarget 경로만 알면 되고 실제로는
+// dm-snapshot 블록 장치를 투명하게 읽고 쓴다. 이 mountTarget 경로가 그대로
+// VMState.DiskPath에 저장되므로, 콜드 리스타트(recovery.go RecoverVMs)와 메모리
+// warm-restore 둘 다 "같은 경로"에 다시 무언가(golden image 재구성이든 dm 장치든)를
+// 만들어 놓고서야 Firecracker를 그 위에 올릴 수 있다 — 이 VM 자신의 재기동 한정 계약이다
+// (스냅샷을 다른 VM으로 복원하는 POST /snapshots/{id}/restore는 매번 새 경로를
+// 새로 만들기 때문에 이 계약과는 별개다, api.go 주석 참고).
 func (p *Provisioner) CloneDiskCOW(vmID string) (string, string, *DMSnapshotInfo, error) {
 	mountTarget := filepath.Join(p.WorkspaceDir, vmID+".ext4")
 	cowStore := filepath.Join(p.WorkspaceDir, vmID+".cow")
@@ -166,6 +191,10 @@ func (p *Provisioner) mountVMDisk(vmID string, fn func(mntDir string) error) err
 	diskPath := filepath.Join(p.WorkspaceDir, fmt.Sprintf("%s.ext4", vmID))
 	mntDir := fmt.Sprintf("/tmp/goose-mnt-%s", vmID)
 
+	// [학습] 왜 매번 시작 전에 먼저 umount를 시도하는가: 이전 데몬 실행이 crash로
+	// 죽으면 이 mntDir이 마운트된 채로 남을 수 있다. -l(lazy)은 프로세스가 그 위에
+	// 파일을 열어둔 상태라도 즉시 경로만 분리시켜, 뒤이은 mount 재시도가 "already
+	// mounted" 에러 없이 성공하게 해준다.
 	// Clean up any stale mount left by a previous failed run before attempting
 	// a fresh mount. -l (lazy) detaches immediately even if the FS is still busy.
 	exec.Command("umount", "-l", mntDir).Run()
@@ -263,6 +292,10 @@ func injectVMFiles(mntDir string, opts VMPrepareOptions) error {
 		}
 	}
 
+	// [학습] 이 함수가 심는 파일들이 anvil의 시크릿 redaction 경계다: 여기서 쓰인
+	// AgentToken/ControlPlaneToken은 VM 디스크에 0600으로만 남고, 데몬 쪽 API 응답
+	// (POST /vms 제외)이나 audit 로그에는 절대 재노출되지 않아야 한다는 것이
+	// anvil의 불변 조건이다(docs/analysis 10/11번 문서의 "agent_token 비노출" 항목).
 	// AgentToken is written with mode 0600 so only root can read it inside the VM.
 	if opts.AgentToken != "" {
 		tokenPath := filepath.Join(mntDir, "root", ".ephemera-agent-token")
@@ -304,6 +337,10 @@ func injectVMFiles(mntDir string, opts VMPrepareOptions) error {
 // injectHostTimezone configures the VM disk to use the host's timezone.
 // It requires tzdata to be installed in the VM (golden image) so that
 // /usr/share/zoneinfo/{tzName} exists for the symlink to resolve correctly.
+// [학습] 함정: 이 함수는 golden image 안에 tzdata 패키지가 이미 설치되어 있다고
+// 가정한다(zoneinfo 파일 존재 여부로 사전 검증은 하지만, 없으면 그냥 에러를 반환할
+// 뿐 tzdata를 설치해주지는 않는다). golden image 빌드 스크립트가 바뀌어 tzdata가
+// 빠지면 이 단계에서 VM마다 반복적으로 실패하게 된다.
 func injectHostTimezone(mntDir string) error {
 	// Derive the IANA timezone name from the host.
 	// Prefer /etc/timezone (plain text), fall back to resolving /etc/localtime symlink.
@@ -623,6 +660,10 @@ func EnsureGooseAgent(binaryPath, projectRoot string) error {
 
 // EnsureKernel downloads the Firecracker kernel binary to kernelPath if it does
 // not exist and verifies the downloaded bytes against expectedSHA256.
+// [학습] SHA256 검증 후에야 os.Rename으로 최종 경로에 배치한다(임시 파일 → 원자적
+// rename). 이렇게 하면 다운로드 도중 프로세스가 죽어도 절반만 받은 커널 파일이
+// kernelPath에 남는 일이 없다 — 이런 supply-chain 검증 패턴은 v0.7.0 installer
+// hardening에서도 그대로 강화되어 나타난다(docs/analysis 11번 문서 참고).
 func EnsureKernel(kernelPath, downloadURL, expectedSHA256 string) error {
 	if _, err := os.Stat(kernelPath); err == nil {
 		slog.Warn("kernel found", "path", kernelPath)

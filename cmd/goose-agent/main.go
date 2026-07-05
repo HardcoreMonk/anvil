@@ -23,6 +23,24 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// [학습 주석] cmd/goose-agent/main.go
+//
+// 이 바이너리는 VM 안에서 goose CLI를 감싸는 in-guest 에이전트다. v0.4.4에서 두 가지
+// 축이 들어왔다: (1) /tasks의 기본 계약은 여전히 buffered {"output","error"} 단일
+// JSON(runTaskBuffered)이고, ?stream=1일 때만 NDJSON progress+result 프레임을 흘려
+// 보내는 runTaskStreaming으로 분기한다 — 이 "기본은 그대로, opt-in만 추가"가 anvil이
+// 그대로 채택한 이유다(docs/analysis 10/11번 문서: buffered 기본 계약 유지, MCP stdio는
+// buffered만 노출). (2) EPHEMERA_TASK_DEPTH 환경변수를 통해 nested gtcall depth를
+// goose 서브프로세스에 전달한다 — 이 값은 daemon(api.go proxyAgentEndpoint)이 보낸
+// X-Ephemera-Task-Depth 헤더를 그대로 받아온 것이고, 이 값을 증가시키는 로직은 이
+// 파일에 없다(daemon 쪽에서만 +1). scripts/gtcall이 이 값을 다시 헤더로 되돌려 보내는
+// 왕복 구조를 이룬다.
+//
+// slog 마이그레이션(log/slog, v0.4.4)도 이 파일에서 일어났다 — initSlog가 host
+// daemon과 같은 EPHEMERA_LOG_FORMAT/EPHEMERA_LOG_LEVEL 계약을 공유한다.
+//
+// 관련 가드 테스트: TestRunTaskBuffered_DefaultShape.
+
 // vsockReconfigPort is the well-known port for host→guest IP reconfiguration commands.
 const vsockReconfigPort = 1234
 
@@ -708,6 +726,10 @@ func handleTask(w http.ResponseWriter, r *http.Request) {
 	// ceiling; absent means a direct top-level call (depth 0). Set cmd.Env
 	// explicitly (it was nil → inherited) and pass the value through verbatim —
 	// the control plane increments again on the next hop.
+	// [학습] 여기서는 depth를 증가시키지 않고 받은 값을 그대로 넘긴다 — 증가는 오직
+	// daemon의 proxyAgentEndpoint(api.go)에서만 일어난다. 만약 이 파일에서도 +1을
+	// 하면 depth가 홉마다 두 번씩 증가해 실제 중첩 깊이보다 훨씬 빨리
+	// EPHEMERA_MAX_TASK_DEPTH에 도달해버리는 버그가 생긴다.
 	depth := r.Header.Get("X-Ephemera-Task-Depth")
 	if depth == "" {
 		depth = "0"
@@ -886,6 +908,12 @@ type streamFrame struct {
 // connection. Because the 200 status is committed before goose runs, a goose
 // failure cannot be a 500 — the error rides in the result frame's error field,
 // so streaming clients MUST inspect result.error rather than the status code.
+// [학습] 이 함수가 존재해도 daemon 쪽 기본 계약(runTaskBuffered)은 절대 안 바뀐다 —
+// 스트리밍은 순전히 호출자가 ?stream=1을 붙였을 때만 타는 별도 경로이고, anvil MCP
+// stdio 표면은 이 스트리밍 프레임을 그대로 노출하지 않는다(별도 tool/transport 설계
+// 전까지 buffered 계약만 사용, docs/analysis 10/11번 문서 참고). flusher 캐스트 실패 시
+// runTaskBuffered로 조용히 폴백하는 것도 "streaming은 항상 optional degrade가
+// 가능해야 한다"는 설계 원칙을 보여준다.
 func runTaskStreaming(w http.ResponseWriter, cmd *exec.Cmd) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {

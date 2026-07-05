@@ -1,4 +1,17 @@
 #!/bin/sh
+# [학습 주석] scripts/gtcall
+#
+# 이 스크립트는 golden image 안에 심어져서 flock 멤버 VM 안에서 실행되는, "옆
+# 에이전트에게 프롬프트를 보내는" CLI 진입점이다. v0.4.4에서 nested-invocation depth
+# guard가 daemon에 추가되면서, 이 스크립트도 EPHEMERA_TASK_DEPTH 환경변수(goose-agent가
+# 서브프로세스에 심어준 값)를 X-Ephemera-Task-Depth 헤더로 재전송하도록 바뀌었다 —
+# 이 재전송이 빠지면 A→B→C→A 같은 순환 호출에서 daemon이 depth를 추적하지 못해
+# EPHEMERA_MAX_TASK_DEPTH 가드가 무력화된다(무한 루프 방지 자체가 깨짐).
+#
+# 함정: CP_TOKEN이 비어있어도(auth 비활성) 스크립트는 정상 동작해야 하므로 모든 curl
+# 호출이 "토큰 있음/없음" 두 갈래로 중복 작성돼 있다 — 이 파일을 고칠 때 한쪽만
+# 고치고 다른 쪽을 빠뜨리기 쉽다.
+#
 # gtcall — dispatch a prompt to another agent in this VM's flock.
 #
 # Usage:
@@ -50,6 +63,10 @@ if [ -z "$CP_TOKEN" ] && [ -n "${EPHEMERA_CONTROL_PLANE_TOKEN:-}" ]; then
     CP_TOKEN="$EPHEMERA_CONTROL_PLANE_TOKEN"
 fi
 
+# [학습] DEPTH_HEADER는 flock 조회(Step 1, GET /flocks/{id})에는 안 붙이고 오직
+# /tasks 디스패치(Step 3)에만 붙인다 — flock 조회는 "task hop"이 아니라 단순 조회라서
+# depth 누적 대상이 아니기 때문이다. 이 구분을 안 지키면 gtcall 한 번 호출에 depth가
+# 두 번 세어지는 것과 비슷한 오차가 생긴다.
 # Forward the nested-invocation depth (v0.4.4). goose-agent injects
 # EPHEMERA_TASK_DEPTH into this process's environment as the depth of the task
 # that spawned this gtcall; re-send it so the control plane accumulates it and
