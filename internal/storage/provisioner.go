@@ -530,6 +530,51 @@ func installGooseAgentIntoMountedImage(mntDir, binaryPath, sourceHash string) er
 	return nil
 }
 
+// goldenAgentMarkerPath returns the path of the out-of-image marker that records which
+// goose-agent source hash is baked into the golden image, keyed to the image's on-disk
+// identity (size + mtime). Kept beside the golden image so EnsureGoldenImageGooseAgent can
+// tell WITHOUT mounting whether the image already carries the current agent — the mount is
+// what fails after a crash leaves a COW VM's dm-snapshot pinning the golden image through a
+// read-only loop device ("/dev/loopN already mounted or mount point busy").
+func goldenAgentMarkerPath(goldenImagePath string) string {
+	return goldenImagePath + ".agent-stamp"
+}
+
+// goldenAgentMarkerCurrent reports whether the marker beside goldenImagePath shows the image
+// already carries sourceHash at its current size+mtime. A missing, unreadable, or mismatched
+// marker returns false so the caller mounts and re-verifies. A golden-image rebuild changes
+// size/mtime and thus invalidates the marker automatically (no coupling to EnsureGoldenImage).
+func goldenAgentMarkerCurrent(goldenImagePath, sourceHash string) bool {
+	data, err := os.ReadFile(goldenAgentMarkerPath(goldenImagePath))
+	if err != nil {
+		return false
+	}
+	var markHash string
+	var markSize, markModNs int64
+	// Marker format: "<sourceHash> <imageSize> <imageModNs>". A sha256 hex hash has no
+	// spaces, so %s parses it cleanly.
+	if n, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%s %d %d", &markHash, &markSize, &markModNs); err != nil || n != 3 {
+		return false
+	}
+	info, err := os.Stat(goldenImagePath)
+	if err != nil {
+		return false
+	}
+	return markHash == sourceHash && markSize == info.Size() && markModNs == info.ModTime().UnixNano()
+}
+
+// writeGoldenAgentMarker records that goldenImagePath currently carries sourceHash, keyed to
+// the image's (post-operation) size+mtime. Best-effort: a write failure only forfeits the
+// next start's mount-skip optimization, never correctness.
+func writeGoldenAgentMarker(goldenImagePath, sourceHash string) error {
+	info, err := os.Stat(goldenImagePath)
+	if err != nil {
+		return err
+	}
+	line := fmt.Sprintf("%s %d %d\n", sourceHash, info.Size(), info.ModTime().UnixNano())
+	return os.WriteFile(goldenAgentMarkerPath(goldenImagePath), []byte(line), 0644)
+}
+
 // EnsureGoldenImageGooseAgent patches an existing golden image when its embedded
 // goose-agent source-hash stamp is stale. It assumes EnsureGooseAgent already ran.
 func EnsureGoldenImageGooseAgent(goldenImagePath, binaryPath string) error {
@@ -540,6 +585,17 @@ func EnsureGoldenImageGooseAgent(goldenImagePath, binaryPath string) error {
 	sourceHash := strings.TrimSpace(string(stamp))
 	if sourceHash == "" {
 		return fmt.Errorf("goose-agent source stamp is empty")
+	}
+
+	// Fast path: if a prior run already synced this exact agent into this exact image, skip
+	// the loop mount entirely. Beyond avoiding wasteful I/O when nothing changed, this is
+	// what keeps daemon startup alive after a SIGKILL: an orphaned COW VM's dm-snapshot
+	// still pins the golden image through a read-only loop device, so `mount -o loop` would
+	// reuse that busy loop and fail with EBUSY ("/dev/loopN already mounted or mount point
+	// busy"), aborting startup before RecoverVMs could reclaim the orphan.
+	if goldenAgentMarkerCurrent(goldenImagePath, sourceHash) {
+		log.Printf("golden image goose-agent already current (source hash %s); skipping mount.", sourceHash)
+		return nil
 	}
 
 	mntDir, err := os.MkdirTemp("", "goose-golden-image-*")
@@ -567,10 +623,26 @@ func EnsureGoldenImageGooseAgent(goldenImagePath, binaryPath string) error {
 	}
 	if current {
 		log.Printf("golden image goose-agent is current (source hash %s).", sourceHash)
+	} else {
+		log.Printf("Patching golden image goose-agent (source hash %s) ...", sourceHash)
+		if err := installGooseAgentIntoMountedImage(mntDir, binaryPath, sourceHash); err != nil {
+			return err
+		}
+	}
+
+	// Success: unmount synchronously so writes flush and the golden image's on-disk mtime
+	// settles, then record the marker so the next start can skip this mount. If the sync
+	// unmount fails, fall back to the deferred lazy unmount and skip the marker (a missing
+	// marker only costs one extra mount next start — never correctness).
+	if out, err := exec.Command("umount", mntDir).CombinedOutput(); err != nil {
+		log.Printf("Warning: sync unmount of golden image %s failed, leaving lazy unmount: %v: %s", mntDir, err, strings.TrimSpace(string(out)))
 		return nil
 	}
-	log.Printf("Patching golden image goose-agent (source hash %s) ...", sourceHash)
-	return installGooseAgentIntoMountedImage(mntDir, binaryPath, sourceHash)
+	mounted = false
+	if err := writeGoldenAgentMarker(goldenImagePath, sourceHash); err != nil {
+		log.Printf("Warning: could not record golden agent marker: %v", err)
+	}
+	return nil
 }
 
 // EnsureGooseAgent builds the goose-agent binary into binaryPath if it doesn't exist
