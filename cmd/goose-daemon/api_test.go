@@ -34,7 +34,10 @@ func newTestCP(t *testing.T) *ControlPlane {
 	defaultCfg := filepath.Join(tmp, "goose.yaml")
 	defaultSec := filepath.Join(tmp, "goose-secrets.yaml")
 	os.WriteFile(defaultCfg, []byte("GOOSE_PROVIDER: default\n"), 0644)
-	os.WriteFile(defaultSec, []byte("DEFAULT_KEY: x\n"), 0644)
+	// Global keychain seeded with the anvil DEFAULT_KEY leak sentinel plus
+	// real-looking keys for every registry provider so provider-availability
+	// guards (profile create/update) pass in tests.
+	os.WriteFile(defaultSec, []byte("DEFAULT_KEY: x\nGOOGLE_API_KEY: \"AIzaSyTestRealKey\"\nANTHROPIC_API_KEY: \"sk-ant-testreal\"\nOPENAI_API_KEY: \"sk-testreal\"\nGROQ_API_KEY: \"gsk_testreal\"\n"), 0644)
 	cp := &ControlPlane{
 		vms:              make(map[string]*runningVM),
 		snapshots:        make(map[string]storage.SnapshotMetadata),
@@ -1094,34 +1097,46 @@ func TestProfileConfigPaths_ValidProfile_ReturnsPaths(t *testing.T) {
 	if cfg != filepath.Join(profileDir, "goose.yaml") {
 		t.Errorf("unexpected configPath: %q", cfg)
 	}
-	if sec != filepath.Join(profileDir, "goose-secrets.yaml") {
-		t.Errorf("unexpected secretsPath: %q", sec)
+	// Secrets always resolve to the global keychain, never a per-profile file.
+	if sec != cp.gooseSecretsPath {
+		t.Errorf("expected global secretsPath %q, got %q", cp.gooseSecretsPath, sec)
 	}
 }
 
-func TestProfileConfigPaths_MissingConfigYaml_Error(t *testing.T) {
+func TestProfileConfigPaths_AbsentConfigYaml_FallsBackToDefault(t *testing.T) {
 	cp := newTestCP(t)
 	profileDir := filepath.Join(cp.workDir, "configs", "profiles", "partial")
 	os.MkdirAll(profileDir, 0755)
-	// Only goose-secrets.yaml, no goose.yaml
-	os.WriteFile(filepath.Join(profileDir, "goose-secrets.yaml"), []byte("KEY: x\n"), 0644)
-
-	_, _, err := cp.profileConfigPaths("partial")
-	if err == nil {
-		t.Error("expected error for missing goose.yaml")
+	// Profile dir present but no goose.yaml → config falls back to the default,
+	// secrets to the global keychain. No error.
+	cfg, sec, err := cp.profileConfigPaths("partial")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg != cp.gooseConfigPath {
+		t.Errorf("expected fallback configPath %q, got %q", cp.gooseConfigPath, cfg)
+	}
+	if sec != cp.gooseSecretsPath {
+		t.Errorf("expected global secretsPath %q, got %q", cp.gooseSecretsPath, sec)
 	}
 }
 
-func TestProfileConfigPaths_MissingSecretsYaml_Error(t *testing.T) {
+func TestProfileConfigPaths_SecretsAlwaysGlobal(t *testing.T) {
 	cp := newTestCP(t)
 	profileDir := filepath.Join(cp.workDir, "configs", "profiles", "partial2")
 	os.MkdirAll(profileDir, 0755)
-	// Only goose.yaml, no goose-secrets.yaml
+	// Only goose.yaml present; there is no per-profile secrets file anymore.
 	os.WriteFile(filepath.Join(profileDir, "goose.yaml"), []byte("GOOSE_PROVIDER: test\n"), 0644)
 
-	_, _, err := cp.profileConfigPaths("partial2")
-	if err == nil {
-		t.Error("expected error for missing goose-secrets.yaml")
+	cfg, sec, err := cp.profileConfigPaths("partial2")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg != filepath.Join(profileDir, "goose.yaml") {
+		t.Errorf("expected profile configPath, got %q", cfg)
+	}
+	if sec != cp.gooseSecretsPath {
+		t.Errorf("expected global secretsPath %q, got %q", cp.gooseSecretsPath, sec)
 	}
 }
 

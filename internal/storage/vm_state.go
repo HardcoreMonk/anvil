@@ -43,6 +43,8 @@ type VMState struct {
 	Profile       string `json:"profile,omitempty"`
 	TenantID      string `json:"tenant_id,omitempty"`
 	EgressPolicy  string `json:"egress_policy,omitempty"`
+	Provider      string `json:"provider,omitempty"` // GOOSE_PROVIDER; carried so recovered VMs keep their model/provider in the UI
+	Model         string `json:"model,omitempty"`    // GOOSE_MODEL
 	// SourceSnapshotID, when non-empty, marks this VM as snapshot-derived
 	// (v0.4.5): recovery re-restores it from that snapshot instead of cold-
 	// booting from a rootfs clone. The exception store in DiskPath is transient

@@ -29,6 +29,27 @@ func TestProxyAgentEndpoint_DepthGuard(t *testing.T) {
 	}
 }
 
+// TestHandleVM_SessionsRouting verifies GET /vms/{id}/sessions routes to the
+// agent proxy (unknown VM → 404) and that a non-GET is rejected with 405 before
+// the agent is contacted.
+func TestHandleVM_SessionsRouting(t *testing.T) {
+	cp := &ControlPlane{vms: make(map[string]*runningVM), agentHTTPClient: &http.Client{}}
+
+	// Wrong method → 405 (guard fires before any agent contact).
+	w := httptest.NewRecorder()
+	cp.handleVM(w, httptest.NewRequest(http.MethodPost, "/vms/vm-1/sessions", nil))
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("POST /sessions: expected 405, got %d", w.Code)
+	}
+
+	// GET for an unknown VM → 404 from the proxy.
+	w = httptest.NewRecorder()
+	cp.handleVM(w, httptest.NewRequest(http.MethodGet, "/vms/vm-unknown/sessions", nil))
+	if w.Code != http.StatusNotFound {
+		t.Errorf("GET /sessions unknown vm: expected 404, got %d", w.Code)
+	}
+}
+
 // TestProxyAgentEndpoint_ForwardsQuery verifies the proxy passes the request's
 // query string through to the agent so ?stream=1 (v0.4.4) selects goose-agent's
 // streaming path. Regression guard: the proxy previously dropped RawQuery.

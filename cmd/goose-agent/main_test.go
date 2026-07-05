@@ -711,6 +711,21 @@ func TestExtractGooseJSONText_MultipleAssistantBlocks(t *testing.T) {
 	}
 }
 
+func TestExtractGooseJSONText_ResumeReturnsOnlyLatestTurn(t *testing.T) {
+	// goose --resume re-emits the whole transcript each turn; the extractor must
+	// return only the reply to the LAST user message, not every prior assistant
+	// block (the multi-turn accumulation bug). Thinking blocks are ignored.
+	in := []byte(`{"messages":[
+	  {"role":"user","content":[{"type":"text","text":"q1"}]},
+	  {"role":"assistant","content":[{"type":"text","text":"answer one"}]},
+	  {"role":"user","content":[{"type":"text","text":"q2"}]},
+	  {"role":"assistant","content":[{"type":"thinking","thinking":"..."},{"type":"text","text":"answer two"}]}
+	]}`)
+	if got := extractGooseJSONText(in); got != "answer two" {
+		t.Errorf("expected only the latest turn %q, got %q", "answer two", got)
+	}
+}
+
 func TestExtractGooseJSONText_NonJSONInput_ReturnsEmpty(t *testing.T) {
 	// goose may crash before producing JSON — caller falls back to raw stdout.
 	if got := extractGooseJSONText([]byte("panic at the disco")); got != "" {
@@ -824,5 +839,22 @@ func TestRunTaskBuffered_DefaultShape(t *testing.T) {
 	}
 	if _, ok := raw["type"]; ok {
 		t.Errorf("buffered object unexpectedly has a stream-frame 'type' field: %v", raw)
+	}
+}
+
+func TestNoThinkForModel(t *testing.T) {
+	cases := map[string]string{
+		"qwen/qwen3-32b":          "/nothink\n",
+		"qwen3-32b":               "/nothink\n",
+		"Qwen/Qwen3-32B":          "/nothink\n", // case-insensitive
+		"llama-3.3-70b-versatile": "",
+		"claude-sonnet-4-6":       "",
+		"gpt-4o":                  "",
+		"":                        "",
+	}
+	for model, want := range cases {
+		if got := noThinkForModel(model); got != want {
+			t.Errorf("noThinkForModel(%q) = %q, want %q", model, got, want)
+		}
 	}
 }

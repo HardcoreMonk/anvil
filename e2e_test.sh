@@ -91,12 +91,12 @@ rm -rf snapshots/snap-* 2>/dev/null || true
 rm -rf flocks/flock-* 2>/dev/null || true
 rm -rf vms/vm-* 2>/dev/null || true
 
-# Restore any profile files left mangled by an interrupted v0.3.3 LLM smoke run.
-# trap-based restore in step 59a covers normal exits; this catches SIGKILL gaps.
-[ -f /tmp/researcher-secrets.bak ] && \
-    mv /tmp/researcher-secrets.bak configs/profiles/researcher/goose-secrets.yaml
-[ -f /tmp/researcher-goose.bak ] && \
-    mv /tmp/researcher-goose.bak configs/profiles/researcher/goose.yaml
+# Restore any global config files left mangled by an interrupted LLM smoke run.
+# trap-based restore in step 71a covers normal exits; this catches SIGKILL gaps.
+[ -f /tmp/global-secrets.bak ] && \
+    mv /tmp/global-secrets.bak configs/goose-secrets.yaml
+[ -f /tmp/global-goose.bak ] && \
+    mv /tmp/global-goose.bak configs/goose.yaml
 rm -f /tmp/t59c.json 2>/dev/null || true
 # v0.3.4 step 58c writes a tokens file; survive SIGKILLed prior runs.
 rm -f /tmp/ephemera-tokens.txt 2>/dev/null || true
@@ -1044,22 +1044,13 @@ check_http "$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/vms/$PUBVM_
 # (which would require real API keys).
 # ════════════════════════════════════════════════════════════════
 
-# ── 51. Prep role profile yaml files ─────────────────────────────
-# profileConfigPaths requires goose.yaml + goose-secrets.yaml to exist
-# per role. Copy from the committed .example placeholders so the spawn
-# path can resolve; the API-key fields stay as placeholders since no
-# task is actually executed in this scenario.
-step "51. Prep role profile yaml files"
-for role in researcher worker reviewer orchestrator; do
-    for f in goose.yaml goose-secrets.yaml; do
-        src="configs/profiles/$role/${f}.example"
-        dst="configs/profiles/$role/${f}"
-        if [ -f "$src" ] && [ ! -f "$dst" ]; then
-            cp "$src" "$dst"
-        fi
-    done
-done
-ok "Profile yaml files ready"
+# ── 52. Profiles resolve via the global default ──────────────────
+# The fixed role profiles were removed. profileConfigPaths now falls back to
+# the default config (configs/goose.yaml) for any role without an on-disk
+# profile dir, and secrets always come from the global keychain — so the flock
+# spawns below need no per-role profile prep.
+step "52. Profiles resolve via global default (no per-role prep)"
+ok "No per-role profile prep needed"
 
 # ── 52. Create flock with 5 agents ───────────────────────────────
 step "52. Create flock with 5 agents"
@@ -1600,33 +1591,44 @@ sleep 2
 # ── 59. Real-LLM /tasks round-trip (v0.3.3 Phase 4) ──────────────
 # Skipped when no provider API key is in env. When run, exercises the
 # full chain: /tasks → Goose CLI → system prompt → gtwall → CP Town Wall.
-LLM_KEY=""; LLM_PROVIDER=""; LLM_SECRET_KEY=""
+LLM_KEY=""; LLM_PROVIDER=""; LLM_SECRET_KEY=""; LLM_MODEL=""
 if [ -n "${GOOGLE_API_KEY:-}" ]; then
-    LLM_KEY="$GOOGLE_API_KEY"; LLM_PROVIDER="google"; LLM_SECRET_KEY="GOOGLE_API_KEY"
+    LLM_KEY="$GOOGLE_API_KEY"; LLM_PROVIDER="google"; LLM_SECRET_KEY="GOOGLE_API_KEY"; LLM_MODEL="gemini-2.5-flash"
 elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-    LLM_KEY="$ANTHROPIC_API_KEY"; LLM_PROVIDER="anthropic"; LLM_SECRET_KEY="ANTHROPIC_API_KEY"
+    LLM_KEY="$ANTHROPIC_API_KEY"; LLM_PROVIDER="anthropic"; LLM_SECRET_KEY="ANTHROPIC_API_KEY"; LLM_MODEL="claude-sonnet-4-6"
 elif [ -n "${OPENAI_API_KEY:-}" ]; then
-    LLM_KEY="$OPENAI_API_KEY"; LLM_PROVIDER="openai"; LLM_SECRET_KEY="OPENAI_API_KEY"
+    LLM_KEY="$OPENAI_API_KEY"; LLM_PROVIDER="openai"; LLM_SECRET_KEY="OPENAI_API_KEY"; LLM_MODEL="gpt-4o"
+elif [ -n "${GROQ_API_KEY:-}" ]; then
+    LLM_KEY="$GROQ_API_KEY"; LLM_PROVIDER="groq"; LLM_SECRET_KEY="GROQ_API_KEY"; LLM_MODEL="llama-3.3-70b-versatile"
 fi
 
 if [ -z "$LLM_KEY" ]; then
-    step "59. Real-LLM /tasks smoke test"
-    ok "Skipped — set GOOGLE_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY to run"
+    step "71. Real-LLM /tasks smoke test"
+    ok "Skipped — set GOOGLE_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY, or GROQ_API_KEY to run"
 else
-    # ── 59a. Inject real key into researcher profile (with restore trap) ──
-    step "59a. Inject $LLM_SECRET_KEY into researcher profile"
-    cp configs/profiles/researcher/goose-secrets.yaml /tmp/researcher-secrets.bak
-    cp configs/profiles/researcher/goose.yaml /tmp/researcher-goose.bak
-    trap '[ -f /tmp/researcher-secrets.bak ] && mv /tmp/researcher-secrets.bak configs/profiles/researcher/goose-secrets.yaml; [ -f /tmp/researcher-goose.bak ] && mv /tmp/researcher-goose.bak configs/profiles/researcher/goose.yaml' EXIT
+    # ── 71a. Inject real key into the GLOBAL keychain (with restore trap) ──
+    # Profiles no longer carry their own secrets, and the fixed role profiles
+    # were removed: the researcher flock below resolves to the default config
+    # (configs/goose.yaml) + global secrets. Point both at whichever provider
+    # key is in the environment.
+    step "71a. Inject $LLM_SECRET_KEY into global keychain"
+    cp configs/goose-secrets.yaml /tmp/global-secrets.bak
+    cp configs/goose.yaml /tmp/global-goose.bak
+    trap '[ -f /tmp/global-secrets.bak ] && mv /tmp/global-secrets.bak configs/goose-secrets.yaml; [ -f /tmp/global-goose.bak ] && mv /tmp/global-goose.bak configs/goose.yaml' EXIT
+    # Ensure a line for this provider's key exists (Groq ships none by default).
+    if ! grep -qE "^# *${LLM_SECRET_KEY}:" configs/goose-secrets.yaml && \
+       ! grep -qE "^${LLM_SECRET_KEY}:" configs/goose-secrets.yaml; then
+        printf '%s: "%s"\n' "$LLM_SECRET_KEY" "$LLM_KEY" >> configs/goose-secrets.yaml
+    fi
     # Uncomment + overwrite the line matching LLM_SECRET_KEY.
     sed -i "s|^# *${LLM_SECRET_KEY}:.*|${LLM_SECRET_KEY}: \"${LLM_KEY}\"|" \
-        configs/profiles/researcher/goose-secrets.yaml
+        configs/goose-secrets.yaml
     sed -i "s|^${LLM_SECRET_KEY}:.*|${LLM_SECRET_KEY}: \"${LLM_KEY}\"|" \
-        configs/profiles/researcher/goose-secrets.yaml
-    # Switch GOOSE_PROVIDER to match the key we have.
-    sed -i "s|^GOOSE_PROVIDER:.*|GOOSE_PROVIDER: ${LLM_PROVIDER}|" \
-        configs/profiles/researcher/goose.yaml
-    ok "Researcher profile updated for provider=$LLM_PROVIDER"
+        configs/goose-secrets.yaml
+    # Switch the default provider + model to match the key we have.
+    sed -i "s|^GOOSE_PROVIDER:.*|GOOSE_PROVIDER: ${LLM_PROVIDER}|" configs/goose.yaml
+    sed -i "s|^GOOSE_MODEL:.*|GOOSE_MODEL: ${LLM_MODEL}|" configs/goose.yaml
+    ok "Global keychain updated for provider=$LLM_PROVIDER model=$LLM_MODEL"
 
     # ── 59b. Spawn 1-agent researcher flock under auth-on daemon ──────
     step "59b. Spawn researcher-only flock"
@@ -1683,11 +1685,11 @@ else
         && ok "broadcast notice recorded on Town Wall ✓" \
         || fail "Town Wall missing broadcast notice"
 
-    # ── 59f. Cleanup ─────────────────────────────────────────────────
-    step "59f. DELETE LLM flock + restore profile files"
+    # ── 71f. Cleanup ─────────────────────────────────────────────────
+    step "71f. DELETE LLM flock + restore global config files"
     curl -s -o /dev/null -H "$AUTH_HDR" -X DELETE "$API/flocks/$LLM_FLOCK_ID"
-    mv /tmp/researcher-secrets.bak configs/profiles/researcher/goose-secrets.yaml
-    mv /tmp/researcher-goose.bak configs/profiles/researcher/goose.yaml
+    mv /tmp/global-secrets.bak configs/goose-secrets.yaml
+    mv /tmp/global-goose.bak configs/goose.yaml
     trap - EXIT
     ok "LLM smoke cleanup complete"
 fi

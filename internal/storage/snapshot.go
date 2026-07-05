@@ -24,6 +24,8 @@ type SnapshotMetadata struct {
 	TenantID       string    `json:"tenant_id,omitempty"`
 	Profile        string    `json:"profile"`
 	EgressPolicy   string    `json:"egress_policy,omitempty"`
+	Provider       string    `json:"provider,omitempty"`         // GOOSE_PROVIDER at snapshot time; restored into VMInfo for UI display
+	Model          string    `json:"model,omitempty"`            // GOOSE_MODEL at snapshot time
 	SnapshotType   string    `json:"snapshot_type"`              // "full" | "diff"
 	BaseSnapshotID string    `json:"base_snapshot_id,omitempty"` // set for diff snapshots
 	GuestIP        string    `json:"guest_ip"`
