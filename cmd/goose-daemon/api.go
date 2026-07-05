@@ -2905,7 +2905,6 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 
 	newVMID := fmt.Sprintf("vm-%d", time.Now().UnixNano())
 	exceptionStorePath := filepath.Join(cp.provisioner.WorkspaceDir, newVMID+".cow")
-	restoreDiskPath := filepath.Join(cp.provisioner.WorkspaceDir, newVMID+".ext4")
 	socketPath := fmt.Sprintf("/tmp/firecracker-%s.sock", newVMID)
 	os.Remove(socketPath)
 
@@ -2959,15 +2958,21 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 		baseDiskForCOW = mergedRootfs
 	}
 
+	// Firecracker's LoadSnapshot opens the disk path baked into state.bin at snapshot
+	// time (meta.DiskPath). The source VM was deleted before restore, so that path no
+	// longer exists and must be reconstructed here: the restored COW device is
+	// bind-mounted over meta.DiskPath. Per-restore isolation lives in the unique
+	// exception store (newVMID.cow), never the mount target. Mirrors upstream and
+	// reRestoreMachine (recovery.go) — KEEP THE THREE IN SYNC.
 	slog.Warn("restore: setting up dm-snapshot cow", "snapshot_id", snapID, "base", baseDiskForCOW, "store", exceptionStorePath)
-	dmInfo, err := cp.setupRestoreDMSnapshot(baseDiskForCOW, exceptionStorePath, restoreDiskPath)
+	dmInfo, err := cp.setupRestoreDMSnapshot(baseDiskForCOW, exceptionStorePath, meta.DiskPath)
 	if err != nil {
 		cp.restoreMu.Unlock()
 		slog.Warn("restore: dm-snapshot failed, falling back to bind mount", "snapshot_id", snapID, "err", err)
 		// Fallback: bind-mount the base disk if dm-snapshot is unavailable.
 		newDiskPath := filepath.Join(cp.provisioner.WorkspaceDir, newVMID+"-bind.ext4")
 		cp.restoreMu.Lock()
-		if bmErr := cp.setupRestoreBindMount(baseDiskForCOW, newDiskPath, restoreDiskPath); bmErr != nil {
+		if bmErr := cp.setupRestoreBindMount(baseDiskForCOW, newDiskPath, meta.DiskPath); bmErr != nil {
 			cp.restoreMu.Unlock()
 			cp.releaseRestoreNetwork(tapDevice, newGuestIP)
 			if mergedRootfs != "" {
@@ -2982,7 +2987,7 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 			os.Remove(mergedRootfs)
 		}
 		delegated = true
-		cp.restoreLegacyBindMount(w, snapID, meta, newVMID, newDiskPath, restoreDiskPath, tapDevice, newGuestIP, socketPath, restoreTenantID, restoreEgressPolicy)
+		cp.restoreLegacyBindMount(w, snapID, meta, newVMID, newDiskPath, meta.DiskPath, tapDevice, newGuestIP, socketPath, restoreTenantID, restoreEgressPolicy)
 		return
 	}
 	// dm-snapshot pins the merged rootfs via its read-only loop device; unlink the transient
@@ -3027,7 +3032,7 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 		VMID:           newVMID,
 		SocketPath:     socketPath,
 		FirecrackerBin: cp.firecrackerPath,
-		RootfsPath:     restoreDiskPath,
+		RootfsPath:     meta.DiskPath,
 		TapDevice:      tapDevice,
 		MacAddress:     meta.MacAddr,
 		GuestIP:        newGuestIP,

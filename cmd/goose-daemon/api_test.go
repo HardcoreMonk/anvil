@@ -2162,11 +2162,15 @@ func TestRestoreSnapshotFirecrackerFailureCleansNetworkAndDMSnapshot(t *testing.
 		if baseDiskPath != meta.DiskCopyPath {
 			t.Fatalf("baseDiskPath = %q, want %q", baseDiskPath, meta.DiskCopyPath)
 		}
-		if mountTargetPath == meta.DiskPath {
-			t.Fatalf("mountTargetPath = %q, must be per-restore path not shared snapshot DiskPath", mountTargetPath)
+		// Firecracker LoadSnapshot opens the disk path baked into state.bin at snapshot
+		// time (meta.DiskPath); the restored COW device MUST be bind-mounted over that
+		// exact path, matching upstream and reRestoreMachine (recovery.go). Per-restore
+		// isolation lives in the unique exception store, not the shared mount target.
+		if mountTargetPath != meta.DiskPath {
+			t.Fatalf("mountTargetPath = %q, want original snapshot DiskPath %q (Firecracker opens the recorded path)", mountTargetPath, meta.DiskPath)
 		}
-		if !strings.HasPrefix(mountTargetPath, cp.provisioner.WorkspaceDir) || !strings.HasSuffix(mountTargetPath, ".ext4") {
-			t.Fatalf("mountTargetPath = %q, want per-restore ext4 under %q", mountTargetPath, cp.provisioner.WorkspaceDir)
+		if !strings.HasPrefix(exceptionStorePath, cp.provisioner.WorkspaceDir) || !strings.HasSuffix(exceptionStorePath, ".cow") {
+			t.Fatalf("exceptionStorePath = %q, want per-restore .cow under %q", exceptionStorePath, cp.provisioner.WorkspaceDir)
 		}
 		dmInfo.MountTarget = mountTargetPath
 		return dmInfo, nil
@@ -2175,8 +2179,8 @@ func TestRestoreSnapshotFirecrackerFailureCleansNetworkAndDMSnapshot(t *testing.
 		tornDown = info
 	}
 	cp.restoreMachine = func(ctx context.Context, cfg vm.VMConfig, memFilePath, snapshotPath string) (*firecracker.Machine, error) {
-		if cfg.RootfsPath != dmInfo.MountTarget {
-			t.Fatalf("RootfsPath = %q, want per-restore mount target %q", cfg.RootfsPath, dmInfo.MountTarget)
+		if cfg.RootfsPath != meta.DiskPath {
+			t.Fatalf("RootfsPath = %q, want original snapshot DiskPath %q", cfg.RootfsPath, meta.DiskPath)
 		}
 		if cfg.VsockUDSPath != meta.VsockPath {
 			t.Fatalf("VsockUDSPath = %q, want %q", cfg.VsockUDSPath, meta.VsockPath)
@@ -2491,11 +2495,11 @@ func TestRestoreSnapshotDMSnapshotFallbackReleasesNetworkOnlyAfterBindMountFailu
 		if !strings.HasPrefix(newDiskPath, cp.provisioner.WorkspaceDir) {
 			t.Fatalf("newDiskPath = %q, want under %q", newDiskPath, cp.provisioner.WorkspaceDir)
 		}
-		if mountTargetPath == meta.DiskPath {
-			t.Fatalf("mountTargetPath = %q, must be per-restore path not shared snapshot DiskPath", mountTargetPath)
-		}
-		if !strings.HasPrefix(mountTargetPath, cp.provisioner.WorkspaceDir) || !strings.HasSuffix(mountTargetPath, ".ext4") {
-			t.Fatalf("mountTargetPath = %q, want per-restore ext4 under %q", mountTargetPath, cp.provisioner.WorkspaceDir)
+		// The bind mount target must be the original recorded disk path (meta.DiskPath)
+		// that Firecracker opens on LoadSnapshot; per-restore isolation is the unique
+		// newDiskPath bind source, not the target.
+		if mountTargetPath != meta.DiskPath {
+			t.Fatalf("mountTargetPath = %q, want original snapshot DiskPath %q (Firecracker opens the recorded path)", mountTargetPath, meta.DiskPath)
 		}
 		return errors.New("bind unavailable")
 	}
