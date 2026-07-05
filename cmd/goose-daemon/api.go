@@ -126,6 +126,11 @@ type VMInfo struct {
 	Profile      string `json:"profile,omitempty"`
 	TenantID     string `json:"tenant_id,omitempty"`
 	EgressPolicy string `json:"egress_policy,omitempty"`
+	// Provider/Model record the goose.yaml LLM config baked into this VM at spawn
+	// time. They are a point-in-time snapshot: editing a profile later does NOT
+	// change a running VM, so the UI shows what each VM is actually using.
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model,omitempty"`
 }
 
 // VMSpawnResult is returned only by POST /vms.
@@ -453,6 +458,8 @@ func NewControlPlane(
 	internalMux.HandleFunc("/snapshots/", cp.handleSnapshotItem)
 	internalMux.HandleFunc("/audit", cp.handleAudit)
 	internalMux.HandleFunc("/watchdog/status", cp.handleWatchdogStatus)
+	internalMux.HandleFunc("/config/profiles", cp.handleConfigProfiles)
+	internalMux.HandleFunc("/config/profiles/", cp.handleConfigProfile)
 	cp.registerOrchestratorRoutes(internalMux)
 
 	externalMux := http.NewServeMux()
@@ -461,9 +468,18 @@ func NewControlPlane(
 	} else {
 		externalMux.HandleFunc("/metrics", cp.handleMetrics)
 	}
+	// The embedded Web UI is served under /ui/ OUTSIDE the auth/audit chain: the
+	// login page + JS bundle must load before the user has a token, and the
+	// bundle carries no secrets. Longest-prefix matching means /ui/ wins over the
+	// "/" catch-all, so the API routing below is unaffected. The SPA's own API
+	// calls still flow through authMiddleware via "/".
+	externalMux.Handle("/ui/", cp.uiHandler())
 	// audit (outer) wraps auth (inner): the access log captures 401s + final
 	// status, and reads the client name auth back-fills via the request holder.
-	externalMux.Handle("/", cp.auditMiddleware(authMiddleware(cp.getClients, cp.metrics.authTotal, internalMux)))
+	// rootRedirectOr sends the bare "/" to /ui/ while delegating every other path
+	// to the unchanged API chain.
+	apiChain := cp.auditMiddleware(authMiddleware(cp.getClients, cp.metrics.authTotal, internalMux))
+	externalMux.Handle("/", rootRedirectOr(apiChain))
 
 	cp.srv = &http.Server{Addr: apiAddr, Handler: externalMux}
 	return cp
@@ -1117,6 +1133,7 @@ func (cp *ControlPlane) spawnVMInternal(opts spawnVMOptions) (*VMInfo, string, e
 		return nil, "", fmt.Errorf("VM start: %w", err)
 	}
 
+	provider, model := readGooseConfigFile(opts.ConfigPath)
 	info := VMInfo{
 		VMID:         vmID,
 		GuestIP:      guestIP,
@@ -1124,6 +1141,8 @@ func (cp *ControlPlane) spawnVMInternal(opts spawnVMOptions) (*VMInfo, string, e
 		Profile:      opts.Profile,
 		TenantID:     opts.TenantID,
 		EgressPolicy: opts.EgressPolicy,
+		Provider:     provider,
+		Model:        model,
 	}
 
 	// runningVM.dmSnapshot drives the COW teardown branch in destroyVM; when
@@ -1352,6 +1371,10 @@ func (cp *ControlPlane) destroyVMUnderSnapshotLock(vmID string) {
 	// Clear any auto-snapshot so an explicit destroy leaves no orphaned memory
 	// image behind (DeleteVMState only removes an empty state dir).
 	storage.RemoveAutoSnapshot(cp.workDir, vmID)
+	// Ask the in-VM agent to shut down cleanly first. goose-agent is the guest's
+	// main process, so /stop halts the guest gracefully; StopVMM below then reaps
+	// the Firecracker VMM whether or not the guest finished halting. Best-effort.
+	cp.gracefulAgentStop(vmID, v.GuestIP, v.agentToken)
 	// StopVMM sends SIGTERM and waits for Firecracker to exit.
 	v.machine.StopVMM()
 	os.Remove(v.socketPath)
@@ -1379,6 +1402,29 @@ func (cp *ControlPlane) destroyVMUnderSnapshotLock(vmID string) {
 	cp.metrics.IncVMDelete()
 	slog.Warn("vm destroyed", "vm_id", vmID)
 	cp.metrics.vmDestroyTotal.WithLabelValues("ok").Inc()
+}
+
+// gracefulAgentStop best-effort asks a VM's goose-agent to shut down (POST /stop,
+// bearer-authenticated) with a short deadline. The agent is the guest's init
+// process, so this halts the guest cleanly; any error is ignored because the
+// caller force-stops the Firecracker VMM regardless.
+func (cp *ControlPlane) gracefulAgentStop(vmID, guestIP, agentToken string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	url := fmt.Sprintf("http://%s:%d/stop", guestIP, agentPort)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return
+	}
+	if agentToken != "" {
+		req.Header.Set("Authorization", "Bearer "+agentToken)
+	}
+	resp, err := cp.agentHTTPClient.Do(req)
+	if err != nil {
+		slog.Debug("graceful agent stop failed; forcing teardown", "vm_id", vmID, "err", err)
+		return
+	}
+	resp.Body.Close()
 }
 
 // DestroyAll is called on graceful daemon shutdown. It stops every running

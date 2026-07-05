@@ -28,6 +28,10 @@ const vsockReconfigPort = 1234
 
 type TaskRequest struct {
 	Prompt string `json:"prompt"`
+	// Session, when set, names a goose chat session so consecutive tasks on this
+	// VM continue one conversation (multi-turn). Empty preserves the original
+	// stateless one-shot behavior.
+	Session string `json:"session,omitempty"`
 }
 
 type TaskResult struct {
@@ -58,6 +62,41 @@ var (
 	agentTokenMu sync.RWMutex
 	agentToken   string
 )
+
+// startedSessions records goose session names already created on this VM so the
+// second and later turns pass --resume. Guarded by sessionMu.
+var (
+	sessionMu       sync.Mutex
+	startedSessions = map[string]bool{}
+)
+
+// gooseArgs builds the goose run argv. With no session it preserves the original
+// stateless invocation; with a session it names the session and (on the second+
+// turn) resumes it so the conversation persists across tasks — multi-turn.
+func gooseArgs(session string, resume bool) []string {
+	args := []string{"run", "--output-format", "json"}
+	if session != "" {
+		args = append(args, "-n", session)
+		if resume {
+			args = append(args, "--resume")
+		}
+	}
+	return append(args, "-i", "-")
+}
+
+// validSessionName allows only filesystem/CLI-safe session identifiers (goose
+// stores one file per session). The Web UI generates "<vm-id>-<timestamp>".
+func validSessionName(s string) bool {
+	if len(s) == 0 || len(s) > 64 {
+		return false
+	}
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-') {
+			return false
+		}
+	}
+	return true
+}
 
 func agentListenAddr() string {
 	port := 8080
@@ -670,6 +709,10 @@ func handleTask(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "prompt required", http.StatusBadRequest)
 		return
 	}
+	if req.Session != "" && !validSessionName(req.Session) {
+		http.Error(w, "invalid session", http.StatusBadRequest)
+		return
+	}
 
 	mu.Lock()
 	if busy {
@@ -699,7 +742,17 @@ func handleTask(w http.ResponseWriter, r *http.Request) {
 	// reach across the HTTP boundary. Neither --debug nor GOOSE_SHOW_FULL_OUTPUT
 	// disables that cap; the JSON path is the only code-level escape because
 	// session/mod.rs gates the markdown buffer flush behind !is_json_mode.
-	cmd := exec.CommandContext(r.Context(), "/usr/local/bin/goose", "run", "--output-format", "json", "-i", "-")
+	// With a session name the conversation persists across turns (multi-turn):
+	// the first turn creates the named session, later turns --resume it. No
+	// session → the original stateless one-shot invocation.
+	resume := false
+	if req.Session != "" {
+		sessionMu.Lock()
+		resume = startedSessions[req.Session]
+		startedSessions[req.Session] = true
+		sessionMu.Unlock()
+	}
+	cmd := exec.CommandContext(r.Context(), "/usr/local/bin/goose", gooseArgs(req.Session, resume)...)
 	cmd.Stdin = strings.NewReader(finalPrompt)
 
 	// Propagate the nested-invocation depth (v0.4.4) to the goose subprocess so a

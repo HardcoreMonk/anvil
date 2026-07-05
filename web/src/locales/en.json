@@ -1,0 +1,103 @@
+{
+  "nav": {
+    "vms": "VMs",
+    "settings": "Settings",
+    "logout": "Log out",
+    "authDisabled": "auth disabled"
+  },
+  "common": {
+    "loading": "Loading…",
+    "cancel": "Cancel",
+    "done": "Done",
+    "refresh": "Refresh",
+    "back": "Back"
+  },
+  "status": {
+    "idle": "idle",
+    "busy": "busy"
+  },
+  "login": {
+    "subtitle": "Enter your API bearer token to continue.",
+    "tokenLabel": "API token",
+    "tokenPlaceholder": "bearer token",
+    "remember": "Remember on this device",
+    "signIn": "Sign in",
+    "checking": "Checking…",
+    "invalidToken": "Invalid token",
+    "unexpected": "Unexpected response: HTTP {status}",
+    "unreachable": "Cannot reach control plane"
+  },
+  "vmlist": {
+    "title": "Virtual Machines",
+    "create": "Create VM",
+    "empty": "No VMs running. Create one to get started.",
+    "colId": "VM ID",
+    "colIp": "Guest IP",
+    "colProfile": "Profile",
+    "colModel": "Model",
+    "colCpu": "CPU",
+    "colMem": "Mem (MiB)",
+    "colUptime": "Uptime"
+  },
+  "createModal": {
+    "title": "Create VM",
+    "profileLabel": "Profile",
+    "profileHint": "Sets the LLM model. Edit profiles in Settings.",
+    "create": "Create",
+    "creating": "Creating…",
+    "createdTitle": "VM created",
+    "vmId": "VM ID",
+    "agentToken": "Agent token",
+    "tokenWarnPre": "This agent token is shown only once and is ",
+    "tokenWarnBold": "not stored server-side",
+    "tokenWarnPost": ". Copy it now if you need to call the agent directly.",
+    "copyToken": "Copy token",
+    "tokenCopied": "Token copied",
+    "copyFailed": "Copy failed",
+    "createdToast": "VM {id} created"
+  },
+  "vmdetail": {
+    "info": "Info",
+    "guestIp": "Guest IP",
+    "profile": "Profile",
+    "model": "Model",
+    "agentUrl": "Agent URL",
+    "liveStats": "Live stats",
+    "waitingStats": "Waiting for stats…",
+    "cpu": "CPU",
+    "memory": "Memory",
+    "uptime": "Uptime",
+    "net": "Net RX / TX",
+    "agentStat": "Agent",
+    "agentBadge": "agent: {status}",
+    "dangerZone": "Danger zone",
+    "deleteBtn": "Delete VM",
+    "deleting": "Deleting…",
+    "deleteConfirm": "Delete VM {id}? This is irreversible.",
+    "deletedToast": "VM {id} deleted"
+  },
+  "taskpanel": {
+    "title": "Conversation",
+    "placeholder": "Type a message…",
+    "hint": "Enter to send · Shift+Enter for a newline",
+    "send": "Send",
+    "newConversation": "New conversation",
+    "you": "You",
+    "assistant": "Agent",
+    "thinking": "Thinking…",
+    "runningFor": "Working… ({sec}s)",
+    "canceled": "Canceled",
+    "empty": "(empty)"
+  },
+  "settings": {
+    "title": "Settings",
+    "note": "Model and provider per profile. Changes apply to the next Create VM, not to running VMs.",
+    "colProfile": "Profile",
+    "colProvider": "Provider",
+    "colModel": "Model",
+    "save": "Save",
+    "saving": "Saving…",
+    "saved": "Profile {name} saved — new VMs will use it.",
+    "empty": "No profiles found."
+  }
+}

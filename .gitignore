@@ -58,3 +58,10 @@ EPHEMERA_v0.3.2_WORK_ORDER.md
 .vscode/
 .idea/
 .DS_Store
+
+# 8. Web UI (v0.5.0)
+# Source lives in web/. The Vite build output is intentionally committed to
+# cmd/goose-daemon/uidist/ (go:embed) so `go build` works without Node — do NOT
+# ignore that directory. Only the node toolchain + any stray dist/ are ignored.
+/web/node_modules/
+/web/dist/
