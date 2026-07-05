@@ -904,6 +904,62 @@ sleep 2
 relaunch_daemon "EPHEMERA_DISK_MODE=plain"
 ok "Daemon restored to plain disk mode ✓"
 
+# ── 46a–c. Snapshot-restored VM auto-recovery across a daemon restart (v0.4.5) ──
+# A restored VM now persists a state.json carrying its source_snapshot_id, so a
+# graceful daemon bounce re-restores it from that snapshot (it cannot cold-boot).
+# If the source snapshot is deleted, the restored VM becomes unrecoverable and is
+# surfaced (dropped), not silently kept. Restore always uses dm-snapshot COW, so
+# this runs fine under the plain-spawn daemon.
+step "46a. Restore a snapshot, capture its recovery record"
+RR_SRC=$(curl -s -w "\n%{http_code}" -X POST "$API/vms" -H "Content-Type: application/json")
+check_http "$(echo "$RR_SRC" | tail -1)" "201" "POST /vms (restore-recovery source)"
+RR_SRC_ID=$(echo "$RR_SRC" | head -1 | jq -r '.vm_id')
+RR_SNAP=$(curl -s -w "\n%{http_code}" -X POST "$API/vms/$RR_SRC_ID/snapshot" \
+    -H "Content-Type: application/json" -d '{"stop_after": true}')
+check_http "$(echo "$RR_SNAP" | tail -1)" "201" "POST /vms/$RR_SRC_ID/snapshot"
+RR_SNAP_ID=$(echo "$RR_SNAP" | head -1 | jq -r '.snapshot_id')
+RR_RES=$(curl -s -w "\n%{http_code}" -X POST "$API/snapshots/$RR_SNAP_ID/restore")
+check_http "$(echo "$RR_RES" | tail -1)" "201" "POST /snapshots/$RR_SNAP_ID/restore"
+RR_VM_ID=$(echo "$RR_RES" | head -1 | jq -r '.vm_id')
+check_http "$(curl -s -o /dev/null -w "%{http_code}" "$API/vms/$RR_VM_ID/health")" "200" "restored VM /health before bounce"
+RR_STATE="$(pwd)/vms/$RR_VM_ID/state.json"
+jq -e --arg s "$RR_SNAP_ID" '.source_snapshot_id == $s' "$RR_STATE" >/dev/null 2>&1 \
+    && ok "restored VM state.json records source_snapshot_id ✓" \
+    || fail "state.json missing/incorrect source_snapshot_id ($RR_STATE)"
+
+step "46b. Graceful daemon bounce → restored VM re-restored from its snapshot"
+kill "$DAEMON_PID" 2>/dev/null
+wait "$DAEMON_PID" 2>/dev/null || true
+pkill -f "firecracker --api-sock" 2>/dev/null || true
+sleep 2
+relaunch_daemon "EPHEMERA_DISK_MODE=plain"
+RR_RECOVERED=false
+for i in $(seq 1 30); do
+    if [ "$(curl -s "$API/vms" | jq --arg id "$RR_VM_ID" '[.[] | select(.vm_id==$id)] | length')" = "1" ]; then
+        RR_RECOVERED=true; break
+    fi
+    sleep 1
+done
+$RR_RECOVERED && ok "restored VM $RR_VM_ID auto-recovered into /vms ✓" || fail "restored VM not auto-recovered after bounce"
+check_http "$(curl -s -o /dev/null -w "%{http_code}" "$API/vms/$RR_VM_ID/health")" "200" "auto-recovered restored VM /health → 200"
+grep -q "re-restored from snapshot" "$LOG" \
+    && ok "daemon log records snapshot re-restore ✓" \
+    || fail "expected 're-restored from snapshot' in daemon log"
+
+step "46c. Deleting the source snapshot makes the restored VM unrecoverable (surfaced)"
+check_http "$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/snapshots/$RR_SNAP_ID")" "200" "DELETE source snapshot"
+kill "$DAEMON_PID" 2>/dev/null
+wait "$DAEMON_PID" 2>/dev/null || true
+pkill -f "firecracker --api-sock" 2>/dev/null || true
+sleep 2
+relaunch_daemon "EPHEMERA_DISK_MODE=plain"
+sleep 3
+if [ "$(curl -s "$API/vms" | jq --arg id "$RR_VM_ID" '[.[] | select(.vm_id==$id)] | length')" = "0" ]; then
+    ok "restored VM dropped after source snapshot deletion (unrecoverable) ✓"
+else
+    fail "restored VM $RR_VM_ID still present after its source snapshot was deleted"
+fi
+
 # ════════════════════════════════════════════════════════════════
 # Agent Proxy test: verify control plane proxy endpoints.
 #

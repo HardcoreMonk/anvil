@@ -459,6 +459,7 @@ Upstream ephemera feature matrix:
 | **MicroVM snapshots (Full + Diff)** | Freeze VM memory state to disk; restore in ~5 s. First snapshot → Full (2 GB); subsequent snapshots of the same VM → Diff (sparse, dirty pages only). Diff is automatically selected; Full is always the reference base. Original agent token preserved across restores. |
 | **COW rootfs on restore** | Restored VMs use a Linux dm-snapshot COW device backed by the snapshot's `rootfs.ext4` (read-only base, shared). Per-VM guest writes accumulate in a sparse exception store (~0 initial disk usage). Eliminates the ~700 MB full copy previously required per restore. |
 | **Post-restore IP reconfiguration** | Restored VMs receive a fresh IP from the pool via vsock — the guest's network stack is updated in-place without reboot, decoupling the restore IP from the snapshot state. |
+| **Restored VM auto-recovery** (v0.4.5) | dm-snapshot restored VMs now persist a `state.json` (with `source_snapshot_id`) and are **auto-recovered** across a daemon restart — re-restored from their source snapshot (back to snapshot-time memory+disk; post-restore writes are not preserved, same as a manual re-restore). Spawn-path VMs were already cold-restarted since v0.4.0. Caveats: bind-mount-fallback restores (dm-snapshot tooling absent) and restored VMs whose source snapshot was deleted are not recovered (the latter is surfaced as dropped, not silently kept). |
 | **IP and TAP recycling** | IPs (10.0.1.2–254) and TAP IDs are returned to a pool and reused across VM lifecycle |
 | **NAT for outbound internet** | Host bridge `goose-br0` with iptables MASQUERADE enables VM-to-internet for LLM API calls |
 | **Per-client API auth** | Named Bearer tokens per client (`alice:tok1,bob:tok2`); timing-safe comparison; optional per-token TTL (`name:token:expires`, v0.4.1); the matched client identity is threaded into request context for the audit log |
@@ -641,7 +642,7 @@ snapshots/            Stored snapshot directories (auto-created, gitignored)
     rootfs.ext4       Disk copy (always full, ~700 MB)
     metadata.json     Restore params (IP, TAP, MAC, token, type, base_snapshot_id)
 
-e2e_test.sh           End-to-end integration test (80+ numbered steps incl. resilience + v0.3.x–v0.4.4 sub-steps; requires /dev/kvm + root)
+e2e_test.sh           End-to-end integration test (80+ numbered steps incl. resilience + v0.3.x–v0.4.5 sub-steps; requires /dev/kvm + root)
 observability_demo.sh One-shot live demo: daemon + Prometheus + Grafana, auto workload, browser-driven exploration until Ctrl-C (v0.3.5)
 webdev_demo.sh        One-shot live demo: orchestrator+worker+reviewer flock builds a React+Vite site, harvested from the Town Wall and served via vite preview until Ctrl-C (v0.3.6; manual gate, needs a Gemini key + /dev/kvm)
 
@@ -878,6 +879,7 @@ rate limit에 따라 보통 15-30분 이상 걸릴 수 있다.
 | 38 | Delete restored VM: verify dm device, loop devices, and `.cow` file all cleaned up |
 | 39 | Delete snapshot and verify empty |
 | 40–46 | **COW spawn cold-restart** (v0.4.0) — relaunch daemon with `EPHEMERA_DISK_MODE=cow`; spawn 2 COW VMs; graceful restart preserves each `.cow` store and re-creates the dm device (same `vm_id`, `/health` 200); then a SIGKILL crash with one `state.json` removed proves `RemoveOrphanCOWDevices` reclaims the orphan while the survivor is cold-restarted; restores plain disk mode |
+| 46a–c | **Restored VM auto-recovery** (v0.4.5) — restore a snapshot (its `state.json` records `source_snapshot_id`); a graceful daemon bounce re-restores the VM from its snapshot (back in `/vms`, `/health` 200, log `re-restored from snapshot`); then deleting the source snapshot + bouncing drops the now-unrecoverable VM |
 | 47–49 | **Agent proxy** — `GET /vms/{id}/health`, `POST /vms/{id}/stop` via control plane proxy; no direct VM IP access |
 | 50–51 | **`EPHEMERA_PUBLIC_URL`** — restart daemon with var set; verify `agent_url` becomes proxy path; use `agent_url` for health + stop |
 | 52 | Prep role profile yaml files from `.example` placeholders |
@@ -1066,6 +1068,63 @@ curl 'http://192.168.3.73:8787/api/recording?id=full-kvm-e2e'
 
 ━━━ 60. Shut down rotation daemon ━━━
   ✓ Rotation daemon stopped
+
+━━━ 76. EPHEMERA_AUTOSNAPSHOT: warm restore preserves VM memory across a graceful daemon bounce ━━━
+  ✓ Daemon up with EPHEMERA_AUTOSNAPSHOT=true
+  ✓ POST /vms (autosnapshot) (HTTP 201)
+  ✓ Agent healthy before bounce ✓
+  ✓ auto-snapshot written: vms/<id>/auto/{memory,state}.bin ✓
+  ✓ VM <id> live after warm restore ✓
+  ✓ warm-restored agent /health → 200 ✓
+  ✓ daemon took warm-restore path (memory preserved, not cold boot) ✓
+  ✓ auto-snapshot consumed (one-shot delete) ✓
+  ✓ metric ephemera_auto_restore_total{ok} present ✓
+  ✓ Auto-snapshot test VM cleaned up
+
+━━━ 77. Recovery with a missing disk artifact drops state cleanly (TAP released, agent dead, surfaced) ━━━
+  ✓ Plain-mode daemon up for disk-missing recovery test
+  ✓ POST /flocks (disk-missing) (HTTP 201)
+  ✓ worker state.json persisted ✓
+  ✓ host TAP present before crash ✓
+  ✓ Crashed daemon; deleted worker rootfs ✓
+  ✓ state.json dropped on recovery ✓
+  ✓ dropped VM absent from /vms ✓
+  ✓ stale TAP released by recovery ✓
+  ✓ flock agent worker-1 marked dead in metadata.json ✓
+  ✓ daemon logged disk-missing drop ✓
+  ✓ drop surfaced in failed[] (vms not cold-restarted) ✓
+  ✓ Disk-missing flock cleaned up
+
+━━━ 78. Audit log records an authenticated request (client + status, no secrets) ━━━
+  ✓ Auth-on daemon up (client: ops)
+  ✓ GET /vms with valid bearer (HTTP 200)
+  ✓ GET /vms with bogus bearer (HTTP 401)
+  ✓ audit recorded GET /vms 200 by client=ops ✓
+  ✓ audit log contains no token/Authorization material ✓
+
+━━━ 79. Audit captures a 401 as client=- ━━━
+  ✓ audit recorded the 401 with client=- ✓
+
+━━━ 80. Per-token TTL: an expired token is rejected; never-expiring primary keeps working ━━━
+  ✓ Auth-on daemon up with a short-TTL token
+  ✓ short-TTL token accepted before expiry (HTTP 200)
+  ✓ short-TTL token rejected after expiry (HTTP 401)
+  ✓ never-expiring primary token still accepted (HTTP 200)
+  ✓ daemon logged token expiry ✓
+  ✓ metric ephemera_auth_total{outcome=expired} present ✓
+
+━━━ 81. SSE /flocks/{id}/wall streams through the audit statusRecorder (Flusher preserved) ━━━
+  ✓ SSE guard flock: flock-...
+  ✓ GET /flocks/{id}/wall streamed (200; Flusher preserved through audit wrapper) ✓
+
+━━━ 82. ephemera-ctl spawn/ls/rm against the live daemon ━━━
+  ✓ ctl vm spawn → vm-... ✓
+  ✓ ctl vm ls shows the spawned VM ✓
+  ✓ ctl vm rm removed it from ls ✓
+  ✓ ctl bogus token → non-zero exit ✓
+
+━━━ 83. ephemera-ctl audit reads the access log ━━━
+  ✓ ctl audit shows recent GET /vms ✓
 
 ══════════════════════════════════
   All test steps passed ✓
@@ -2241,7 +2300,10 @@ The daemon-side shutdown path is designed to feed cold-restart:
 - **Graceful shutdown (SIGTERM/SIGINT)** — `ControlPlane.DestroyAll` stops every Firecracker process via `StopVMM`, releases TAP/IP/vsock/socket, and **preserves each VM's rootfs ext4 and `state.json`**. The next daemon start cold-restarts them.
 - **Explicit `DELETE /vms/{id}`** — routes through `destroyVM`, which does a full cleanup (deletes `state.json`, removes the rootfs ext4, releases all resources). The VM is gone and is not cold-restarted.
 - **SIGKILL / crash** — defers don't run. `state.json` + rootfs survive on disk; on the next start, cold-restart picks them up exactly as for graceful shutdown.
-- **COW-restored and snapshot-restored VMs** — torn down fully during `DestroyAll` (dm-snapshot devices / bind mounts would leak kernel resources otherwise); their `state.json` is removed so the next start does not attempt to recover them.
+- **COW spawn VMs** (`EPHEMERA_DISK_MODE=cow`) — `DestroyAll` releases the dm-snapshot kernel objects but **preserves the sparse exception store + `state.json`** (`TeardownDMSnapshotKeepStore`); the next start re-layers the store over the golden image and cold-restarts them (v0.4.0).
+- **Snapshot-restored VMs** (`POST /snapshots/{id}/restore`, dm-snapshot path) — `DestroyAll` drops the dm device + transient exception store but **keeps `state.json`** (which carries `source_snapshot_id`, plus anvil `tenant_id` / `egress_policy`). The next start **re-restores** the VM from that source snapshot via `RecoverVMs` → `recoverRestoredVM` (back to snapshot-time memory+disk; the store is recreated fresh), v0.4.5. The legacy **bind-mount fallback** path (dm-snapshot tooling unavailable) still persists no `state.json` and is not auto-recovered.
+
+**Memory auto-snapshot (v0.4.0, opt-in).** With `EPHEMERA_AUTOSNAPSHOT=true`, `DestroyAll` additionally snapshots each recoverable VM's live memory+state into `vms/<id>/auto/{memory.bin,state.bin}` *before* stopping it (graceful shutdown only — a SIGKILL cannot run it). On the next start, `RecoverVMs` **warm-restores** from that snapshot via `vm.RestoreMachine` (memory preserved, same `vm_id`/IP/TAP/MAC/token), so in-flight `/tasks` work survives a daemon bounce. Snapshot-restored VMs are excluded (they re-restore from their source snapshot). The snapshot is **one-shot** (deleted after the attempt, so a later bounce never rolls the VM back to a stale image) and **best-effort**: any failure — snapshot write, restore, or agent handshake — logs and falls back to the cold boot above. This is why `forwardSignals` omits `SIGTERM`/`SIGINT` (v0.4.0): the daemon owns graceful teardown, and a forwarded SIGTERM would kill Firecracker mid-snapshot.
 
 What this preserves:
 
@@ -2249,19 +2311,15 @@ What this preserves:
 |-----------|------|
 | `vm_id`, `guest_ip`, `tap_device`, `mac_addr` | In-flight `/tasks` work (memory is not snapshotted) |
 | `agent_token`, `agent_url` | Goose conversation context (in-VM, in-memory) |
-| Disk contents (the rootfs clone, or COW spawn exception store, is reused) | Snapshot-restore dm-snapshot / bind-mount runtime state (snapshot-restored VMs are not auto-recovered) |
+| Disk contents (the rootfs clone, or COW spawn exception store, is reused) | Post-restore writes on a re-restored VM (dm-snapshot restores re-restore from source, v0.4.5; legacy bind-mount restores are not auto-recovered) |
 | Flock membership, Town Wall history | (none) |
 | Watchdog `status=dead` markings (v0.3.3 — persisted to `metadata.json`) | |
 
 Callers that need at-most-once semantics across daemon restarts should idempotency-key their `/tasks` calls or poll for completion before retrying.
 
-**Out of scope for v0.3.2, current behavior as of v0.4.0+**:
-- VMs spawned with `EPHEMERA_DISK_MODE=cow` are auto-recovered when
-  `vms/<vm_id>/state.json` and the `.cow` exception store still exist. Stale COW
-  states without recoverable VM state are treated as orphans and cleaned up.
-- Snapshot-restored VMs (`POST /snapshots/{id}/restore`) are not auto-recovered
-  — restore from the snapshot again after the daemon comes back. Restored-COW
-  stale state is dropped/cleaned instead of being cold-restarted.
+**Snapshot-restored VM recovery (v0.4.5):** dm-snapshot restored VMs **are** auto-recovered — they persist a `state.json` with `source_snapshot_id` (plus anvil `tenant_id` / `egress_policy`), and `RecoverVMs` re-restores them from that snapshot on the next start (the VM returns to its snapshot-time memory+disk; writes since the restore are not preserved, same as a manual re-restore). Still **out of scope**: the legacy bind-mount-fallback restore path (no `state.json`), and a restored VM whose **source snapshot was deleted** while it ran — recovery cannot re-restore it, so it is dropped and surfaced (not silently kept). Snapshot GC never deletes a source snapshot still referenced by a live or persisted restored VM.
+
+> COW *spawn* VMs (`EPHEMERA_DISK_MODE=cow`) **are** auto-recovered as of v0.4.0: `DestroyAll` preserves the exception store and `RecoverVMs` re-layers it over the golden image. Orphan dm-snapshot devices left by a crashed run (no surviving `state.json`) are reclaimed on the next start via `RemoveOrphanCOWDevices`.
 
 ### Watchdog dead-status persistence (v0.3.3)
 
@@ -2448,8 +2506,7 @@ Requirements: a Google Gemini API key in `configs/goose-secrets.yaml`, `/dev/kvm
 | **Same-snapshot concurrent restores not supported** | The guest IP is reconfigured via vsock after restore, so different-snapshot concurrent restores each get a fresh IP. However, two VMs from the *same* snapshot would still collide on the Firecracker vsock UDS path (which is fixed in `state.bin`), so same-snapshot concurrent restores are not supported. |
 | **Cross-machine restore** | `anvil_replicate_snapshot`으로 target host에 snapshot bundle을 import한 뒤 `POST /snapshots/{id}/restore`를 호출한다. diff snapshot은 target에 base full snapshot이 필요하며 `include_dependencies=true`가 base를 먼저 복제한다. |
 | **Cold-restart loses in-VM memory by default** (v0.3.2; mitigated v0.4.0) | Live VM auto-restart re-boots each VM from its rootfs clone — the guest kernel and `goose-agent` start fresh, and any `/tasks` request in flight at the moment of daemon shutdown is dropped. Set `EPHEMERA_AUTOSNAPSHOT=true` to warm-restore in-VM memory across a *graceful* shutdown (v0.4.0). A SIGKILL/crash still cold-boots, so callers should still idempotency-key tasks or re-poll for completion across an ungraceful restart. |
-| **Snapshot-restored VMs are not auto-recovered** (v0.3.2) | Only spawn-path VMs are cold-restarted. After a daemon restart, call `POST /snapshots/{id}/restore` again to bring back a snapshot-derived VM. COW *spawn* VMs explicitly created with `EPHEMERA_DISK_MODE=cow` are auto-recovered as of v0.4.0. |
-| **CP token rotation needs v0.3.4 VMs and `_TOKENS_FILE`** (updated v0.3.4) | v0.3.4 hot-propagates the new control-plane token (the first non-expired client since v0.4.1; `apiClients[0]` before) to running VMs via vsock on SIGHUP. Two prerequisites: (a) the daemon must source tokens from `EPHEMERA_API_TOKENS_FILE` rather than env (env values are fixed at exec time and cannot change on SIGHUP); (b) the VMs must run a v0.3.4+ `goose-agent` (older ones lack the `SET_CP_TOKEN` vsock handler). When either is missing the v0.3.3 fallback (`POST /flocks/{id}/agents/{agent_id}/restart`) still works. |
+| **CP token hot-rotation requires `_TOKENS_FILE`** (v0.3.4) | On SIGHUP the daemon hot-propagates the new control-plane token (the first non-expired client since v0.4.1; `apiClients[0]` before) to running VMs via the `SET_CP_TOKEN` vsock command. This requires sourcing tokens from `EPHEMERA_API_TOKENS_FILE` — env-supplied tokens are fixed at exec and cannot change on SIGHUP. (The in-VM `SET_CP_TOKEN` handler ships in every current golden image, which auto-rebakes on any `goose-agent` change.) When tokens come from the env, the `POST /flocks/{id}/agents/{agent_id}/restart` fallback re-injects the current token. |
 | **Metrics retention is external** (v0.3.5) | `/metrics` exposes raw counters and gauges only — the daemon does not aggregate, store, or rotate history. Operators are expected to wire an external Prometheus (or any text-exposition-compatible) scraper. |
 
 ---

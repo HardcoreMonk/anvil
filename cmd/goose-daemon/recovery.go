@@ -65,19 +65,12 @@ func (cp *ControlPlane) RecoverVMs() (recovered int, failed []string, err error)
 	}
 
 	for _, s := range states {
+		// Snapshot-restored VMs (v0.4.5) re-restore from their source snapshot
+		// rather than cold-booting a rootfs clone. Their DiskPath is the transient
+		// exception store that graceful shutdown discards, so they must branch off
+		// BEFORE the disk-missing check below (which would otherwise drop them all).
 		if strings.TrimSpace(s.SourceSnapshotID) != "" {
-			slog.Warn("recovery: restored vm state is not recoverable in v0.4.0 slice, dropping state", "vm_id", s.VMID, "source_snapshot_id", s.SourceSnapshotID)
-			if killErr := killStaleFirecracker(s.SocketPath); killErr != nil {
-				slog.Warn("recovery: stale restored firecracker probe failed", "vm_id", s.VMID, "err", killErr)
-			}
-			logFifoPath := fmt.Sprintf("/tmp/fc-%s-log.fifo", s.VMID)
-			removeStaleVMArtifacts(s.SocketPath, s.VsockPath, logFifoPath)
-			if s.DiskMode == storage.DiskModeCOW && cp.provisioner != nil {
-				removeRestoredCOWDevice(cp.provisioner.WorkspaceDir, s.VMID)
-			}
-			cp.releaseRecoveryNetwork(s.TapDevice, s.GuestIP)
-			cp.dropRecoveryState(s)
-			failed = append(failed, s.VMID)
+			cp.recoverRestoredVM(s, &recovered, &failed)
 			continue
 		}
 		if _, statErr := os.Stat(s.DiskPath); os.IsNotExist(statErr) {
@@ -291,15 +284,16 @@ func (cp *ControlPlane) registerRecoveredVM(s storage.VMState, machine *firecrac
 			TenantID:     s.TenantID,
 			EgressPolicy: s.EgressPolicy,
 		},
-		agentToken: s.AgentToken,
-		diskPath:   s.DiskPath,
-		dmSnapshot: dmInfo,
-		vsockPath:  s.VsockPath,
-		machine:    machine,
-		tapDevice:  s.TapDevice,
-		socketPath: s.SocketPath,
-		memSizeMib: memSize,
-		spawnedAt:  s.CreatedAt,
+		agentToken:       s.AgentToken,
+		diskPath:         s.DiskPath,
+		dmSnapshot:       dmInfo,
+		vsockPath:        s.VsockPath,
+		machine:          machine,
+		tapDevice:        s.TapDevice,
+		socketPath:       s.SocketPath,
+		memSizeMib:       memSize,
+		spawnedAt:        s.CreatedAt,
+		sourceSnapshotID: s.SourceSnapshotID,
 	}
 	cp.mu.Unlock()
 
@@ -388,4 +382,174 @@ func (cp *ControlPlane) markFlockAgentDead(flockID, agentID string) {
 	if f.TownWall != nil {
 		f.TownWall.Post("<orchestrator>", fmt.Sprintf("agent %s could not be recovered after daemon restart (marked dead)", agentID))
 	}
+}
+
+// recoverRestoredVM re-restores a snapshot-derived VM (v0.4.5) after a daemon
+// restart, reusing the persisted identity (vm_id, IP, TAP, MAC, agent token).
+// Unlike a spawn VM it cannot cold-boot — it is re-loaded from its source
+// snapshot's memory+state (the same path POST /snapshots/{id}/restore takes), so
+// the VM returns to its snapshot-time memory and disk; writes made after the
+// original restore are not preserved (identical to a manual re-restore). The
+// exception store is recreated fresh. On any failure the state is dropped, the
+// network released, and the flock agent (if any) marked dead; vmID → failed.
+func (cp *ControlPlane) recoverRestoredVM(s storage.VMState, recovered *int, failed *[]string) {
+	cp.snapshotsMu.RLock()
+	meta, ok := cp.snapshots[s.SourceSnapshotID]
+	cp.snapshotsMu.RUnlock()
+	if !ok {
+		// Source snapshot was deleted while the VM ran: nothing to re-restore from.
+		// Drop it with the same thorough resource cleanup anvil applies to any
+		// unrecoverable restored VM — probe/kill a stale Firecracker, remove its
+		// socket/vsock/log artifacts and (for COW) its dm device + transient store —
+		// before releasing the network and dropping state, so a crashed prior run
+		// cannot leak kernel objects. (Upstream's leaner path skips these; anvil
+		// keeps the hardening.)
+		slog.Warn("recovery: source snapshot gone, dropping restored vm", "vm_id", s.VMID, "snapshot_id", s.SourceSnapshotID)
+		if killErr := killStaleFirecracker(s.SocketPath); killErr != nil {
+			slog.Warn("recovery: stale restored firecracker probe failed", "vm_id", s.VMID, "err", killErr)
+		}
+		logFifoPath := fmt.Sprintf("/tmp/fc-%s-log.fifo", s.VMID)
+		removeStaleVMArtifacts(s.SocketPath, s.VsockPath, logFifoPath)
+		if s.DiskMode == storage.DiskModeCOW && cp.provisioner != nil {
+			removeRestoredCOWDevice(cp.provisioner.WorkspaceDir, s.VMID)
+		}
+		cp.releaseRecoveryNetwork(s.TapDevice, s.GuestIP)
+		cp.dropRecoveryState(s)
+		*failed = append(*failed, s.VMID)
+		return
+	}
+
+	// Clear orphans from the previous daemon process and force a FRESH exception
+	// store — re-loading the snapshot's memory onto an evolved store would be
+	// inconsistent, so the store is recreated from scratch by reRestoreMachine.
+	// removeRestoredCOWDevice reclaims the dm device AND drops the transient store.
+	if killErr := killStaleFirecracker(s.SocketPath); killErr != nil {
+		slog.Warn("recovery: stale firecracker probe failed", "vm_id", s.VMID, "err", killErr)
+	}
+	logFifoPath := fmt.Sprintf("/tmp/fc-%s-log.fifo", s.VMID)
+	removeStaleVMArtifacts(s.SocketPath, s.VsockPath, logFifoPath)
+	exceptionStore := filepath.Join(cp.provisioner.WorkspaceDir, s.VMID+".cow")
+	if cp.provisioner != nil {
+		removeRestoredCOWDevice(cp.provisioner.WorkspaceDir, s.VMID)
+	}
+	os.Remove(exceptionStore)
+
+	if reErr := cp.reclaimRecoveryNetwork(s.TapDevice, s.GuestIP, s.MacAddr); reErr != nil {
+		slog.Warn("recovery: network reclaim failed, dropping restored vm", "vm_id", s.VMID, "err", reErr)
+		cp.dropRecoveryState(s)
+		*failed = append(*failed, s.VMID)
+		return
+	}
+
+	machine, dmInfo, err := cp.reRestoreMachine(meta, s.VMID, exceptionStore, s.SocketPath, s.TapDevice, s.GuestIP)
+	if err != nil {
+		slog.Warn("recovery: re-restore failed, dropping state", "vm_id", s.VMID, "snapshot_id", s.SourceSnapshotID, "err", err)
+		cp.releaseRecoveryNetwork(s.TapDevice, s.GuestIP)
+		cp.dropRecoveryState(s)
+		*failed = append(*failed, s.VMID)
+		return
+	}
+
+	if waitErr := waitForAgent(s.GuestIP, 60*time.Second); waitErr != nil {
+		slog.Warn("recovery: re-restored agent did not respond, dropping state", "vm_id", s.VMID, "err", waitErr)
+		machine.StopVMM()
+		storage.TeardownDMSnapshot(dmInfo)
+		cp.releaseRecoveryNetwork(s.TapDevice, s.GuestIP)
+		cp.dropRecoveryState(s)
+		*failed = append(*failed, s.VMID)
+		return
+	}
+
+	cp.registerRecoveredVM(s, machine, dmInfo)
+	slog.Warn("recovery: vm re-restored from snapshot", "vm_id", s.VMID, "snapshot_id", s.SourceSnapshotID, "guest_ip", s.GuestIP)
+	*recovered++
+}
+
+// reRestoreMachine rebuilds a Firecracker machine from a snapshot for recovery
+// (v0.4.5): set up a COW dm-snapshot over the snapshot's base (merging a rootfs
+// diff if present), load the (diff-merged) memory snapshot, then reconfigure the
+// guest IP to the recovered VM's address. It mirrors the dm-snapshot success path
+// of restoreSnapshot (api.go) — KEEP THE TWO IN SYNC — but omits that handler's
+// bind-mount fallback and fresh-network allocation. cp.restoreMu serializes the
+// dm-setup + Firecracker-open window. On failure any dm-snapshot created is torn
+// down before returning.
+func (cp *ControlPlane) reRestoreMachine(meta storage.SnapshotMetadata, vmID, exceptionStore, socketPath, tapDevice, guestIP string) (*firecracker.Machine, *storage.DMSnapshotInfo, error) {
+	var base storage.SnapshotMetadata
+	if meta.SnapshotType == "diff" {
+		cp.snapshotsMu.RLock()
+		b, ok := cp.snapshots[meta.BaseSnapshotID]
+		cp.snapshotsMu.RUnlock()
+		if !ok {
+			return nil, nil, fmt.Errorf("base snapshot %s not found", meta.BaseSnapshotID)
+		}
+		base = b
+	}
+
+	baseDiskForCOW := meta.DiskCopyPath
+	var mergedRootfs string
+	if meta.RootfsDiffPath != "" {
+		mergedRootfs = pickMergedRootfsPath(cp.workDir, vmID)
+		os.MkdirAll(filepath.Dir(mergedRootfs), 0755)
+		os.Remove(mergedRootfs)
+		if mErr := storage.MergeRootfsDiff(base.DiskCopyPath, meta.RootfsDiffPath, mergedRootfs); mErr != nil {
+			os.Remove(mergedRootfs)
+			return nil, nil, fmt.Errorf("merge rootfs diff: %w", mErr)
+		}
+		baseDiskForCOW = mergedRootfs
+	}
+
+	cp.restoreMu.Lock()
+	dmInfo, err := storage.SetupDMSnapshot(baseDiskForCOW, exceptionStore, meta.DiskPath)
+	if err != nil {
+		cp.restoreMu.Unlock()
+		if mergedRootfs != "" {
+			os.Remove(mergedRootfs)
+		}
+		return nil, nil, fmt.Errorf("dm-snapshot setup: %w", err)
+	}
+	if mergedRootfs != "" {
+		os.Remove(mergedRootfs) // dm pins it via its read-only loop; safe to unlink
+	}
+
+	memFileToUse := meta.MemFilePath
+	var mergedMemPath string
+	if meta.SnapshotType == "diff" {
+		mergedMemPath = pickMergedMemPath(cp.workDir, vmID)
+		os.MkdirAll(filepath.Dir(mergedMemPath), 0755)
+		if mErr := storage.MergeMemoryDiff(base.MemFilePath, meta.MemFilePath, mergedMemPath); mErr != nil {
+			cp.restoreMu.Unlock()
+			storage.TeardownDMSnapshot(dmInfo)
+			return nil, nil, fmt.Errorf("merge memory diff: %w", mErr)
+		}
+		memFileToUse = mergedMemPath
+	}
+
+	machine, err := vm.RestoreMachine(context.Background(), vm.VMConfig{
+		VMID:           vmID,
+		SocketPath:     socketPath,
+		FirecrackerBin: cp.firecrackerPath,
+		RootfsPath:     meta.DiskPath,
+		TapDevice:      tapDevice,
+		MacAddress:     meta.MacAddr,
+		GuestIP:        guestIP,
+		GatewayIP:      "10.0.1.1",
+		// VsockUDSPath empty: snapshot state recreates vsock at meta.VsockPath.
+	}, memFileToUse, meta.StatFilePath)
+	cp.restoreMu.Unlock()
+	if mergedMemPath != "" {
+		os.Remove(mergedMemPath)
+	}
+	if err != nil {
+		storage.TeardownDMSnapshot(dmInfo)
+		return nil, nil, fmt.Errorf("restore machine: %w", err)
+	}
+
+	// Firecracker recreated vsock at meta.VsockPath; reconfigure the guest's IP to
+	// the recovered address (the snapshot's baked IP is the original).
+	if rErr := vm.ReconfigureGuestIP(meta.VsockPath, guestIP+"/24", "10.0.1.1"); rErr != nil {
+		machine.StopVMM()
+		storage.TeardownDMSnapshot(dmInfo)
+		return nil, nil, fmt.Errorf("vsock ip reconfigure: %w", rErr)
+	}
+	return machine, dmInfo, nil
 }

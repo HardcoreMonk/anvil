@@ -46,14 +46,21 @@
   재연결하고 repaired metadata를 다시 persist한다.
 - `webdev_demo.sh`는 `POST /flocks` 응답의 `agent_tokens`를 읽지 않고, orchestrator
   `vm_id`를 사용해 control-plane proxy `POST /vms/{vm_id}/tasks`로 brief를 보낸다.
-- 현재 sync branch의 anvil runtime baseline은 upstream `v0.4.4`까지 반영한다.
-  2026-07-02 기준 upstream latest observed는 `v0.7.0`이며, `v0.4.5`는 다음 sync
-  후보, `v0.5.0`-`v0.7.0`은 별도 adoption review backlog로 둔다.
+- 현재 sync branch의 anvil runtime baseline은 upstream `v0.4.5`까지 반영한다.
+  2026-07-02 기준 upstream latest observed는 `v0.7.0`이며, `v0.5.0`-`v0.7.0`은
+  별도 adoption review backlog로 둔다.
 - upstream `v0.4.4` (streaming `/tasks`, nested-invocation depth guard,
   watchdog status route, flock broadcast, goose-agent slog migration)를 sync
   한다. anvil adaptation: buffered `POST /vms/{id}/tasks` 기본 계약(`stream=1`
   없으면 `{"output","error"}`)을 그대로 유지하고, flock broadcast는 daemon-only
   endpoint로만 두며 `anvil_*` MCP tool로 노출하지 않는다.
+- upstream `v0.4.5` (snapshot-restore auto-recovery)를 sync 한다. restore가
+  `source_snapshot_id`를 담은 `state.json`을 persist하고, daemon restart 시
+  `RecoverVMs`가 source snapshot에서 re-restore한다. anvil adaptation: 지속되는
+  restore state에 `tenant_id` / `egress_policy`를 함께 기록하고, restore 응답과
+  MCP restore output은 `agent_token` 계열을 redact한 채 `source_snapshot_id`만
+  노출한다. snapshot GC는 live·persisted restored VM이 참조하는 source snapshot을
+  삭제하지 않는다.
 
 ## 검증됨
 
@@ -67,6 +74,28 @@
 - `go build ./cmd/anvil-scheduler`
 - `go build ./cmd/anvil-mcp`
 - `go build ./cmd/goose-daemon`
+
+---
+
+# v0.4.5 — Snapshot-Restore Auto-Recovery
+
+**Ephemera** v0.4.5 closes a recovery gap from the Known Limitations audit. Additive — no wire format changed; no golden-image rebake (daemon/storage only).
+
+---
+
+## What's New
+
+### Snapshot-restored VMs are auto-recovered across a daemon restart
+
+- A VM created via `POST /snapshots/{id}/restore` now persists a `state.json` carrying `source_snapshot_id`. On the next daemon start, `RecoverVMs` **re-restores it from that source snapshot** (it cannot cold-boot like a spawn VM) instead of dropping it — automating what previously required a manual re-restore.
+- Semantics: the VM returns to its **snapshot-time** memory and disk. Writes made *after* the original restore are not preserved across the restart (identical to a manual re-restore); the COW exception store is recreated fresh so the re-loaded snapshot memory and disk stay consistent.
+- Shutdown handling: graceful shutdown discards a restored VM's dm device + transient exception store but **keeps its `state.json`** (recovery re-restores fresh). Restored VMs are excluded from the opt-in memory auto-snapshot (they re-restore from source, so an `auto/` image would never be used).
+- Caveats (documented, by design): **bind-mount-fallback** restores (when dm-snapshot tooling is unavailable) are not auto-recovered; and if the **source snapshot was deleted** while the restored VM ran, recovery drops the VM and surfaces it (via `failed[]` / a flock agent marked dead) rather than silently keeping it.
+
+### Known-Limitations refresh
+
+- Removed the "Snapshot-restored VMs are not auto-recovered" limitation (now resolved above).
+- Reworded the CP-token-rotation limitation to "CP token hot-rotation requires `_TOKENS_FILE`": the old "needs v0.3.4 VMs" clause is obsolete — the golden image auto-rebakes on any `goose-agent` change, so every current VM carries the `SET_CP_TOKEN` vsock handler. The only real requirement is sourcing tokens from a file (env tokens are fixed at exec and cannot change on SIGHUP).
 
 ---
 

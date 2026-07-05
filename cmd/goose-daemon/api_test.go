@@ -2317,7 +2317,16 @@ func TestRestoreSnapshotDiffMemoryTempRemovedWhenEgressFails(t *testing.T) {
 	}
 }
 
-func TestRestoreSnapshotDoesNotPersistRecoverableVMState(t *testing.T) {
+// TestRestoreSnapshotPersistsRecoverableVMState covers the v0.4.5 behavior change:
+// a dm-snapshot restore now persists a recovery record (state.json) carrying
+// source_snapshot_id so a daemon restart re-restores the VM from its source
+// snapshot (see recoverRestoredVM). This inverts the pre-v0.4.5 anvil guarantee
+// (restore left no recoverable state). anvil adaptation: the persisted record also
+// carries tenant_id / egress_policy attribution and the snapshot's baked agent
+// token — re-restore reloads the snapshot's memory, so the recovered guest carries
+// that token, not any post-restore rotation. The wire response still omits tokens
+// (see TestVMRestoreResultOmitsAgentToken); the state.json is daemon-private.
+func TestRestoreSnapshotPersistsRecoverableVMState(t *testing.T) {
 	cp := newTestCP(t)
 	cp.provisioner = &storage.Provisioner{WorkspaceDir: t.TempDir()}
 	snapshotID := "snap-restore-live"
@@ -2331,6 +2340,8 @@ func TestRestoreSnapshotDoesNotPersistRecoverableVMState(t *testing.T) {
 	meta.MemFilePath = filepath.Join(t.TempDir(), "memory.bin")
 	meta.StatFilePath = filepath.Join(t.TempDir(), "state.bin")
 	meta.AgentToken = "restored-token"
+	meta.TenantID = "tenant-1"
+	meta.EgressPolicy = "profile"
 	cp.snapshots[snapshotID] = meta
 
 	dmInfo := &storage.DMSnapshotInfo{
@@ -2366,15 +2377,40 @@ func TestRestoreSnapshotDoesNotPersistRecoverableVMState(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode restore response: %v", err)
 	}
-	if storage.VMStateExists(cp.workDir, resp.VMID) {
-		t.Fatalf("restored VM %q left recoverable state.json", resp.VMID)
+	if resp.SourceSnapshotID != snapshotID {
+		t.Fatalf("response source_snapshot_id = %q, want %q", resp.SourceSnapshotID, snapshotID)
 	}
+
 	restored := cp.vms[resp.VMID]
 	if restored == nil {
 		t.Fatalf("restored VM %q not registered", resp.VMID)
 	}
 	if restored.sourceSnapshotID != snapshotID {
 		t.Fatalf("sourceSnapshotID = %q, want %q", restored.sourceSnapshotID, snapshotID)
+	}
+
+	// v0.4.5: the recovery record must be persisted so RecoverVMs re-restores it.
+	if !storage.VMStateExists(cp.workDir, resp.VMID) {
+		t.Fatalf("restored VM %q did not persist a recovery state.json", resp.VMID)
+	}
+	state, err := storage.LoadVMState(cp.workDir, resp.VMID)
+	if err != nil {
+		t.Fatalf("LoadVMState: %v", err)
+	}
+	if state.SourceSnapshotID != snapshotID {
+		t.Errorf("persisted source_snapshot_id = %q, want %q", state.SourceSnapshotID, snapshotID)
+	}
+	if state.TenantID != "tenant-1" {
+		t.Errorf("persisted tenant_id = %q, want tenant-1", state.TenantID)
+	}
+	if state.EgressPolicy != "profile" {
+		t.Errorf("persisted egress_policy = %q, want profile", state.EgressPolicy)
+	}
+	if state.AgentToken != "restored-token" {
+		t.Errorf("persisted agent_token = %q, want restored-token (snapshot's baked token)", state.AgentToken)
+	}
+	if state.DiskMode != storage.DiskModeCOW {
+		t.Errorf("persisted disk_mode = %q, want %q", state.DiskMode, storage.DiskModeCOW)
 	}
 }
 
