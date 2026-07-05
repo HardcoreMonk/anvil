@@ -48,15 +48,17 @@ daemon 이름, HTTP API, 일부 환경 변수에는 `ephemera` 또는 `goose` �
 runtime으로 구분한다.
 
 버전별 ephemera 소스 snapshot은 Git tag로 공개된다. anvil main runtime baseline은
-upstream ephemera `v0.4.5`까지 병합·적응한 상태를 포함한다. 이 병합은 MicroVM
+upstream ephemera `v0.5.5`까지 병합·적응한 상태를 포함한다. 이 병합은 MicroVM
 lifecycle, flock resilience, token rotation, observability, v0.4 runtime 안정화,
-single-host flock lifecycle, streaming task, snapshot-restore auto-recovery 같은
-runtime substrate를 끌어올린 것이며, anvil의 제품 정체성을 ephemera로 바꾸는 작업이
-아니다. 즉 anvil main runtime baseline은 upstream ephemera `v0.4.5` adapted runtime
-stabilization을 포함하는 것이지, 수정 없는 ephemera `v0.4.5`가 아니다.
-`v0.4.0`-`v0.4.5`는 full KVM gate로 검증했고 `v0.4.4` flock broadcast의 MCP tool
-노출과 `v0.4.2` default COW 전환만 deferred다. 2026-07-02 기준 upstream `main`과
-최신 upstream tag는 `v0.7.0`이며, `v0.5.0`-`v0.7.0`은 별도 adoption review가 필요한
+single-host flock lifecycle, streaming task, snapshot-restore auto-recovery,
+v0.5 operator Web UI/config surface 같은 runtime·operator substrate를 끌어올린
+것이며, anvil의 제품 정체성을 ephemera로 바꾸는 작업이 아니다. 즉 anvil main runtime
+baseline은 upstream ephemera `v0.5.5` adapted runtime·operator support를 포함하는
+것이지, 수정 없는 ephemera `v0.5.5`가 아니다. `v0.4.0`-`v0.5.5`는 full KVM gate로
+검증했고 `v0.5.0` operator Web UI(`/ui/`, `/config/*`)는 runtime/operator surface로만
+채택하며(IronClaw MCP surface 아님), `v0.4.4` flock broadcast의 MCP tool 노출과
+`v0.4.2` default COW 전환만 deferred다. 2026-07-02 기준 upstream `main`과 최신
+upstream tag는 `v0.7.0`이며, `v0.6.0`-`v0.7.0`은 별도 adoption review가 필요한
 backlog다.
 upstream `v0.7.0`의 kernel SHA 검증, `waitForAgent` per-probe timeout,
 `EPHEMERA_HOME` hardening은 선별 backport됐지만 baseline sync 완료를 의미하지
@@ -106,20 +108,24 @@ anvil은 ephemera를 이름만 바꾼 프로젝트가 아니다. anvil은 IronCl
 
 ### Runtime Baseline
 
-anvil main runtime baseline은 upstream ephemera `v0.4.5`까지를 포함한다.
+anvil main runtime baseline은 upstream ephemera `v0.5.5`까지를 포함한다.
 
 | 구분 | 현재 기준 | anvil에서의 의미 |
 |---|---|---|
-| ephemera runtime baseline | `v0.4.5` | Firecracker VM lifecycle, cold-restart, flock recovery, token rotation, `/metrics`, `/stats`, `slog`, in-VM `gtcall`, webdev demo, v0.4.0-v0.4.5 runtime 안정화(auth/audit, COW spawn, dynamic flock lifecycle, streaming task, nested depth guard, watchdog status, snapshot-restore auto-recovery) 기반 |
-| upstream latest observed | `v0.7.0` (2026-07-02 확인) | `v0.5.0`-`v0.7.0`은 별도 검토 backlog |
+| ephemera runtime baseline | `v0.5.5` | Firecracker VM lifecycle, cold-restart, flock recovery, token rotation, `/metrics`, `/stats`, `slog`, in-VM `gtcall`, webdev demo, v0.4.0-v0.4.5 runtime 안정화(auth/audit, COW spawn, dynamic flock lifecycle, streaming task, nested depth guard, watchdog status, snapshot-restore auto-recovery), v0.5.0-v0.5.5 operator support(Web UI `/ui/`, `/config/*`, per-VM sizing `1` vCPU/`1024` MiB default) 기반 |
+| upstream latest observed | `v0.7.0` (2026-07-02 확인) | `v0.6.0`-`v0.7.0`은 별도 검토 backlog |
 | anvil product surface | `anvil_*` MCP tool, scheduler, tenant/egress, workload runner | IronClaw가 직접 사용하는 공개 실행 계약 |
 | namespace policy | `EPHEMERA_*`, `goose-*`, `ephemera_*` 유지 | upstream runtime 호환성. anvil 이름으로 일괄 rename하지 않는다. |
 
-ephemera `v0.3.2`-`v0.4.5`는 anvil 안에서 runtime baseline으로 채택/적응된 변경이다.
+ephemera `v0.3.2`-`v0.5.5`는 anvil 안에서 runtime baseline으로 채택/적응된 변경이다.
 `v0.4.4` flock broadcast는 daemon-only이고 `anvil_*` MCP tool로 노출하지 않으며,
 `v0.4.5` snapshot-restore auto-recovery에서 anvil은 live·persisted restored VM이
 참조하는 source snapshot의 `DELETE`를 `409`로 계속 막는다(upstream e2e 46c의 `200`
-orphan과 다른 의도적 divergence).
+orphan과 다른 의도적 divergence). `v0.5.0` operator Web UI(`/ui/`)와 `/config/*`는
+runtime/operator surface로만 채택하고 IronClaw `anvil_*` MCP surface로 노출하지 않으며,
+`cmd/anvil-mcp`는 v0.5 sync에서 변경되지 않았다. `v0.5.x`가 드러낸 upstream pooled
+agent-proxy 결함은 `64ec57c`가 request마다 fresh dial(`DisableKeepAlives`)로 고쳤다
+(upstream connection pooling과의 divergence).
 anvil release note에서는 이 내용을 "upstream runtime baseline"으로 분리해 기록하고,
 MCP/scheduler/workload/tenant/egress 같은 anvil 고유 기능과 섞어 제품명처럼 쓰지
 않는다.
@@ -502,6 +508,12 @@ Upstream ephemera feature matrix:
 | **Profile/model editing** (v0.5.0) | `GET /config/profiles` lists each profile's provider/model; `PUT /config/profiles/{name}` rewrites `GOOSE_PROVIDER`/`GOOSE_MODEL` in place (comments + `extensions:` preserved; API keys are never read or written here). The Settings screen drives these; an edit applies to the **next** VM (config is injected at spawn), and each VM records the provider/model it was spawned with (`VMInfo.model`). |
 | **Multi-turn conversation** (v0.5.0) | `POST /vms/{id}/tasks` accepts an optional `session`; with it, `goose-agent` runs goose as `-n <session> [--resume]`, so consecutive turns continue one goose chat session (context preserved). Omitting `session` keeps the original stateless one-shot behavior (`ephemera-ctl`, `gtcall`). |
 | **Graceful VM delete** (v0.5.0) | `DELETE /vms/{id}` first asks the in-VM agent to shut down cleanly (best-effort `POST /stop`, 2 s) before force-stopping Firecracker, then frees TAP/IP/disk and deregisters. The old "stop agent" action — which actually halted the whole guest while leaving the VM registered — was removed; Delete is the single teardown. |
+| **Profile config API** (v0.5.1) | `GET /config/providers` reports per-provider API-key **availability** only (never the key value); the Web UI adds snapshot/restore and per-profile sizing screens. Config data APIs sit behind bearer auth when configured. |
+| **Orchestration UI + Activity Feed** (v0.5.2) | The Web console gains a flock (Agent Group) orchestration view, an Activity Feed (Town Wall) panel, and an operator-only single-agent Send-task action. |
+| **Sizing presets + per-VM sizing** (v0.5.3) | Profiles carry a sizing **preset**; `POST /vms` honors per-VM `EPHEMERA_VCPU_COUNT` / `EPHEMERA_MEM_SIZE_MIB` (struct `VcpuCount`/`MemSizeMib`), and snapshot metadata records the VM's sizing (legacy snapshots fall back to 2 vCPU / 2048 MiB). The upstream **default drops to 1 vCPU / 1024 MiB** (was 2/2048). *anvil adopts the 1/1024 default (KVM-verified, full e2e 3× 316✓).* Flock members still size from `LookupProfile` defaults and do **not** yet honor per-profile sizing overrides — known follow-up. |
+| **Profile guards** (v0.5.3) | Deleting a profile a running VM was spawned from is refused `409`; the `default` profile is reserved; path traversal in a profile name is rejected. |
+| **System prompt editor** (v0.5.4) | `GET/PUT/DELETE /config/profiles/{name}` edit a profile's `system.md` only (64 KiB cap); the Web UI adds a system-prompt editor and an operator-only feed. |
+| **System & Monitoring console** (v0.5.5) | The Web console adds System/Monitoring endpoints plus an `API_TOKEN` warning; `GET /config/clients` lists control-plane client **names + expiry** only (never the token). Town Wall author migrated to `SystemAuthor`; snapshot-restore agent-wait raised 30 s → 60 s. |
 
 ---
 

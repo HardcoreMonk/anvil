@@ -46,9 +46,9 @@
   재연결하고 repaired metadata를 다시 persist한다.
 - `webdev_demo.sh`는 `POST /flocks` 응답의 `agent_tokens`를 읽지 않고, orchestrator
   `vm_id`를 사용해 control-plane proxy `POST /vms/{vm_id}/tasks`로 brief를 보낸다.
-- 현재 sync branch의 anvil runtime baseline은 upstream `v0.5.0`까지 반영한다.
-  2026-07-02 기준 upstream latest observed는 `v0.7.0`이며, `v0.6.0`-`v0.7.0`은
-  별도 adoption review backlog로 둔다.
+- anvil main runtime baseline은 upstream ephemera `v0.5.5` adapted runtime·operator
+  support를 포함한다(수정 없는 `v0.5.5`가 아니다). 2026-07-02 기준 upstream latest
+  observed는 `v0.7.0`이며, `v0.6.0`-`v0.7.0`은 별도 adoption review backlog로 둔다.
 - upstream `v0.5.0` (operator Web UI + `/config/profiles` + multi-turn agent
   `session` + graceful VM delete)를 sync 한다. anvil adaptation은 runtime/operator
   surface를 IronClaw MCP surface와 분리해서 유지한다:
@@ -63,6 +63,33 @@
     spawn-time `provider`/`model` snapshot 필드를 additive로 추가한다. `cmd/anvil-mcp`
     tool surface는 그대로다.
   - anvil `ANVIL_*` alias와 `EPHEMERA_*` canonical env 이름을 유지한다.
+- upstream `v0.5.1`-`v0.5.5` (profile config API 확장, snapshot/restore UI,
+  orchestration UI/Activity Feed, sizing preset, `system.md` 편집, System console)를
+  sync 한다. anvil adaptation:
+  - `/config/providers`는 provider별 API key 존재 여부만, `/config/clients`는
+    control-plane client 이름과 만료만 반환하고 key/token 값은 노출하지 않는다
+    (sentinel test).
+  - profile `system.md` 편집은 `system.md`만 대상으로 하고 `64 KiB` cap을 적용하며,
+    profile delete는 running VM이 그 profile을 쓰면 `409`, default profile은 예약,
+    path traversal은 거부한다.
+  - sizing preset과 per-VM `EPHEMERA_VCPU_COUNT`/`EPHEMERA_MEM_SIZE_MIB`(struct
+    `VcpuCount`/`MemSizeMib`)를 지원한다. snapshot metadata가 per-VM sizing을 기록하고
+    legacy snapshot(0)은 restore 시 historical 2 vCPU / 2048 MiB로 fallback한다.
+  - Town Wall author를 `SystemAuthor`로 migration하고, restore agent-wait를 30s에서
+    60s로 늘린다.
+- anvil sizing 결정 (KVM 근거로 승인): `v0.5.3`부터 upstream default VM sizing
+  `1` vCPU / `1024` MiB를 채택한다(이전 2/2048). full e2e 3× `316✓`가 1024에서
+  통과했다. flock member spawn이 per-profile `EPHEMERA_VCPU_COUNT`/
+  `EPHEMERA_MEM_SIZE_MIB` override를 무시하고 `LookupProfile` default로만 sizing하는
+  upstream-inherited gap은 follow-up으로 기록한다.
+- Phase 2 KVM gate 중 고친 latent defect (`64ec57c`, 분류: `v0.5.x`
+  `gracefulAgentStop`이 v0.2.0부터 잠재하던 upstream pooled-client 결함을 노출):
+  guest IP가 VM destroy/create/restore 사이에 재활용되는데 shared keep-alive agent
+  proxy client가 destroy된 VM으로 향하던 stale pooled connection을 재사용해, restored
+  VM의 첫 proxied `/tasks`가 hang하거나 `502`(peer RST)로 실패했다(Phase 2 gate
+  step 15 "Run task on restored VM"). fix는 proxy client의 keep-alive pooling을
+  끄고(`DisableKeepAlives`) request마다 fresh dial하며 connection-reuse guard test를
+  추가한다. upstream connection pooling과의 의도적 divergence이며 upstream 기여 후보다.
 - upstream `v0.4.4` (streaming `/tasks`, nested-invocation depth guard,
   watchdog status route, flock broadcast, goose-agent slog migration)를 sync
   한다. anvil adaptation: buffered `POST /vms/{id}/tasks` 기본 계약(`stream=1`
@@ -133,6 +160,24 @@ v0.4 sync Phase 1 gate (upstream `v0.4.4`/`v0.4.5` 적응):
 - 전제: KVM gate는 working directory에 gitignore된 로컬 operator 파일
   `configs/goose.yaml`, `configs/goose-secrets.yaml`이 있어야 한다. 없으면
   `POST /vms`가 config injection 단계에서 `500`으로 실패한다.
+
+v0.5 sync Phase 2 gate (upstream `v0.5.0`-`v0.5.5` operator support 적응):
+
+- CI-safe gate all green: `git diff --check`, targeted test group, web build 재현
+  가능(`cmd/goose-daemon/uidist/` drift 없음), `go test ./... -count=1` (EXIT=0),
+  `go build ./cmd/{goose-daemon,anvil-mcp,anvil-scheduler}`.
+- guard/sentinel test: `config_api_anvil_test.go`(`/config/profiles` auth·secret
+  sentinel, `/config/providers`·`/config/clients` secret 비노출, profile in-use
+  `409`), proxy connection-reuse guard.
+- 실제 KVM host: `sudo bash e2e_test.sh` `316✓ / 0✗` ×3(step 59 real-LLM smoke만
+  provider key 부재로 skip). `scripts/anvil-mcp-e2e.sh` lifecycle PASS·flock PASS,
+  `scripts/vm-workload-e2e.sh` PASS.
+- `scripts/anvil-mcp-e2e.sh semantic`은 key-free 구간(workspace copy-in/out, task
+  proxy, cleanup)이 모두 `200`이고 마지막 LLM-echo substep만 로컬 Google API key가
+  invalid해 실패했다(provider-key 의존, 코드 결함 아님).
+- gate coverage correction: Phase 1 KVM gate는 `e2e_test.sh`만 실행하고
+  `anvil-mcp-e2e.sh`(3개 모드)와 `vm-workload-e2e.sh`를 누락했다. 이 스크립트들은 현재
+  HEAD(post-v0.5.5+fix)에서 처음 실행돼 두 baseline의 superset을 검증했다.
 
 ---
 

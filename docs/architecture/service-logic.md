@@ -2,7 +2,7 @@
 
 ## 상태
 
-- 기준 버전: upstream ephemera `v0.4.5` + anvil runtime control-plane updates
+- 기준 버전: upstream ephemera `v0.5.5` + anvil runtime control-plane updates
 - 범위: ephemera daemon HTTP 동작, VM lifecycle, agent proxy, snapshot lifecycle,
   Goosetown flock/Town Wall, tenant/egress/audit/observability endpoint, guest agent 동작
 - 제외 범위: IronClaw MCP client 동작. 해당 내용은
@@ -46,6 +46,10 @@ control plane daemon은 하나의 HTTP service를 노출한다.
 | `/flocks/{flock_id}/wall` | `cmd/goose-daemon/orchestrator_api.go` | Town Wall SSE stream |
 | `/flocks/{flock_id}/wall/history` | `cmd/goose-daemon/orchestrator_api.go` | Town Wall history 조회 |
 | `/flocks/{flock_id}/broadcast` | `cmd/goose-daemon/orchestrator_api.go` | flock 전 member agent에 prompt scatter-gather. daemon-only endpoint이며 `anvil_*` MCP tool로 노출하지 않는다 |
+| `/ui/` | `cmd/goose-daemon/config_api.go`, `cmd/goose-daemon/uidist/` | embedded operator Svelte SPA(정적 bundle + login page). auth chain 밖에 두는 유일한 surface. runtime/operator surface이며 IronClaw MCP surface가 아니다 |
+| `/config/profiles`, `/config/profiles/{name}` | `cmd/goose-daemon/config_api.go` | profile `GOOSE_PROVIDER`/`GOOSE_MODEL`·sizing·`system.md`(`64 KiB` cap) read/write. `goose-secrets.yaml`은 read/write하지 않음(sentinel test). delete in-use → `409`, default profile 예약, traversal 거부. auth 설정 시 bearer 뒤 |
+| `/config/providers` | `cmd/goose-daemon/config_api.go` | provider별 API key 존재 여부만 반환(key 값 비노출, sentinel test) |
+| `/config/clients` | `cmd/goose-daemon/config_api.go` | control-plane client 이름과 만료만 반환(token 값 비노출, sentinel test) |
 
 VM 내부의 `goose-agent`는 다음 endpoint를 제공한다.
 
@@ -104,6 +108,12 @@ ephemera 배포의 동작을 보존하면서 anvil 운영 문서에서 `ANVIL_*`
 있게 한다.
 
 ## 제어 평면 인증
+
+operator Web UI(`v0.5.0`)에서 auth 밖에 두는 surface는 `/ui/`(정적 bundle + login
+page)뿐이다. `/config/profiles`·`/config/providers`·`/config/clients`를 포함한 모든
+data API는 auth 설정 시 bearer token 뒤에 유지한다(guard `config_api_anvil_test.go`).
+`/config/*` surface는 `goose-secrets.yaml` 값(API key)이나 control-plane token 값을
+응답에 담지 않는다(sentinel test).
 
 모든 control-plane route는 `authMiddleware`로 감싼다.
 
@@ -417,9 +427,18 @@ proxyAgentEndpoint()
   -> incoming context와 body로 새 request 생성
   -> Content-Type 보존
   -> /health가 아니면 "Authorization: Bearer <agent_token>" 주입
-  -> cp.agentHTTPClient로 request 전송
+  -> cp.agentHTTPClient(request마다 fresh dial, `DisableKeepAlives`)로 request 전송
   -> response header, status code, body를 caller에게 복사
 ```
+
+`cp.agentHTTPClient`는 connection pooling을 끈다(`DisableKeepAlives`, `64ec57c`).
+guest IP는 VM destroy/create/restore 사이에 재활용되는데, 공유 keep-alive client가
+destroy된 VM으로 향하던 stale pooled connection을 재사용하면(특히 `v0.5.x`
+`gracefulAgentStop`이 넓힌 window에서) restored VM의 첫 proxied `/tasks`가 hang하거나
+`502`(peer RST)로 실패한다. proxied body는 rewindable하지 않아 net/http가 재시도할 수
+없으므로, request마다 새로 dial해 이 재사용을 원천 차단한다. 이는 v0.2.0부터 잠재하던
+upstream pooled-client 결함을 고친 것으로, upstream connection pooling과의 의도적
+divergence이며 upstream 기여 후보다.
 
 proxy는 외부 caller에게 하나의 인증 모델만 노출한다. caller는 control plane에만
 인증하고, daemon이 필요한 guest agent token을 내부적으로 주입한다.
@@ -479,6 +498,8 @@ createSnapshot()
 - diff snapshot도 rootfs는 full copy한다. memory만 sparse/diff다.
 - `metadata.json`은 tenant ID, egress policy, original TAP name, MAC, vsock path,
   agent token, disk path, memory path, state path, base snapshot ID를 보존한다.
+  `v0.5.3`부터 per-VM `VcpuCount`/`MemSizeMib`도 기록하며, legacy snapshot(0 값)은
+  restore 시 historical 2 vCPU / 2048 MiB로 fallback한다.
 - snapshot API response에는 `agent_token`을 노출하지 않는다.
 
 ### Snapshot token 수명 주기

@@ -2,11 +2,11 @@
 
 ## 상태
 
-- 기준 버전: upstream ephemera `v0.4.5` + anvil runtime control-plane updates
+- 기준 버전: upstream ephemera `v0.5.5` + anvil runtime control-plane updates
 - anvil 관점: ephemera runtime은 IronClaw 결합 프로젝트의 기반 실행 계층
 - upstream: `https://github.com/steve-seungeui/ephemera`. anvil fork network를
   유지하며 ephemera runtime version을 merge로 반영한다.
-- upstream `v0.3.2`-`v0.4.5`는 anvil main runtime baseline으로 반영되어 있다. `v0.3.2`는
+- upstream `v0.3.2`-`v0.5.5`는 anvil main runtime baseline으로 반영되어 있다. `v0.3.2`는
   cold-restart, `v0.3.3`은 watchdog/restart/CP-token polish, `v0.3.4`는 token
   hot rotation과 watchdog tunable, `v0.3.5`는 metrics/stats/slog 관측성,
   `v0.3.6`은 in-VM `gtcall`, multi-line-safe `gtwall`, Goose JSON output parsing,
@@ -16,7 +16,12 @@
   `/tasks?stream=1`(buffered 기본 계약 유지), nested task depth guard
   (`EPHEMERA_MAX_TASK_DEPTH`/`508`), read-only `GET /watchdog/status`, daemon-only
   flock broadcast를 제공하고, `v0.4.5`는 snapshot-restore auto-recovery
-  (`recoverRestoredVM`/`reRestoreMachine`)를 제공한다.
+  (`recoverRestoredVM`/`reRestoreMachine`)를 제공한다. `v0.5.0`-`v0.5.5`는 operator
+  Web UI(`/ui/`, embedded `cmd/goose-daemon/uidist/`), `/config/*` profile/provider/
+  client/system-prompt surface, per-VM sizing(`EPHEMERA_VCPU_COUNT`/
+  `EPHEMERA_MEM_SIZE_MIB`, default `1` vCPU / `1024` MiB), `SystemAuthor` migration을
+  제공한다. Web UI와 `/config/*`는 runtime/operator surface이고 IronClaw MCP surface가
+  아니다.
 - 저장소/모듈 이름: `ephemera`
 - 런타임 소유 파일:
   - `cmd/goose-daemon/`
@@ -203,8 +208,8 @@ Cold-spawn VM은 `vm.StartMachine`으로 시작한다.
 
 | 설정 | 값 |
 |---|---|
-| vCPU | `2` |
-| Memory | `2048 MiB` |
+| vCPU | `1` (default; profile/per-VM `EPHEMERA_VCPU_COUNT` override. `v0.5.3`부터 upstream default 1, 이전 2) |
+| Memory | `1024 MiB` (default; profile/per-VM `EPHEMERA_MEM_SIZE_MIB` override. `v0.5.3`부터 upstream default 1024, 이전 2048) |
 | Root drive | VM별 ext4 clone |
 | Network | `goose-br0`에 연결된 TAP interface 1개 |
 | IP assignment | DHCP 없이 kernel `ip=` boot argument |

@@ -2,7 +2,7 @@
 
 ## 상태
 
-- 기준 버전: upstream ephemera `v0.4.5` + anvil runtime foundation
+- 기준 버전: upstream ephemera `v0.5.5` + anvil runtime foundation
 - MCP 버전: v1 stdio adapter
 - Entrypoint: `cmd/anvil-mcp`
 - 런타임 대상: ephemera control plane daemon HTTP API
@@ -707,11 +707,17 @@ HTTP MCP transport도 이 작업 범위 밖이다. v2 후보 논의에서는 다
 - Town Wall SSE stream의 MCP tool 노출
 - flock snapshot/restore
 - flock broadcast의 MCP tool 노출 (daemon-only, 이 phase deferred)
+- operator Web UI(`/ui/`)와 `/config/*`(profile/provider/client/system-prompt)
+  surface의 MCP tool 노출 (`v0.5.0`-`v0.5.5` runtime/operator 표면, MCP 아님)
 - flock alias 또는 `session_name` 재사용
 - routed members-only flock의 Town Wall, cross-host `gtcall`, guest flock context
   injection, daemon `FlockManager` registration
 
 위 항목은 v1의 숨은 동작이 아니라 향후 MCP v2 설계 후보로 남긴다.
+
+`v0.5.0`-`v0.5.5` operator sync에서 `cmd/anvil-mcp` tool surface는 변경되지 않았다.
+daemon `VMInfo`가 얻은 additive `provider`/`model` 필드는 daemon 응답과 operator Web
+UI만 소비하며, IronClaw `anvil_*` tool 계약이나 tool 개수를 바꾸지 않는다.
 
 ## 소스 참조
 

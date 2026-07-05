@@ -83,9 +83,10 @@ upstream 변경 자체와 anvil에서 해결한 conflict/적응 작업을 review
 
 ## 현재 runtime baseline
 
-anvil main runtime baseline은 upstream ephemera `v0.4.5` tag까지 병합·적응한 runtime을
+anvil main runtime baseline은 upstream ephemera `v0.5.5` tag까지 병합·적응한 runtime을
 포함한다. `v0.3.2`-`v0.3.6`은 이전 release(`anvil-v0.3.x`)에서 채택한 baseline이고,
-`v0.4.0`-`v0.4.5`는 이 v0.4 sync로 병합·적응해 full KVM gate로 검증한 baseline이다.
+`v0.4.0`-`v0.4.5`는 v0.4 sync로, `v0.5.0`-`v0.5.5`는 v0.5 operator sync로 병합·적응해
+full KVM gate로 검증한 baseline이다.
 2026-07-02 기준 upstream `main`과 최신 upstream tag는 `v0.7.0`까지 진행되어 있다.
 `v0.3.2`-`v0.3.5` 병합 commit은 `1ebe201 Merge upstream/main`이고, `v0.3.6`은
 `v0.3.6` tag commit을 merge한다.
@@ -117,6 +118,25 @@ snapshot의 `DELETE`를 `409`로 막는다. upstream e2e 46c는 이 `DELETE`를 
 `e2e_test.sh`에 divergence 주석) 같은 divergence를 [`docs/ADR_INDEX.md`](../ADR_INDEX.md)
 Section 4에도 `v0.4.5` `adapted`로 기록한다.
 
+`v0.5.0`-`v0.5.5` operator sync 채택 상태(이 v0.5 sync의 merge/adapt commit 기준):
+
+| tag | 상태 | anvil adaptation 요지 |
+|---|---|---|
+| `v0.5.0` | 병합(`884e832`)/적응(`726a59a`), `adapted` | operator Web UI(`cmd/goose-daemon/uidist/` embedded) + `/config/profiles` + multi-turn session + graceful delete. runtime/operator surface로만 채택(IronClaw MCP 아님). `/ui/`(정적 bundle + login)만 auth 밖, data API는 bearer 뒤. `/config/profiles`는 `goose-secrets.yaml` 비노출(sentinel). `cmd/anvil-mcp` 불변, `VMInfo` provider/model additive. |
+| `v0.5.1`-`v0.5.5` | 병합(`bab1e9d`..`7f207a0`)/적응(`b0b4c48`, `225a845`), `adapted` | `/config/providers`(key 존재 여부)·`/config/clients`(이름+만료) secret 비노출, `system.md` 편집(`64 KiB`), profile delete in-use `409`/default 예약/traversal 거부, sizing preset + per-VM `VcpuCount`/`MemSizeMib`(snapshot metadata 기록, legacy 2/2048 fallback), `SystemAuthor` author migration, restore agent-wait 30s→60s. |
+
+의도적 divergence (`adapted`, keep-alive): `v0.5.x` `gracefulAgentStop`이 v0.2.0부터
+잠재하던 upstream shared pooled agent proxy client 결함을 드러냈다(guest IP 재활용 시
+stale keep-alive connection 재사용 → restored VM `/tasks` hang/`502`). `64ec57c`가
+request마다 fresh dial(`DisableKeepAlives`)하고 connection-reuse guard test를 추가한다.
+upstream connection pooling과의 divergence이며 upstream 기여 후보다. 같은 divergence를
+[`docs/ADR_INDEX.md`](../ADR_INDEX.md) Section 4에도 기록한다.
+
+sizing 결정: `v0.5.3`부터 anvil은 upstream default VM sizing `1` vCPU / `1024` MiB를
+채택한다(이전 2/2048, KVM 근거로 승인, full e2e 3× `316✓`). flock member spawn이
+per-profile `EPHEMERA_VCPU_COUNT`/`EPHEMERA_MEM_SIZE_MIB` override를 무시하고
+`LookupProfile` default로만 sizing하는 upstream-inherited gap은 follow-up이다.
+
 `v0.3.2`/`v0.3.3`의 세부 변경 근거와 anvil 채택 검토 포인트는
 [`docs/analysis/08-v0.3.2-v0.3.3-upstream-change-review.md`](../analysis/08-v0.3.2-v0.3.3-upstream-change-review.md)를
 historical analysis로 보존한다. 현재 채택 상태는
@@ -126,13 +146,14 @@ historical analysis로 보존한다. 현재 채택 상태는
 다음 sync 순서는 다음 기준으로 관리한다.
 
 1. `v0.4.0`-`v0.4.5` runtime 안정화 변경은
-   [`docs/superpowers/plans/2026-06-10-ephemera-v0.4-runtime-sync.md`](../superpowers/plans/2026-06-10-ephemera-v0.4-runtime-sync.md)의
-   계획대로 이 v0.4 sync에서 병합/적응·검증을 마쳤다(위 채택 상태 표 참조).
-   남은 항목은 `v0.4.2` default COW 전환과 `v0.4.4` flock broadcast의 MCP tool
-   노출이며, 각각 KVM burn-in과 tenant/rate/audit 설계 뒤 결정한다.
-2. `v0.5.0`-`v0.7.0`은 product/operator Web UI, MCP Gateway,
-   installer/transcript/hardening 계열 변경으로 분류하고, `v0.4.x` sync 이후 별도
-   adoption review 문서를 먼저 작성한다.
+   [`docs/superpowers/plans/2026-06-10-ephemera-v0.4-runtime-sync.md`](../superpowers/plans/2026-06-10-ephemera-v0.4-runtime-sync.md)
+   계획대로 v0.4 sync에서, `v0.5.0`-`v0.5.5` operator support 변경은 v0.5 operator
+   sync에서 각각 병합/적응·검증을 마쳤다(위 채택 상태 표 참조). 남은 항목은 `v0.4.2`
+   default COW 전환, `v0.4.4` flock broadcast의 MCP tool 노출, flock member spawn의
+   per-profile sizing 존중이며, 각각 KVM burn-in과 tenant/rate/audit·sizing 경로 설계
+   뒤 결정한다.
+2. `v0.6.0`-`v0.7.0`은 MCP Gateway, installer/transcript/hardening 계열 변경으로
+   분류하고, 별도 adoption review 문서를 먼저 작성한다.
 3. upstream `v0.7.0`의 kernel SHA 검증, `waitForAgent` per-probe timeout,
    `EPHEMERA_HOME`은 baseline sync와 독립적인 hardening backport로 이미 반영됐지만,
    이것을 `v0.7.0` 전체 채택으로 표기하지 않는다.

@@ -64,27 +64,43 @@
 | `v0.4.3` | adapted | dynamic flock membership, pause/resume, per-flock `max_agents`, Town Wall filter/rotation single-host lifecycle은 채택한다. routed members-only cross-host flock에는 그대로 적용하지 않는다. |
 | `v0.4.4` | adapted, broadcast MCP exposure deferred | streaming `/tasks`(buffered 기본 계약 유지), nested depth guard(`EPHEMERA_MAX_TASK_DEPTH`, `508`), `GET /watchdog/status`, goose-agent slog는 채택한다. flock broadcast는 daemon API/CLI로만 두고 `anvil_*` MCP tool 노출은 tenant/rate/audit 설계 전까지 deferred다(guard로 고정). |
 | `v0.4.5` | adapted | snapshot-restore auto-recovery(`recoverRestoredVM`/`reRestoreMachine`)를 채택하고 restore state에 `tenant_id`/`egress_policy`를 persist하되 응답 token redaction은 유지한다. anvil은 live·persisted restored VM이 참조하는 source snapshot의 `DELETE`를 `409`로 막아 upstream e2e 46c의 `200` orphan 동작과 의도적으로 divergent하다(먼저 VM을 삭제한 뒤 snapshot 삭제). |
+| `v0.5.0` | adapted | operator Web UI(Svelte SPA, EN/KO, `cmd/goose-daemon/uidist/` embedded), `/config/profiles`, multi-turn goose session, graceful VM delete를 채택한다. Web UI는 runtime/operator surface이고 IronClaw MCP surface가 아니다 — `/ui/`(정적 bundle + login)만 auth 밖, 모든 data API는 bearer 뒤(guard `config_api_anvil_test.go`). `/config/profiles`는 `goose-secrets.yaml`을 절대 read/write하지 않는다(sentinel test). `cmd/anvil-mcp`는 그대로이고 `VMInfo`는 additive `provider`/`model` 필드만 추가한다. |
+| `v0.5.1`-`v0.5.5` | adapted | `/config/providers`(key 존재 여부만), `/config/clients`(이름+만료만)를 sentinel test로 secret 비노출 확인. `system.md`-only prompt 편집(`64 KiB` cap), profile delete in-use → `409`, default profile 예약, traversal 거부. sizing preset + per-VM `VcpuCount`/`MemSizeMib`(snapshot metadata에 기록, legacy → 2/2048 fallback). Town Wall `SystemAuthor` author migration. restore agent-wait 30s→60s. |
 
-`v0.4.0`-`v0.4.5`는 anvil main runtime baseline으로 병합·적응되었고 full KVM gate로
-검증됐다. 위 분류는 Task 8 문서 반영 기준이며, 상세 병합 근거는
-[`docs/analysis/10-v0.4.0-v0.4.5-runtime-stabilization-adoption.md`](analysis/10-v0.4.0-v0.4.5-runtime-stabilization-adoption.md)에
+`v0.4.0`-`v0.5.5`는 anvil main runtime baseline으로 병합·적응되었고 full KVM gate로
+검증됐다(`v0.4.x`는 Task 8, `v0.5.x`는 Task 4 문서 반영 기준). 상세 병합 근거는
+[`docs/analysis/10-v0.4.0-v0.4.5-runtime-stabilization-adoption.md`](analysis/10-v0.4.0-v0.4.5-runtime-stabilization-adoption.md)와
+Phase 2 handoff([`docs/operations/2026-07-05-ephemera-v0.5-operator-sync-handoff.md`](operations/2026-07-05-ephemera-v0.5-operator-sync-handoff.md))에
 보존한다.
+
+sizing 결정: `v0.5.3`부터 anvil은 upstream default VM sizing `1` vCPU / `1024` MiB를
+채택한다(이전 2/2048, KVM 근거로 승인, full e2e 3× `316✓`). snapshot metadata가 per-VM
+sizing을 기록하고 legacy snapshot은 2/2048로 fallback한다. flock member spawn이
+per-profile `EPHEMERA_VCPU_COUNT`/`EPHEMERA_MEM_SIZE_MIB` override를 무시하고
+`LookupProfile` default로만 sizing하는 upstream-inherited gap은 follow-up이다.
+
+keep-alive divergence(`adapted`): `v0.5.x` `gracefulAgentStop`이 v0.2.0부터 잠재하던
+upstream shared pooled agent proxy client 결함을 드러냈다(guest IP 재활용 시 stale
+keep-alive connection 재사용 → restored VM `/tasks` hang/`502`). `64ec57c`가 request마다
+fresh dial(`DisableKeepAlives`)하고 connection-reuse guard test를 추가한다. upstream
+connection pooling과의 의도적 divergence이며 upstream 기여 후보다. 같은 divergence를
+[`docs/operations/upstream-sync-policy.md`](operations/upstream-sync-policy.md)에도
+기록한다.
 
 ---
 
 ## 5. 다음 upstream sync 후보 예비 분류
 
-`v0.4.0`-`v0.4.5`는 Section 4의 baseline 채택 상태로 이동했다. 다음 upstream tag는
+`v0.4.0`-`v0.5.5`는 Section 4의 baseline 채택 상태로 이동했다. 다음 upstream tag는
 아직 anvil runtime baseline으로 병합되지 않았다. 2026-07-02 기준 upstream `main`과
 최신 upstream tag는 `v0.7.0`이다.
 
-`v0.5.0`-`v0.7.0`은 아직 상세 adoption review가 끝나지 않았다. 다음 분류는 sync
+`v0.6.0`-`v0.7.0`은 아직 상세 adoption review가 끝나지 않았다. 다음 분류는 sync
 전 backlog triage 기준이며, 실제 채택 상태는 별도 analysis 문서와 sync branch 검증
 뒤 확정한다.
 
 | upstream tag 범위 | 현재 상태 | 적용 전 검토 요약 |
 |---|---|---|
-| `v0.5.0`-`v0.5.5` | pre-review | product/operator Web UI 계열로 보인다. anvil 공개 표면으로 승격하기 전 IronClaw 전용 경계, 인증, 운영 노출 범위를 별도로 판단해야 한다. |
 | `v0.6.0`-`v0.6.4` | pre-review | MCP Gateway 계열로 보인다. anvil MCP adapter, IronClaw 통합 경계, multi-host runtime 계획과 겹칠 수 있어 보안/권한 설계 review가 필요하다. |
 | `v0.7.0` | pre-review/backported-hardening | installer, transcript, hardening 계열로 보인다. kernel SHA 검증, `waitForAgent` per-probe timeout, `EPHEMERA_HOME`은 baseline sync와 독립 backport로 반영됐지만, tag 전체는 아직 채택하지 않았다. |
 

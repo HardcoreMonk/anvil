@@ -135,12 +135,13 @@ scripts/anvil-mcp-e2e.sh flock
 
 ### 현재 upstream runtime baseline
 
-anvil main runtime baseline은 upstream ephemera `v0.4.5`까지 병합·적응한 runtime을
+anvil main runtime baseline은 upstream ephemera `v0.5.5`까지 병합·적응한 runtime을
 포함한다. `v0.3.2`-`v0.3.6`은 이전 release가 채택한 baseline이고, `v0.4.0`-`v0.4.5`는
-이 v0.4 sync에서 병합·적응해 full KVM gate로 검증했다. upstream `main`과 최신
-upstream tag는 `v0.7.0`까지 진행되어 있으나 `v0.5.0`-`v0.7.0`은 아직 anvil baseline으로
-병합하지 않았다. 새 anvil release 후보가 이 baseline을 포함한다면 release 본문에는
-upstream runtime 변경과 anvil product 변경을 분리해서 적는다.
+v0.4 sync, `v0.5.0`-`v0.5.5`는 v0.5 operator sync에서 병합·적응해 full KVM gate로
+검증했다. upstream `main`과 최신 upstream tag는 `v0.7.0`까지 진행되어 있으나
+`v0.6.0`-`v0.7.0`은 아직 anvil baseline으로 병합하지 않았다. 새 anvil release 후보가
+이 baseline을 포함한다면 release 본문에는 upstream runtime 변경과 anvil product 변경을
+분리해서 적는다.
 
 - upstream `v0.3.2`: live VM cold-restart, `vms/<vm_id>/state.json`, orphan cleanup,
   기존 TAP/IP/MAC 재예약, graceful daemon shutdown 시 rootfs/state 보존.
@@ -166,6 +167,20 @@ upstream runtime 변경과 anvil product 변경을 분리해서 적는다.
 - upstream `v0.4.5`: snapshot-restore auto-recovery(daemon restart 시 source
   snapshot에서 re-restore). anvil은 live·persisted restored VM이 참조하는 source
   snapshot `DELETE`를 `409`로 막아 upstream e2e 46c의 `200` orphan과 divergent하다.
+- upstream `v0.5.0`: operator Web UI(`/ui/`, embedded `cmd/goose-daemon/uidist/`) +
+  `/config/profiles` + multi-turn goose session + graceful VM delete. Web UI는
+  runtime/operator surface(IronClaw MCP 아님), `/ui/`만 auth 밖·data API는 bearer 뒤,
+  `/config/profiles`는 `goose-secrets.yaml` 비노출.
+- upstream `v0.5.1`-`v0.5.5`: `/config/providers`·`/config/clients`(secret 비노출),
+  `system.md` 편집(64 KiB), profile guard(in-use `409`/default 예약/traversal 거부),
+  sizing preset + per-VM `VcpuCount`/`MemSizeMib`, `SystemAuthor`, restore wait 60s.
+- anvil sizing 결정: default VM sizing `1` vCPU / `1024` MiB(v0.5.3 이전 2/2048,
+  KVM 근거로 승인). flock member spawn의 per-profile sizing override 미존중 gap은
+  follow-up으로 기록한다.
+- anvil keep-alive divergence(`64ec57c`): proxy agent client가 request마다 fresh
+  dial(`DisableKeepAlives`)한다. `v0.5.x` `gracefulAgentStop`이 드러낸 v0.2.0-since
+  pooled-client 결함(guest IP 재활용 시 stale connection → restored VM `/tasks`
+  hang/`502`)을 막는 upstream pooling divergence이며 upstream 기여 후보다.
 - anvil adaptation: `agent_token`과 control-plane token이 MCP output, audit, metrics,
   trace, replay fixture, release artifact에 노출되지 않도록 수정 또는 검증한 내용.
   `ephemera_*` metric namespace와 `EPHEMERA_*` env는 runtime compatibility로
@@ -182,10 +197,34 @@ v0.4 sync Phase 1 KVM gate 결과와 전제:
   `configs/goose.yaml`, `configs/goose-secrets.yaml`이 있어야 한다. 없으면
   `POST /vms`가 config injection 단계에서 `500`으로 실패한다.
 
+v0.5 sync Phase 2 KVM gate — 필수 스크립트(재발 방지):
+
+KVM runtime/operator 변경 release 후보는 아래 스크립트를 **모두** 실행한다. Phase 1은
+`e2e_test.sh`만 실행하고 `anvil-mcp-e2e.sh`(3개 모드)와 `vm-workload-e2e.sh`를 누락했다.
+이 목록은 그 누락이 재발하지 않도록 게시 전 필수 항목으로 고정한다.
+
+```bash
+sudo bash e2e_test.sh
+scripts/anvil-mcp-e2e.sh lifecycle
+scripts/anvil-mcp-e2e.sh semantic
+scripts/anvil-mcp-e2e.sh flock
+sudo -n bash scripts/vm-workload-e2e.sh
+```
+
+Phase 2 결과:
+
+- CI-safe gate all green: `git diff --check`, targeted test group, web build 재현
+  가능(`cmd/goose-daemon/uidist/` drift 없음), `go test ./... -count=1`(EXIT=0),
+  `go build ./cmd/{goose-daemon,anvil-mcp,anvil-scheduler}`.
+- KVM: `sudo bash e2e_test.sh` `316✓ / 0✗` ×3(step 59 real-LLM smoke만 provider-key
+  부재로 skip). `anvil-mcp-e2e.sh` lifecycle PASS·flock PASS, `vm-workload-e2e.sh`
+  PASS.
+- `anvil-mcp-e2e.sh semantic`은 key-free 구간(workspace copy-in/out, task proxy,
+  cleanup)이 모두 `200`이고 마지막 LLM-echo substep만 로컬 Google API key가 invalid해
+  실패했다. provider-key 의존 실패이며 코드 결함이 아니다(계획대로 기록).
+
 미병합 upstream review 상태:
 
-- `v0.5.0`-`v0.5.5`: product/operator Web UI 계열로 별도 공개 경계 검토 전까지
-  anvil release baseline에 포함하지 않는다.
 - `v0.6.0`-`v0.6.4`: MCP Gateway 계열로 anvil MCP adapter, IronClaw 통합 경계,
   권한 모델과 충돌하거나 중복될 수 있어 별도 설계 review가 필요하다.
 - `v0.7.0`: installer/transcript/hardening 계열로 보인다. kernel SHA 검증,
