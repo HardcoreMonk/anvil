@@ -9,6 +9,8 @@
   import VMDetail from './components/VMDetail.svelte'
   import Snapshots from './components/Snapshots.svelte'
   import Settings from './components/Settings.svelte'
+  import Flocks from './components/Flocks.svelte'
+  import FlockDetail from './components/FlockDetail.svelte'
   import Toasts from './components/Toasts.svelte'
 
   // Bootstrap: figure out whether auth is enabled and whether we already hold a
@@ -60,9 +62,10 @@
 {:else}
   <div class="nav">
     <span class="brand">EPHEMERA</span>
-    <span class="badge">v0.5.1</span>
+    <span class="badge">v0.5.2</span>
     <button class="ghost" on:click={() => view.set({ name: 'list' })}>{$_('nav.vms')}</button>
     <button class="ghost" on:click={() => view.set({ name: 'snapshots' })}>{$_('nav.snapshots')}</button>
+    <button class="ghost" on:click={() => view.set({ name: 'flocks' })}>{$_('nav.orchestration')}</button>
     <button class="ghost" on:click={() => view.set({ name: 'settings' })}>{$_('nav.settings')}</button>
     <span class="spacer"></span>
     <div class="lang-switch">
@@ -82,6 +85,10 @@
       <VMDetail vm={$view.vm} />
     {:else if $view.name === 'snapshots'}
       <Snapshots />
+    {:else if $view.name === 'flocks'}
+      <Flocks />
+    {:else if $view.name === 'flockDetail'}
+      <FlockDetail flock={$view.flock} />
     {:else if $view.name === 'settings'}
       <Settings />
     {/if}
