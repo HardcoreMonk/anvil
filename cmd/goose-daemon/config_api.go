@@ -1,5 +1,30 @@
 package main
 
+// ===== 학습 노트 (anvil v0.5.x 학습용 주석, 참고 전용 브랜치) =====
+// 이 파일은 upstream ephemera v0.5.0~v0.5.5에 걸쳐 들어온 /config/* 오퍼레이터 설정
+// API 전부를 담는다: /config/profiles(provider/model + 선택적 sizing CRUD, v0.5.0/v0.5.3),
+// /config/profiles/{name}/system(system.md 프롬프트 편집, v0.5.4), /config/providers
+// (API 키 "존재 여부"만, v0.5.1), /config/presets(sizing 프리셋 목록), /config/clients
+// (등록된 클라이언트 이름+만료만, v0.5.5), /config/monitoring(Grafana URL).
+//
+// anvil이 지키는 불변 계약(sentinel 테스트로 고정됨, config_api_anvil_test.go):
+//   - goose-secrets.yaml(API 키)은 이 표면을 통해 절대 읽히거나 쓰이지 않는다
+//     (TestConfigProfileSurfaceNeverReadsOrWritesSecrets). handleConfigProviders는
+//     secretKeyPresent로 "있다/없다"만 계산하고 원문 값은 응답에 담지 않는다
+//     (TestConfigProvidersNeverExposeKeyValues).
+//   - /config/clients는 clientView에 Token 필드 자체가 없다 — 구조적으로 직렬화될 수
+//     없다(토큰 값을 담는 필드가 없으므로 json.Marshal이 값을 낼 방법이 없음).
+//   - 모든 /config/* 는 internalMux에 등록되어(api.go NewControlPlane) auth 설정 시
+//     bearer 뒤에 그대로 남는다 — ui.go의 /ui/ 만 auth 밖이라는 경계와 대비된다
+//     (TestConfigProfilesRequireAuthWhenConfigured).
+//
+// path traversal/예약어 가드: 프로필 이름은 "/", "\\", ".."를 거부(gooseConfigPathForProfile,
+// handleConfigProfile, handleConfigProfileSystem이 각자 진입점에서 반복 검사)하고,
+// "default"는 생성 불가·삭제 불가 예약 이름이다(validateProfileName,
+// DELETE 분기의 defaultProfileName 체크). 사용 중(vmsUsingProfile) 프로필은 409로 삭제를
+// 막아 실행 중 VM이 재시작/역할변경 시 조용히 default 설정으로 떨어지는 사고를 막는다
+// (TestDeleteProfileInUseReturns409).
+
 import (
 	"encoding/json"
 	"fmt"
@@ -14,6 +39,10 @@ import (
 	"time"
 )
 
+// [학습] Settings 화면(web/src/components/Settings.svelte)이 그대로 소비하는 DTO.
+// VcpuCount/MemSizeMib는 v0.5.3에서 추가된 per-profile sizing 필드로, 0이면 "기본값
+// 사용"을 의미한다(default 1 vCPU / 1024 MiB — cmd/goose-daemon/config.go의
+// LookupProfile 참고). API 키 필드는 아예 존재하지 않는다 — 구조적으로 노출 불가능.
 // ProfileConfig is the UI-facing view of a profile's editable LLM settings.
 // Only provider/model are exposed; API keys (goose-secrets.yaml) stay
 // server-side and are never read or written through this surface.
@@ -34,6 +63,10 @@ const defaultProfileName = "default"
 // guest rootfs at spawn.
 const maxSystemPromptBytes = 64 * 1024
 
+// [학습] 이 함수가 /config/profiles 계열 핸들러 전체의 traversal 가드 원점이다.
+// "/", "\\", ".." 를 파일시스템 접근 이전에 거부하고, "default"/""는 daemon 기본
+// goose.yaml로 매핑한다(별도 디렉터리 없음). goose-secrets.yaml 경로는 이 함수가
+// 절대 반환하지 않는다 — 이름에서 알 수 있듯 provider/model 설정 파일 전용.
 // gooseConfigPathForProfile resolves a profile name to its goose.yaml path for
 // config read/write. "default"/"" → the daemon's default config; otherwise a
 // validated configs/profiles/{name}/goose.yaml. It never touches secrets.
@@ -95,6 +128,11 @@ func (cp *ControlPlane) listProfiles(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// [학습] 표준 prefix mux(http.ServeMux)로는 "/config/profiles/{name}/system" 같은
+// path variable을 표현할 수 없어서, 이 핸들러가 먼저 "/system" 접미사를 직접 잘라내고
+// (line 107 부근) 서브 핸들러로 위임한다 — api.go의 handleVM이 /stats, /snapshot,
+// /tasks 등을 같은 방식으로 나누는 것과 동일한 패턴. PUT 분기는 provider/model에 더해
+// v0.5.3 sizing(vcpu_count/mem_size_mib)까지 한 번에 검증·반영한다.
 // handleConfigProfile serves GET/PUT /config/profiles/{name}. PUT updates the
 // profile's GOOSE_PROVIDER and GOOSE_MODEL; the change applies to future VM
 // spawns (config is injected into each VM's rootfs at spawn time).
@@ -171,6 +209,11 @@ func (cp *ControlPlane) handleConfigProfile(w http.ResponseWriter, r *http.Reque
 			writeJSONError(w, http.StatusNotFound, fmt.Errorf("profile %q not found", name))
 			return
 		}
+		// [학습] in-use 삭제 가드(409): 실행 중인 VM이 참조하는 프로필을 지우면 그
+		// VM이 나중에 재시작/역할변경될 때 조용히 default 설정으로 fallback해버리는
+		// 사고를 막는다. system.md 편집(handleConfigProfileSystem)에는 이 가드가
+		// 없는데, 편집은 향후 spawn에만 영향을 주고 이미 떠 있는 VM의 rootfs는
+		// 건드리지 않기 때문이다 — "삭제(구조 제거)"와 "편집(내용 갱신)"의 위험도 차이.
 		// Refuse to delete a profile that running VMs were spawned from — otherwise a
 		// restart / change-role of those agents would silently fall back to the default
 		// config. The caller must remove or re-profile those agents first.
@@ -189,6 +232,11 @@ func (cp *ControlPlane) handleConfigProfile(w http.ResponseWriter, r *http.Reque
 	}
 }
 
+// [학습] v0.5.4에서 들어온 system prompt 편집기(64 KiB 캡 = maxSystemPromptBytes).
+// PUT은 temp+rename 원자적 쓰기라서 spawn 중인 다른 goroutine이 절반만 써진 파일을
+// 읽는 일이 없다. YAML escape 검사가 없는 이유는 system.md가 goose.yaml 안의 스칼라
+// 값이 아니라 그 자체로 자유 형식 markdown 파일 본문이기 때문 — provider/model처럼
+// yamlScalar를 거칠 필요가 없다.
 // handleConfigProfileSystem serves GET/PUT/DELETE /config/profiles/{name}/system —
 // the profile's system.md, injected into every VM spawned from the profile as
 // /root/.goose-system-prompt (loadProfileSystemPrompt). Editing it affects only
@@ -280,6 +328,9 @@ func (cp *ControlPlane) vmsUsingProfile(name string) []string {
 	return ids
 }
 
+// [학습] v0.5.1 추가. "이 provider를 쓸 수 있는가"만 UI에 노출하고, goose-secrets.yaml에
+// 실제로 어떤 값이 들어있는지는 절대 응답에 싣지 않는다 — Available bool 하나가 전부다.
+// clientView(아래, v0.5.5)가 토큰 값 대신 이름+만료만 내보내는 것과 같은 설계 원칙.
 // providerStatus is one element of the GET /config/providers response: a known
 // provider annotated with whether its API key is present in the global keychain.
 // Secret values never leave the server — only the availability flag is exposed.
@@ -326,6 +377,9 @@ func (cp *ControlPlane) handleConfigPresets(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, sizingPresetRegistry)
 }
 
+// [학습] v0.5.5 System 콘솔(web/src/components/System.svelte, ConfiguredClients.svelte)이
+// 소비하는 DTO. 구조체에 Token 필드가 아예 없다는 점이 핵심 — "실수로 직렬화에 넣지 않는다"
+// 가 아니라 "애초에 필드가 없어 넣을 수 없다"는 구조적 보장이다.
 // clientView is the UI-facing view of a configured API client. The bearer Token
 // is structurally absent from this struct — it never leaves the server (mirrors
 // providerStatus, which exposes only an availability flag, never the API key).
@@ -371,6 +425,10 @@ func (cp *ControlPlane) handleConfigMonitoring(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, map[string]any{"grafana_url": url, "enabled": url != ""})
 }
 
+// [학습] handleConfigProviders와 validateProviderAvailable이 공유하는 "키 존재 판정"
+// 로직. topLevelScalar로 goose-secrets.yaml을 파싱하지만 파일 경로만 받고 값은 호출자
+// 밖으로 나가지 않는다 — 반환값은 bool 하나뿐이라 이 함수 시그니처 자체가 값 유출을
+// 구조적으로 막는다.
 // secretKeyPresent reports whether goose-secrets.yaml content carries a usable
 // value for envKey: an uncommented top-level `envKey: value` whose value is not a
 // shipped placeholder. topLevelScalar already skips comments and indented lines.
@@ -409,6 +467,10 @@ func isPlaceholderSecret(v string) bool {
 // URL-safe slug; it also rejects "/", "\", "." and "..".
 var profileNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 
+// [학습] "default"는 daemon의 내장 default 프로필과 이름이 겹치므로 사용자가 새로
+// 만들 수 없게 예약한다(handleConfigProfile DELETE 분기의 별도 defaultProfileName
+// 체크와 짝을 이루는 생성 시점 가드). profileNameRe가 슬래시/역슬래시/점을 애초에
+// 허용하지 않으므로 gooseConfigPathForProfile의 traversal 체크와 이중 방어가 된다.
 // validateProfileName enforces the slug format and reserves "default".
 func validateProfileName(name string) error {
 	if name == "" {
@@ -440,6 +502,10 @@ func (cp *ControlPlane) validateProviderAvailable(provider string) error {
 	return nil
 }
 
+// [학습] validateSizing은 create/update 양쪽에서 공유하는 sizing 상한 검증이다
+// (vcpu 0~8, mem 0 또는 256~16384 MiB). 0은 "미지정 → LookupProfile 기본값(1/1024)
+// 사용"을 의미하며, 이 0-sentinel 관례가 writeProfileConfig의 "기존 줄 보존" 로직과도
+// 맞물린다.
 // createProfile handles POST /config/profiles. It creates a new user-defined
 // profile directory holding a goose.yaml with the chosen provider/model. Secrets
 // are NOT stored per profile — every VM reads the global keychain at spawn time.
@@ -509,6 +575,10 @@ func (cp *ControlPlane) createProfile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, ProfileConfig{Name: name, Provider: provider, Model: model, VcpuCount: body.VcpuCount, MemSizeMib: body.MemSizeMib})
 }
 
+// [학습] EPHEMERA_VCPU_COUNT/EPHEMERA_MEM_SIZE_MIB는 goose 입장에서는 그냥 모르는
+// 키라서 무시되지만, api.go의 spawn 경로(parseProfileSizing 경유)가 같은 goose.yaml을
+// 되읽어 MicroVM 크기를 결정한다 — 즉 이 두 키는 "goose 설정"이 아니라 "anvil이
+// goose.yaml 파일에 얹혀 보내는 사이드채널 sizing 힌트"다. 0이면 아예 줄을 안 쓴다.
 // renderGooseProfileYAML produces a goose.yaml body for a new profile, mirroring
 // the structure of the default configs/goose.yaml (telemetry off, keyring off, the
 // bundled developer extension). Provider/model are rendered via yamlScalar.
@@ -600,6 +670,10 @@ func readGooseConfigFile(path string) (provider, model string) {
 	return parseGooseConfig(data)
 }
 
+// [학습] "부분 업데이트" 안전장치: vcpu/mem이 0(미지정)이면 기존 줄을 그대로 두어,
+// provider/model만 바꾸는 평범한 편집이 이전에 설정된 sizing을 실수로 리셋하지
+// 않게 한다. extensions: 블록 등 나머지 내용은 라인 단위로만 건드리므로 통째로
+// 보존된다 — YAML을 파싱해서 재직렬화하지 않는 이유이기도 하다.
 // writeProfileConfig rewrites the GOOSE_PROVIDER and GOOSE_MODEL lines in a
 // profile's goose.yaml in place, preserving comments, ordering, and the nested
 // extensions block. Missing keys are appended. The write is atomic (temp+rename).
@@ -699,6 +773,10 @@ func yamlScalar(v string) string {
 	return `"` + esc + `"`
 }
 
+// [학습] provider/model처럼 goose.yaml의 스칼라 값으로 그대로 삽입되는 문자열은
+// 개행을 포함하면 안 된다 — 개행이 허용되면 "GOOSE_MODEL: foo\nEXTRA_KEY: bar"처럼
+// 추가 YAML 키를 밀어넣는 injection이 가능해진다. system.md(자유 형식 markdown 본문)에는
+// 이 검사가 적용되지 않는 것과 대비해서 보면 이해가 쉽다.
 // validateConfigValue guards against empty values and YAML injection via
 // embedded newlines (which could smuggle in extra keys).
 func validateConfigValue(field, v string) error {

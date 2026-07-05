@@ -1,5 +1,22 @@
 package main
 
+// ===== 학습 노트 (anvil v0.5.x 학습용 주석, 참고 전용 브랜치) =====
+// 이 파일은 daemon 전역 설정(포트, 토큰, watchdog 튜너블 등)과 AgentProfile/LookupProfile
+// (per-role VM sizing) 을 함께 담는다. v0.5.x 관련 핵심은 맨 아래 AgentProfile /
+// agentProfiles / LookupProfile 세 덩어리다.
+//
+// anvil 적응 포인트(sizing 기본값 전환): v0.5.3부터 anvil은 upstream 기본 VM sizing인
+// 1 vCPU / 1024 MiB("Standard" 프리셋)를 채택했다(v0.5.3 이전엔 2 vCPU / 2048 MiB였다).
+// KVM 3회 반복 e2e(316✓)가 1024 MiB에서 통과해 승인됐다. agentProfiles의 유일한 항목
+// (""→default)과 LookupProfile의 unknown-name 폴백이 모두 1/1024를 반환하는 이유다.
+//
+// upstream-inherited sizing 갭(follow-up으로 남음): POST /vms(api.go의 spawnVM)는
+// LookupProfile 기본값 위에 UI가 만든 profile의 goose.yaml에 박힌 EPHEMERA_VCPU_COUNT/
+// EPHEMERA_MEM_SIZE_MIB(readProfileConfig 경유)를 얹어 override 하지만, flock 멤버
+// spawn 경로는 이 override를 거치지 않고 LookupProfile 기본값만 사용한다 — 즉 flock으로
+// 만든 에이전트는 아직 per-profile 커스텀 sizing을 받지 못한다(docs/operations의
+// ephemera-v0.5-operator-sync-handoff.md "Known upstream-inherited gap" 참고).
+
 import (
 	"fmt"
 	"log/slog"
@@ -99,6 +116,9 @@ var (
 	apiClients = loadAPIClients()
 )
 
+// [학습] v0.5.5 System 콘솔(config_api.go의 handleConfigClients)이 리스트업하는
+// "이름+만료"는 결국 이 함수가 만드는 APIClient 슬라이스에서 Token 필드만 잘라낸 것이다
+// — 토큰 값 자체는 이 함수와 authMiddleware(api.go) 사이에서만 오가고 UI까지 나가지 않는다.
 // loadAPIClients parses caller tokens. Precedence: file > multi-env > single-env > nil.
 //
 // File source (v0.3.4, preferred for rotation):
@@ -335,6 +355,10 @@ func envBool(key string, defaultVal bool) bool {
 	return defaultVal
 }
 
+// [학습] v0.5.x sizing과는 별개 축이지만 같은 "anvil은 upstream 기본값을 그대로
+// 따르지 않는다" 패턴을 보여준다: upstream은 COW(dm-snapshot) spawn을 기본으로 바꿨지만
+// anvil은 KVM burn-in 검증 전까지 plain full-clone을 기본으로 유지하고, COW는
+// EPHEMERA_DISK_MODE=cow로 명시적 opt-in해야만 켜진다.
 // resolveDiskModeCOW decides the spawn disk strategy once at startup. anvil keeps
 // the plain/full clone default; only EPHEMERA_DISK_MODE=cow opts into COW. When
 // COW is requested but the host lacks dm-snapshot support, it logs a warning and
@@ -356,6 +380,9 @@ func resolveDiskModeCOW(probe func() error) bool {
 	}
 }
 
+// [학습] Name은 로그/표시용, ProfileDir은 {workDir}/configs/profiles/{ProfileDir}로
+// goose.yaml을 찾을 실제 디렉터리명이다. 빈 ProfileDir("")은 "디렉터리 없음, daemon
+// 기본 goose.yaml 사용"을 뜻하며 defaultProfileName("default")과 짝을 이룬다.
 // AgentProfile bundles per-role VM sizing and the on-disk profile directory.
 // ProfileDir is resolved relative to {workDir}/configs/profiles/{ProfileDir}.
 // An empty ProfileDir signals "use the daemon's default goose config".
@@ -366,6 +393,10 @@ type AgentProfile struct {
 	ProfileDir string
 }
 
+// [학습] 이 map에는 "default" 하나만 하드코딩돼 있다 — v0.5.0 이전에는 flock role별로
+// 여러 항목을 미리 등록해 뒀을 법한 구조지만, Settings UI로 프로필을 자유롭게 만들 수
+// 있게 되면서(config_api.go의 createProfile) 정적 등록이 더 필요 없어졌다. 나머지
+// 이름은 전부 LookupProfile의 unknown-name 분기가 처리한다.
 // agentProfiles holds only the reserved default. Every other profile is
 // user-defined: created through the Settings UI as a configs/profiles/{name}
 // directory and resolved by name. LookupProfile returns default sizing
@@ -375,6 +406,11 @@ var agentProfiles = map[string]AgentProfile{
 	"": {Name: "default", VcpuCount: 1, MemSizeMib: 1024, ProfileDir: ""},
 }
 
+// [학습] 이 함수 자체는 goose.yaml을 읽지 않는다 — 반환하는 VcpuCount/MemSizeMib는
+// 항상 1/1024(기본값)이고, "실제 프로필별 sizing"은 호출자(api.go의 spawnVM)가
+// LookupProfile 결과 위에 readProfileConfig(config_api.go)로 얻은 값을 덮어써서
+// 얻는다. 이 두 단계 분리 때문에 "LookupProfile만 거치는 경로"(flock spawn)는 기본값
+// 이상으로 커지지 못한다 — 파일 상단 학습 노트의 sizing 갭 설명 참고.
 // LookupProfile returns the canonical AgentProfile for a known name, or a
 // default-sized profile whose ProfileDir mirrors the requested name when the
 // name is unknown. The latter preserves the legacy "any directory works" behavior

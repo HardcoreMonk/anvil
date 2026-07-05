@@ -35,6 +35,35 @@ import (
 	"ephemera/internal/vm"
 )
 
+// ===== 학습 노트 (anvil v0.5.x 학습용 주석, 참고 전용 브랜치) =====
+// 이 파일은 control plane 전체(VM 라이프사이클, 이중 mux 배선, spawn/destroy)를 담는
+// 큰 파일이라, 이 주석 세트는 v0.5.x가 건드린 세 표면에만 집중한다: (1) NewControlPlane의
+// internalMux/externalMux 이중 mux 배선(아래에서 설명), (2) spawnVMOptions.VcpuCount/
+// MemSizeMib를 따라가는 per-VM sizing 흐름(v0.5.3), (3) graceful VM delete
+// (destroyVM → gracefulAgentStop, v0.5.0).
+//
+// 이중 mux 패턴(auth 경계): internalMux는 /vms, /config/*, /audit 등 "데이터" 라우트를
+// 모두 등록하고, 이 mux 전체가 auditMiddleware(authMiddleware(...))로 한 번에 감싸져
+// apiChain이 된다. externalMux는 실제로 :3000에 바인딩되는 최상위 mux로, "/ui/"(auth
+// 밖, ui.go), "/metrics"(기본 auth 밖, EPHEMERA_METRICS_REQUIRE_AUTH로 토글), "/"
+// (rootRedirectOr가 apiChain으로 위임)만 등록한다. 즉 auth를 안 거치는 경로는 코드
+// 전체에서 딱 이 externalMux 등록 블록 하나로 한정된다 — 새 데이터 라우트를 추가할 땐
+// internalMux에 등록해야 authMiddleware를 자동으로 상속받는다.
+//
+// per-VM sizing 흐름: spawnVMOptions.VcpuCount/MemSizeMib(0=기본값)가 spawnVMInternal을
+// 거쳐 vm.VMConfig로 흘러가고, runningVM.vcpuCount/memSizeMib에 기록되어 snapshot
+// metadata에도 남는다(레거시 snapshot은 0 → restore 시 2/2048 fallback). spawnVM
+// 핸들러가 LookupProfile 기본값 위에 프로필의 goose.yaml 값을 덮어써 override하는
+// 반면, flock 멤버 spawn 경로는 이 override 없이 LookupProfile 기본값만 쓴다 —
+// config.go 학습 노트의 sizing 갭 설명과 같은 비대칭.
+//
+// graceful delete(v0.5.0): destroyVM → gracefulAgentStop이 먼저 in-VM agent에
+// POST /stop(2s 데드라인, best-effort)을 보내 guest를 깨끗이 종료시키고, 그 다음
+// machine.StopVMM()으로 Firecracker를 강제 종료한다. 구버전 UI의 "stop agent"
+// 액션(에이전트=guest init 프로세스라 사실상 guest 전체를 죽이면서도 VM은 등록된
+// 채로 남아 stats poller가 계속 실패 로그를 뿜던 문제)이 이 버전에서 제거되고
+// Delete 하나로 통합됐다.
+
 type authFailureRecorder interface {
 	IncAuthFailure()
 }
@@ -459,6 +488,10 @@ func NewControlPlane(
 		cp.metrics.watchdogProbeDuration.Observe(d.Seconds())
 	}
 
+	// [학습] internalMux 등록 블록: 여기 등록되는 모든 라우트(/vms, /config/*, /audit,
+	// /snapshots, /watchdog/status 등)는 아래에서 auditMiddleware(authMiddleware(...))로
+	// 한 번에 감싸진 뒤에만 실제로 서빙된다. 새 데이터 API를 추가할 때 이 mux 대신
+	// externalMux에 직접 등록하면 auth를 건너뛰게 되므로 주의.
 	// Two-mux pattern: /metrics is exempt from authMiddleware by default
 	// (standard Prometheus scrape model). When EPHEMERA_METRICS_REQUIRE_AUTH=true
 	// the /metrics handler is wrapped in authMiddleware just like everything else.
@@ -491,6 +524,9 @@ func NewControlPlane(
 	} else {
 		externalMux.HandleFunc("/metrics", cp.handleMetrics)
 	}
+	// [학습] externalMux는 실제 net/http 리스너에 바인딩되는 최상위 mux다. 이 지점
+	// 이후 세 줄(= /ui/, apiChain 배선)이 이 프로세스에서 "auth를 안 거치는 경로가
+	// 정확히 무엇인가"를 전부 결정한다 — /ui/(정적+로그인), 그리고 조건부로 /metrics뿐.
 	// The embedded Web UI is served under /ui/ OUTSIDE the auth/audit chain: the
 	// login page + JS bundle must load before the user has a token, and the
 	// bundle carries no secrets. Longest-prefix matching means /ui/ wins over the
@@ -1025,6 +1061,11 @@ func (cp *ControlPlane) profileConfigPaths(profile string) (configPath, secretsP
 	return cp.gooseConfigPath, secretsPath, nil
 }
 
+// [학습] VcpuCount/MemSizeMib(0=기본값 사용)가 이 학습 노트가 따라가는 sizing 흐름의
+// 입구다. 표준 POST /vms 경로(spawnVM 핸들러)는 이 필드를 채우기 전에 LookupProfile
+// 기본값 위에 UI가 저장한 프로필별 override를 얹지만, orchestrator의 flock 멤버 spawn은
+// 이 override 단계를 거치지 않는다 — 동일 struct를 공유하면서도 "누가 채우는가"에
+// 따라 실제 sizing이 달라지는 지점.
 // spawnVMOptions captures all caller-supplied inputs for spawnVMInternal.
 // Callers must pre-resolve the goose config paths so this helper does not need
 // to know about profileConfigPaths' specific error semantics.
@@ -1182,6 +1223,10 @@ func (cp *ControlPlane) spawnVMInternal(opts spawnVMOptions) (*VMInfo, string, e
 		Model:        model,
 	}
 
+	// [학습] 여기서 vcpu/memSize에 적용하는 1/1024 fallback은 config.go의
+	// LookupProfile이 반환하는 기본값과 반드시 같은 상수여야 한다(주석에 "matches
+	// vm.defaultVcpuCount"라고 명시된 이유) — runningVM에 기록되는 실제 sizing이
+	// opts.VcpuCount==0일 때도 "알 수 없음"이 아니라 실제 적용된 값이 되도록 한다.
 	// runningVM.dmSnapshot drives the COW teardown branch in destroyVM; when
 	// nil, destroyVM falls back to deleting diskPath as a plain file.
 	vcpu := opts.VcpuCount
@@ -1308,6 +1353,12 @@ func (cp *ControlPlane) spawnVM(w http.ResponseWriter, r *http.Request) {
 	}
 	agentProfile := LookupProfile(req.Profile)
 	vcpu, mem := agentProfile.VcpuCount, agentProfile.MemSizeMib
+	// [학습] sizing 흐름의 핵심 override 지점: LookupProfile은 항상 1/1024를 주지만,
+	// 바로 아래에서 readProfileConfig(config_api.go)로 해당 프로필의 goose.yaml에
+	// 실제 EPHEMERA_VCPU_COUNT/EPHEMERA_MEM_SIZE_MIB가 있으면 그 값으로 덮어쓴다.
+	// standalone POST /vms만 이 override를 거치고, flock 멤버 spawn(orchestrator
+	// 패키지)은 이 단계 없이 LookupProfile 기본값 그대로 spawnVMOptions를 채운다 —
+	// 이것이 v0.5.3에서 알려진 채 남은 "flock sizing 갭"의 코드 상 위치다.
 	// UI-created profiles persist their own sizing in goose.yaml (EPHEMERA_* keys);
 	// prefer those over the LookupProfile defaults when present.
 	if pc, err := cp.readProfileConfig(req.Profile); err == nil {
@@ -1401,6 +1452,10 @@ func (cp *ControlPlane) stopVM(w http.ResponseWriter, vmID string) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "stopped", "vm_id": vmID})
 }
 
+// [학습] stopVM(DELETE /vms/{id} 핸들러) → destroyVM → destroyVMUnderSnapshotLock 순으로
+// 호출된다. destroyVM 자체는 snapshotLifecycleMu만 잡고 실제 정리는
+// destroyVMUnderSnapshotLock에 위임하는데, 이렇게 나뉜 이유는 DestroyAll 등 다른
+// 내부 호출자가 이미 락을 쥔 채로 "언더락" 버전을 직접 부를 수 있게 하기 위해서다.
 func (cp *ControlPlane) destroyVM(vmID string) {
 	cp.snapshotLifecycleMu.Lock()
 	defer cp.snapshotLifecycleMu.Unlock()
@@ -1426,6 +1481,10 @@ func (cp *ControlPlane) destroyVMUnderSnapshotLock(vmID string) {
 	// Clear any auto-snapshot so an explicit destroy leaves no orphaned memory
 	// image behind (DeleteVMState only removes an empty state dir).
 	storage.RemoveAutoSnapshot(cp.workDir, vmID)
+	// [학습] graceful delete(v0.5.0)의 핵심 순서: gracefulAgentStop(아래)이 먼저
+	// POST /stop을 보내 guest를 정상 종료시키려 시도하고, 그 성공 여부와 무관하게
+	// 바로 다음 줄 v.machine.StopVMM()으로 Firecracker를 강제 종료한다 — "정중하게
+	// 부탁하고, 어쨌든 강제로 끝낸다"는 best-effort 2단 구조.
 	// Ask the in-VM agent to shut down cleanly first. goose-agent is the guest's
 	// main process, so /stop halts the guest gracefully; StopVMM below then reaps
 	// the Firecracker VMM whether or not the guest finished halting. Best-effort.
@@ -1459,6 +1518,12 @@ func (cp *ControlPlane) destroyVMUnderSnapshotLock(vmID string) {
 	cp.metrics.vmDestroyTotal.WithLabelValues("ok").Inc()
 }
 
+// [학습] v0.5.0에서 새로 생긴 "정상 종료 요청" 단계. 2초 데드라인 안에 응답이 없거나
+// 에러가 나도 그냥 무시(Debug 로그만)하고 리턴한다 — 호출자(destroyVMUnderSnapshotLock)가
+// 곧바로 Firecracker VMM을 강제 종료하므로 이 함수의 실패가 delete 자체를 막지 않는다.
+// 참고: 이 프록시 호출은 cp.agentHTTPClient를 쓰는데, keep-alive pooling이 destroy된
+// VM의 재활용된 guest IP로 stale connection을 재사용하는 문제(v0.5.x KVM gate에서
+// 드러난 latent defect, DisableKeepAlives로 수정)와 같은 클라이언트를 공유한다.
 // gracefulAgentStop best-effort asks a VM's goose-agent to shut down (POST /stop,
 // bearer-authenticated) with a short deadline. The agent is the guest's init
 // process, so this halts the guest cleanly; any error is ignored because the

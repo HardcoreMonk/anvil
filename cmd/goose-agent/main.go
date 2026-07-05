@@ -1,5 +1,24 @@
 package main
 
+// ===== 학습 노트 (anvil v0.5.x 학습용 주석, 참고 전용 브랜치) =====
+// 이 파일은 각 MicroVM 안에서 도는 in-guest 에이전트다. v0.5.0에서 들어온 핵심 기능은
+// multi-turn goose 세션(POST /tasks의 선택적 "session" 필드)이다: session이 비어 있으면
+// 기존 v0.4.x 이하의 stateless one-shot 동작이 그대로 보존되고(gooseArgs가 "-n"/
+// "--resume" 없이 원래 argv를 낸다), session이 있으면 첫 턴이 이름 붙은 세션을 만들고
+// 이후 턴은 --resume으로 이어 붙여 대화 맥락을 유지한다.
+//
+// anvil 적응 포인트: 세션 이름은 validSessionName으로 영숫자/`_`/`-`, 최대 64자만
+// 허용한다 — goose가 세션마다 파일을 하나씩 만들기 때문에 파일명/CLI 인자로 안전해야
+// 한다(경로 traversal이나 셸 메타문자 주입 방지). 기본(버퍼드) 응답 계약
+// {"output","error"}는 session 유무와 무관하게 절대 안 바뀐다 — ephemera-ctl, gtcall,
+// depth-guard 테스트가 이 불변식에 의존한다(runTaskBuffered 참고). 스트리밍
+// (?stream=1)은 v0.4.4부터 있던 opt-in 경로로, session과 독립적으로 공존한다.
+//
+// 세션 상태(sessions map)는 이 프로세스 메모리에만 있지만, VM 메모리 스냅샷이 그대로
+// 캡처하므로 snapshot-restore된 VM도 대화 목록(GET /sessions)을 유지한다 — 실제 대화
+// 내용 자체는 goose 자신의 온디스크 세션 파일에 있고, 스냅샷의 rootfs 복사가 이를
+// 함께 보존한다.
+
 import (
 	"bufio"
 	"bytes"
@@ -64,6 +83,10 @@ var (
 	agentToken   string
 )
 
+// [학습] LastOutput은 "누적 출력 버그"를 UI 쪽에서 피하기 위한 델타 베이스라인이다.
+// goose --resume은 매 턴마다 세션 전체 transcript를 다시 뱉는데(extractGooseJSONText가
+// 마지막 user 메시지 이후만 잘라내 이 문제를 소스에서 해결), UI가 재연결 후 다시
+// 이어 볼 때 이 필드로 "이전까지 본 것"을 알 수 있다.
 // sessionInfo is the agent's in-memory record of a goose chat session created on
 // this VM. It lives only in memory, but VM memory snapshots capture it, so a
 // snapshot-restored VM keeps its conversations and the Web UI can list/resume
@@ -84,6 +107,11 @@ var (
 	sessions  = map[string]*sessionInfo{}
 )
 
+// [학습] multi-turn의 실제 진입점. session=="" 이면 "-n"/"--resume" 없이 v0.4.x 이하와
+// 정확히 같은 argv가 나간다는 것이 "버퍼드 기본 계약 불변" 원칙의 코드 레벨 근거다
+// (guard 테스트 TestRunTaskBuffered_DefaultShape 참고). --no-profile +
+// --with-builtin developer는 v0.5.0과 무관한 기존 최적화(토큰 예산 문제 회피)로,
+// session 유무와 독립적으로 항상 붙는다.
 // gooseArgs builds the goose run argv. With no session it preserves the original
 // stateless invocation; with a session it names the session and (on the second+
 // turn) resumes it so the conversation persists across tasks — multi-turn.
@@ -149,6 +177,9 @@ func sessionTitle(prompt string) string {
 	return t
 }
 
+// [학습] handleTask 진입부에서 req.Session이 있을 때 이 검사를 통과 못 하면 400으로
+// 즉시 거부한다 — goose에 "-n <session>"으로 그대로 넘어가는 값이라 여기서 막지
+// 않으면 임의 문자열이 CLI 인자/파일명으로 흘러간다.
 // validSessionName allows only filesystem/CLI-safe session identifiers (goose
 // stores one file per session). The Web UI generates "<vm-id>-<timestamp>".
 func validSessionName(s string) bool {
@@ -765,6 +796,10 @@ func workspaceHandler(root string) http.HandlerFunc {
 	}
 }
 
+// [학습] v0.5.0 Web UI의 "대화 이어하기" 목록 화면이 호출하는 엔드포인트. /tasks와
+// 동일한 agentAuthMiddlewareWithTokenProvider로 보호되며, 실제 대화 내용이 아니라
+// sessionInfo(제목/턴 수/마지막 출력)만 반환한다 — 프롬프트 원문은 Title로 60자
+// 트렁케이션된 라벨만 노출된다(sessionTitle).
 // handleSessions lists the goose chat sessions created on this VM, newest first.
 // The registry is in memory but VM snapshots capture it, so a snapshot-restored
 // VM reports the conversations frozen in the snapshot and the Web UI can resume
@@ -835,6 +870,10 @@ func handleTask(w http.ResponseWriter, r *http.Request) {
 	// With a session name the conversation persists across turns (multi-turn):
 	// the first turn creates the named session, later turns --resume it. No
 	// session → the original stateless one-shot invocation.
+	// [학습] "이미 sessions map에 있는가"로 첫 턴/재개 턴을 구분한다 — 첫 턴은
+	// resume=false로 세션을 새로 만들고, 두 번째 턴부터는 resume=true로 --resume이
+	// 붙는다(gooseArgs). 이 map은 프로세스 메모리에만 있으므로 daemon이 이 VM을
+	// cold-restart(메모리 미보존)시키면 세션 연속성이 끊긴다는 점에 유의.
 	resume := false
 	if req.Session != "" {
 		sessionMu.Lock()
@@ -897,6 +936,10 @@ func handleTask(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// [학습] "버퍼드가 기본, 스트리밍은 opt-in" 계약의 실제 구현체. session 유무와
+// 무관하게 항상 이 함수(또는 stream=1일 때 runTaskStreaming)를 거치므로, multi-turn이
+// 추가돼도 기존 호출자(ephemera-ctl, gtcall, depth-guard 테스트)가 보는 응답 shape은
+// {"output","error"} 그대로다.
 // runTaskBuffered runs goose to completion and returns the whole TaskResult as a
 // single JSON object — the original (pre-v0.4.4) behavior, unchanged.
 func runTaskBuffered(w http.ResponseWriter, cmd *exec.Cmd) TaskResult {
@@ -1160,6 +1203,11 @@ func runTaskStreaming(w http.ResponseWriter, cmd *exec.Cmd) TaskResult {
 	return res
 }
 
+// [학습] multi-turn을 실제로 쓸만하게 만드는 핵심 함수. --resume은 매번 세션 전체
+// transcript를 돌려주므로, 그냥 assistant 메시지를 전부 이어 붙이면 턴이 늘어날수록
+// 이전 답변이 계속 중복 노출된다("누적 출력 버그"). 마지막 user 메시지 뒤쪽만 잘라내는
+// 이 함수가 그 버그를 소스에서 차단한다 — session이 없는 단발 호출은 lastUser==-1이라
+// 자연히 "전체 transcript = 이번 턴 답변"이 되어 기존 동작과 동일하다.
 // extractGooseJSONText parses the envelope produced by `goose run --output-format json`
 // and returns the assistant text that follows the LAST user message — i.e. only the
 // latest turn's reply. goose --resume re-emits the whole session transcript on every
