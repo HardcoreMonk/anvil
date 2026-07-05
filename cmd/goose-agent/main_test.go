@@ -858,3 +858,63 @@ func TestNoThinkForModel(t *testing.T) {
 		}
 	}
 }
+
+func TestExtractGooseTranscript_FullConversation(t *testing.T) {
+	// Unlike extractGooseJSONText (latest turn only), the transcript extractor
+	// returns EVERY user/assistant turn in order, for the Web UI to repaint a
+	// resumed chat. Thinking/tool blocks are dropped; only text is kept.
+	in := []byte(`{"messages":[
+	  {"role":"user","content":[{"type":"text","text":"q1"}]},
+	  {"role":"assistant","content":[{"type":"text","text":"a1"}]},
+	  {"role":"user","content":[{"type":"text","text":"q2"}]},
+	  {"role":"assistant","content":[{"type":"thinking","thinking":"..."},{"type":"text","text":"a2"}]}
+	]}`)
+	want := []TranscriptTurn{
+		{Role: "user", Text: "q1"},
+		{Role: "assistant", Text: "a1"},
+		{Role: "user", Text: "q2"},
+		{Role: "assistant", Text: "a2"},
+	}
+	got := extractGooseTranscript(in)
+	if len(got) != len(want) {
+		t.Fatalf("got %d turns, want %d: %+v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("turn %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestExtractGooseTranscript_CleansUserPrefixes(t *testing.T) {
+	// The user message carries goose-agent's injected prefixes; the restored
+	// transcript must show only what the user actually typed.
+	in := []byte(`{"messages":[
+	  {"role":"user","content":[{"type":"text","text":"/nothink\n[SYSTEM INSTRUCTIONS]\nbe terse\n\n[USER TASK]\nhello there"}]},
+	  {"role":"assistant","content":[{"type":"text","text":"hi"}]}
+	]}`)
+	got := extractGooseTranscript(in)
+	if len(got) != 2 || got[0].Text != "hello there" {
+		t.Fatalf("user prompt not cleaned: %+v", got)
+	}
+}
+
+func TestExtractGooseTranscript_NonJSON_ReturnsNil(t *testing.T) {
+	if got := extractGooseTranscript([]byte("panic at the disco")); got != nil {
+		t.Errorf("expected nil for non-JSON input, got %+v", got)
+	}
+}
+
+func TestCleanUserPrompt(t *testing.T) {
+	cases := map[string]string{
+		"/nothink\n[SYSTEM INSTRUCTIONS]\nrole\n\n[USER TASK]\nactual": "actual",
+		"/nothink\nactual": "actual",
+		"plain prompt":     "plain prompt",
+		"[SYSTEM INSTRUCTIONS]\nx\n\n[USER TASK]\nmulti\nline": "multi\nline",
+	}
+	for in, want := range cases {
+		if got := cleanUserPrompt(in); got != want {
+			t.Errorf("cleanUserPrompt(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

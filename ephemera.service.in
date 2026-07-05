@@ -1,0 +1,28 @@
+[Unit]
+Description=Ephemera control plane (Firecracker MicroVM orchestrator)
+Documentation=https://github.com/steve-seungeui/ephemera
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=@DEST@
+Environment=EPHEMERA_HOME=@DEST@
+EnvironmentFile=@DEST@/ephemera.env
+ExecStart=@DEST@/ephemera-daemon
+Restart=on-failure
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=30
+# First boot of the SLIM package bakes the golden image (debootstrap) inside the
+# process, which can take several minutes — do not let systemd time it out.
+TimeoutStartSec=0
+LimitNOFILE=65536
+# No ProtectSystem/PrivateTmp/sandbox on purpose: the daemon needs /dev/kvm, raw
+# networking (iptables/dmsetup/TAP), and loop mounts under /tmp/goose-workspaces.
+# A hardened unit would break VM provisioning. Keep the API on localhost + a token
+# (see ephemera.env) and expose it only behind a reverse proxy.
+
+[Install]
+WantedBy=multi-user.target

@@ -867,6 +867,22 @@ func (cp *ControlPlane) handleVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// GET /vms/{vm_id}/sessions/{name}/transcript → agent /sessions/{name}/transcript
+	// (the full conversation for a resumed chat; the Web UI repaints prior turns).
+	if strings.HasSuffix(path, "/transcript") {
+		idx := strings.Index(path, "/sessions/")
+		if idx <= 0 {
+			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, `{"error":"GET required"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		cp.proxyAgentEndpoint(w, r, path[:idx], path[idx:])
+		return
+	}
+
 	// DELETE /vms/{vm_id}
 	if r.Method != http.MethodDelete {
 		http.Error(w, "DELETE required", http.StatusMethodNotAllowed)
@@ -1618,6 +1634,11 @@ func (cp *ControlPlane) DestroyAll() {
 
 func waitForAgent(guestIP string, timeout time.Duration) error {
 	url := fmt.Sprintf("http://%s:%d/health", guestIP, agentPort)
+	// Per-probe timeout (well under the overall deadline) so a guest that accepts
+	// the TCP connection but never answers — kernel up, goose-agent not yet
+	// listening — cannot block a single probe indefinitely and starve the deadline
+	// loop. http.Get uses http.DefaultClient, which has no timeout. The probe is
+	// also capped at the overall deadline so a sub-2s timeout stays self-consistent.
 	probeTimeout := 2 * time.Second
 	if timeout > 0 && timeout < probeTimeout {
 		probeTimeout = timeout

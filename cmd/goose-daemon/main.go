@@ -58,6 +58,10 @@ func main() {
 		slog.Warn("api unauthenticated (no tokens configured)")
 	}
 
+	// Working directory: artifacts/, scripts/, configs/, snapshots/ etc. are all
+	// resolved relative to it. resolveWorkDir pins it to EPHEMERA_HOME when set (by
+	// the systemd unit and the installer) so the daemon is robust when launched from
+	// anywhere; absent, it falls back to the process working directory (dev / repo flow).
 	cwd, err := resolveWorkDir()
 	if err != nil {
 		fatal("fatal: resolve work dir", "err", err)

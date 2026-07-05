@@ -26,6 +26,8 @@
 *.bin
 *.tgz
 vmlinux*
+# Release tarballs built by scripts/build_release.sh
+/dist/
 
 # 3. Unix domain sockets & logs
 *.sock

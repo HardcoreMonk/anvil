@@ -736,7 +736,12 @@ func EnsureGooseAgent(binaryPath, projectRoot string) error {
 }
 
 // EnsureKernel downloads the Firecracker kernel binary to kernelPath if it does
-// not exist and verifies the downloaded bytes against expectedSHA256.
+// not exist, verifying its SHA256 against expectedSHA256. The kernel is the
+// trust root of every guest (booted via init=), so it gets the same integrity
+// pin as the Firecracker binary. The download streams to a sibling temp file and
+// is renamed onto kernelPath only after the SHA256 matches, so an unverified or
+// partial vmlinux.bin is never published (a mismatch or write failure leaves the
+// temp file, which the deferred cleanup removes — no bad artifact survives a crash).
 func EnsureKernel(kernelPath, downloadURL, expectedSHA256 string) error {
 	if _, err := os.Stat(kernelPath); err == nil {
 		slog.Warn("kernel found", "path", kernelPath)
@@ -766,6 +771,7 @@ func EnsureKernel(kernelPath, downloadURL, expectedSHA256 string) error {
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
 
+	// Stream to disk and compute SHA256 simultaneously (mirrors EnsureFirecracker).
 	h := sha256.New()
 	if _, err := io.Copy(io.MultiWriter(tmp, h), resp.Body); err != nil {
 		tmp.Close()
