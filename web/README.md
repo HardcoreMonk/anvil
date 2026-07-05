@@ -108,6 +108,8 @@ Endpoints (auth-protected, `cmd/goose-daemon/config_api.go`):
 - `PUT /config/profiles/{name}/system` body `{system_md}` — write the profile's system.md (atomic, ≤64 KiB);
   injected into each VM spawned from the profile as `/root/.goose-system-prompt` at spawn time (v0.5.4)
 - `DELETE /config/profiles/{name}/system` — clear the profile's system.md (idempotent) (v0.5.4)
+- `GET /config/clients` → `[{name, expires, expired}]` — configured API clients; name + expiry only, **never tokens** (v0.5.5)
+- `GET /config/monitoring` → `{grafana_url, enabled}` — Grafana base URL for the System → Monitoring iframe (from `EPHEMERA_GRAFANA_URL`) (v0.5.5)
 
 **Constraints:** API keys (`goose-secrets.yaml`) are **never** exposed or edited
 through the UI — they stay server-side. Config is injected at spawn, so edits

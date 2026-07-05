@@ -135,6 +135,13 @@ func loadAPIClients() []APIClient {
 		return parseAPIClients(raw)
 	}
 	if t := envWithAlias(envEphemeraAPIToken, envAnvilAPIToken); t != "" {
+		// A ':' here almost always means the operator meant EPHEMERA_API_TOKENS
+		// (plural, name:token) — the singular form uses the whole value as the
+		// token and fixes the client name to "default". Warn rather than silently
+		// surprising them in the Clients view.
+		if strings.Contains(t, ":") {
+			slog.Warn("EPHEMERA_API_TOKEN contains ':'; its whole value is used as the token and the client name is \"default\" — use EPHEMERA_API_TOKENS (plural) as name:token to set a client name")
+		}
 		return []APIClient{{Name: "default", Token: t}}
 	}
 	return nil

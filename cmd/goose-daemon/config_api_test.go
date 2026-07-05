@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // writeProfileFixture creates configs/profiles/{name}/goose.yaml under the test
@@ -457,5 +458,102 @@ func TestLoadProfileSystemPrompt_RoundTrip(t *testing.T) {
 	cp.handleConfigProfileSystem(rr, httptest.NewRequest(http.MethodDelete, "/config/profiles/worker/system", nil), "worker")
 	if got := cp.loadProfileSystemPrompt("worker"); got != "" {
 		t.Fatalf("after DELETE loadProfileSystemPrompt = %q, want empty", got)
+	}
+}
+
+func TestHandleConfigClients_Shape_NoToken(t *testing.T) {
+	cp := newTestCP(t)
+	cp.clients = []APIClient{
+		{Name: "alice", Token: "secret-alice-tok"},
+		{Name: "bob", Token: "secret-bob-tok", Expires: time.Now().Add(24 * time.Hour)},
+		{Name: "carol", Token: "secret-carol-tok", Expires: time.Now().Add(-time.Hour)},
+	}
+
+	rr := httptest.NewRecorder()
+	cp.handleConfigClients(rr, httptest.NewRequest(http.MethodGet, "/config/clients", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+
+	// SECURITY INVARIANT: no token value (or "token" key) may appear in the body.
+	body := rr.Body.String()
+	for _, tok := range []string{"secret-alice-tok", "secret-bob-tok", "secret-carol-tok"} {
+		if strings.Contains(body, tok) {
+			t.Fatalf("token leaked in /config/clients body: %s", body)
+		}
+	}
+	if strings.Contains(body, "\"token\"") {
+		t.Fatalf("response carries a token key: %s", body)
+	}
+
+	var list []clientView
+	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(list) != 3 {
+		t.Fatalf("got %d clients, want 3", len(list))
+	}
+	byName := map[string]clientView{}
+	for _, c := range list {
+		byName[c.Name] = c
+	}
+	// never-expires → null expires, not expired.
+	if byName["alice"].Expires != nil || byName["alice"].Expired {
+		t.Errorf("alice should be never-expires: %+v", byName["alice"])
+	}
+	// future expiry → present, not expired.
+	if byName["bob"].Expires == nil || byName["bob"].Expired {
+		t.Errorf("bob should have a future expiry, not expired: %+v", byName["bob"])
+	}
+	// past expiry → marked expired but STILL listed (operators must see stale tokens).
+	if byName["carol"].Expires == nil || !byName["carol"].Expired {
+		t.Errorf("carol should be marked expired and still listed: %+v", byName["carol"])
+	}
+}
+
+func TestHandleConfigClients_MethodNotAllowed(t *testing.T) {
+	cp := newTestCP(t)
+	rr := httptest.NewRecorder()
+	cp.handleConfigClients(rr, httptest.NewRequest(http.MethodPost, "/config/clients", nil))
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", rr.Code)
+	}
+}
+
+func TestHandleConfigMonitoring(t *testing.T) {
+	cp := newTestCP(t)
+
+	// Unset → disabled, empty URL.
+	t.Setenv("EPHEMERA_GRAFANA_URL", "")
+	rr := httptest.NewRecorder()
+	cp.handleConfigMonitoring(rr, httptest.NewRequest(http.MethodGet, "/config/monitoring", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	var off map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &off); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if off["enabled"] != false || off["grafana_url"] != "" {
+		t.Fatalf("unset: got %+v, want disabled/empty", off)
+	}
+
+	// Set → enabled, URL echoed.
+	t.Setenv("EPHEMERA_GRAFANA_URL", "http://localhost:3001")
+	rr = httptest.NewRecorder()
+	cp.handleConfigMonitoring(rr, httptest.NewRequest(http.MethodGet, "/config/monitoring", nil))
+	var on map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &on); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if on["enabled"] != true || on["grafana_url"] != "http://localhost:3001" {
+		t.Fatalf("set: got %+v, want enabled/url", on)
+	}
+
+	// Method guard.
+	rr = httptest.NewRecorder()
+	cp.handleConfigMonitoring(rr, httptest.NewRequest(http.MethodPost, "/config/monitoring", nil))
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST status = %d, want 405", rr.Code)
 	}
 }
