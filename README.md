@@ -709,7 +709,7 @@ snapshots/            Stored snapshot directories (auto-created, gitignored)
     rootfs.ext4       Disk copy (always full, ~700 MB)
     metadata.json     Restore params (IP, TAP, MAC, token, type, base_snapshot_id)
 
-e2e_test.sh           End-to-end integration test (80+ numbered steps incl. resilience + v0.3.x–v0.4.5 sub-steps; requires /dev/kvm + root)
+e2e_test.sh           End-to-end integration test (89 numbered steps incl. resilience + v0.3.x–v0.7.0 sub-steps; requires /dev/kvm + root)
 observability_demo.sh One-shot live demo: daemon + Prometheus + Grafana, auto workload, browser-driven exploration until Ctrl-C (v0.3.5)
 webdev_demo.sh        One-shot live demo: orchestrator+worker+reviewer flock builds a React+Vite site, harvested from the Town Wall and served via vite preview until Ctrl-C (v0.3.6; manual gate, needs a Gemini key + /dev/kvm)
 
