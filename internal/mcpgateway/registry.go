@@ -248,6 +248,9 @@ func validateServer(s ServerConfig) error {
 		if s.CredentialEnv != "" && !validEnvName(s.CredentialEnv) {
 			return fmt.Errorf("server %q: credential_env %q is not a valid environment variable name", s.ID, s.CredentialEnv)
 		}
+		if reservedChildEnvName(s.CredentialEnv) {
+			return fmt.Errorf("server %q: credential_env %q is reserved (PATH, HOME, and LANG are set by the minimal child environment)", s.ID, s.CredentialEnv)
+		}
 	default:
 		return fmt.Errorf("server %q: unsupported transport %q (only \"http\" or \"stdio\")", s.ID, s.Transport)
 	}
@@ -259,6 +262,18 @@ func validateServer(s ServerConfig) error {
 		return fmt.Errorf("server %q: namespace %q must not contain %q", s.ID, ns, namespaceSep)
 	}
 	return nil
+}
+
+// reservedChildEnvName reports whether name collides with a variable that
+// minimalChildEnv (backend_stdio.go) always sets from scratch. Injecting a
+// credential under one of these would silently shadow the child's PATH, HOME,
+// or LANG, so it is rejected as a config error.
+func reservedChildEnvName(name string) bool {
+	switch name {
+	case "PATH", "HOME", "LANG":
+		return true
+	}
+	return false
 }
 
 // validEnvName reports whether s is a portable environment variable name:
