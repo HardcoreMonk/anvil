@@ -182,3 +182,40 @@ func TestConfigProvidersNeverExposeKeyValues(t *testing.T) {
 		t.Errorf("GET /config/providers leaked the API key value: %s", body)
 	}
 }
+
+// TestDeleteProfileInUseReturns409 locks in the v0.5.3 guard that deleting a
+// profile a running VM was spawned from is refused with 409 (deleting it would
+// leave those agents silently falling back to the default config on restart /
+// change-role). Upstream ships the vmsUsingProfile guard but no test for it.
+func TestDeleteProfileInUseReturns409(t *testing.T) {
+	cp := newTestCP(t)
+	writeProfileFixture(t, cp, "worker", sampleGooseYAML)
+	profileDir := filepath.Join(cp.workDir, "configs", "profiles", "worker")
+
+	// A running VM spawned from the "worker" profile.
+	cp.mu.Lock()
+	cp.vms["vm-inuse"] = &runningVM{VMInfo: VMInfo{VMID: "vm-inuse", Profile: "worker"}}
+	cp.mu.Unlock()
+
+	rr := httptest.NewRecorder()
+	cp.handleConfigProfile(rr, httptest.NewRequest(http.MethodDelete, "/config/profiles/worker", nil))
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("DELETE in-use profile = %d, want 409; body=%s", rr.Code, rr.Body.String())
+	}
+	if _, err := os.Stat(profileDir); err != nil {
+		t.Errorf("in-use profile dir removed despite 409: %v", err)
+	}
+
+	// Once no live VM references it, delete succeeds.
+	cp.mu.Lock()
+	delete(cp.vms, "vm-inuse")
+	cp.mu.Unlock()
+	rr = httptest.NewRecorder()
+	cp.handleConfigProfile(rr, httptest.NewRequest(http.MethodDelete, "/config/profiles/worker", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("DELETE unused profile = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	if _, err := os.Stat(profileDir); !os.IsNotExist(err) {
+		t.Errorf("unused profile dir not removed after 200: err=%v", err)
+	}
+}
