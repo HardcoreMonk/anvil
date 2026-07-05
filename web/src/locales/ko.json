@@ -176,7 +176,7 @@
     "empty": "구성된 백엔드 MCP 서버가 없습니다. configs/mcp/servers.yaml에 추가하세요.",
     "colId": "ID",
     "colNamespace": "네임스페이스",
-    "colUrl": "URL",
+    "colUrl": "엔드포인트",
     "colProfiles": "프로파일",
     "colCredential": "자격증명",
     "colHealth": "상태",

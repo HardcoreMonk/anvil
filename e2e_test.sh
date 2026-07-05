@@ -2152,14 +2152,17 @@ unset EPHEMERA_CTL_URL EPHEMERA_CTL_TOKEN
 rm -f "$TOKENS_FILE" || true
 
 # ════════════════════════════════════════════════════════════════
-# MCP GATEWAY (v0.6.1) — steps 84-86
+# MCP GATEWAY (v0.6.1) — steps 84-86; stdio backends (v0.6.4) — 87-89
 # The gateway is OFF by default through the rest of this script, so
 # these steps relaunch the daemon with EPHEMERA_MCP_ENABLED=1 and a
 # public DeepWiki backend, exercising the VM→gateway→backend path that
 # v0.6.0 added. Tier A (no key) asserts the plumbing; Tier B (a
 # Gemini/Anthropic key) drives a real tool call and checks the audit
 # log + metric. The daemon is relaunched WITHOUT auth tokens, so these
-# control-plane calls need no Authorization header.
+# control-plane calls need no Authorization header. Steps 87-89 repeat
+# the pattern with a local stdio backend (a jq-based fixture script):
+# spawn + handshake + privilege drop key-free, a key-gated tool call,
+# and subprocess reaping on daemon shutdown.
 # ════════════════════════════════════════════════════════════════
 
 # ── 84. Relaunch daemon with the MCP gateway enabled ─────────────
@@ -2303,6 +2306,172 @@ pkill -f "firecracker --api-sock" 2>/dev/null || true
 [ -f /tmp/mcp-servers.bak ] && mv /tmp/mcp-servers.bak configs/mcp/servers.yaml || rm -f configs/mcp/servers.yaml
 trap - EXIT
 ok "MCP gateway test daemon stopped"
+
+# ── 87. MCP stdio backend (v0.6.4): spawn + handshake + drop ─────
+step "87. Relaunch daemon with a stdio MCP backend (jq fixture)"
+# The fixture is a minimal newline-delimited JSON-RPC MCP server. It lives in
+# /tmp (mode 755) so the unprivileged stdio user can read and exec it — the
+# repo dir may not be world-traversable. It exits on stdin EOF, exercising the
+# gateway's graceful-close path.
+STDIO_FIXTURE=/tmp/ephemera-e2e-stdio-mcp.sh
+cat > "$STDIO_FIXTURE" <<'FIXTURE'
+#!/bin/bash
+# Minimal stdio MCP server for the Ephemera e2e (newline-delimited JSON-RPC).
+while IFS= read -r line; do
+  method=$(printf '%s' "$line" | jq -r '.method // empty' 2>/dev/null)
+  id=$(printf '%s' "$line" | jq -c '.id // empty' 2>/dev/null)
+  [ -z "$method" ] && continue   # responses to server-initiated requests: none expected
+  [ -z "$id" ] && continue       # notifications get no reply
+  case "$method" in
+    initialize)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"e2e-echoer","version":"1"}}}\n' "$id" ;;
+    ping)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id" ;;
+    tools/list)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"echo","description":"Echo the given text back","inputSchema":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}]}}\n' "$id" ;;
+    tools/call)
+      text=$(printf '%s' "$line" | jq -r '.params.arguments.text // ""' 2>/dev/null)
+      jq -nc --argjson id "$id" --arg t "echo: $text" '{jsonrpc:"2.0",id:$id,result:{content:[{type:"text",text:$t}],isError:false}}' ;;
+    resources/list)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"resources":[]}}\n' "$id" ;;
+    prompts/list)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"prompts":[]}}\n' "$id" ;;
+    *)
+      printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32601,"message":"unknown method"}}\n' "$id" ;;
+  esac
+done
+FIXTURE
+chmod 755 "$STDIO_FIXTURE"
+[ -f configs/mcp/servers.yaml ] && cp configs/mcp/servers.yaml /tmp/mcp-servers.bak
+trap '[ -f /tmp/mcp-servers.bak ] && mv /tmp/mcp-servers.bak configs/mcp/servers.yaml || rm -f configs/mcp/servers.yaml; rm -f /tmp/ephemera-e2e-stdio-mcp.sh' EXIT
+cat > configs/mcp/servers.yaml <<YAML
+servers:
+  - id: echoer
+    namespace: echoer
+    transport: stdio
+    command: $STDIO_FIXTURE
+YAML
+relaunch_daemon "EPHEMERA_MCP_ENABLED=1 EPHEMERA_DISK_MODE=plain"
+ok "Daemon back up with a stdio MCP backend configured"
+
+# ── 87a. Health probe spawns + handshakes the subprocess key-free ─
+step "87a. GET /config/mcp/servers spawns the stdio child and probes up"
+STDIO_SRV=$(curl -s -m 20 "$API/config/mcp/servers" || echo '[]')
+echo "$STDIO_SRV" | jq -e 'any(.[]; .id=="echoer" and .transport=="stdio" and .command=="'"$STDIO_FIXTURE"'")' >/dev/null 2>&1 \
+    && ok "echoer listed with transport=stdio and its command ✓" \
+    || fail "echoer stdio row wrong: $STDIO_SRV"
+echo "$STDIO_SRV" | jq -e 'map(select(.id=="echoer"))[0].up==true' >/dev/null 2>&1 \
+    && ok "stdio child spawned, initialized, and answers ping (up=true) ✓" \
+    || fail "echoer not up — spawn/handshake failed: $STDIO_SRV"
+echo "$STDIO_SRV" | jq -e 'any(.[]; .id=="echoer" and has("args"))' >/dev/null 2>&1 \
+    && fail "args must never be exposed via /config/mcp/servers" \
+    || ok "args not exposed in the API ✓"
+
+# ── 87b. The child runs de-privileged with rlimits applied ───────
+step "87b. stdio child runs as the unprivileged user with rlimits"
+STDIO_PID=$(pgrep -f "$STDIO_FIXTURE" | head -1 || true)
+if [ -z "$STDIO_PID" ]; then
+    fail "no fixture process found after the health probe"
+else
+    STDIO_WANT_USER="${EPHEMERA_MCP_STDIO_USER:-nobody}"
+    STDIO_GOT_USER=$(ps -o user= -p "$STDIO_PID" | tr -d ' ')
+    # ps truncates long names (e.g. "systemd+"); compare the visible prefix.
+    case "$STDIO_WANT_USER" in
+        "$STDIO_GOT_USER"|"${STDIO_GOT_USER%+}"*)
+            ok "child pid $STDIO_PID runs as $STDIO_GOT_USER ✓" ;;
+        *)
+            fail "child runs as $STDIO_GOT_USER, want $STDIO_WANT_USER" ;;
+    esac
+    grep -E "^Max open files" "/proc/$STDIO_PID/limits" | grep -q 256 \
+        && ok "RLIMIT_NOFILE clamped to 256 ✓" \
+        || fail "RLIMIT_NOFILE not clamped: $(grep "^Max open files" "/proc/$STDIO_PID/limits" || true)"
+    grep -E "^Max processes" "/proc/$STDIO_PID/limits" | grep -q 512 \
+        && ok "RLIMIT_NPROC clamped to 512 ✓" \
+        || fail "RLIMIT_NPROC not clamped: $(grep "^Max processes" "/proc/$STDIO_PID/limits" || true)"
+fi
+
+# ── 88. Tier B: a real tool call through VM → gateway → stdio ────
+step "88. MCP stdio tool-call round-trip (requires Gemini/Anthropic key)"
+if [ -z "${MCP_LLM_KEY:-}" ]; then
+    ok "Skipped — set GOOGLE_API_KEY or ANTHROPIC_API_KEY to exercise a real stdio tool call"
+else
+    cp configs/goose-secrets.yaml /tmp/mcp-global-secrets.bak
+    cp configs/goose.yaml /tmp/mcp-global-goose.bak
+    trap '[ -f /tmp/mcp-servers.bak ] && mv /tmp/mcp-servers.bak configs/mcp/servers.yaml || rm -f configs/mcp/servers.yaml; rm -f /tmp/ephemera-e2e-stdio-mcp.sh; [ -f /tmp/mcp-global-secrets.bak ] && mv /tmp/mcp-global-secrets.bak configs/goose-secrets.yaml; [ -f /tmp/mcp-global-goose.bak ] && mv /tmp/mcp-global-goose.bak configs/goose.yaml' EXIT
+    if ! grep -qE "^# *${MCP_SECRET_KEY}:" configs/goose-secrets.yaml && \
+       ! grep -qE "^${MCP_SECRET_KEY}:" configs/goose-secrets.yaml; then
+        printf '%s: "%s"\n' "$MCP_SECRET_KEY" "$MCP_LLM_KEY" >> configs/goose-secrets.yaml
+    fi
+    sed -i "s|^# *${MCP_SECRET_KEY}:.*|${MCP_SECRET_KEY}: \"${MCP_LLM_KEY}\"|" configs/goose-secrets.yaml
+    sed -i "s|^${MCP_SECRET_KEY}:.*|${MCP_SECRET_KEY}: \"${MCP_LLM_KEY}\"|" configs/goose-secrets.yaml
+    sed -i "s|^GOOSE_PROVIDER:.*|GOOSE_PROVIDER: ${MCP_PROVIDER}|" configs/goose.yaml
+    sed -i "s|^GOOSE_MODEL:.*|GOOSE_MODEL: ${MCP_MODEL}|" configs/goose.yaml
+    ok "Global goose config set to provider=$MCP_PROVIDER model=$MCP_MODEL"
+
+    # ── 88a. Spawn a researcher flock; its VM gets the MCP extension ──
+    step "88a. Spawn researcher flock under the stdio-backed gateway"
+    SB_RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/flocks" \
+        -H "Content-Type: application/json" \
+        -d '{"task":"stdio mcp smoke","roles":["researcher"]}')
+    check_http "$(echo "$SB_RESP" | tail -1)" "201" "POST /flocks (stdio MCP smoke)"
+    SB_BODY=$(echo "$SB_RESP" | head -1)
+    SB_FLOCK_ID=$(echo "$SB_BODY" | jq -r '.flock_id')
+    SB_VM_ID=$(echo "$SB_BODY" | jq -r '.agents[] | select(.agent_id=="researcher-1") | .vm_id')
+    SB_TOKEN=$(echo "$SB_BODY" | jq -r '.agent_tokens["researcher-1"]')
+    ok "Spawned researcher VM $SB_VM_ID"
+
+    # ── 88b. Drive a single echoer tool call ─────────────────────
+    step "88b. POST /tasks instructing one echoer tool call"
+    SB_TASK=$(jq -n '{prompt:"Call the echoer echo tool exactly once with the text \"hello\", then respond with the JSON {\"done\":true}. Do not call any other tool."}')
+    curl -s -m 180 -X POST "$API/vms/$SB_VM_ID/tasks" \
+        -H "Authorization: Bearer $SB_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$SB_TASK" > /tmp/mcp-stdio-task.json || true
+    ok "/tasks invocation returned (see /tmp/mcp-stdio-task.json)"
+
+    # ── 88c. audit/mcp.jsonl + metric record the echoer call ─────
+    step "88c. Gateway recorded the stdio tool call (audit + metric)"
+    SB_FOUND=false
+    for i in $(seq 1 30); do
+        if [ -f audit/mcp.jsonl ] && \
+           jq -e -s 'any(.[]; .server=="echoer")' audit/mcp.jsonl >/dev/null 2>&1; then
+            SB_FOUND=true; break
+        fi
+        sleep 1
+    done
+    $SB_FOUND && ok "audit/mcp.jsonl recorded an echoer tool call ✓" \
+              || fail "no echoer entry in audit/mcp.jsonl within 30s (see /tmp/mcp-stdio-task.json)"
+    SB_METRICS=$(curl -s -m 5 "$API/metrics" || echo "")
+    echo "$SB_METRICS" | grep -qE 'ephemera_mcp_tool_calls_total\{server="echoer",outcome="ok"\} [1-9]' \
+        && ok "metric ephemera_mcp_tool_calls_total{echoer,ok} incremented ✓" \
+        || fail "echoer ok tool-call metric not incremented"
+
+    # ── 88d. Cleanup Tier B ──────────────────────────────────────
+    step "88d. DELETE stdio MCP flock + restore global goose config"
+    curl -s -o /dev/null -X DELETE "$API/flocks/$SB_FLOCK_ID"
+    mv /tmp/mcp-global-secrets.bak configs/goose-secrets.yaml
+    mv /tmp/mcp-global-goose.bak configs/goose.yaml
+    trap '[ -f /tmp/mcp-servers.bak ] && mv /tmp/mcp-servers.bak configs/mcp/servers.yaml || rm -f configs/mcp/servers.yaml; rm -f /tmp/ephemera-e2e-stdio-mcp.sh' EXIT
+    ok "Tier B cleanup complete"
+fi
+
+# ── 89. Daemon shutdown reaps the stdio subprocess ────────────────
+step "89. Daemon shutdown reaps the stdio subprocess (Registry.Close)"
+kill "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null || true
+pkill -f "firecracker --api-sock" 2>/dev/null || true
+SB_REAPED=false
+for i in $(seq 1 5); do
+    if ! pgrep -f "$STDIO_FIXTURE" >/dev/null 2>&1; then
+        SB_REAPED=true; break
+    fi
+    sleep 1
+done
+$SB_REAPED && ok "stdio child gone after daemon shutdown ✓" \
+           || fail "stdio fixture still running after daemon shutdown: $(pgrep -f "$STDIO_FIXTURE" | tr '\n' ' ')"
+[ -f /tmp/mcp-servers.bak ] && mv /tmp/mcp-servers.bak configs/mcp/servers.yaml || rm -f configs/mcp/servers.yaml
+rm -f "$STDIO_FIXTURE"
+trap - EXIT
+ok "stdio MCP test daemon stopped + configs restored"
 
 # ── Shut down the last test daemon ───────────────────────────────
 kill "$DAEMON_PID" 2>/dev/null || true; wait "$DAEMON_PID" 2>/dev/null || true
