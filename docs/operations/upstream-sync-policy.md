@@ -83,10 +83,11 @@ upstream 변경 자체와 anvil에서 해결한 conflict/적응 작업을 review
 
 ## 현재 runtime baseline
 
-anvil main runtime baseline은 upstream ephemera `v0.5.5` tag까지 병합·적응한 runtime을
+anvil main runtime baseline은 upstream ephemera `v0.6.4` tag까지 병합·적응한 runtime을
 포함한다. `v0.3.2`-`v0.3.6`은 이전 release(`anvil-v0.3.x`)에서 채택한 baseline이고,
-`v0.4.0`-`v0.4.5`는 v0.4 sync로, `v0.5.0`-`v0.5.5`는 v0.5 operator sync로 병합·적응해
-full KVM gate로 검증한 baseline이다.
+`v0.4.0`-`v0.4.5`는 v0.4 sync로, `v0.5.0`-`v0.5.5`는 v0.5 operator sync로,
+`v0.6.0`-`v0.6.4`는 v0.6 MCP gateway sync로 병합·적응해 full KVM gate로 검증한
+baseline이다.
 2026-07-02 기준 upstream `main`과 최신 upstream tag는 `v0.7.0`까지 진행되어 있다.
 `v0.3.2`-`v0.3.5` 병합 commit은 `1ebe201 Merge upstream/main`이고, `v0.3.6`은
 `v0.3.6` tag commit을 merge한다.
@@ -137,6 +138,21 @@ sizing 결정: `v0.5.3`부터 anvil은 upstream default VM sizing `1` vCPU / `10
 per-profile `EPHEMERA_VCPU_COUNT`/`EPHEMERA_MEM_SIZE_MIB` override를 무시하고
 `LookupProfile` default로만 sizing하는 upstream-inherited gap은 follow-up이다.
 
+`v0.6.0`-`v0.6.4` MCP gateway sync 채택 상태(이 v0.6 sync의 merge/adapt commit 기준;
+upstream에 `v0.6.3` 없음):
+
+| tag | 상태 | anvil adaptation 요지 |
+|---|---|---|
+| `v0.6.0` | 병합(`6e42d2b`)/적응(`cf2e87a`), `adapted` | runtime MCP Gateway(`internal/mcpgateway`, daemon `/config/mcp*` handler, `configs/mcp/*.example`, Web UI MCP console). **runtime/operator surface, IronClaw MCP surface 아님, `cmd/anvil-mcp` 대체 아님.** 경계 구조적 강제: source IP↔VM registry로 caller profile 판정(unknown `403`), backend credential host-side only(`configs/mcp/secrets.yaml` gitignored; VM엔 gateway URL만), `audit/mcp.jsonl` metadata-only(`Err`도 omit), profile policy는 widen 불가. anvil boundary guard 4종 추가. |
+| `v0.6.1`/`v0.6.2`/`v0.6.4` | 병합(`9ba10f0`/`94fafdf`/`1bdd491`)/적응(`74c89c4`/`688e6ad`/`04e2a12`), `adapted` | `EPHEMERA_NET_ANTISPOOF` 기본 on(ebtables best-effort); per-(VM,server) token-bucket rate limit(`EPHEMERA_MCP_RATE` 기본 `0`, `EPHEMERA_MCP_BURST`); resources/prompts가 tools와 policy·rate bucket 공유(anvil guard); audit `kind` field; `GET /config/mcp/servers`는 transport/command + `has_credential`만(leak guard + sentinel); stdio backend child env `[PATH,HOME,LANG]`+`spec.Env` 재구성(`EPHEMERA_*` canary), credential은 `credential_env`로만(argv 아님), root면 `nobody` + `/var/lib/ephemera/mcp-stdio` scratch, shutdown이 process group reap. |
+
+runtime MCP Gateway 경계: `EPHEMERA_MCP_*`(gateway, runtime/operator surface)와
+`ANVIL_MCP_*`(`cmd/anvil-mcp` IronClaw adapter 설정)는 별개 namespace다. gateway는
+adapter를 대체하지 않고 IronClaw tool 목록에 gateway tool을 추가하지 않는다(guard
+`TestToolRegistrationsExcludeGatewayTools`). `EPHEMERA_MCP_BIND_IP`는 기본 안전한
+bridge IP bind를 override할 수 있고 source-IP `403`이 defense-in-depth로 남으며, stdio
+backend 운영 시 `nobody`/scratch default를 확인한다.
+
 `v0.3.2`/`v0.3.3`의 세부 변경 근거와 anvil 채택 검토 포인트는
 [`docs/analysis/08-v0.3.2-v0.3.3-upstream-change-review.md`](../analysis/08-v0.3.2-v0.3.3-upstream-change-review.md)를
 historical analysis로 보존한다. 현재 채택 상태는
@@ -148,12 +164,12 @@ historical analysis로 보존한다. 현재 채택 상태는
 1. `v0.4.0`-`v0.4.5` runtime 안정화 변경은
    [`docs/superpowers/plans/2026-06-10-ephemera-v0.4-runtime-sync.md`](../superpowers/plans/2026-06-10-ephemera-v0.4-runtime-sync.md)
    계획대로 v0.4 sync에서, `v0.5.0`-`v0.5.5` operator support 변경은 v0.5 operator
-   sync에서 각각 병합/적응·검증을 마쳤다(위 채택 상태 표 참조). 남은 항목은 `v0.4.2`
-   default COW 전환, `v0.4.4` flock broadcast의 MCP tool 노출, flock member spawn의
-   per-profile sizing 존중이며, 각각 KVM burn-in과 tenant/rate/audit·sizing 경로 설계
-   뒤 결정한다.
-2. `v0.6.0`-`v0.7.0`은 MCP Gateway, installer/transcript/hardening 계열 변경으로
-   분류하고, 별도 adoption review 문서를 먼저 작성한다.
+   sync에서, `v0.6.0`-`v0.6.4` MCP gateway 변경은 v0.6 MCP gateway sync에서 각각
+   병합/적응·검증을 마쳤다(위 채택 상태 표 참조). 남은 항목은 `v0.4.2` default COW
+   전환, `v0.4.4` flock broadcast의 MCP tool 노출, flock member spawn의 per-profile
+   sizing 존중이며, 각각 KVM burn-in과 tenant/rate/audit·sizing 경로 설계 뒤 결정한다.
+2. `v0.7.0`은 installer/transcript/hardening 계열 변경으로 분류하고, 별도 adoption
+   review 문서를 먼저 작성한다.
 3. upstream `v0.7.0`의 kernel SHA 검증, `waitForAgent` per-probe timeout,
    `EPHEMERA_HOME`은 baseline sync와 독립적인 hardening backport로 이미 반영됐지만,
    이것을 `v0.7.0` 전체 채택으로 표기하지 않는다.

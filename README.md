@@ -48,17 +48,18 @@ daemon 이름, HTTP API, 일부 환경 변수에는 `ephemera` 또는 `goose` �
 runtime으로 구분한다.
 
 버전별 ephemera 소스 snapshot은 Git tag로 공개된다. anvil main runtime baseline은
-upstream ephemera `v0.5.5`까지 병합·적응한 상태를 포함한다. 이 병합은 MicroVM
+upstream ephemera `v0.6.4`까지 병합·적응한 상태를 포함한다. 이 병합은 MicroVM
 lifecycle, flock resilience, token rotation, observability, v0.4 runtime 안정화,
 single-host flock lifecycle, streaming task, snapshot-restore auto-recovery,
-v0.5 operator Web UI/config surface 같은 runtime·operator substrate를 끌어올린
-것이며, anvil의 제품 정체성을 ephemera로 바꾸는 작업이 아니다. 즉 anvil main runtime
-baseline은 upstream ephemera `v0.5.5` adapted runtime·operator support를 포함하는
-것이지, 수정 없는 ephemera `v0.5.5`가 아니다. `v0.4.0`-`v0.5.5`는 full KVM gate로
-검증했고 `v0.5.0` operator Web UI(`/ui/`, `/config/*`)는 runtime/operator surface로만
-채택하며(IronClaw MCP surface 아님), `v0.4.4` flock broadcast의 MCP tool 노출과
-`v0.4.2` default COW 전환만 deferred다. 2026-07-02 기준 upstream `main`과 최신
-upstream tag는 `v0.7.0`이며, `v0.6.0`-`v0.7.0`은 별도 adoption review가 필요한
+v0.5 operator Web UI/config surface, v0.6 runtime MCP Gateway 같은 runtime·operator
+substrate를 끌어올린 것이며, anvil의 제품 정체성을 ephemera로 바꾸는 작업이 아니다.
+즉 anvil main runtime baseline은 upstream ephemera `v0.6.4` adapted runtime·operator
+support를 포함하는 것이지, 수정 없는 ephemera `v0.6.4`가 아니다. `v0.4.0`-`v0.6.4`는
+full KVM gate로 검증했고 `v0.5.0` operator Web UI(`/ui/`, `/config/*`)와 `v0.6.0`
+runtime MCP Gateway(`EPHEMERA_MCP_*`)는 runtime/operator surface로만 채택하며(IronClaw
+MCP surface 아님, `cmd/anvil-mcp` adapter를 대체하지 않음), `v0.4.4` flock broadcast의
+MCP tool 노출과 `v0.4.2` default COW 전환만 deferred다. 2026-07-02 기준 upstream
+`main`과 최신 upstream tag는 `v0.7.0`이며, `v0.7.0`은 별도 adoption review가 필요한
 backlog다.
 upstream `v0.7.0`의 kernel SHA 검증, `waitForAgent` per-probe timeout,
 `EPHEMERA_HOME` hardening은 선별 backport됐지만 baseline sync 완료를 의미하지
@@ -108,16 +109,16 @@ anvil은 ephemera를 이름만 바꾼 프로젝트가 아니다. anvil은 IronCl
 
 ### Runtime Baseline
 
-anvil main runtime baseline은 upstream ephemera `v0.5.5`까지를 포함한다.
+anvil main runtime baseline은 upstream ephemera `v0.6.4`까지를 포함한다.
 
 | 구분 | 현재 기준 | anvil에서의 의미 |
 |---|---|---|
-| ephemera runtime baseline | `v0.5.5` | Firecracker VM lifecycle, cold-restart, flock recovery, token rotation, `/metrics`, `/stats`, `slog`, in-VM `gtcall`, webdev demo, v0.4.0-v0.4.5 runtime 안정화(auth/audit, COW spawn, dynamic flock lifecycle, streaming task, nested depth guard, watchdog status, snapshot-restore auto-recovery), v0.5.0-v0.5.5 operator support(Web UI `/ui/`, `/config/*`, per-VM sizing `1` vCPU/`1024` MiB default) 기반 |
-| upstream latest observed | `v0.7.0` (2026-07-02 확인) | `v0.6.0`-`v0.7.0`은 별도 검토 backlog |
+| ephemera runtime baseline | `v0.6.4` | Firecracker VM lifecycle, cold-restart, flock recovery, token rotation, `/metrics`, `/stats`, `slog`, in-VM `gtcall`, webdev demo, v0.4.0-v0.4.5 runtime 안정화(auth/audit, COW spawn, dynamic flock lifecycle, streaming task, nested depth guard, watchdog status, snapshot-restore auto-recovery), v0.5.0-v0.5.5 operator support(Web UI `/ui/`, `/config/*`, per-VM sizing `1` vCPU/`1024` MiB default), v0.6.0-v0.6.4 runtime MCP Gateway(`EPHEMERA_MCP_*`, anti-spoof/rate-limit/stdio backends) 기반 |
+| upstream latest observed | `v0.7.0` (2026-07-02 확인) | `v0.7.0`은 별도 검토 backlog |
 | anvil product surface | `anvil_*` MCP tool, scheduler, tenant/egress, workload runner | IronClaw가 직접 사용하는 공개 실행 계약 |
 | namespace policy | `EPHEMERA_*`, `goose-*`, `ephemera_*` 유지 | upstream runtime 호환성. anvil 이름으로 일괄 rename하지 않는다. |
 
-ephemera `v0.3.2`-`v0.5.5`는 anvil 안에서 runtime baseline으로 채택/적응된 변경이다.
+ephemera `v0.3.2`-`v0.6.4`는 anvil 안에서 runtime baseline으로 채택/적응된 변경이다.
 `v0.4.4` flock broadcast는 daemon-only이고 `anvil_*` MCP tool로 노출하지 않으며,
 `v0.4.5` snapshot-restore auto-recovery에서 anvil은 live·persisted restored VM이
 참조하는 source snapshot의 `DELETE`를 `409`로 계속 막는다(upstream e2e 46c의 `200`
@@ -125,7 +126,11 @@ orphan과 다른 의도적 divergence). `v0.5.0` operator Web UI(`/ui/`)와 `/co
 runtime/operator surface로만 채택하고 IronClaw `anvil_*` MCP surface로 노출하지 않으며,
 `cmd/anvil-mcp`는 v0.5 sync에서 변경되지 않았다. `v0.5.x`가 드러낸 upstream pooled
 agent-proxy 결함은 `64ec57c`가 request마다 fresh dial(`DisableKeepAlives`)로 고쳤다
-(upstream connection pooling과의 divergence).
+(upstream connection pooling과의 divergence). `v0.6.0` runtime MCP Gateway
+(`EPHEMERA_MCP_*`, `internal/mcpgateway`)도 runtime/operator surface로만 채택하며
+IronClaw `anvil_*` MCP surface(`ANVIL_MCP_*` adapter)를 대체하지 않는다 — caller
+profile은 source IP로 판정하고, backend credential은 host-side에만 두며(VM엔 gateway
+URL만), audit은 metadata-only이고 profile policy는 서버 목록을 넓힐 수 없다.
 anvil release note에서는 이 내용을 "upstream runtime baseline"으로 분리해 기록하고,
 MCP/scheduler/workload/tenant/egress 같은 anvil 고유 기능과 섞어 제품명처럼 쓰지
 않는다.
@@ -516,6 +521,9 @@ Upstream ephemera feature matrix:
 | **System & Monitoring console** (v0.5.5) | The Web console adds System/Monitoring endpoints plus an `API_TOKEN` warning; `GET /config/clients` lists control-plane client **names + expiry** only (never the token). Town Wall author migrated to `SystemAuthor`; snapshot-restore agent-wait raised 30 s → 60 s. |
 | **Per-profile builtin extensions** (v0.6.0) | Each profile selects which goose builtin extensions its agents load (`EPHEMERA_BUILTINS` in the profile `goose.yaml`; registry at `GET /config/builtins`; `GET/PUT /config/profiles/{name}/builtins`; Settings checkbox group + Extensions editor). Replaces the old hardcoded `--with-builtin developer`; absent → `developer` fallback (existing profiles unchanged). Ships in the same rebake as the MCP extension. |
 | **MCP Gateway** (v0.6.0, opt-in, runtime/operator surface) | `EPHEMERA_MCP_ENABLED=1` starts a host-resident MCP server on the bridge IP (`10.0.1.1:3001`) that the in-VM goose clients connect to, aggregating backend MCP servers (`configs/mcp/servers.yaml`) behind one namespaced, per-profile-filtered tool catalog. Backend credentials (`configs/mcp/secrets.yaml`) stay host-side; VMs get only an injected endpoint URL, added via `--with-streamable-http-extension`. Caller identity is by source IP → profile. `GET /config/mcp` + `GET /config/mcp/servers` (live health) back the **System › MCP Gateway** tab; calls are metered (`ephemera_mcp_tool_calls_total`) and audited to `audit/mcp.jsonl` (metadata only). Built on interfaces so the multi-host build re-implements them without touching the protocol core. This gateway is the runtime tool surface **for in-VM agents**; it is separate from and does **not** replace `cmd/anvil-mcp`, which remains anvil's only IronClaw-facing MCP adapter. |
+| **MCP Gateway anti-spoof + rate limit** (v0.6.1) | `EPHEMERA_NET_ANTISPOOF` (default on) adds best-effort ebtables MAC/IP anti-spoof so a guest cannot forge another VM's source IP — the gateway's identity signal. Per-(VM, backend server) token-bucket rate limiting via `EPHEMERA_MCP_RATE` (default `0` = unlimited) / `EPHEMERA_MCP_BURST`. |
+| **MCP catalog + granular policy** (v0.6.2) | The gateway aggregates backend **resources** and **prompts** alongside tools; a profile's policy narrows access per-server and per-tool and can only **narrow**, never widen `servers.yaml`. Resources/prompts share the same policy filter and rate-limit bucket as tools (anvil guard). Audit records gain a `kind` field. |
+| **MCP stdio backends** (v0.6.4) | Backends may be spawned as local subprocesses (`transport: stdio`). The child env is rebuilt from scratch (`PATH`/`HOME`/`LANG` + the server's `spec.Env`) so daemon `EPHEMERA_*` vars never leak in (canary test); the credential is passed only through `credential_env` (never argv). When the daemon runs as root the child drops to `EPHEMERA_MCP_STDIO_USER` (default `nobody`) with a `/var/lib/ephemera/mcp-stdio` scratch cwd/HOME, and shutdown reaps the child's process group (pgid-recycling-safe). `GET /config/mcp/servers` exposes transport/command + `has_credential` only (leak guard). *(Upstream has no v0.6.3.)* |
 
 ---
 

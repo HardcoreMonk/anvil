@@ -2,7 +2,7 @@
 
 ## 상태
 
-- 기준 버전: upstream ephemera `v0.5.5` + anvil runtime control-plane updates
+- 기준 버전: upstream ephemera `v0.6.4` + anvil runtime control-plane updates
 - 범위: ephemera daemon HTTP 동작, VM lifecycle, agent proxy, snapshot lifecycle,
   Goosetown flock/Town Wall, tenant/egress/audit/observability endpoint, guest agent 동작
 - 제외 범위: IronClaw MCP client 동작. 해당 내용은
@@ -50,6 +50,8 @@ control plane daemon은 하나의 HTTP service를 노출한다.
 | `/config/profiles`, `/config/profiles/{name}` | `cmd/goose-daemon/config_api.go` | profile `GOOSE_PROVIDER`/`GOOSE_MODEL`·sizing·`system.md`(`64 KiB` cap) read/write. `goose-secrets.yaml`은 read/write하지 않음(sentinel test). delete in-use → `409`, default profile 예약, traversal 거부. auth 설정 시 bearer 뒤 |
 | `/config/providers` | `cmd/goose-daemon/config_api.go` | provider별 API key 존재 여부만 반환(key 값 비노출, sentinel test) |
 | `/config/clients` | `cmd/goose-daemon/config_api.go` | control-plane client 이름과 만료만 반환(token 값 비노출, sentinel test) |
+| `/config/mcp`, `/config/mcp/builtins` | `cmd/goose-daemon/mcp_api.go` | runtime MCP Gateway 설정/builtins 조회. auth 설정 시 bearer 뒤(`v0.6.0`) |
+| `/config/mcp/servers` | `cmd/goose-daemon/mcp_api.go` | backend server 목록을 transport/command + `has_credential`만 노출(credential 값 비노출, leak guard, `v0.6.4`) |
 
 VM 내부의 `goose-agent`는 다음 endpoint를 제공한다.
 
@@ -760,6 +762,62 @@ response 안의 `errors`에 `snapshot_id: ""`, `error: "write GC audit: ..."` �
 - 하나의 create/restore/delete/GC lifecycle operation만 동시에 실행된다. snapshot
   graph locking이 설계되기 전까지 restore/delete race와 진행 중인 restore 파일
   읽기 중 diff base 삭제를 피하기 위한 보수적 직렬화다.
+
+## runtime MCP Gateway 로직 (v0.6.x)
+
+runtime MCP Gateway(`internal/mcpgateway`, `EPHEMERA_MCP_*`)는 VM 내부 goose agent가
+host가 중개하는 backend MCP server(tools/resources/prompts)를 사용하게 하는
+daemon-side runtime/operator surface다. IronClaw MCP adapter(`cmd/anvil-mcp`,
+`ANVIL_MCP_*`)와 별개 계층이며 그것을 대체하지 않는다. VM에는 gateway URL만
+주입되고 backend endpoint·credential은 host가 소유한다.
+
+활성화와 설정:
+
+- `EPHEMERA_MCP_ENABLED`로 켜고, backend 목록은 `EPHEMERA_MCP_SERVERS`(또는
+  `configs/mcp/servers.yaml`)로 정의한다. backend credential은
+  `configs/mcp/secrets.yaml`(gitignored)에만 둔다.
+- listener는 기본적으로 안전한 bridge IP에 bind한다. `EPHEMERA_MCP_BIND_IP`로
+  override할 수 있으며, source-IP 검사가 defense-in-depth로 남는다.
+
+caller identity와 policy:
+
+```text
+gateway request
+  -> source IP를 VM registry(`10.0.1.x`)와 대조해 caller VM/profile을 server-side 판정
+  -> registry에 없는 caller는 403 (guest가 identity를 주입하지 못한다)
+  -> profile policy를 servers.yaml에 교차 적용
+       policy는 허용 backend/tool을 좁히기만 하고 넓힐 수 없다(intersection)
+  -> resources/prompts도 tools와 같은 policy와 rate bucket을 공유한다
+```
+
+rate limit: per-(VM, backend server) token-bucket. `EPHEMERA_MCP_RATE`(기본 `0` =
+unlimited)와 `EPHEMERA_MCP_BURST`로 조정한다. `v0.6.1` 안티스푸핑(`EPHEMERA_NET_ANTISPOOF`,
+기본 on, ebtables best-effort)은 guest가 다른 VM의 IP를 위조하지 못하게 보강한다.
+
+credential 경계:
+
+- backend credential은 host-side에만 존재한다. `VMPrepareOptions`에는 credential
+  필드가 없어 VM에는 gateway URL만 전달된다.
+- stdio backend의 credential은 `credential_env`로 지정한 환경 변수로만 child에
+  주입하고 argv에는 절대 넣지 않는다.
+- `GET /config/mcp/servers`는 transport/command와 `has_credential` boolean만 노출하고
+  credential 값은 반환하지 않는다(leak guard + sentinel).
+
+audit: gateway 호출은 `audit/mcp.jsonl`에 고정 key set metadata만 남긴다. tool
+argument, result, 그리고 `Err` 문자열까지 제외한다(metadata-only, sentinel test).
+
+stdio backend(`v0.6.4`):
+
+- child 환경은 매번 `[PATH, HOME, LANG]` + backend `spec.Env`로 새로 구성한다.
+  daemon의 `EPHEMERA_*`를 포함한 host env는 child로 새지 않는다(canary test).
+- daemon이 root면 `EPHEMERA_MCP_STDIO_USER`(기본 `nobody`)로 privilege drop하고,
+  `/var/lib/ephemera/mcp-stdio` 아래 per-server scratch를 cwd·HOME으로 쓴다.
+- child는 자신의 process group으로 실행(`Setpgid`)해, shutdown 시 group을 통째로
+  reap한다. pgid 재사용에도 안전하다.
+
+anvil boundary guard: IronClaw schema/adapter tool 목록은 gateway tool을 제외하고,
+`/config/mcp*`는 auth 설정 시 bearer 없이는 `401`이며, VM은 URL(credential 아님)만
+받고 policy는 widen할 수 없다.
 
 ## Guest agent 로직
 

@@ -46,9 +46,42 @@
   재연결하고 repaired metadata를 다시 persist한다.
 - `webdev_demo.sh`는 `POST /flocks` 응답의 `agent_tokens`를 읽지 않고, orchestrator
   `vm_id`를 사용해 control-plane proxy `POST /vms/{vm_id}/tasks`로 brief를 보낸다.
-- anvil main runtime baseline은 upstream ephemera `v0.5.5` adapted runtime·operator
-  support를 포함한다(수정 없는 `v0.5.5`가 아니다). 2026-07-02 기준 upstream latest
-  observed는 `v0.7.0`이며, `v0.6.0`-`v0.7.0`은 별도 adoption review backlog로 둔다.
+- anvil main runtime baseline은 upstream ephemera `v0.6.4` adapted runtime·operator
+  support를 포함한다(수정 없는 `v0.6.4`가 아니다). 2026-07-02 기준 upstream latest
+  observed는 `v0.7.0`이며, `v0.7.0`은 별도 adoption review backlog로 둔다.
+- upstream `v0.6.0` (runtime MCP Gateway)를 sync 한다. `EPHEMERA_MCP_ENABLED`로 켜는
+  host-resident MCP Gateway(`internal/mcpgateway`)가 backend MCP server(tools/
+  resources/prompts)를 VM 내부 goose client에 중개한다. **이 gateway는 runtime/operator
+  surface이고 IronClaw MCP surface가 아니며, `cmd/anvil-mcp` IronClaw adapter를
+  대체하지 않는다**(`EPHEMERA_MCP_*` gateway ≠ `ANVIL_MCP_*` adapter). anvil은 경계를
+  구조적으로 강제한다:
+  - caller profile은 source IP를 VM registry와 대조해 server-side로 판정한다. registry에
+    없는 caller는 `403`이며 guest가 identity를 주입하지 못한다.
+  - backend credential은 host-side(`configs/mcp/secrets.yaml`, gitignored)에만 있고 VM에는
+    gateway URL만 주입된다(`VMPrepareOptions`에 credential 필드 없음).
+  - `audit/mcp.jsonl`은 고정 key set의 metadata만 기록하고 tool argument/result와 `Err`
+    문자열까지 제외한다(sentinel test).
+  - profile policy는 `servers.yaml`을 좁히기만 하고 넓힐 수 없다(intersection).
+  - anvil boundary guard 4종: IronClaw schema/adapter가 gateway tool 제외
+    (`TestToolRegistrationsExcludeGatewayTools`,
+    `TestCurrentIronClawSchemasExcludeGatewayNamespacedTools`), audit metadata-only
+    sentinel, `/config/mcp*` bearer 없으면 `401`, VM은 URL(credential 아님)만 받고
+    policy는 widen 불가.
+- upstream `v0.6.1`/`v0.6.2`/`v0.6.4`(upstream에 `v0.6.3` 없음) MCP Gateway hardening을
+  sync 한다:
+  - `v0.6.1`: `EPHEMERA_NET_ANTISPOOF`(기본 on, ebtables best-effort)로 guest IP 위조를
+    막고, per-(VM, backend server) token-bucket rate limit(`EPHEMERA_MCP_RATE` 기본 `0`
+    =unlimited, `EPHEMERA_MCP_BURST`)을 적용한다.
+  - `v0.6.2`: backend resources/prompts를 aggregate하고 per-tool·per-profile policy를
+    적용한다. resources/prompts는 tools와 같은 policy와 rate bucket을 공유한다(anvil
+    guard). audit에 `kind` field 추가.
+  - `v0.6.4`: stdio backend를 subprocess로 실행한다. child env는 `[PATH,HOME,LANG]`+
+    backend `spec.Env`로 새로 구성해 daemon `EPHEMERA_*`가 새지 않고(canary test),
+    credential은 `credential_env`로만 주입(argv 아님), daemon이 root면 `nobody`로
+    privilege drop + `/var/lib/ephemera/mcp-stdio` scratch를 cwd·HOME으로 쓰며 shutdown이
+    process group을 reap한다(pgid recycling-safe). `GET /config/mcp/servers`는
+    transport/command와 `has_credential`만 노출한다(leak guard). `EPHEMERA_MCP_BIND_IP`로
+    기본 bridge IP bind를 override할 수 있고 source-IP `403`이 defense-in-depth로 남는다.
 - upstream `v0.5.0` (operator Web UI + `/config/profiles` + multi-turn agent
   `session` + graceful VM delete)를 sync 한다. anvil adaptation은 runtime/operator
   surface를 IronClaw MCP surface와 분리해서 유지한다:
@@ -178,6 +211,25 @@ v0.5 sync Phase 2 gate (upstream `v0.5.0`-`v0.5.5` operator support 적응):
 - gate coverage correction: Phase 1 KVM gate는 `e2e_test.sh`만 실행하고
   `anvil-mcp-e2e.sh`(3개 모드)와 `vm-workload-e2e.sh`를 누락했다. 이 스크립트들은 현재
   HEAD(post-v0.5.5+fix)에서 처음 실행돼 두 baseline의 superset을 검증했다.
+
+v0.6 sync Phase 3 gate (upstream `v0.6.0`-`v0.6.4` MCP gateway 적응):
+
+- CI-safe gate all green: `git diff --check`, targeted test group(mcpgateway/boundary/
+  audit/ratelimit/stdio guard 포함), web build 재현 가능(`uidist` drift 없음),
+  `go test ./... -count=1`(EXIT=0), `go build ./cmd/{goose-daemon,anvil-mcp,anvil-scheduler}`.
+- boundary guard: `TestToolRegistrationsExcludeGatewayTools`,
+  `TestCurrentIronClawSchemasExcludeGatewayNamespacedTools`,
+  `TestConfigMCPRoutesRequireAuthWhenConfigured`, `TestMCPInjectionCarriesURLNotCredential`,
+  audit metadata-only sentinel, rate-limit per-(VM,server), resources/prompts shared-bucket,
+  stdio env-canary/leak guards.
+- 실제 KVM host `sudo bash e2e_test.sh`: `334✓ / 0✗`("All test steps passed").
+  gateway step `84`-`89`가 최초 실행에서 green. provider-key skip 3건(LLM smoke,
+  real tool call, real stdio tool call).
+- `anvil-mcp-e2e.sh` lifecycle PASS·flock PASS — runtime gateway가 live인 상태에서도
+  IronClaw adapter는 영향받지 않는다. `vm-workload-e2e.sh` PASS.
+- `anvil-mcp-e2e.sh semantic`은 key-free 구간이 `200`이고 LLM-echo substep만
+  known-invalid local Google key로 실패했다(provider-key 의존, Phase 2와 동일한
+  release-gate item, 코드 결함 아님).
 
 ---
 

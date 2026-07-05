@@ -2,11 +2,11 @@
 
 ## 상태
 
-- 기준 버전: upstream ephemera `v0.5.5` + anvil runtime control-plane updates
+- 기준 버전: upstream ephemera `v0.6.4` + anvil runtime control-plane updates
 - anvil 관점: ephemera runtime은 IronClaw 결합 프로젝트의 기반 실행 계층
 - upstream: `https://github.com/steve-seungeui/ephemera`. anvil fork network를
   유지하며 ephemera runtime version을 merge로 반영한다.
-- upstream `v0.3.2`-`v0.5.5`는 anvil main runtime baseline으로 반영되어 있다. `v0.3.2`는
+- upstream `v0.3.2`-`v0.6.4`는 anvil main runtime baseline으로 반영되어 있다. `v0.3.2`는
   cold-restart, `v0.3.3`은 watchdog/restart/CP-token polish, `v0.3.4`는 token
   hot rotation과 watchdog tunable, `v0.3.5`는 metrics/stats/slog 관측성,
   `v0.3.6`은 in-VM `gtcall`, multi-line-safe `gtwall`, Goose JSON output parsing,
@@ -20,8 +20,12 @@
   Web UI(`/ui/`, embedded `cmd/goose-daemon/uidist/`), `/config/*` profile/provider/
   client/system-prompt surface, per-VM sizing(`EPHEMERA_VCPU_COUNT`/
   `EPHEMERA_MEM_SIZE_MIB`, default `1` vCPU / `1024` MiB), `SystemAuthor` migration을
-  제공한다. Web UI와 `/config/*`는 runtime/operator surface이고 IronClaw MCP surface가
-  아니다.
+  제공한다. `v0.6.0`-`v0.6.4`는 runtime MCP Gateway(`internal/mcpgateway`,
+  `EPHEMERA_MCP_*`, `configs/mcp/*`, daemon `/config/mcp*` handler, Web UI MCP console,
+  anti-spoof·rate-limit·stdio backend)를 제공한다. Web UI, `/config/*`, runtime MCP
+  Gateway는 모두 runtime/operator surface이고 IronClaw MCP surface가 아니며, runtime
+  MCP Gateway(`EPHEMERA_MCP_*`)는 `cmd/anvil-mcp` IronClaw adapter(`ANVIL_MCP_*`)를
+  대체하지 않는다. gateway 런타임 동작은 [service-logic.md](service-logic.md)에 정리한다.
 - 저장소/모듈 이름: `ephemera`
 - 런타임 소유 파일:
   - `cmd/goose-daemon/`

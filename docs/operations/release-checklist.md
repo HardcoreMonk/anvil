@@ -135,13 +135,13 @@ scripts/anvil-mcp-e2e.sh flock
 
 ### 현재 upstream runtime baseline
 
-anvil main runtime baseline은 upstream ephemera `v0.5.5`까지 병합·적응한 runtime을
+anvil main runtime baseline은 upstream ephemera `v0.6.4`까지 병합·적응한 runtime을
 포함한다. `v0.3.2`-`v0.3.6`은 이전 release가 채택한 baseline이고, `v0.4.0`-`v0.4.5`는
-v0.4 sync, `v0.5.0`-`v0.5.5`는 v0.5 operator sync에서 병합·적응해 full KVM gate로
-검증했다. upstream `main`과 최신 upstream tag는 `v0.7.0`까지 진행되어 있으나
-`v0.6.0`-`v0.7.0`은 아직 anvil baseline으로 병합하지 않았다. 새 anvil release 후보가
-이 baseline을 포함한다면 release 본문에는 upstream runtime 변경과 anvil product 변경을
-분리해서 적는다.
+v0.4 sync, `v0.5.0`-`v0.5.5`는 v0.5 operator sync, `v0.6.0`-`v0.6.4`는 v0.6 MCP gateway
+sync에서 병합·적응해 full KVM gate로 검증했다. upstream `main`과 최신 upstream tag는
+`v0.7.0`까지 진행되어 있으나 `v0.7.0`은 아직 anvil baseline으로 병합하지 않았다. 새
+anvil release 후보가 이 baseline을 포함한다면 release 본문에는 upstream runtime 변경과
+anvil product 변경을 분리해서 적는다.
 
 - upstream `v0.3.2`: live VM cold-restart, `vms/<vm_id>/state.json`, orphan cleanup,
   기존 TAP/IP/MAC 재예약, graceful daemon shutdown 시 rootfs/state 보존.
@@ -174,6 +174,16 @@ v0.4 sync, `v0.5.0`-`v0.5.5`는 v0.5 operator sync에서 병합·적응해 full 
 - upstream `v0.5.1`-`v0.5.5`: `/config/providers`·`/config/clients`(secret 비노출),
   `system.md` 편집(64 KiB), profile guard(in-use `409`/default 예약/traversal 거부),
   sizing preset + per-VM `VcpuCount`/`MemSizeMib`, `SystemAuthor`, restore wait 60s.
+- upstream `v0.6.0`: runtime MCP Gateway(`internal/mcpgateway`, daemon `/config/mcp*`,
+  `configs/mcp/*.example`, Web UI MCP console). runtime/operator surface(IronClaw MCP
+  아님, `cmd/anvil-mcp` 대체 아님). source IP로 caller profile 판정(unknown `403`),
+  backend credential host-side only(VM엔 gateway URL만), `audit/mcp.jsonl` metadata-only,
+  `/config/mcp*`는 bearer 뒤, profile policy는 widen 불가.
+- upstream `v0.6.1`/`v0.6.2`/`v0.6.4`(upstream `v0.6.3` 없음): `EPHEMERA_NET_ANTISPOOF`
+  기본 on, per-(VM,server) rate limit(`EPHEMERA_MCP_RATE`/`BURST`, 기본 `0`=unlimited),
+  resources/prompts policy·rate 공유, `GET /config/mcp/servers`는 `has_credential`만,
+  stdio backend(`nobody`/`/var/lib/ephemera/mcp-stdio` scratch, `credential_env`,
+  child env 재구성, process-group reap).
 - anvil sizing 결정: default VM sizing `1` vCPU / `1024` MiB(v0.5.3 이전 2/2048,
   KVM 근거로 승인). flock member spawn의 per-profile sizing override 미존중 gap은
   follow-up으로 기록한다.
@@ -223,10 +233,25 @@ Phase 2 결과:
   cleanup)이 모두 `200`이고 마지막 LLM-echo substep만 로컬 Google API key가 invalid해
   실패했다. provider-key 의존 실패이며 코드 결함이 아니다(계획대로 기록).
 
+v0.6 sync Phase 3 KVM gate — gateway steps:
+
+- `e2e_test.sh`는 이제 MCP gateway step `84`-`89`를 포함한다. gateway를 건드리는 release
+  후보는 이 step들이 green인지 확인한다(real tool call / real stdio tool call step은
+  provider key가 필요할 수 있다).
+- Phase 3 결과: CI-safe gate all green(`git diff --check`, targeted group, web build
+  drift 없음, `go test ./... -count=1` EXIT=0, 3 builds). KVM `sudo bash e2e_test.sh`
+  `334✓ / 0✗`("All test steps passed") — gateway step 84-89 최초 실행 green, provider-key
+  skip 3건(LLM smoke, real tool call, real stdio tool call). `anvil-mcp-e2e.sh`
+  lifecycle PASS·flock PASS(runtime gateway live 상태에서 adapter 영향 없음),
+  `vm-workload-e2e.sh` PASS. `anvil-mcp-e2e.sh semantic`은 key-free 구간 `200`, LLM-echo
+  substep만 known-invalid local Google key로 실패(provider-key 의존, Phase 2와 동일 기록).
+- stdio backend 운영 주의: `EPHEMERA_MCP_STDIO_USER`(기본 `nobody`)와
+  `/var/lib/ephemera/mcp-stdio` scratch default를 확인한다. `EPHEMERA_MCP_BIND_IP`는
+  기본 안전한 bridge IP bind를 override할 수 있고, source-IP `403`이 defense-in-depth로
+  남는다.
+
 미병합 upstream review 상태:
 
-- `v0.6.0`-`v0.6.4`: MCP Gateway 계열로 anvil MCP adapter, IronClaw 통합 경계,
-  권한 모델과 충돌하거나 중복될 수 있어 별도 설계 review가 필요하다.
 - `v0.7.0`: installer/transcript/hardening 계열로 보인다. kernel SHA 검증,
   `waitForAgent` per-probe timeout, `EPHEMERA_HOME`은 선별 backport됐지만 tag 전체를
   채택한 것은 아니다.

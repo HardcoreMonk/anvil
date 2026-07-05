@@ -35,6 +35,7 @@
 | Runtime observability | `/metrics`, `/metrics/vms`, `/vms/{vm_id}/stats`, `GET /watchdog/status`(read-only count/ID/config), structured daemon logs | upstream ephemera runtime namespace + anvil 운영 문서 |
 | Operator Web console | daemon이 `/ui/`로 serve하는 embedded Svelte SPA(EN/KO). `/ui/`(정적 bundle + login)만 auth 밖, VM list/create/detail/stats/settings/delete·multi-turn session data API는 bearer 뒤. runtime/operator surface이며 IronClaw MCP surface가 아니다 | `cmd/goose-daemon/uidist/`, `cmd/goose-daemon/config_api.go`, `docs/architecture/service-logic.md` |
 | Profile config surface | `/config/profiles`(provider/model), `/config/providers`(key 존재 여부만), `/config/clients`(이름+만료만), profile `system.md` 편집(`64 KiB` cap). `goose-secrets.yaml` 값은 read/write·노출하지 않음 | `cmd/goose-daemon/config_api.go` |
+| Runtime MCP Gateway | daemon이 VM 내부 agent에 backend MCP server를 policy·rate-limit·audit로 중개(`EPHEMERA_MCP_*`, `internal/mcpgateway`, `configs/mcp/*`, Web UI MCP console). caller profile은 source IP↔VM registry로 판정(unknown → `403`), backend credential은 host-side only(VM엔 gateway URL만), `audit/mcp.jsonl` metadata-only, `/config/mcp*`는 bearer 뒤. **runtime/operator surface이며 IronClaw MCP surface가 아니다 — `cmd/anvil-mcp` IronClaw adapter를 대체하지 않는다** | `internal/mcpgateway`, `cmd/goose-daemon`, `configs/mcp/`, `docs/architecture/mcp-architecture.md` |
 | Workload automation | script-only `POST /vms/{vm_id}/workloads/run` 계약 | `cmd/goose-agent`, `cmd/goose-daemon`, `scripts/vm-workload-e2e.sh` |
 | Goosetown in-VM helpers | `gtwall`, `gtcall`, `webdev_demo.sh` operator demo | upstream ephemera runtime namespace + anvil 보안 경계 문서 |
 | Token policy | daemon token과 guest `agent_token` 분리, MCP output token redaction | `CONTEXT.md`, `README.md`, MCP adapter |
@@ -123,14 +124,15 @@ upstream ephemera 변경을 병합할 때는 다음 상태 중 하나로 분류�
 | `v0.4.5` | snapshot-restore auto-recovery | `adapted` — restore state persist + token redaction 유지. live·persisted restored VM이 참조하는 source snapshot `DELETE`는 `409`로 보호(upstream e2e 46c의 `200` orphan과 의도적 divergent) |
 | `v0.5.0` | operator Web UI `/ui/`, `/config/profiles`, multi-turn session, graceful delete | `adapted` — Web UI/`/config/*`는 runtime/operator 표면으로 채택(IronClaw MCP surface 아님). `/ui/`(정적 bundle + login)만 auth 밖, data API는 bearer 뒤(guard). `/config/profiles`는 `goose-secrets.yaml` 비노출(sentinel). `cmd/anvil-mcp` 불변, `VMInfo` provider/model additive |
 | `v0.5.1`-`v0.5.5` | `/config/providers`·`/config/clients`, `system.md` 편집, profile guard, sizing preset + per-VM `VcpuCount`/`MemSizeMib`, `SystemAuthor`, restore wait 60s | `adapted` — provider/client surface는 secret 비노출(sentinel), default sizing `1` vCPU/`1024` MiB 채택(이전 2/2048). keep-alive divergence(`64ec57c`)는 ADR_INDEX/upstream-sync-policy 참조 |
+| `v0.6.0` | runtime MCP Gateway(`internal/mcpgateway`, `/config/mcp*`, `configs/mcp/*`, Web UI MCP console) | `adapted` — **runtime/operator 표면, IronClaw MCP surface 아님, `cmd/anvil-mcp` 대체 아님.** source IP로 caller profile 판정(unknown `403`), backend credential host-side only(VM엔 URL만 주입), `audit/mcp.jsonl` metadata-only, profile policy는 `servers.yaml`을 좁히기만 함. IronClaw schema/adapter가 gateway tool 제외(guard) |
+| `v0.6.1`, `v0.6.2`, `v0.6.4` | anti-spoof, per-(VM,server) rate limit, resources/prompts policy·rate 공유, stdio backends | `adapted` — `EPHEMERA_NET_ANTISPOOF` 기본 on, `EPHEMERA_MCP_RATE` 기본 `0`=unlimited, `GET /config/mcp/servers`는 transport/command + `has_credential`만(leak guard), stdio child env 재구성 + `credential_env` + `nobody`/scratch + process-group reap. upstream에 `v0.6.3` 없음 |
 
-2026-07-02 기준 upstream `main`과 최신 upstream tag는 `v0.7.0`이다. `v0.4.0`-`v0.5.5`는
+2026-07-02 기준 upstream `main`과 최신 upstream tag는 `v0.7.0`이다. `v0.4.0`-`v0.6.4`는
 anvil main runtime baseline으로 병합·적응되어 full KVM gate로 검증됐으며(위 표),
-`v0.6.0`-`v0.7.0`은 별도 adoption review 전까지 조건부/제외 표면 후보로 둔다.
+`v0.7.0`은 별도 adoption review 전까지 조건부/제외 표면 후보로 둔다.
 
 | upstream tag 범위 | 공개 경계 판단 |
 |---|---|
-| `v0.6.0`-`v0.6.4` | MCP Gateway 계열로 보인다. anvil MCP adapter와 권한 모델을 우회하거나 중복할 수 있으므로 별도 ADR/adoption review 전까지 공개 표면으로 승격하지 않는다. |
 | `v0.7.0` | installer/transcript/hardening 계열로 보인다. kernel SHA 검증, `waitForAgent` per-probe timeout, `EPHEMERA_HOME`은 선별 backport됐지만 tag 전체는 미채택이다. |
 
 `v0.3.2`/`v0.3.3` 병합 전 검토 근거는

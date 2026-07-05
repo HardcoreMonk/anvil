@@ -2,7 +2,7 @@
 
 ## 상태
 
-- 기준 버전: upstream ephemera `v0.5.5` + anvil runtime foundation
+- 기준 버전: upstream ephemera `v0.6.4` + anvil runtime foundation
 - MCP 버전: v1 stdio adapter
 - Entrypoint: `cmd/anvil-mcp`
 - 런타임 대상: ephemera control plane daemon HTTP API
@@ -18,6 +18,29 @@ adapter process 안에는 작은 `session_name` alias map만 유지하며, 설�
 이 adapter의 제품 통합 대상은 IronClaw 전용이다. Go MCP SDK smoke client는
 검증 도구일 뿐이며, OpenClaw 또는 다른 orchestration product와의 연동 계약을
 의미하지 않는다.
+
+## runtime MCP Gateway vs IronClaw MCP adapter
+
+이 문서가 다루는 "MCP"는 **IronClaw MCP adapter**(`cmd/anvil-mcp`, 설정 `ANVIL_MCP_*`)다.
+upstream `v0.6.0`이 추가한 **runtime MCP Gateway**(`internal/mcpgateway`, 설정
+`EPHEMERA_MCP_*`)는 이름만 비슷할 뿐 다른 계층이며, 두 surface를 혼동하지 않는다.
+
+| 구분 | IronClaw MCP adapter | runtime MCP Gateway |
+|---|---|---|
+| 목적 | IronClaw가 anvil VM lifecycle을 `anvil_*` tool로 호출 | VM 내부 agent가 host가 중개하는 backend MCP server(tools/resources/prompts)를 사용 |
+| 방향 | IronClaw → anvil (north-bound) | guest VM agent → daemon → backend MCP server (south-bound) |
+| 구현 | `cmd/anvil-mcp`, `internal/anvilmcp` | `internal/mcpgateway`, `cmd/goose-daemon` |
+| 설정 namespace | `ANVIL_MCP_*` | `EPHEMERA_MCP_*` |
+| transport | stdio (IronClaw) | HTTP (daemon), backend는 HTTP/SSE/stdio |
+| 노출 대상 | IronClaw operator/planner | runtime/operator (Web UI MCP console) |
+
+**runtime MCP Gateway는 `cmd/anvil-mcp` IronClaw adapter를 대체하지 않는다.** 두 계층은
+독립적으로 존재한다. gateway tool은 IronClaw `anvil_*` tool 목록에 추가되지 않으며,
+adapter의 IronClaw/Gemini schema에도 포함되지 않는다(guard
+`TestToolRegistrationsExcludeGatewayTools`,
+`TestCurrentIronClawSchemasExcludeGatewayNamespacedTools`). runtime MCP Gateway의
+런타임 동작(caller identity, policy, rate limit, credential, audit, stdio backend)은
+[service-logic.md](service-logic.md)에 정리한다.
 
 ## 시스템 관점
 
@@ -709,6 +732,8 @@ HTTP MCP transport도 이 작업 범위 밖이다. v2 후보 논의에서는 다
 - flock broadcast의 MCP tool 노출 (daemon-only, 이 phase deferred)
 - operator Web UI(`/ui/`)와 `/config/*`(profile/provider/client/system-prompt)
   surface의 MCP tool 노출 (`v0.5.0`-`v0.5.5` runtime/operator 표면, MCP 아님)
+- runtime MCP Gateway(`EPHEMERA_MCP_*`, `internal/mcpgateway`)의 `anvil_*` MCP tool
+  노출 (`v0.6.x` runtime/operator 표면이며 IronClaw adapter tool 아님)
 - flock alias 또는 `session_name` 재사용
 - routed members-only flock의 Town Wall, cross-host `gtcall`, guest flock context
   injection, daemon `FlockManager` registration
@@ -718,6 +743,11 @@ HTTP MCP transport도 이 작업 범위 밖이다. v2 후보 논의에서는 다
 `v0.5.0`-`v0.5.5` operator sync에서 `cmd/anvil-mcp` tool surface는 변경되지 않았다.
 daemon `VMInfo`가 얻은 additive `provider`/`model` 필드는 daemon 응답과 operator Web
 UI만 소비하며, IronClaw `anvil_*` tool 계약이나 tool 개수를 바꾸지 않는다.
+
+`v0.6.0`-`v0.6.4` MCP gateway sync에서도 `cmd/anvil-mcp` adapter는 그대로다. runtime
+MCP Gateway는 daemon-side runtime/operator surface이고, IronClaw adapter tool 목록·
+schema에는 gateway tool이 들어가지 않는다(guard). KVM gate에서 runtime gateway가 live인
+상태로 `anvil-mcp-e2e.sh` lifecycle·flock이 PASS해 adapter가 영향받지 않음을 확인했다.
 
 ## 소스 참조
 
