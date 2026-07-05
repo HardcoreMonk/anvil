@@ -429,9 +429,7 @@ func (cp *ControlPlane) recoverRestoredVM(s storage.VMState, recovered *int, fai
 	logFifoPath := fmt.Sprintf("/tmp/fc-%s-log.fifo", s.VMID)
 	removeStaleVMArtifacts(s.SocketPath, s.VsockPath, logFifoPath)
 	exceptionStore := filepath.Join(cp.provisioner.WorkspaceDir, s.VMID+".cow")
-	if cp.provisioner != nil {
-		removeRestoredCOWDevice(cp.provisioner.WorkspaceDir, s.VMID)
-	}
+	removeRestoredCOWDevice(cp.provisioner.WorkspaceDir, s.VMID)
 	os.Remove(exceptionStore)
 
 	if reErr := cp.reclaimRecoveryNetwork(s.TapDevice, s.GuestIP, s.MacAddr); reErr != nil {
