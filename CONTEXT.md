@@ -52,9 +52,10 @@ runtime/operator surface로만 채택해 IronClaw `anvil_*` MCP surface로 노�
 service는 canonical `ephemera` 이름을 유지한다(anvil alias wrapper 없음). 남은
 deferred/비목표는 `v0.4.4` flock broadcast의 MCP tool 노출, `v0.4.2` default COW 전환,
 auto-snapshot public support, flock member spawn의 per-profile sizing 존중, runtime MCP
-Gateway의 IronClaw 표면 승격 금지(비목표 유지)이며, 여기에 release-gate 항목(valid
-provider key semantic run, audit-writer sentinel, stdio stderr scrub, `credential_env`
-reserved names, production-mux auth assert)이 남는다. 2026-07-02 기준 upstream `main`과
+Gateway의 IronClaw 표면 승격 금지(비목표 유지)다. release-gate 코드 항목 4종
+(audit-writer sentinel, stdio stderr scrub, `credential_env` reserved names,
+production-mux auth assert)은 2026-07-06 follow-up batch로 닫혔고, 남은 open gate는
+valid provider key로 `semantic` run(e2e step 59)뿐이다. 2026-07-02 기준 upstream `main`과
 최신 upstream tag는 `v0.7.0`까지 진행되어 있다. `v0.7.0`의 kernel SHA 검증,
 `waitForAgent` per-probe timeout, `EPHEMERA_HOME` work directory 지정은 sync 전 독립
 hardening backport로 먼저 반영돼 있었고, v0.7.0 병합 시 upstream 버전과 reconcile해 anvil
@@ -304,8 +305,13 @@ daemon으로 보내는 outbound Bearer token이다.
 - proxy agent client keep-alive 비활성화(`64ec57c`)의 upstream 기여 검토
 - runtime MCP Gateway backend 운영 정책(어떤 backend server를 profile에 바인딩할지,
   rate-limit·credential 운영)과 실제 operator 배포 검증
-- release-gate 항목: valid provider key로 `semantic` run, audit-writer sentinel,
-  stdio stderr scrub, `credential_env` reserved names, production-mux auth assert
+- release-gate: 코드 항목 4종(audit-writer sentinel `de5a7aa`, stdio stderr scrub
+  `4a802f5`, `credential_env` reserved names `0376afa`, production-mux auth sentinel
+  `de5a7aa`)은 2026-07-06 batch로 닫힘. 남은 open gate는 valid provider key로
+  `semantic` run(e2e step 59, 사용자 key 교체 대기)뿐
+- post-merge backlog: reRestore helper extraction, `config_api.go` split, web npm audit,
+  MCP `initialize`-error string genericization review(#36), GC-abort response
+  `Protected` list cosmetic(#37)
 - installer 운영 검증: 실제 systemd host에 `install.sh` 배포와 release build(FULL
   variant) 검증. `uninstall.sh`의 ephemera-scoped `/tmp` scratch 정리는 의도된 cleanup
   (root-gated, prefix-anchored)이며 `/tmp/goose-rootfs`는 현재 source에 producer 없는

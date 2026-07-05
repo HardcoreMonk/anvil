@@ -54,6 +54,25 @@
   token redaction, tenant/egress, scheduler, audit, and IronClaw MCP surface separation.
   전 태그별 adopted/adapted/deferred/excluded parity matrix는
   `docs/analysis/11-v0.5.0-v0.7.0-core-service-parity-review.md`에 있다.
+- 2026-07-06 release-gate follow-up batch (anvil 적응 — upstream 변경 아님; commits
+  `4a802f5`, `0376afa`, `613a01b`, `cd2e70b`, `de5a7aa`, `0625df5`, 상태 close
+  `ccc5127`):
+  - **behavior change**: stdio backend 자식 stderr를 VM-facing gateway error에서 scrub하고
+    host slog에만 남긴다(`4a802f5`). backend 오동작 시 backend credential이 VM에 도달할 수
+    있던 유일한 신규 경로를 차단한다.
+  - **behavior change**: `credential_env`가 예약 이름 `PATH`/`HOME`/`LANG`을 쓰면 config
+    validation error로 거부한다(`0376afa`).
+  - **behavior change**: snapshot GC가 persisted restored-VM state를 읽지 못하면
+    fail-closed한다(`613a01b`) — plan이 `Errors` entry로 abort하고 아무것도 삭제하지 않는다.
+  - **behavior change**: `PUT /config/profiles/default`가 `goose.yaml` 부재 시 `404`를
+    반환한다(`cd2e70b`, 이전 `500`).
+  - new guard: MCP audit writer JSONL key-set sentinel(`de5a7aa`,
+    `mcp_audit_writer_anvil_test.go`); KVM-free flock broadcast unit test(`de5a7aa`,
+    `orchestrator_broadcast_test.go`); auth sentinel을 `/config/clients`·`/config/providers`·
+    profile DELETE·`/system` verbs로 확장(real production mux, `de5a7aa`).
+  - e2e/README step-label reconciliation(`0625df5`); keep-alive(`64ec57c`) upstream 제안은
+    DECLINED. batch 검증: 13 pkgs ok, review Approved(0 Crit/Imp), full e2e `334✓/0✗` at
+    `ccc5127`, PR #17 push.
 - upstream `v0.7.0` (end-user installer + conversation transcript restore + upstream
   hardening reconcile)를 sync 한다. anvil adaptation:
   - end-user installer(`install.sh`/`uninstall.sh`/`INSTALL.md`/`ephemera.service.in`)와
@@ -273,8 +292,10 @@ scope 코드 편입 완료):
 - installer: `bash install.sh --help`/`bash uninstall.sh --help` OK(시스템 변경 없음).
   release build를 root로 실행 → SLIM(≈27M) + FULL(≈250M) tarball + `.sha256` checksum
   (dist/ gitignored). `build_release.sh`가 kernel/firecracker를 `sha256sum -c`로 검증.
-- 남은 release-gate 항목: valid provider key로 `semantic` run, audit-writer sentinel,
-  stdio stderr scrub, `credential_env` reserved names, production-mux auth assert.
+- release-gate: 코드 항목 4종(audit-writer sentinel, stdio stderr scrub, `credential_env`
+  reserved names, production-mux auth sentinel)은 2026-07-06 follow-up batch로 닫혔다
+  (위 batch 항목 참조). 남은 open gate는 valid provider key로 `semantic` run(e2e step
+  59, 사용자 key 교체 대기)뿐이다.
 
 ---
 

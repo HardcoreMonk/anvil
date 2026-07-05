@@ -115,9 +115,11 @@ upstream `main`과 최신 upstream tag는 `v0.7.0`이며, anvil은 이 관찰 �
 
 `v0.7.0` 이후 upstream 태그가 새로 관찰되면 이 인덱스에 pre-review 분류로 다시 추가하고,
 sync 전 backlog triage와 별도 analysis 문서/sync branch 검증 뒤 채택 상태를 확정한다.
-현재 남은 작업은 tag 채택이 아니라 release-gate 항목(valid provider key `semantic` run,
-audit-writer sentinel, stdio stderr scrub, `credential_env` reserved names, production-mux
-auth assert)과 deferred 항목(`v0.4.4` broadcast MCP 노출, `v0.4.2` default COW,
+현재 남은 작업은 tag 채택이 아니다. release-gate 코드 항목 4종(audit-writer sentinel,
+stdio stderr scrub, `credential_env` reserved names, production-mux auth sentinel)은
+2026-07-06 follow-up batch(`4a802f5`, `0376afa`, `613a01b`, `cd2e70b`, `de5a7aa`,
+`0625df5`)로 닫혔고, 남은 open gate는 valid provider key로 `semantic` run(e2e step
+59)뿐이다. 그 밖에 deferred 항목(`v0.4.4` broadcast MCP 노출, `v0.4.2` default COW,
 auto-snapshot public support, flock per-profile sizing, runtime MCP Gateway의 IronClaw
 표면 승격 금지)이다.
 

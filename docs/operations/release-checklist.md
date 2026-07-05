@@ -293,8 +293,10 @@ upstream parity scope 채택 완료:
 - `v0.4.0`-`v0.7.0`은 모두 anvil main baseline으로 병합·적응됐다. 2026-07-02 기준 관찰된
   upstream 최신 tag는 `v0.7.0`이며 pending sync 후보는 없다. `v0.7.0` 이후 새 tag가
   관찰되면 별도 sync/adoption review로 처리한다.
-- 남은 release-gate 항목: valid provider key로 `semantic` run, audit-writer sentinel,
-  stdio stderr scrub, `credential_env` reserved names, production-mux auth assert.
+- release-gate: 코드 항목 4종(audit-writer sentinel, stdio stderr scrub, `credential_env`
+  reserved names, production-mux auth sentinel)은 2026-07-06 follow-up batch(`4a802f5`,
+  `0376afa`, `613a01b`, `cd2e70b`, `de5a7aa`, `0625df5`)로 닫혔다. 남은 open gate는
+  valid provider key로 `semantic` run(e2e step 59, 사용자 key 교체 대기)뿐이다.
 
 현재 baseline 기반 upstream E2E는 `/metrics`, `/stats`, streaming/depth/watchdog,
 snapshot-restore recovery, real-LLM smoke, in-VM helper 경로를 포함할 수 있다. provider key가 있는 환경에서는 `GOOGLE_API_KEY`,
