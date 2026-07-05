@@ -331,6 +331,10 @@ type ControlPlane struct {
 
 	// agentHTTPClient is used for proxying requests to VM goose-agents.
 	// No global timeout — timeouts are controlled by the incoming request's context.
+	// Built by newAgentHTTPClient, which DISABLES keep-alive connection pooling:
+	// guest IPs are recycled across VM destroy/create/restore, so a pooled
+	// connection to a destroyed VM must never be reused for its IP's successor
+	// (see newAgentHTTPClient for the full rationale).
 	agentHTTPClient *http.Client
 
 	allocateForRestore func(tapDeviceName, macAddr string) (tapDevice string, guestIP string, err error)

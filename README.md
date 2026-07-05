@@ -925,7 +925,7 @@ rate limit에 따라 보통 15-30분 이상 걸릴 수 있다.
 | 51-57 | Goosetown flock 생성, `/vms` 반영, Town Wall post/history/list/delete, token redaction |
 | 57a-57f | Town Wall seq, flock metadata persistence, daemon restart recovery, watchdog log |
 | 58 | daemon graceful shutdown |
-**What it tests (62 numbered steps incl. sub-steps):**
+**What it tests (steps 1–89 incl. lettered sub-steps):**
 
 | Steps | Scenario |
 |-------|----------|
@@ -976,7 +976,7 @@ rate limit에 따라 보통 15-30분 이상 걸릴 수 있다.
 | 69 | Daemon graceful shutdown |
 | 70 | **Auth-on CP token auto-injection** (v0.3.3) — restart daemon with `EPHEMERA_API_TOKENS` set; flock VM's `/townwall/post` forward to CP returns 200 without any in-VM env setup |
 | 71 | **Real-LLM round-trip** (v0.3.3) — when `GOOGLE_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` is in env, spawn researcher, send `/tasks`, verify `ROUNDTRIP_OK` reaches Town Wall via `gtwall`. Skipped (ok) when no key. |
-| 71e | **Broadcast fan-out** (v0.4.4, LLM-gated) — `POST /flocks/{id}/broadcast` to the live researcher flock returns 200 with `agents==1`/`sent==1`, `results["researcher-1"].status=="ok"`, and the broadcast notice lands on the Town Wall |
+| 59e | **Broadcast fan-out** (v0.4.4, LLM-gated) — `POST /flocks/{id}/broadcast` to the live researcher flock returns 200 with `agents==1`/`sent==1`, `results["researcher-1"].status=="ok"`, and the broadcast notice lands on the Town Wall |
 | 72 | **CP token hot rotation via SIGHUP** (v0.3.4) — restart daemon with `EPHEMERA_API_TOKENS_FILE`; spawn flock under v1; edit file to v2 + SIGHUP; verify post-rotation `/townwall/post` still 200 (in-VM `/root/.ephemera-cp-token` rewritten via vsock), v1 operator bearer now 401, and the daemon log carries `msg="sighup: cp token propagated" ok=N total=M` (slog form since v0.3.5). |
 | 73 | **`/metrics` endpoint format** (v0.3.5) — `GET /metrics` returns 200 unauthenticated, `Content-Type: text/plain; version=0.0.4`, body contains `# HELP`/`# TYPE` lines plus `ephemera_vm_count` gauge and `ephemera_sighup_reload_total` counter samples. |
 | 74 | **Per-VM `/stats` endpoint + `?stats=true`** (v0.3.5) — spawn a VM, `GET /vms/{vm_id}/stats` returns a JSON snapshot with `uptime_seconds ≥ 0`, `mem_total_mib > 0`, numeric `cpu_percent`; `GET /vms?stats=true` inlines the same `stats` block on every VM list entry. |

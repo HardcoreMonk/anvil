@@ -135,7 +135,8 @@ Section 4에도 `v0.4.5` `adapted`로 기록한다.
 잠재하던 upstream shared pooled agent proxy client 결함을 드러냈다(guest IP 재활용 시
 stale keep-alive connection 재사용 → restored VM `/tasks` hang/`502`). `64ec57c`가
 request마다 fresh dial(`DisableKeepAlives`)하고 connection-reuse guard test를 추가한다.
-upstream connection pooling과의 divergence이며 upstream 기여 후보다. 같은 divergence를
+upstream connection pooling과의 divergence다. 2026-07-06 결정으로 이 divergence는
+anvil-side에서 유지하고 upstream 제안(기여)은 하지 않는다. 같은 divergence를
 [`docs/ADR_INDEX.md`](../ADR_INDEX.md) Section 4에도 기록한다.
 
 sizing 결정: `v0.5.3`부터 anvil은 upstream default VM sizing `1` vCPU / `1024` MiB를

@@ -100,7 +100,8 @@ keep-alive divergence(`adapted`): `v0.5.x` `gracefulAgentStop`이 v0.2.0부터 �
 upstream shared pooled agent proxy client 결함을 드러냈다(guest IP 재활용 시 stale
 keep-alive connection 재사용 → restored VM `/tasks` hang/`502`). `64ec57c`가 request마다
 fresh dial(`DisableKeepAlives`)하고 connection-reuse guard test를 추가한다. upstream
-connection pooling과의 의도적 divergence이며 upstream 기여 후보다. 같은 divergence를
+connection pooling과의 의도적 divergence다. 2026-07-06 결정으로 anvil-side에서 유지하고
+upstream 제안(기여)은 하지 않는다. 같은 divergence를
 [`docs/operations/upstream-sync-policy.md`](operations/upstream-sync-policy.md)에도
 기록한다.
 

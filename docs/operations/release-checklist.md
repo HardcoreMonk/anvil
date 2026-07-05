@@ -211,7 +211,8 @@ matrix는 [`docs/analysis/11-v0.5.0-v0.7.0-core-service-parity-review.md`](../an
 - anvil keep-alive divergence(`64ec57c`): proxy agent client가 request마다 fresh
   dial(`DisableKeepAlives`)한다. `v0.5.x` `gracefulAgentStop`이 드러낸 v0.2.0-since
   pooled-client 결함(guest IP 재활용 시 stale connection → restored VM `/tasks`
-  hang/`502`)을 막는 upstream pooling divergence이며 upstream 기여 후보다.
+  hang/`502`)을 막는 upstream pooling divergence다. 2026-07-06 결정으로 anvil-side에서
+  유지하고 upstream 제안(기여)은 하지 않는다.
 - anvil adaptation: `agent_token`과 control-plane token이 MCP output, audit, metrics,
   trace, replay fixture, release artifact에 노출되지 않도록 수정 또는 검증한 내용.
   `ephemera_*` metric namespace와 `EPHEMERA_*` env는 runtime compatibility로

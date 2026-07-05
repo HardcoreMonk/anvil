@@ -474,7 +474,8 @@ func (cp *ControlPlane) recoverRestoredVM(s storage.VMState, recovered *int, fai
 // (v0.4.5): set up a COW dm-snapshot over the snapshot's base (merging a rootfs
 // diff if present), load the (diff-merged) memory snapshot, then reconfigure the
 // guest IP to the recovered VM's address. It mirrors the dm-snapshot success path
-// of restoreSnapshot (api.go) — KEEP THE TWO IN SYNC — but omits that handler's
+// of restoreSnapshot (api.go) — KEEP THE THREE IN SYNC (this, restoreSnapshot,
+// and the upstream mirror) — but omits that handler's
 // bind-mount fallback and fresh-network allocation. cp.restoreMu serializes the
 // dm-setup + Firecracker-open window. On failure any dm-snapshot created is torn
 // down before returning.

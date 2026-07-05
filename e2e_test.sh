@@ -1258,7 +1258,7 @@ echo "$WD_BODY" | jq -e '(.vm_dead_marked|length)==0' >/dev/null \
 # ── 57h. Broadcast contract (v0.4.4) ─────────────────────────────
 # Validate the broadcast endpoint's short-circuit paths that do NOT invoke
 # goose: a missing flock → 404, an empty body → 400. The full fan-out (which
-# runs goose on every member) is exercised in the LLM-gated block (step 71f).
+# runs goose on every member) is exercised in the LLM-gated block (step 59e).
 step "57h. POST /flocks/{id}/broadcast contract checks (v0.4.4)"
 BC_404=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/flocks/flock-does-not-exist/broadcast" \
     -H "Content-Type: application/json" -d '{"body":"hi"}')
