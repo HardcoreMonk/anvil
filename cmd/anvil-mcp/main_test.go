@@ -93,6 +93,27 @@ func TestToolRegistrationsExcludeBroadcast(t *testing.T) {
 	}
 }
 
+// TestToolRegistrationsExcludeGatewayTools locks in the Phase 3 (v0.6.0) boundary
+// decision: the runtime MCP Gateway (internal/mcpgateway) is the operator/in-VM
+// tool surface, and cmd/anvil-mcp remains the ONLY IronClaw-facing adapter.
+// Nothing gateway-originated may leak into the anvil_* tool schema. The gateway
+// names its aggregated tools with a "__" namespace separator (e.g.
+// "github__create_issue"); every anvil-mcp tool is an "anvil_"-prefixed native
+// tool. This guard fails if any registration is not anvil_-prefixed or carries a
+// gateway namespace separator. The separator is hardcoded (not imported from
+// mcpgateway) precisely because anvil-mcp must not depend on the gateway package.
+func TestToolRegistrationsExcludeGatewayTools(t *testing.T) {
+	const gatewayNamespaceSep = "__" // mcpgateway.namespaceSep, intentionally duplicated
+	for _, registration := range toolRegistrations() {
+		if !strings.HasPrefix(registration.name, "anvil_") {
+			t.Fatalf("tool registration %q is not an anvil_ native tool; a gateway tool must never reach the IronClaw surface", registration.name)
+		}
+		if strings.Contains(registration.name, gatewayNamespaceSep) {
+			t.Fatalf("tool registration %q carries the gateway namespace separator %q; gateway-aggregated tools must not leak into the anvil_ schema", registration.name, gatewayNamespaceSep)
+		}
+	}
+}
+
 func TestToolRegistrationsHaveIronClawInputSchemas(t *testing.T) {
 	schemas := anvilmcp.CurrentIronClawToolInputSchemas()
 	schemaNames := make(map[string]bool, len(schemas))
