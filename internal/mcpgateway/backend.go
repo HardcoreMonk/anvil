@@ -22,6 +22,10 @@ type Backend interface {
 	Namespace() string
 	ListTools(ctx context.Context) ([]Tool, error)
 	CallTool(ctx context.Context, tool string, args json.RawMessage) (json.RawMessage, error)
+	ListResources(ctx context.Context) ([]Resource, error)
+	ReadResource(ctx context.Context, uri string) (json.RawMessage, error)
+	ListPrompts(ctx context.Context) ([]Prompt, error)
+	GetPrompt(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error)
 	Health(ctx context.Context) error
 }
 
@@ -138,6 +142,78 @@ func (b *HTTPBackend) CallTool(ctx context.Context, tool string, args json.RawMe
 	}
 	if resp.Error != nil {
 		return nil, fmt.Errorf("tools/call %s/%s: %s", b.id, tool, resp.Error.Message)
+	}
+	return resp.Result, nil
+}
+
+// ListResources returns the backend's advertised resources (un-namespaced URIs).
+func (b *HTTPBackend) ListResources(ctx context.Context) ([]Resource, error) {
+	if err := b.ensureInit(ctx); err != nil {
+		return nil, err
+	}
+	resp, _, err := b.roundTrip(ctx, "resources/list", json.RawMessage(`{}`), b.sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Error != nil {
+		return nil, fmt.Errorf("resources/list %s: %s", b.id, resp.Error.Message)
+	}
+	var out resourcesListResult
+	if err := json.Unmarshal(resp.Result, &out); err != nil {
+		return nil, fmt.Errorf("resources/list %s: bad result: %w", b.id, err)
+	}
+	return out.Resources, nil
+}
+
+// ReadResource reads one resource by its un-namespaced URI and returns the raw
+// MCP result object (contents) for the gateway to relay verbatim.
+func (b *HTTPBackend) ReadResource(ctx context.Context, uri string) (json.RawMessage, error) {
+	if err := b.ensureInit(ctx); err != nil {
+		return nil, err
+	}
+	params := mustMarshal(resourcesReadParams{URI: uri})
+	resp, _, err := b.roundTrip(ctx, "resources/read", params, b.sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Error != nil {
+		return nil, fmt.Errorf("resources/read %s/%s: %s", b.id, uri, resp.Error.Message)
+	}
+	return resp.Result, nil
+}
+
+// ListPrompts returns the backend's advertised prompts (un-namespaced names).
+func (b *HTTPBackend) ListPrompts(ctx context.Context) ([]Prompt, error) {
+	if err := b.ensureInit(ctx); err != nil {
+		return nil, err
+	}
+	resp, _, err := b.roundTrip(ctx, "prompts/list", json.RawMessage(`{}`), b.sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Error != nil {
+		return nil, fmt.Errorf("prompts/list %s: %s", b.id, resp.Error.Message)
+	}
+	var out promptsListResult
+	if err := json.Unmarshal(resp.Result, &out); err != nil {
+		return nil, fmt.Errorf("prompts/list %s: bad result: %w", b.id, err)
+	}
+	return out.Prompts, nil
+}
+
+// GetPrompt fetches one prompt by its un-namespaced name and returns the raw MCP
+// result object (messages) for the gateway to relay verbatim.
+func (b *HTTPBackend) GetPrompt(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error) {
+	if err := b.ensureInit(ctx); err != nil {
+		return nil, err
+	}
+	params := mustMarshal(promptsGetParams{Name: name, Arguments: args})
+	resp, _, err := b.roundTrip(ctx, "prompts/get", params, b.sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Error != nil {
+		return nil, fmt.Errorf("prompts/get %s/%s: %s", b.id, name, resp.Error.Message)
 	}
 	return resp.Result, nil
 }

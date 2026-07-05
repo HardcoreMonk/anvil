@@ -25,6 +25,14 @@
 #   profiles:   Ephemera profiles permitted to use this server. Empty/omitted
 #               means every profile may use it. Scoping per profile keeps each
 #               agent's per-request tool schema small (token-budget control).
+#   tools_allow: optional whitelist — if set, ONLY these tool names are exposed
+#                from this server (applies to tools/list and tools/call) (v0.6.2).
+#   tools_deny:  optional blacklist — these tool names are hidden (ignored when
+#                tools_allow is set) (v0.6.2).
+#
+# A profile may further narrow which of these servers it uses via the API
+# (PUT /config/profiles/{name}/mcp). That binding INTERSECTS with `profiles:`
+# above, so it can only narrow a profile's access, never widen it (v0.6.2).
 
 servers:
   - id: example
@@ -33,3 +41,5 @@ servers:
     url: https://mcp.example.com/mcp
     credential: example_token
     profiles: [leader]
+    # tools_allow: [read_wiki_structure, ask_question]   # expose only these tools
+    # tools_deny:  [dangerous_tool]                       # hide these (if no allow-list)

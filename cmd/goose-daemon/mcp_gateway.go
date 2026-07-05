@@ -108,9 +108,13 @@ func (cp *ControlPlane) initMCPGateway() {
 		slog.Error("mcp gateway: invalid server config; gateway disabled", "err", err)
 		return
 	}
+	// Policy intersects servers.yaml `profiles:` with each profile's explicit
+	// EPHEMERA_MCP_SERVERS binding (read per request, so edits apply immediately).
+	cp.mcpPolicy = mcpgateway.NewStaticPolicyStoreWithBinding(reg.ServerConfigs(), cp.mcpBindingForProfile)
 	opts := mcpgateway.Options{
 		Resolver: mcpgateway.NewIPCallerResolver(cp.lookupVMByIP),
 		Registry: reg,
+		Policy:   cp.mcpPolicy,
 		Observe:  cp.observeMCPCall,
 	}
 	if r := mcpRate(); r > 0 {
@@ -159,10 +163,10 @@ func (cp *ControlPlane) stopMCPGateway() {
 // keeps a VM whose role needs no external tools from connecting to the gateway at
 // all (no extra protocol overhead, no empty catalog).
 func (cp *ControlPlane) mcpURLForProfile(profile string) string {
-	if cp.mcpGateway == nil || cp.mcpRegistry == nil || cp.mcpEndpoint == "" {
+	if cp.mcpGateway == nil || cp.mcpRegistry == nil || cp.mcpPolicy == nil || cp.mcpEndpoint == "" {
 		return ""
 	}
-	policy := mcpgateway.NewStaticPolicyStore(cp.mcpRegistry.ServerConfigs()).For(profile)
+	policy := cp.mcpPolicy.For(profile)
 	for _, s := range cp.mcpRegistry.ServerConfigs() {
 		if policy.Allows(s.ID) {
 			return cp.mcpEndpoint
@@ -224,6 +228,7 @@ func (cp *ControlPlane) appendMCPAudit(rec mcpgateway.AuditRecord, outcome strin
 		"vm":      rec.VMID,
 		"profile": rec.Profile,
 		"server":  rec.Server,
+		"kind":    rec.Kind,
 		"tool":    rec.Tool,
 		"outcome": outcome,
 		"ms":      rec.DurationMs,
