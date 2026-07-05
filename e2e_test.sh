@@ -907,8 +907,9 @@ ok "Daemon restored to plain disk mode ✓"
 # ── 46a–c. Snapshot-restored VM auto-recovery across a daemon restart (v0.4.5) ──
 # A restored VM now persists a state.json carrying its source_snapshot_id, so a
 # graceful daemon bounce re-restores it from that snapshot (it cannot cold-boot).
-# If the source snapshot is deleted, the restored VM becomes unrecoverable and is
-# surfaced (dropped), not silently kept. Restore always uses dm-snapshot COW, so
+# anvil protects the source snapshot from deletion while any live or persisted
+# restored VM still references it (409, see 46c below) rather than letting the
+# delete succeed and orphaning the VM. Restore always uses dm-snapshot COW, so
 # this runs fine under the plain-spawn daemon.
 step "46a. Restore a snapshot, capture its recovery record"
 RR_SRC=$(curl -s -w "\n%{http_code}" -X POST "$API/vms" -H "Content-Type: application/json")
@@ -946,19 +947,22 @@ grep -q "re-restored from snapshot" "$LOG" \
     && ok "daemon log records snapshot re-restore ✓" \
     || fail "expected 're-restored from snapshot' in daemon log"
 
-step "46c. Deleting the source snapshot makes the restored VM unrecoverable (surfaced)"
-check_http "$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/snapshots/$RR_SNAP_ID")" "200" "DELETE source snapshot"
-kill "$DAEMON_PID" 2>/dev/null
-wait "$DAEMON_PID" 2>/dev/null || true
-pkill -f "firecracker --api-sock" 2>/dev/null || true
-sleep 2
-relaunch_daemon "EPHEMERA_DISK_MODE=plain"
-sleep 3
-if [ "$(curl -s "$API/vms" | jq --arg id "$RR_VM_ID" '[.[] | select(.vm_id==$id)] | length')" = "0" ]; then
-    ok "restored VM dropped after source snapshot deletion (unrecoverable) ✓"
-else
-    fail "restored VM $RR_VM_ID still present after its source snapshot was deleted"
-fi
+# anvil adaptation of upstream 46c: upstream lets DELETE on a snapshot
+# referenced by a live restored VM succeed (200) and orphans the VM. anvil
+# deliberately blocks that (409, deleteSnapshotByID's live/persisted-restored
+# -VM guard in api.go) so a running VM's only recovery path can't be pulled
+# out from under it — the VM must be deleted first before its source
+# snapshot can be reclaimed.
+step "46c. Deleting a snapshot referenced by a live restored VM is blocked (anvil protection)"
+RR_DEL_BLOCKED=$(curl -s -w "\n%{http_code}" -X DELETE "$API/snapshots/$RR_SNAP_ID")
+check_http "$(echo "$RR_DEL_BLOCKED" | tail -1)" "409" "DELETE source snapshot while restored VM is live"
+echo "$RR_DEL_BLOCKED" | head -1 | grep -qi "referenced by restored VM" \
+    && ok "409 error body names the referencing restored VM ✓" \
+    || fail "409 error body missing restored-VM protection message"
+check_http "$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/vms/$RR_VM_ID")" \
+           "200" "DELETE restored VM $RR_VM_ID"
+check_http "$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/snapshots/$RR_SNAP_ID")" \
+           "200" "DELETE source snapshot after restored VM removed"
 
 # ════════════════════════════════════════════════════════════════
 # Agent Proxy test: verify control plane proxy endpoints.
