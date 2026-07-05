@@ -9,6 +9,15 @@
 #
 set -euo pipefail
 
+# [v0.7.0 학습 주석] end-user installer 전체 개요.
+#   - 흐름: preflight(호스트 요건 검사) → place_files(바이너리/설정 배치) →
+#     configure_provider(LLM provider/키 입력) → setup_env(API 토큰) →
+#     install_service(systemd 유닛 등록) → wait_ready → summary.
+#   - DEST(EPHEMERA_HOME)는 daemon의 WorkingDirectory이자 리소스 root다.
+#     ephemera.service.in의 @DEST@ 치환과 cmd/goose-daemon/main.go의
+#     resolveWorkDir()이 이 값을 그대로 공유한다(설치 경로 = 런타임 workdir).
+#   - -h|--help는 preflight 이전에 sed로 헤더 주석만 출력하고 exit 0 — 시스템에
+#     아무 것도 쓰지 않는 무변이(no side effect) 경로다.
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEST="${EPHEMERA_HOME:-/opt/ephemera}"
 API_ADDR_DEFAULT="127.0.0.1:3000"
@@ -26,6 +35,9 @@ warn() { printf '\033[1;33m[warn]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[error]\033[0m %s\n' "$*" >&2; exit 1; }
 
 # ---------------------------------------------------------------- preflight ----
+# [학습 주석] root/아키텍처/KVM/필수 커맨드 검사 후 VARIANT(slim|full)를 판정한다.
+# golden-image.ext4가 이미 SRC/artifacts에 있으면 full(사전 빌드 이미지 포함),
+# 없으면 slim(첫 부팅 시 debootstrap으로 이미지 빌드, 추가 툴체인 필요)이다.
 preflight() {
 	[ "$(id -u)" -eq 0 ] || die "run as root: sudo ./install.sh"
 	[ "$(uname -m)" = "x86_64" ] || die "Ephemera ships amd64 binaries; this host is $(uname -m). Unsupported."
@@ -194,6 +206,10 @@ setup_env() {
 }
 
 # ------------------------------------------------------------------ systemd ----
+# [학습 주석] ephemera.service.in의 @DEST@ 자리표시자를 이 스크립트의 DEST로
+# 치환해 실제 유닛 파일을 만든다. 그 결과 WorkingDirectory/EPHEMERA_HOME이 모두
+# DEST를 가리키게 되고, daemon 기동 시 resolveWorkDir()이 EPHEMERA_HOME을 읽어
+# 같은 경로를 workdir로 삼는다(설치 경로와 런타임 workdir이 한 곳으로 수렴).
 install_service() {
 	say "Installing the systemd service"
 	sed "s|@DEST@|$DEST|g" "$SRC/ephemera.service.in" > /etc/systemd/system/ephemera.service

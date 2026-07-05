@@ -14,6 +14,13 @@
 #
 set -euo pipefail
 
+# [v0.7.0 학습 주석] 개요.
+#   - SLIM(default)은 golden-image.ext4를 뺀 tarball(첫 부팅에 debootstrap으로
+#     빌드). --slim-only 없이 실행하면 FULL도 추가로 만드는데, FULL은 golden
+#     image를 이 스크립트가 직접 베이크하므로 root + debootstrap 툴체인이 필요하다.
+#   - kernel/firecracker 다운로드는 각각 `sha256sum -c`로 pinned SHA를 검증한다
+#     (공급망 무결성). pin 값은 하드코딩이 아니라 pin()이 cmd/goose-daemon/main.go를
+#     sed로 파싱해 가져오므로, 릴리스가 daemon이 기대하는 값과 어긋날 수 없다.
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
 
@@ -71,6 +78,10 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$STAGE/artifacts/mi
 
 # -------------------------------------------------- kernel + firecracker ----
 say "Downloading pinned kernel + firecracker"
+# [학습 주석] 이 sha256sum -c 검증은 internal/storage/provisioner.go의
+# EnsureKernel(런타임에서 파일이 없을 때만 동작)과 별개 방어선이다 — EnsureKernel은
+# os.Stat으로 이미 있는 파일은 그냥 skip하므로, FULL tarball에 미리 담겨 배포되는
+# vmlinux.bin은 이 빌드 시점 검증이 유일한 공급망 체크다.
 curl -fL -o "$STAGE/artifacts/vmlinux.bin" "$KURL"
 echo "$KSHA  $STAGE/artifacts/vmlinux.bin" | sha256sum -c - >/dev/null || die "kernel SHA256 mismatch"
 
@@ -92,6 +103,9 @@ cp install.sh uninstall.sh ephemera.service.in "$STAGE/"
 chmod 755 "$STAGE/install.sh" "$STAGE/uninstall.sh" "$STAGE/scripts/"build_image.sh "$STAGE/scripts/"gtwall "$STAGE/scripts/"gtcall
 
 # ----------------------------------------------- FULL: bake golden image ----
+# [학습 주석] FULL 변형만 이 블록을 탄다 — guards 섹션에서 이미 root + 이미지
+# 빌드 툴체인을 확인했다. golden-image.ext4를 이 호스트에서 직접 debootstrap/mount로
+# 굽기 때문에 root 권한이 필요하다(SLIM은 이 단계를 건너뛰고 첫 부팅 시 빌드로 미룬다).
 if [ "$SLIM_ONLY" -eq 0 ]; then
 	say "Baking golden image for the FULL variant (cd $STAGE)"
 	( cd "$STAGE" && bash scripts/build_image.sh )

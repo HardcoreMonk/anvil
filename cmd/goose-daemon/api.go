@@ -1,5 +1,16 @@
 package main
 
+// [v0.7.0 학습 주석] 이 파일에서 v0.7.0이 들여온 두 표면.
+//   - GET /vms/{id}/sessions/{name}/transcript (여기 handleVMSub 부근, ~L870):
+//     authMiddleware가 mux 전체를 감싸므로 bearer 뒤에 있고 GET 전용이다. 응답
+//     schema {turns:[{role,text}]}는 secret-free라 Web UI가 daemon 토큰 없이 렌더한다.
+//     transcript-safety guard 4종(TDD) 중 endpoint 401은 여기(api_test.go
+//     TestTranscriptEndpointRequiresBearer), 나머지 3종(payload sentinel-free,
+//     cache-hit no-spawn, export read-only)은 cmd/goose-agent/main.go 쪽 테스트다.
+//   - waitForAgent (~L1635): backport 화해 3종 중 하나로, per-probe timeout이
+//     upstream v0.7.0과 병합되며 anvil 기존 구현이 그대로 승리했다(net diff는
+//     doc-comment 수준). 나머지 2종(kernel SHA pin, EPHEMERA_HOME)은
+//     cmd/goose-daemon/main.go / internal/storage/provisioner.go에 있다.
 import (
 	"context"
 	"crypto/rand"
@@ -869,6 +880,9 @@ func (cp *ControlPlane) handleVM(w http.ResponseWriter, r *http.Request) {
 
 	// GET /vms/{vm_id}/sessions/{name}/transcript → agent /sessions/{name}/transcript
 	// (the full conversation for a resumed chat; the Web UI repaints prior turns).
+	// [학습 주석] 이 핸들러 자체는 GET만 허용하고, 진입 전에 authMiddleware가 이미
+	// control-plane Bearer token을 강제한다 — 여기서 auth를 다시 검사하지 않는 것은
+	// 라우팅 계층 아래가 아니라 위(미들웨어)에서 이미 걸렸기 때문이다.
 	if strings.HasSuffix(path, "/transcript") {
 		idx := strings.Index(path, "/sessions/")
 		if idx <= 0 {
@@ -1632,6 +1646,9 @@ func (cp *ControlPlane) DestroyAll() {
 	}
 }
 
+// [학습 주석] backport 화해: per-probe timeout(아래 probeTimeout)이 upstream v0.7.0
+// hardening과 겹쳤고, anvil 기존 구현이 승리했다 — TCP는 붙었지만 /health 응답이
+// 없는 guest 때문에 전체 readiness loop가 무한정 묶이는 것을 막는다.
 func waitForAgent(guestIP string, timeout time.Duration) error {
 	url := fmt.Sprintf("http://%s:%d/health", guestIP, agentPort)
 	// Per-probe timeout (well under the overall deadline) so a guest that accepts

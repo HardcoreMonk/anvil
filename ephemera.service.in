@@ -1,3 +1,8 @@
+# [v0.7.0 학습 주석] 유닛 템플릿. install.sh의 install_service()가
+# `sed "s|@DEST@|$DEST|g"`로 @DEST@ 세 자리(WorkingDirectory, Environment,
+# EnvironmentFile/ExecStart 경로)를 실제 설치 경로로 한 번에 치환해
+# /etc/systemd/system/ephemera.service를 만든다. 이 파일 자체는 설치 시
+# 실행되지 않고 항상 치환 후 결과물만 배치된다.
 [Unit]
 Description=Ephemera control plane (Firecracker MicroVM orchestrator)
 Documentation=https://github.com/steve-seungeui/ephemera
@@ -8,6 +13,9 @@ Wants=network-online.target
 Type=simple
 User=root
 WorkingDirectory=@DEST@
+# EPHEMERA_HOME=@DEST@는 cmd/goose-daemon/main.go의 resolveWorkDir()이 읽는 값과
+# 동일하다 — daemon이 systemd 밖에서 기동돼도(dev 환경) 이 env가 없으면
+# os.Getwd()로 폴백하므로, 유닛에서 이 줄을 지우면 WorkingDirectory와 어긋날 수 있다.
 Environment=EPHEMERA_HOME=@DEST@
 EnvironmentFile=@DEST@/ephemera.env
 ExecStart=@DEST@/ephemera-daemon

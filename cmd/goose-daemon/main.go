@@ -1,5 +1,14 @@
 package main
 
+// [v0.7.0 학습 주석] daemon 진입점 개요.
+//   - resolveWorkDir()이 EPHEMERA_HOME(systemd 유닛/installer가 심어준 값)을 workdir로
+//     쓰고, 없으면 os.Getwd()로 폴백한다(dev/repo 실행 흐름 하위호환).
+//   - kernelDownloadURL/kernelSHA256/firecrackerDownloadURL/firecrackerSHA256은
+//     scripts/build_release.sh의 pin()이 sed로 그대로 파싱해가는 single source of
+//     truth다 — 여기 값을 바꾸면 다음 릴리스 빌드가 자동으로 새 값을 따라간다.
+//   - kernel SHA pin + EPHEMERA_HOME 지원은 upstream v0.7.0과의 backport 화해
+//     3종 중 2종이며, anvil 기존 구현이 그대로 승리했다(병합은 doc-comment 수준).
+//     나머지 1종(waitForAgent per-probe timeout)은 cmd/goose-daemon/api.go에 있다.
 import (
 	"log/slog"
 	"net/http"
@@ -44,6 +53,8 @@ func fatal(msg string, args ...any) {
 	os.Exit(1)
 }
 
+// [학습 주석] EPHEMERA_HOME 화해 지점: ephemera.service.in의 `Environment=EPHEMERA_HOME=@DEST@`와
+// install.sh의 DEST가 여기로 수렴한다. TrimSpace로 공백뿐인 값도 미설정 취급한다.
 func resolveWorkDir() (string, error) {
 	if home := strings.TrimSpace(os.Getenv("EPHEMERA_HOME")); home != "" {
 		return home, nil
@@ -81,6 +92,9 @@ func main() {
 		fatal("fatal: create snapshot dir", "err", err, "dir", snapshotDir)
 	}
 
+	// [학습 주석] scripts/build_release.sh의 pin()이 `sed -n "s/.*<name>[[:space:]]*=.../"`
+	// 패턴으로 이 4개 상수를 그대로 파싱한다 — 이름/형식(따옴표로 감싼 문자열 리터럴)을
+	// 바꾸면 release 스크립트의 파싱이 깨질 수 있다.
 	const (
 		kernelDownloadURL      = "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/x86_64/vmlinux-6.1.155"
 		kernelSHA256           = "e20e46d0c36c55c0d1014eb20576171b3f3d922260d9f792017aeff53af3d4f2"

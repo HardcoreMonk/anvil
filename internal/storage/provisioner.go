@@ -1,5 +1,12 @@
 package storage
 
+// [v0.7.0 학습 주석] EnsureKernel (~L745)은 backport 화해 3종 중 하나다 — upstream
+// v0.7.0의 kernel SHA256 검증과 병합되며 anvil 기존 구현이 그대로 승리했다(net Go
+// diff는 doc-comment 수준). temp+rename으로 mismatch나 write 실패 시 partial한
+// vmlinux.bin이 kernelPath에 남지 않는 점이 anvil이 upstream보다 strict한 지점이다.
+// 단, os.Stat으로 이미 존재하는 파일은 재검증 없이 skip하므로, FULL 릴리스
+// tarball처럼 vmlinux.bin이 처음부터 배포에 포함되는 경로는 이 함수가 커버하지
+// 못한다 — 그 gap은 scripts/build_release.sh의 자체 sha256sum -c가 닫는다.
 import (
 	"archive/tar"
 	"compress/gzip"
@@ -786,6 +793,9 @@ func EnsureKernel(kernelPath, downloadURL, expectedSHA256 string) error {
 		return fmt.Errorf("kernel SHA256 mismatch: expected %s, got %s", expectedSHA256, actual)
 	}
 
+	// [학습 주석] SHA 검증(위)을 통과한 뒤에만 rename한다 — 이 지점 이전의 모든
+	// 실패 경로는 tmpPath에만 쓰고 kernelPath는 절대 건드리지 않으므로, 검증
+	// 실패/쓰기 실패가 kernelPath에 부분 파일을 남기는 경우는 없다.
 	if err := os.Rename(tmpPath, kernelPath); err != nil {
 		return fmt.Errorf("failed to install kernel file: %w", err)
 	}

@@ -1,5 +1,17 @@
 package main
 
+// [v0.7.0 학습 주석] transcript export 표면 개요 (handleSessionItem ~L848,
+// exportSessionTranscript ~L1415).
+//   - GET /sessions/{name}/transcript는 먼저 메모리 캐시(sessionInfo.transcript)를
+//     보고, cache miss일 때만 `goose session export`(read-only, model 호출 없음)로
+//     폴백한다 — 캐시 히트 시엔 goose 서브프로세스를 아예 스폰하지 않는다.
+//   - transcript-safety guard 4종(TDD): (1) daemon 쪽 GET endpoint가 bearer 없으면
+//     401(cmd/goose-daemon/api_test.go TestTranscriptEndpointRequiresBearer),
+//     (2) 응답 payload가 provider key/CP token/agent_token sentinel-free
+//     (TestHandleSessionItem_PayloadOmitsAgentAuth), (3) cache-hit는 goose export를
+//     스폰하지 않음(TestHandleSessionItem_CacheHitSkipsGooseExport), (4) export argv가
+//     고정 `session export -n {name} --format json`이며 run 토큰을 거부
+//     (TestExportSessionTranscript_ReadOnlyNoModelCall).
 import (
 	"bufio"
 	"bytes"
@@ -876,6 +888,9 @@ func handleSessionItem(w http.ResponseWriter, r *http.Request) {
 	if len(turns) == 0 {
 		// Cache miss (e.g. a cold restart cleared the in-memory session map): dump
 		// the conversation from goose's on-disk session store.
+		// [학습 주석] len(turns)==0인 cache-miss 분기에서만 exportSessionTranscript를
+		// 호출한다 — TestHandleSessionItem_CacheHitSkipsGooseExport가 캐시 히트
+		// 경로에서 이 호출이 절대 일어나지 않음을 검증한다(spawn 없음).
 		if exported, err := exportSessionTranscript(r.Context(), name); err != nil {
 			slog.Warn("session transcript export failed", "session", name, "err", err)
 		} else {
@@ -1413,6 +1428,9 @@ var gooseExportBinary = "/usr/local/bin/goose"
 // format is parsed with the same envelope reader; if goose wraps it differently the
 // reader returns nil and the caller degrades to an empty transcript.
 func exportSessionTranscript(ctx context.Context, name string) ([]TranscriptTurn, error) {
+	// [학습 주석] argv가 리터럴로 고정돼 있다 — "session export"는 goose의 read-only
+	// dump 서브커맨드이고, 여기엔 실행("run")이나 프롬프트 입력이 끼어들 자리가 없다.
+	// TestExportSessionTranscript_ReadOnlyNoModelCall이 이 argv 형태를 고정 검증한다.
 	cmd := exec.CommandContext(ctx, gooseExportBinary, "session", "export", "-n", name, "--format", "json")
 	out, err := cmd.Output()
 	if err != nil {
