@@ -148,3 +148,37 @@ func TestConfigProfileSurfaceNeverReadsOrWritesSecrets(t *testing.T) {
 		}
 	}
 }
+
+// TestConfigProvidersNeverExposeKeyValues locks in the anvil surface guarantee
+// that GET /config/providers reports key *availability* only and never the key
+// value itself (v0.5.1 added this endpoint; providerStatus has no key field, so
+// this is a regression guard against a future field being marshaled). We plant a
+// distinctive sentinel value that must be DETECTED (Available=true, proving the
+// key was read) yet must NEVER appear anywhere in the JSON response body.
+func TestConfigProvidersNeverExposeKeyValues(t *testing.T) {
+	cp := newTestCP(t)
+	const providerKeyValue = "AIzaSENTINEL-PROVIDER-KEY-DO-NOT-LEAK"
+	// Sole keychain entry: only Google has a (sentinel) key.
+	if err := os.WriteFile(cp.gooseSecretsPath, []byte("GOOGLE_API_KEY: \""+providerKeyValue+"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Control: the sentinel really is on disk, so a leak would be possible.
+	if !strings.Contains(mustRead(t, cp.gooseSecretsPath), providerKeyValue) {
+		t.Fatal("precondition: sentinel key value must be present on disk")
+	}
+
+	rr := httptest.NewRecorder()
+	cp.handleConfigProviders(rr, httptest.NewRequest(http.MethodGet, "/config/providers", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /config/providers = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	// The key must be reported present (availability is the only thing exposed)...
+	if !strings.Contains(body, "\"available\":true") {
+		t.Errorf("google key present but no provider reported available; body=%s", body)
+	}
+	// ...but its value must never appear in the response.
+	if strings.Contains(body, providerKeyValue) {
+		t.Errorf("GET /config/providers leaked the API key value: %s", body)
+	}
+}
