@@ -2008,19 +2008,34 @@ func (cp *ControlPlane) planSnapshotGC(policy SnapshotGCPolicy, now time.Time) S
 		}
 		protected[snapshotID] = snapshotGCEntryFrom(meta, snapshotGCReasonSourceSnapshot, nil, sizes[snapshotID])
 	}
-	if stateRefs, err := cp.persistedRestoredSourceSnapshotRefs(); err == nil {
-		for snapshotID := range stateRefs {
-			if _, exists := protected[snapshotID]; exists {
-				continue
-			}
-			meta, ok := byID[snapshotID]
-			if !ok {
-				continue
-			}
-			protected[snapshotID] = snapshotGCEntryFrom(meta, snapshotGCReasonSourceSnapshot, nil, sizes[snapshotID])
+	stateRefs, err := cp.persistedRestoredSourceSnapshotRefs()
+	if err != nil {
+		// Fail closed: without the persisted VM state we cannot tell which
+		// snapshots are the restore source of a recoverable (persisted) VM, so we
+		// must not plan any deletion — deleting a still-referenced source snapshot
+		// is unrecoverable. Abort the plan with no candidates, matching
+		// deleteSnapshotByID, which 500s (fail closed) on the same error.
+		slog.Warn("snapshot gc: list vm state failed; aborting plan (fail closed)", "err", err)
+		return SnapshotGCResponse{
+			RequestedAt: now,
+			Policy:      policy,
+			Candidates:  []SnapshotGCEntry{},
+			Protected:   []SnapshotGCEntry{},
+			Deleted:     []SnapshotGCEntry{},
+			Errors: []SnapshotGCError{{
+				Error: fmt.Sprintf("snapshot gc aborted: cannot verify restored-VM source snapshots: %v", err),
+			}},
 		}
-	} else {
-		slog.Warn("snapshot gc: list vm state failed", "err", err)
+	}
+	for snapshotID := range stateRefs {
+		if _, exists := protected[snapshotID]; exists {
+			continue
+		}
+		meta, ok := byID[snapshotID]
+		if !ok {
+			continue
+		}
+		protected[snapshotID] = snapshotGCEntryFrom(meta, snapshotGCReasonSourceSnapshot, nil, sizes[snapshotID])
 	}
 
 	if policy.KeepLastPerVM > 0 {

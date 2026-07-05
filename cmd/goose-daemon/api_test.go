@@ -1461,6 +1461,45 @@ func TestPlanSnapshotGCKeepsLiveRestoredSourceSnapshotWithoutVMState(t *testing.
 	}
 }
 
+// TestPlanSnapshotGCFailsClosedWhenVMStateUnreadable verifies the GC planner
+// fails CLOSED when it cannot enumerate persisted VM state: if ListVMState
+// errors, the daemon cannot verify which snapshots are the restore source of a
+// persisted (recoverable) VM, so it must plan NO deletions rather than risk
+// deleting a still-referenced source snapshot. This matches deleteSnapshotByID's
+// fail-closed posture (that path 500s on the same error).
+func TestPlanSnapshotGCFailsClosedWhenVMStateUnreadable(t *testing.T) {
+	now := time.Now().UTC()
+	cp := newTestCP(t)
+
+	addTestSnapshot(t, cp, testSnapshotMeta("snap-source", "vm-source", "full", now.Add(-72*time.Hour)))
+	addTestSnapshot(t, cp, testSnapshotMeta("snap-old", "vm-other", "full", now.Add(-96*time.Hour)))
+
+	// Make {workDir}/vms a regular file so storage.ListVMState's os.ReadDir fails
+	// with a non-IsNotExist error (ENOTDIR) — the injected verification failure.
+	vmsPath := filepath.Join(cp.workDir, "vms")
+	if err := os.RemoveAll(vmsPath); err != nil {
+		t.Fatalf("clear vms path: %v", err)
+	}
+	if err := os.WriteFile(vmsPath, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("plant vms file: %v", err)
+	}
+	// Precondition: the injection really does make persistedRestoredSourceSnapshotRefs fail.
+	if _, err := cp.persistedRestoredSourceSnapshotRefs(); err == nil {
+		t.Fatal("precondition: ListVMState must fail with the planted vms file")
+	}
+
+	got := cp.planSnapshotGC(SnapshotGCPolicy{
+		OlderThanSeconds: int64((24 * time.Hour) / time.Second),
+	}, now)
+
+	if len(got.Candidates) != 0 {
+		t.Fatalf("fail-closed GC must plan no deletions, got candidates=%v", snapshotIDs(got.Candidates))
+	}
+	if len(got.Errors) == 0 {
+		t.Fatal("fail-closed GC must record an error explaining the abort")
+	}
+}
+
 func TestPlanSnapshotGCMaxTotalBytesSelectsOldestUnprotected(t *testing.T) {
 	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
 	cp := newTestCP(t)
