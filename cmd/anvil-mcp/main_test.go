@@ -80,6 +80,19 @@ func TestToolRegistrationsIncludeSnapshotTools(t *testing.T) {
 	}
 }
 
+// TestToolRegistrationsExcludeBroadcast locks in the Task 6 phase decision:
+// upstream ephemera v0.4.4 added POST /flocks/{id}/broadcast, but anvil keeps it
+// a daemon-only endpoint and never registers anvil_broadcast_flock (or any
+// broadcast tool) on the MCP surface in this phase. A stray broadcast
+// registration fails this guard first.
+func TestToolRegistrationsExcludeBroadcast(t *testing.T) {
+	for _, registration := range toolRegistrations() {
+		if strings.Contains(strings.ToLower(registration.name), "broadcast") {
+			t.Fatalf("anvil-mcp unexpectedly registers a broadcast tool: %q", registration.name)
+		}
+	}
+}
+
 func TestToolRegistrationsHaveIronClawInputSchemas(t *testing.T) {
 	schemas := anvilmcp.CurrentIronClawToolInputSchemas()
 	schemaNames := make(map[string]bool, len(schemas))

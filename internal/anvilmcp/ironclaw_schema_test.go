@@ -1,6 +1,22 @@
 package anvilmcp
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+// TestCurrentIronClawSchemasExcludeBroadcastTool locks in the Task 6 phase
+// decision: upstream ephemera v0.4.4 added a flock broadcast endpoint, but anvil
+// keeps it a daemon-only route and does NOT surface it as an anvil_* MCP tool in
+// this phase. The IronClaw tool-input schema is the surface IronClaw advertises,
+// so if a broadcast tool ever leaks into it, this guard fails first.
+func TestCurrentIronClawSchemasExcludeBroadcastTool(t *testing.T) {
+	for _, schema := range CurrentIronClawToolInputSchemas() {
+		if strings.Contains(strings.ToLower(schema.ToolName), "broadcast") {
+			t.Fatalf("IronClaw schema unexpectedly exposes a broadcast tool: %q", schema.ToolName)
+		}
+	}
+}
 
 func TestIronClawSchemaValidationRejectsEmptyGeminiType(t *testing.T) {
 	err := ValidateIronClawToolInputSchemas([]IronClawToolInputSchema{{
