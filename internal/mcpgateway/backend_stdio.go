@@ -23,6 +23,24 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// 학습 주석 개요: v0.6.4 에서 추가된 stdio backend(로컬 subprocess) 구현. 핵심
+// 하드닝 4가지가 이 파일에 모여 있다.
+//   1. minimalChildEnv — daemon 자신의 환경(EPHEMERA_* 등 비밀 포함 가능)을
+//      절대 상속하지 않고 PATH/HOME/LANG 세 값 + credential_env 하나만으로
+//      자식 환경을 백지에서 재구성한다.
+//   2. applyRlimits — NOFILE/CORE(+ de-privileged 일 때 NPROC)를 prlimit(2)
+//      으로 강제해 폭주 자식을 억제한다(RLIMIT_AS 는 의도적으로 안 건다, 이유는
+//      상단 주석 참고).
+//   3. root 로 daemon 이 뜨면 spec.Cred(EPHEMERA_MCP_STDIO_USER, 기본
+//      "nobody")로 setuid 하고, ensureScratchDir 이 만든 per-server scratch
+//      디렉터리를 cwd+HOME 으로 쓴다.
+//   4. Setpgid: true 로 자식이 자기 그룹의 leader 가 되고, terminate 는 그
+//      pgid 전체를 SIGKILL 한다 — 단 reap 이후에는 pgid 가 재사용될 수 있어
+//      고아 프로세스를 그룹 kill 하지 않는다(재활용 안전, terminate 는 항상
+//      leader 가 살아있는 동안에만 호출됨).
+// credential 은 registry.go 가 만든 StdioSpawnSpec.Env 를 통해 자식 프로세스
+// 환경변수 하나로만 전달되고 Args(argv)에는 절대 섞이지 않는다.
+
 const (
 	// stdioSpawnCooldown is the minimum interval between spawn attempts for one
 	// backend, bounding a crash-looping child to one spawn per cooldown.
@@ -79,6 +97,9 @@ type StdioSpawnSpec struct {
 // transport). The child is spawned lazily on first use, de-privileged and
 // rlimited, restarted on demand after a crash (rate-bound by a cooldown), and
 // torn down by Close.
+// 학습 주석: HTTPBackend(backend.go)와 마찬가지로 Backend interface 를 구현해
+// gateway.go 는 stdio 인지 http 인지 구분하지 않는다. 차이는 네트워크 요청 대신
+// 자식 프로세스의 stdin/stdout 으로 JSON-RPC 를 주고받는다는 점뿐이다.
 type StdioBackend struct {
 	id        string
 	namespace string
@@ -174,6 +195,8 @@ func lookupStdioUser(name string) (*syscall.Credential, error) {
 // honors ctx, but the spawn itself does not: a caller that gives up (e.g. a 5s
 // health probe racing a slow first start) must not kill a child that is still
 // coming up — it just returns, and the spawn converges in the background.
+// 학습 주석: 이 함수가 lazy spawn 의 진입점 — 첫 tools/list 나 health 호출에서만
+// 실제 자식이 뜬다. spawnCooldown 체크가 crash loop 를 5초 간격으로 억제한다.
 func (b *StdioBackend) ensureStarted(ctx context.Context) (*stdioProc, error) {
 	b.mu.Lock()
 	if b.closed {
@@ -217,6 +240,9 @@ func (b *StdioBackend) ensureStarted(ctx context.Context) (*stdioProc, error) {
 }
 
 // spawnLocked starts the child and its lifecycle goroutines. Caller holds b.mu.
+// 학습 주석: cmd.Env = minimalChildEnv(...) 로 daemon 환경 백지화, SysProcAttr 에
+// Setpgid+Credential 로 그룹 격리와 권한 하강을 동시에 설정한다 — 이 두 줄이
+// v0.6.4 하드닝의 물리적 실체다.
 func (b *StdioBackend) spawnLocked() (*stdioProc, error) {
 	if err := b.ensureScratchDir(); err != nil {
 		return nil, err
@@ -306,6 +332,9 @@ func (b *StdioBackend) spawnLocked() (*stdioProc, error) {
 // changed EPHEMERA_MCP_STDIO_USER self-heals. The Lstat guard refuses a leaf
 // that is not a real directory (e.g. a symlink planted in a world-writable
 // base like the os.TempDir() library default) before root chowns it.
+// 학습 주석: leaf 디렉터리만 0700 + chown 하고 조상 디렉터리는 0755 로 열어,
+// setuid 된 자식이 자기 소유가 아닌 상위 경로도 traverse 할 수 있게 한다 — root
+// 소유 /var/lib 아래 두는 이유(mcp_gateway.go 의 mcpStdioScratchBase 주석 참고).
 func (b *StdioBackend) ensureScratchDir() error {
 	// Note which ancestors are about to be created, so each can be chmodded
 	// 0755 explicitly afterwards — immune to the daemon's umask, and without
@@ -349,6 +378,9 @@ func (b *StdioBackend) ensureScratchDir() error {
 
 // handshake drives the MCP initialize exchange on its own clock, deliberately
 // decoupled from any caller's ctx (see ensureStarted).
+// 학습 주석: 이 핸드셰이크는 gateway.go 의 handleInitialize(goose 쪽 세션)와
+// 완전히 별개다 — backend 자식과의 MCP initialize 는 백그라운드 goroutine 에서
+// 독립적으로 진행된다.
 func (b *StdioBackend) handshake(p *stdioProc) {
 	ctx, cancel := context.WithTimeout(context.Background(), stdioHandshakeTimeout)
 	defer cancel()
@@ -379,6 +411,9 @@ func (b *StdioBackend) handshake(p *stdioProc) {
 // exiting on its own are not group-killed here: after Wait the pgid may be
 // recycled, so a kill could hit an innocent process. Kill paths (terminate)
 // only ever run while the leader is alive, which pins the pgid.
+// 학습 주석: "pgid 재활용 안전"의 근거 코드 — Wait() 이후에는 group kill 을 시도
+// 하지 않는다(pgid 가 커널에 의해 다른 프로세스에 재할당될 수 있으므로). kill
+// 경로(terminate)는 leader 가 아직 살아있다고 보장되는 시점에서만 호출된다.
 func (b *StdioBackend) reap(p *stdioProc) {
 	werr := p.cmd.Wait()
 	p.closeStdin() // release the write end; harmless if already closed
@@ -420,6 +455,9 @@ func (b *StdioBackend) detach(p *stdioProc, exitErr error) {
 // Close shuts the backend down for good: no further spawns, and the running
 // child (if any) is asked to exit via stdin EOF (the MCP stdio convention),
 // then SIGKILLed with its whole process group after a short grace period.
+// 학습 주석: registry.go 의 Registry.Close 가 모든 backend 의 Close 를 병렬로
+// 호출한다 — cmd/goose-daemon/mcp_gateway.go 의 stopMCPGateway 가 daemon 종료
+// 시 그 경로를 탄다.
 func (b *StdioBackend) Close() error {
 	b.mu.Lock()
 	b.closed = true
@@ -739,6 +777,9 @@ func (p *stdioProc) exitError() error { return p.exitErr }
 // the constants above). There is a tiny window between Start and the limits
 // taking effect; accepted — the command is operator-declared, and the limits
 // guard against runaway behavior, not malice.
+// 학습 주석: NPROC 은 dropped(전용 unprivileged user 로 실행 중)일 때만 추가된다
+// — daemon 이 root 가 아니면 공유 uid 의 전역 프로세스 수를 제한해 무관한 부하로
+// 자식이 시작부터 죽는 것을 피한다(상단 const 블록 주석 참고).
 func applyRlimits(pid int, dropped bool) error {
 	limits := []struct {
 		resource int
@@ -764,6 +805,9 @@ func applyRlimits(pid int, dropped bool) error {
 
 // minimalChildEnv builds the child environment from scratch: the daemon's own
 // environment (EPHEMERA_* config, possibly key material) is never inherited.
+// 학습 주석: 개요에서 말한 "child env 백지 구성"이 바로 이 함수다. spec.Env 는
+// registry.go 의 NewRegistry 가 credential_env 하나만 채워 넣은 map — 즉 credential
+// 은 여기서 딱 한 줄의 env 항목으로만 자식에 들어간다.
 func minimalChildEnv(spec StdioSpawnSpec) []string {
 	env := []string{
 		"PATH=/usr/local/bin:/usr/bin:/bin",

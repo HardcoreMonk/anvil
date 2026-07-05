@@ -15,6 +15,16 @@ import (
 	"ephemera/internal/mcpgateway"
 )
 
+// 학습 주석 개요: 이 파일은 goose-daemon 프로세스가 internal/mcpgateway 를
+// 실제로 배선하는 곳이다 — gateway 는 daemon 의 API mux 와 별도로 독립 리스너
+// (mcpSrv, bridge IP mcpVMHostIP 에 바인딩)를 연다. EPHEMERA_MCP_* 환경변수가
+// 이 파일의 진입점이며, ANVIL_MCP_* IronClaw adapter 환경변수와는 이름만
+// 비슷할 뿐 완전히 다른 표면(cmd/anvil-mcp, docs/architecture/mcp-architecture.md
+// 참고)이다. VM 에는 mcpEndpoint(letter-starting alias URL)만 주입되고
+// (provisioner.go 의 MCPGatewayURL), audit(appendMCPAudit)은 고정 key set
+// metadata 만 {workDir}/audit/mcp.jsonl 에 남긴다 — tool argument/result 는
+// 절대 기록하지 않는다(mcp_audit_privacy_test.go 가드).
+
 const (
 	defaultMCPPort = 3001
 	// mcpStdioScratchBase is where stdio backend children get their per-server
@@ -63,6 +73,9 @@ func mcpPort() int {
 // mcpBindIP returns the listener bind IP (EPHEMERA_MCP_BIND_IP, default the bridge
 // gateway IP so the gateway is reachable only from VMs and the host, never
 // externally).
+// 학습 주석: 기본값(mcpVMHostIP, 10.0.1.1)이 곧 gateway 를 외부 노출로부터
+// 지키는 1차 방어선이고, identity.go 의 source-IP 403 판정이 defense-in-depth
+// 로 겹친다(handoff 문서의 "KVM gate 스크립트" 절 참고).
 func mcpBindIP() string {
 	if v := strings.TrimSpace(os.Getenv("EPHEMERA_MCP_BIND_IP")); v != "" {
 		return v
@@ -105,6 +118,10 @@ func mcpStdioUser() string {
 // initMCPGateway loads configs/mcp/{servers,secrets}.yaml and builds the gateway
 // and its listener. Disabled or misconfigured → the gateway stays nil and VMs get
 // no MCP extension (behavior unchanged). Failures are logged, never fatal.
+// 학습 주석: 이 함수가 gateway.Options 를 실제로 조립하는 지점이다 —
+// Resolver=NewIPCallerResolver(cp.lookupVMByIP), Policy=바인딩 교집합 store,
+// Observe=cp.observeMCPCall(audit). WithStdioUser/WithStdioDir 로 stdio 강화
+// (nobody, /var/lib/ephemera/mcp-stdio)도 여기서 registry 에 전달된다.
 func (cp *ControlPlane) initMCPGateway() {
 	if !mcpEnabled() {
 		return
@@ -156,6 +173,9 @@ func (cp *ControlPlane) initMCPGateway() {
 // startMCPGateway starts the gateway listener (no-op when disabled). A bind
 // failure is logged but must not take down the daemon — the control-plane API
 // stays up so operators can diagnose it.
+// 학습 주석: gateway 는 daemon 의 메인 API mux 와 다른 http.Server(cp.mcpSrv,
+// 별도 bridge IP 리스너)이므로, 이 goroutine 이 죽어도 /config/* 등 daemon API
+// 는 영향받지 않는다.
 func (cp *ControlPlane) startMCPGateway() {
 	if cp.mcpSrv == nil {
 		return
@@ -185,6 +205,9 @@ func (cp *ControlPlane) stopMCPGateway() {
 // "" when the gateway is off or the profile is permitted no backend server. This
 // keeps a VM whose role needs no external tools from connecting to the gateway at
 // all (no extra protocol overhead, no empty catalog).
+// 학습 주석: 이 함수의 반환값이 provisioner.go 의 MCPGatewayURL 로 흘러가
+// VM 의 /root/.ephemera-mcp 에 그대로 쓰인다 — 여기서 만들어지는 것은 오직 URL
+// 문자열뿐이고 credential 은 절대 이 경로에 섞이지 않는다.
 func (cp *ControlPlane) mcpURLForProfile(profile string) string {
 	if cp.mcpGateway == nil || cp.mcpRegistry == nil || cp.mcpPolicy == nil || cp.mcpEndpoint == "" {
 		return ""
@@ -200,6 +223,8 @@ func (cp *ControlPlane) mcpURLForProfile(profile string) string {
 
 // lookupVMByIP resolves a VM guest IP to its id and profile, for the gateway's
 // source-IP caller identity. Read-locks cp.mu for a consistent snapshot.
+// 학습 주석: internal/mcpgateway.VMLookup 의 실제 구현 — 이 함수가 "세션이 아닌
+// source IP 로 신원을 판정한다"는 anvil 경계를 daemon 쪽에서 완성한다.
 func (cp *ControlPlane) lookupVMByIP(ip string) (string, string, bool) {
 	cp.mu.RLock()
 	defer cp.mu.RUnlock()
@@ -214,6 +239,8 @@ func (cp *ControlPlane) lookupVMByIP(ip string) (string, string, bool) {
 // observeMCPCall records one gateway tool call: a metric, an append to
 // {workDir}/audit/mcp.jsonl, and a structured slog line. Arguments and results
 // are never recorded (metadata only), matching the access-log privacy invariant.
+// 학습 주석: gateway.Options.Observe 로 주입되는 hook — mcpgateway 패키지가
+// audit 저장 형식(JSONL, 파일 경로)을 몰라도 되게 host(daemon) 쪽에 위임한다.
 func (cp *ControlPlane) observeMCPCall(rec mcpgateway.AuditRecord) {
 	outcome := "ok"
 	if !rec.OK {
@@ -236,6 +263,10 @@ func (cp *ControlPlane) observeMCPCall(rec mcpgateway.AuditRecord) {
 // appendMCPAudit appends one tool-call record to {workDir}/audit/mcp.jsonl.
 // Best-effort (a failed open is silently skipped); O_APPEND keeps line-sized
 // writes from concurrent calls from interleaving.
+// 학습 주석: 여기 기록되는 key 는 ts/vm/profile/server/kind/tool/outcome/ms
+// 뿐이다 — rec.Err 원문이나 tool argument/result 는 이 함수에도, AuditRecord
+// 자체에도 담기지 않는다(gateway.go 의 AuditRecord 정의 참고, sentinel 가드는
+// mcp_audit_privacy_test.go).
 func (cp *ControlPlane) appendMCPAudit(rec mcpgateway.AuditRecord, outcome string) {
 	dir := filepath.Join(cp.workDir, "audit")
 	if err := os.MkdirAll(dir, 0o755); err != nil {

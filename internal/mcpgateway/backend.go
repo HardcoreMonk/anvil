@@ -1,5 +1,14 @@
 package mcpgateway
 
+// 학습 주석 개요: 이 파일은 v0.6.0 core 의 유일한 backend 구현인 HTTPBackend
+// (Streamable HTTP transport)를 담는다. v0.6.4 에서 추가된 StdioBackend 는
+// backend_stdio.go 에 별도로 있다 — 둘 다 Backend interface 를 구현해
+// gateway.go 는 transport 종류를 몰라도 된다(registry.go 가 transport 필드로
+// 둘 중 하나를 골라 만든다). HTTPBackend 는 initialize 핸드셰이크를 lazy 하게
+// 한 번만 하고 Mcp-Session-Id 를 재사용하며, credential 은 CredentialProvider
+// (secrets.go)가 매 요청 직전에 헤더로 주입한다 — HTTPBackend 자신은 credential
+// 문자열을 필드로 들고 있지 않는다.
+
 import (
 	"bufio"
 	"bytes"
@@ -17,6 +26,9 @@ import (
 // Backend is one upstream MCP server the gateway aggregates. The single-host
 // build ships HTTPBackend (Streamable HTTP / SSE); a multi-host fork can add a
 // RemoteNodeBackend (a server living on another node) behind the same interface.
+// 학습 주석: HTTPBackend(이 파일)와 StdioBackend(backend_stdio.go)가 이 하나의
+// interface 를 구현한다 — gateway.go 의 handleToolsCall 등은 이 interface 로만
+// backend 를 다루므로 transport 종류에 무관하게 동일한 요청 흐름을 유지한다.
 type Backend interface {
 	ID() string
 	Namespace() string
@@ -33,6 +45,8 @@ type Backend interface {
 // the initialize handshake lazily on first use and reuses the negotiated session
 // (Mcp-Session-Id) for subsequent tools/list and tools/call requests. Credentials
 // are injected per request by the gateway's CredentialProvider just before send.
+// 학습 주석: sessionID/protocol 은 backend 와 협상된 MCP 세션 상태다 — gateway 가
+// goose 에게 발급하는 Mcp-Session-Id(session.go)와는 별개의, backend 쪽 세션이다.
 type HTTPBackend struct {
 	id        string
 	namespace string
@@ -69,6 +83,9 @@ func (b *HTTPBackend) nextID() json.RawMessage {
 
 // ensureInit performs the MCP initialize handshake once. Safe for concurrent
 // callers; only the first does the work.
+// 학습 주석: 모든 ListTools/CallTool/... 메서드가 자기 앞단에서 이 함수를 부른다 —
+// backend 쪽 initialize 는 gateway 자신의 handleInitialize(gateway.go)와 완전히
+// 독립적인, backend 별로 한 번씩 필요한 핸드셰이크다.
 func (b *HTTPBackend) ensureInit(ctx context.Context) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -128,6 +145,8 @@ func (b *HTTPBackend) ListTools(ctx context.Context) ([]Tool, error) {
 
 // CallTool invokes one tool by its un-namespaced name and returns the raw MCP
 // result object (content/isError) for the gateway to relay verbatim.
+// 학습 주석: tool 은 여기서 이미 un-namespaced 다 — namespace 분리/복원은
+// gateway.go 의 splitNamespaced/namespacedName 이 이 함수 호출 전후로 처리한다.
 func (b *HTTPBackend) CallTool(ctx context.Context, tool string, args json.RawMessage) (json.RawMessage, error) {
 	if err := b.ensureInit(ctx); err != nil {
 		return nil, err
@@ -227,6 +246,9 @@ func (b *HTTPBackend) Health(ctx context.Context) error {
 // roundTrip sends one JSON-RPC request and returns the response plus any
 // Mcp-Session-Id the server issued. sessionID, when non-empty, is sent back as
 // the Mcp-Session-Id header.
+// 학습 주석: b.creds.Inject(b.id, httpReq.Header) 호출이 credential 이 실제로
+// 네트워크에 나가는 유일한 지점이다 — 이 함수 밖 어디에도 token 문자열이
+// 노출되지 않는다.
 func (b *HTTPBackend) roundTrip(ctx context.Context, method string, params json.RawMessage, sessionID string) (rpcResponse, string, error) {
 	reqMsg := rpcRequest{JSONRPC: jsonRPCVersion, ID: b.nextID(), Method: method, Params: params}
 	body, _ := json.Marshal(reqMsg)
@@ -287,6 +309,8 @@ func (b *HTTPBackend) notify(ctx context.Context, method string, params json.Raw
 // parseRPCResponse decodes a JSON-RPC response from either an application/json
 // body or a text/event-stream (SSE) body. For SSE it returns the first event
 // whose data is a JSON-RPC response (carries "result" or "error").
+// 학습 주석: MCP Streamable HTTP 는 응답이 application/json 또는 text/event-stream
+// 둘 다일 수 있다 — 이 함수가 그 두 표현을 하나의 rpcResponse 로 통일한다.
 func parseRPCResponse(contentType string, body io.Reader) (rpcResponse, error) {
 	if strings.Contains(contentType, "text/event-stream") {
 		return parseSSEResponse(body)
@@ -301,6 +325,9 @@ func parseRPCResponse(contentType string, body io.Reader) (rpcResponse, error) {
 // parseSSEResponse scans an SSE stream and returns the first `data:` payload that
 // decodes to a JSON-RPC response. SSE data may span multiple `data:` lines per
 // event (joined by newlines), separated by a blank line.
+// 학습 주석: backend 가 SSE 로 응답하는 경우를 위한 최소 파서 — gateway 자신은
+// 항상 application/json 단일 응답만 쓰고(writeRPC, gateway.go) SSE 를 goose 쪽
+// 으로 열지 않는다. SSE 는 backend 와의 통신에서만 등장한다.
 func parseSSEResponse(body io.Reader) (rpcResponse, error) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)

@@ -218,6 +218,9 @@ type VMPrepareOptions struct {
 	// agent reads it and adds the host MCP gateway as a goose streamable-HTTP
 	// extension, so the agent's tools include the gateway's aggregated catalog.
 	// Empty (gateway off or profile has no allowed servers) injects nothing.
+	// 학습 주석: VM 이 받는 것은 이 URL 문자열 하나뿐이다 — backend credential 은
+	// 이 struct 어디에도 필드가 없다(cmd/goose-daemon/mcp_gateway.go 의
+	// mcpURLForProfile 이 이 값을 채운다). anvil 경계: "VM 엔 gateway URL만".
 	MCPGatewayURL string
 
 	// MCPGatewayHostsEntry, when non-empty, is appended to the guest's /etc/hosts
@@ -225,6 +228,10 @@ type VMPrepareOptions struct {
 	// MCPGatewayURL resolve to the bridge gateway IP, so goose derives a
 	// provider-valid extension/tool-name prefix from the URL. Paired with
 	// MCPGatewayURL.
+	// 학습 주석: 값은 cmd/goose-daemon/mcp_gateway.go 의 mcpHostsEntry()
+	// ("10.0.1.1 ephemera-gw")로 만들어진다 — 숫자로 시작하는 IP 호스트명을 쓰면
+	// Gemini 같은 provider 가 tool 이름 규칙 위반으로 거부하기 때문에 문자로
+	// 시작하는 alias 가 필요하다(mcp_gateway.go 의 mcpVMHostName 주석 참고).
 	MCPGatewayHostsEntry string
 }
 
@@ -316,6 +323,9 @@ func injectVMFiles(mntDir string, opts VMPrepareOptions) error {
 	// MCP gateway URL: read by the in-VM agent to add the host gateway as a goose
 	// streamable-HTTP extension. Not a secret (caller identity is by source IP), so
 	// mode 0644 like the system prompt.
+	// 학습 주석: 이 블록이 anvil 경계의 물리적 증거다 — opts 구조체에 backend
+	// credential 필드가 아예 없으므로, 이 코드가 아무리 바뀌어도 VM 에 credential
+	// 을 쓸 방법이 없다.
 	if opts.MCPGatewayURL != "" {
 		mcpPath := filepath.Join(mntDir, "root", ".ephemera-mcp")
 		if err := os.WriteFile(mcpPath, []byte(opts.MCPGatewayURL), 0644); err != nil {
@@ -326,6 +336,8 @@ func injectVMFiles(mntDir string, opts VMPrepareOptions) error {
 	// MCP gateway /etc/hosts entry: maps the letter-starting gateway hostname to the
 	// bridge IP so the URL above resolves (guest nsswitch is files→dns). Appended so
 	// the image's existing localhost line is preserved.
+	// 학습 주석: MCPGatewayURL 과 항상 짝으로 오는 보조 주입 — URL 만 주고 hosts
+	// entry 를 빼먹으면 guest 에서 이름 해석이 안 돼 gateway 연결이 실패한다.
 	if opts.MCPGatewayHostsEntry != "" {
 		hostsPath := filepath.Join(mntDir, "etc", "hosts")
 		f, err := os.OpenFile(hostsPath, os.O_APPEND|os.O_WRONLY, 0644)
