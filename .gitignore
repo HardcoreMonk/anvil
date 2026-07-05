@@ -47,6 +47,9 @@ configs/goose-secrets.yaml
 # Runtime profiles (created via Settings UI or installed by webdev_demo.sh).
 # Demo profile assets live under configs/webdev-demo/profiles/ and ARE tracked.
 configs/profiles/
+# MCP gateway backend config + credentials (.example templates ARE tracked).
+configs/mcp/servers.yaml
+configs/mcp/secrets.yaml
 
 # 6. Claude Code context file
 CLAUDE.md

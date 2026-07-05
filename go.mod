@@ -7,6 +7,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.6.0
 	github.com/sirupsen/logrus v1.9.4
 	golang.org/x/sys v0.41.0
+	gopkg.in/yaml.v2 v2.4.0
 )
 
 require (
@@ -47,5 +48,4 @@ require (
 	golang.org/x/net v0.0.0-20220127200216-cd36cc0744dd // indirect
 	golang.org/x/oauth2 v0.35.0 // indirect
 	golang.org/x/text v0.3.7 // indirect
-	gopkg.in/yaml.v2 v2.4.0 // indirect
 )

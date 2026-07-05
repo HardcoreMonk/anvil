@@ -5,11 +5,14 @@
   import { apiJSON } from '../lib/api.js'
   import { toast } from '../lib/store.js'
   import ModelPicker from './ModelPicker.svelte'
+  import BuiltinPicker from './BuiltinPicker.svelte'
 
   // Available providers only: [{ id, label, default_model, suggested_models }].
   export let providers = []
   // VM sizing presets from GET /config/presets: [{ id, label, vcpu_count, mem_size_mib }].
   export let presets = []
+  // Builtin extension registry from GET /config/builtins: [{ id, label, description, default }].
+  export let builtins = []
 
   const dispatch = createEventDispatcher()
 
@@ -18,6 +21,8 @@
   let model = providers.length ? providers[0].default_model : ''
   let vcpu = 1
   let mem = 1024
+  // Pre-select the registry defaults (currently "developer"), all removable.
+  let selectedBuiltins = builtins.filter((b) => b.default).map((b) => b.id)
   let busy = false
 
   // Suggested models track the selected provider.
@@ -41,7 +46,7 @@
   async function create() {
     busy = true
     try {
-      const body = JSON.stringify({ name: name.trim(), provider, model: model.trim(), vcpu_count: vcpu, mem_size_mib: mem })
+      const body = JSON.stringify({ name: name.trim(), provider, model: model.trim(), vcpu_count: vcpu, mem_size_mib: mem, builtins: selectedBuiltins })
       await apiJSON('/config/profiles', { method: 'POST', body })
       toast(get(_)('profileModal.createdToast', { values: { name: name.trim() } }), 'ok')
       dispatch('created')
@@ -111,6 +116,13 @@
         </div>
       </div>
       <div class="muted" style="margin-top:-6px; margin-bottom:6px; font-size:12px;">{$_('profileModal.sizingHint')}</div>
+      {#if builtins.length}
+        <div class="field">
+          <span class="preset-label">{$_('builtins.label')}</span>
+          <BuiltinPicker options={builtins} bind:selected={selectedBuiltins} disabled={busy} />
+          <div class="muted" style="margin-top:6px; font-size:12px;">{$_('builtins.tokenHint')}</div>
+        </div>
+      {/if}
       <div class="row between" style="margin-top:18px;">
         <button class="ghost" on:click={close} disabled={busy}>{$_('common.cancel')}</button>
         <button on:click={create} disabled={busy || !name.trim() || !model.trim()}>

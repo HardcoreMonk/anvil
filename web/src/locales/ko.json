@@ -111,6 +111,7 @@
     "saving": "저장 중…",
     "saved": "프로파일 {name} 저장됨 — 새 VM부터 적용됩니다.",
     "editSystem": "시스템 프롬프트",
+    "editBuiltins": "확장",
     "empty": "프로파일이 없습니다.",
     "createProfile": "프로파일 생성",
     "delete": "삭제",
@@ -150,6 +151,40 @@
     "clear": "비우기",
     "clearConfirm": "비우기 확인",
     "clearedToast": "{name} 시스템 프롬프트 비움."
+  },
+  "builtins": {
+    "label": "기본 제공 확장",
+    "tokenHint": "이 프로파일의 에이전트가 사용할 도구입니다. 확장을 켤수록 요청당 토큰이 늘어 일부 프로바이더의 한도를 초과할 수 있습니다.",
+    "none": "사용 가능한 기본 제공 확장이 없습니다.",
+    "items": {
+      "developer": { "desc": "셸 명령 실행과 파일/텍스트 편집." },
+      "memory": { "desc": "턴 사이에 유지되는 영속 메모리를 읽고 씁니다." },
+      "tutorial": { "desc": "goose 대화형 튜토리얼." }
+    }
+  },
+  "builtinsModal": {
+    "title": "기본 제공 확장 — {name}",
+    "intro": "이 프로파일로 만든 에이전트가 사용할 goose 기본 제공 도구를 선택하세요. 변경 사항은 실행 중인 VM이 아니라 다음 VM 생성부터 적용됩니다.",
+    "save": "저장",
+    "saving": "저장 중…",
+    "savedToast": "{name} 기본 제공 확장 저장됨 — 새 VM부터 적용됩니다."
+  },
+  "mcp": {
+    "disabled": "MCP 게이트웨이가 꺼져 있습니다. EPHEMERA_MCP_ENABLED=1로 데몬을 실행하고 configs/mcp/servers.yaml을 설정하면 켜집니다.",
+    "endpoint": "게이트웨이 엔드포인트",
+    "serverCount": "백엔드 수",
+    "empty": "구성된 백엔드 MCP 서버가 없습니다. configs/mcp/servers.yaml에 추가하세요.",
+    "colId": "ID",
+    "colNamespace": "네임스페이스",
+    "colUrl": "URL",
+    "colProfiles": "프로파일",
+    "colCredential": "자격증명",
+    "colHealth": "상태",
+    "allProfiles": "전체",
+    "credYes": "있음",
+    "credNo": "—",
+    "up": "정상",
+    "down": "불가"
   },
   "snapshots": {
     "title": "스냅샷",
@@ -346,6 +381,7 @@
     "tabAudit": "감사 로그",
     "tabWatchdog": "워치독",
     "tabClients": "클라이언트",
+    "tabMCP": "MCP 게이트웨이",
     "tabMonitoring": "모니터링",
     "monitoringDisabled": "Grafana가 설정되지 않았습니다. observability_demo.sh로 daemon·Prometheus·Grafana를 함께 기동하거나 EPHEMERA_GRAFANA_URL을 설정하세요.",
     "methodAny": "전체 메서드",

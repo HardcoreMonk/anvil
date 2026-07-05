@@ -28,6 +28,7 @@ import (
 	ops "github.com/firecracker-microvm/firecracker-go-sdk/client/operations"
 
 	"ephemera/internal/anvilmcp"
+	"ephemera/internal/mcpgateway"
 	"ephemera/internal/metrics"
 	"ephemera/internal/network"
 	"ephemera/internal/orchestrator"
@@ -358,6 +359,15 @@ type ControlPlane struct {
 
 	stopCh chan struct{}
 	srv    *http.Server
+
+	// MCP gateway (v0.6.0): a host-resident MCP server bound to the bridge IP that
+	// aggregates backend MCP servers behind one policy-filtered, namespaced catalog
+	// for the in-VM goose clients. All nil/empty when EPHEMERA_MCP_ENABLED is unset,
+	// in which case VMs get no MCP extension and behavior is unchanged.
+	mcpGateway  *mcpgateway.Gateway
+	mcpRegistry *mcpgateway.Registry
+	mcpSrv      *http.Server
+	mcpEndpoint string // gateway URL injected into VMs, e.g. http://10.0.1.1:3001/mcp
 }
 
 // newAgentHTTPClient builds the HTTP client used to proxy control-plane requests
@@ -500,6 +510,9 @@ func NewControlPlane(
 	internalMux.HandleFunc("/watchdog/status", cp.handleWatchdogStatus)
 	internalMux.HandleFunc("/config/providers", cp.handleConfigProviders)
 	internalMux.HandleFunc("/config/presets", cp.handleConfigPresets)
+	internalMux.HandleFunc("/config/builtins", cp.handleConfigBuiltins)
+	internalMux.HandleFunc("/config/mcp", cp.handleConfigMCP)
+	internalMux.HandleFunc("/config/mcp/servers", cp.handleConfigMCPServers)
 	internalMux.HandleFunc("/config/clients", cp.handleConfigClients)
 	internalMux.HandleFunc("/config/monitoring", cp.handleConfigMonitoring)
 	internalMux.HandleFunc("/config/profiles", cp.handleConfigProfiles)
@@ -688,6 +701,10 @@ func (cp *ControlPlane) Start() error {
 		"timeout_sec", watchdogTimeoutSec,
 		"threshold", watchdogThreshold,
 		"auto_heal", watchdogAutoHeal)
+	// MCP gateway (v0.6.0): build and start its bridge-bound listener (no-op when
+	// EPHEMERA_MCP_ENABLED is unset). Independent of the control-plane API server.
+	cp.initMCPGateway()
+	cp.startMCPGateway()
 	return cp.srv.ListenAndServe()
 }
 
@@ -696,6 +713,7 @@ func (cp *ControlPlane) Shutdown() {
 	// (via listVMRefs) on every tick; tearing down the server first leaves
 	// in-flight ticks racing against any cp.vms cleanup that follows.
 	cp.watchdog.Stop()
+	cp.stopMCPGateway()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cp.srv.Shutdown(ctx)
@@ -1157,6 +1175,13 @@ func (cp *ControlPlane) spawnVMInternal(opts spawnVMOptions) (*VMInfo, string, e
 		rollback = append(rollback, func() { cp.provisioner.CleanupDisk(vmID) })
 	}
 
+	// Resolve the MCP gateway URL for this profile; pair it with the /etc/hosts
+	// entry only when the URL is set (gateway on and profile permitted a backend).
+	mcpURL := cp.mcpURLForProfile(opts.Profile)
+	mcpHostsLine := ""
+	if mcpURL != "" {
+		mcpHostsLine = mcpHostsEntry()
+	}
 	if err := cp.prepareVMFiles(vmID, storage.VMPrepareOptions{
 		HostConfigPath:    opts.ConfigPath,
 		HostSecretsPath:   opts.SecretsPath,
@@ -1165,6 +1190,12 @@ func (cp *ControlPlane) spawnVMInternal(opts spawnVMOptions) (*VMInfo, string, e
 		AgentID:           opts.AgentID,
 		SystemPrompt:      opts.SystemPrompt,
 		ControlPlaneToken: opts.ControlPlaneToken,
+		// MCP gateway (v0.6.0): inject the gateway URL only when it is enabled AND
+		// this VM's profile is permitted at least one backend; otherwise the agent
+		// runs without the extension. The /etc/hosts entry (paired with the URL) maps
+		// the letter-starting gateway hostname to the bridge IP. Empty injects nothing.
+		MCPGatewayURL:        mcpURL,
+		MCPGatewayHostsEntry: mcpHostsLine,
 	}); err != nil {
 		return nil, "", fmt.Errorf("VM preparation: %w", err)
 	}
