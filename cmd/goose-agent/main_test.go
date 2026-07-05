@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -915,6 +916,132 @@ func TestCleanUserPrompt(t *testing.T) {
 	for in, want := range cases {
 		if got := cleanUserPrompt(in); got != want {
 			t.Errorf("cleanUserPrompt(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// --- anvil transcript-safety guards (v0.7 parity) ---
+//
+// These lock the three transcript-restore invariants the merge introduced:
+//   1. the cache-hit hot path never shells out to goose (no model call);
+//   2. the cache-miss fallback is a read-only `goose session export` — never `run`;
+//   3. the transcript payload cannot echo the agent's bearer token.
+
+// writeGooseStub writes an executable shell stub at a temp path and returns it.
+func writeGooseStub(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "goose-stub.sh")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+		t.Fatalf("write goose stub: %v", err)
+	}
+	return path
+}
+
+// seedSession installs a session with a cached transcript and returns a cleanup.
+func seedSession(t *testing.T, name string, turns []TranscriptTurn) {
+	t.Helper()
+	sessionMu.Lock()
+	sessions[name] = &sessionInfo{Name: name, transcript: turns}
+	sessionMu.Unlock()
+	t.Cleanup(func() {
+		sessionMu.Lock()
+		delete(sessions, name)
+		sessionMu.Unlock()
+	})
+}
+
+// Guard 1: a cache hit serves the cached transcript WITHOUT invoking goose at all
+// (proves the hot path makes no model call and spawns no process).
+func TestHandleSessionItem_CacheHitSkipsGooseExport(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "goose-was-called")
+	stub := writeGooseStub(t, "touch '"+marker+"'\nexit 1\n")
+	orig := gooseExportBinary
+	gooseExportBinary = stub
+	t.Cleanup(func() { gooseExportBinary = orig })
+
+	want := []TranscriptTurn{{Role: "user", Text: "q1"}, {Role: "assistant", Text: "a1"}}
+	seedSession(t, "sess1", want)
+
+	req := httptest.NewRequest(http.MethodGet, "/sessions/sess1/transcript", nil)
+	rr := httptest.NewRecorder()
+	handleSessionItem(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("goose was invoked on a cache hit — the transcript hot path must not call the agent")
+	}
+	var got struct {
+		Turns []TranscriptTurn `json:"turns"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Turns) != 2 || got.Turns[0] != want[0] || got.Turns[1] != want[1] {
+		t.Fatalf("turns = %+v, want %+v", got.Turns, want)
+	}
+}
+
+// Guard 2: the cache-miss fallback runs `goose session export` (read-only) and
+// never the model-invoking `run` subcommand.
+func TestExportSessionTranscript_ReadOnlyNoModelCall(t *testing.T) {
+	argvFile := filepath.Join(t.TempDir(), "argv")
+	stub := writeGooseStub(t, "printf '%s\\n' \"$*\" > '"+argvFile+"'\n"+
+		`printf '%s' '{"messages":[{"role":"user","content":[{"type":"text","text":"q1"}]},{"role":"assistant","content":[{"type":"text","text":"a1"}]}]}'`+"\n")
+	orig := gooseExportBinary
+	gooseExportBinary = stub
+	t.Cleanup(func() { gooseExportBinary = orig })
+
+	turns, err := exportSessionTranscript(context.Background(), "sess1")
+	if err != nil {
+		t.Fatalf("exportSessionTranscript: %v", err)
+	}
+	if len(turns) != 2 || turns[0].Text != "q1" || turns[1].Text != "a1" {
+		t.Fatalf("turns = %+v, want q1/a1", turns)
+	}
+	argv, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatalf("read argv: %v", err)
+	}
+	got := strings.TrimSpace(string(argv))
+	if got != "session export -n sess1 --format json" {
+		t.Fatalf("export argv = %q, want a read-only session export", got)
+	}
+	for _, f := range strings.Fields(got) {
+		if f == "run" {
+			t.Fatalf("transcript export invoked the model-running subcommand: %q", got)
+		}
+	}
+}
+
+// Guard 3: the transcript payload never carries the agent's bearer token even when
+// one is configured — the response schema is role/text only, no auth material.
+func TestHandleSessionItem_PayloadOmitsAgentAuth(t *testing.T) {
+	const sentinel = "SENTINEL-AGENT-BEARER-do-not-leak"
+	orig := agentToken
+	setCurrentAgentToken(sentinel)
+	t.Cleanup(func() { setCurrentAgentToken(orig) })
+
+	seedSession(t, "sess2", []TranscriptTurn{
+		{Role: "user", Text: "what time is it"},
+		{Role: "assistant", Text: "it is noon"},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/sessions/sess2/transcript", nil)
+	rr := httptest.NewRecorder()
+	handleSessionItem(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if strings.Contains(body, sentinel) {
+		t.Fatalf("transcript payload leaked the agent bearer token: %s", body)
+	}
+	for _, k := range []string{"agent_token", "authorization", "Authorization", "Bearer"} {
+		if strings.Contains(body, k) {
+			t.Fatalf("transcript payload exposed auth field %q: %s", k, body)
 		}
 	}
 }

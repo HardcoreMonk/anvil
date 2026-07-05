@@ -1402,13 +1402,18 @@ func cleanUserPrompt(text string) string {
 	return strings.TrimPrefix(text, "/nothink\n")
 }
 
+// gooseExportBinary is the goose binary invoked by the transcript export fallback.
+// It is a package var (not a literal) purely so a test can point it at a stub and
+// prove the export path is read-only — the production value is the fixed in-VM path.
+var gooseExportBinary = "/usr/local/bin/goose"
+
 // exportSessionTranscript is the cache-miss fallback for GET /sessions/{name}/transcript
 // (e.g. after a cold restart cleared the in-memory session map). `goose session export`
 // is a read-only dump of the on-disk session that does NOT invoke the model. The JSON
 // format is parsed with the same envelope reader; if goose wraps it differently the
 // reader returns nil and the caller degrades to an empty transcript.
 func exportSessionTranscript(ctx context.Context, name string) ([]TranscriptTurn, error) {
-	cmd := exec.CommandContext(ctx, "/usr/local/bin/goose", "session", "export", "-n", name, "--format", "json")
+	cmd := exec.CommandContext(ctx, gooseExportBinary, "session", "export", "-n", name, "--format", "json")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("goose session export %q: %w", name, err)

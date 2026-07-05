@@ -2709,3 +2709,51 @@ func TestHandleVMWorkloadRunRequiresPost(t *testing.T) {
 		t.Fatalf("status = %d, want 405", rr.Code)
 	}
 }
+
+// TestTranscriptEndpointRequiresBearer is an anvil transcript-safety guard (v0.7
+// parity): GET /vms/{id}/sessions/{name}/transcript is served inside handleVM,
+// which production wraps in authMiddleware. A request with no bearer must be
+// rejected before the handler (and thus before any agent proxy) runs; a valid
+// bearer must pass auth and reach the transcript routing (404 vm-not-found here,
+// never 401), proving it is the auth boundary — not a coincidence — that gates it.
+func TestTranscriptEndpointRequiresBearer(t *testing.T) {
+	cp := newTestCP(t)
+	handler := authMiddleware(
+		func() []APIClient { return []APIClient{{Name: "operator", Token: "secret-token"}} },
+		cp.metrics.authTotal,
+		http.HandlerFunc(cp.handleVM),
+	)
+	const path = "/vms/vm-404/sessions/sess1/transcript"
+
+	// No Authorization header → 401, and no token echoed back.
+	noAuth := httptest.NewRecorder()
+	handler.ServeHTTP(noAuth, httptest.NewRequest(http.MethodGet, path, nil))
+	if noAuth.Code != http.StatusUnauthorized {
+		t.Fatalf("no-bearer status = %d, want 401; body = %s", noAuth.Code, noAuth.Body.String())
+	}
+	if strings.Contains(noAuth.Body.String(), "secret-token") {
+		t.Fatalf("401 response leaked token: %s", noAuth.Body.String())
+	}
+
+	// Wrong bearer → still 401.
+	badAuth := httptest.NewRecorder()
+	badReq := httptest.NewRequest(http.MethodGet, path, nil)
+	badReq.Header.Set("Authorization", "Bearer not-the-token")
+	handler.ServeHTTP(badAuth, badReq)
+	if badAuth.Code != http.StatusUnauthorized {
+		t.Fatalf("bad-bearer status = %d, want 401", badAuth.Code)
+	}
+
+	// Correct bearer → auth passes; the transcript route runs and 404s on the
+	// missing VM. The point is only that it is NOT 401 (auth did not block it).
+	okAuth := httptest.NewRecorder()
+	okReq := httptest.NewRequest(http.MethodGet, path, nil)
+	okReq.Header.Set("Authorization", "Bearer secret-token")
+	handler.ServeHTTP(okAuth, okReq)
+	if okAuth.Code == http.StatusUnauthorized {
+		t.Fatalf("valid bearer was rejected: %d %s", okAuth.Code, okAuth.Body.String())
+	}
+	if okAuth.Code != http.StatusNotFound {
+		t.Fatalf("valid-bearer status = %d, want 404 (vm not found); body = %s", okAuth.Code, okAuth.Body.String())
+	}
+}
