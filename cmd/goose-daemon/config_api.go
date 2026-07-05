@@ -28,6 +28,11 @@ type ProfileConfig struct {
 // (configs/goose.yaml). It maps to an empty profile at spawn time.
 const defaultProfileName = "default"
 
+// maxSystemPromptBytes caps a profile's system.md. Shipped reference prompts are
+// ~1-2.5 KB; 64 KiB is generous headroom while bounding what gets baked into a
+// guest rootfs at spawn.
+const maxSystemPromptBytes = 64 * 1024
+
 // gooseConfigPathForProfile resolves a profile name to its goose.yaml path for
 // config read/write. "default"/"" → the daemon's default config; otherwise a
 // validated configs/profiles/{name}/goose.yaml. It never touches secrets.
@@ -94,6 +99,14 @@ func (cp *ControlPlane) listProfiles(w http.ResponseWriter, r *http.Request) {
 // spawns (config is injected into each VM's rootfs at spawn time).
 func (cp *ControlPlane) handleConfigProfile(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/config/profiles/")
+	// Sub-route /config/profiles/{name}/system manages the profile's system.md.
+	// The prefix mux can't express path variables, so peel the suffix here (the
+	// handleVM dispatch does the same for /stats, /snapshot, /tasks). Name
+	// validation lives inside the sub-handler, mirroring the guard below.
+	if strings.HasSuffix(name, "/system") {
+		cp.handleConfigProfileSystem(w, r, strings.TrimSuffix(name, "/system"))
+		return
+	}
 	// Reject empty and any path-traversal form before touching the filesystem.
 	if name == "" || name == ".." || strings.ContainsAny(name, "/\\") {
 		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("profile name required"))
@@ -170,6 +183,82 @@ func (cp *ControlPlane) handleConfigProfile(w http.ResponseWriter, r *http.Reque
 		}
 		slog.Info("profile deleted", "profile", name)
 		writeJSON(w, http.StatusOK, map[string]string{"deleted": name})
+	default:
+		writeJSONError(w, http.StatusMethodNotAllowed, fmt.Errorf("method not allowed"))
+	}
+}
+
+// handleConfigProfileSystem serves GET/PUT/DELETE /config/profiles/{name}/system —
+// the profile's system.md, injected into every VM spawned from the profile as
+// /root/.goose-system-prompt (loadProfileSystemPrompt). Editing it affects only
+// FUTURE spawns: a running VM already has the prompt baked into its rootfs, so
+// unlike a whole-profile delete this needs no in-use (409) guard.
+func (cp *ControlPlane) handleConfigProfileSystem(w http.ResponseWriter, r *http.Request, name string) {
+	// Reject empty and any path-traversal form before touching the filesystem
+	// (same guard as handleConfigProfile). The default profile has no directory.
+	if name == "" || name == ".." || strings.ContainsAny(name, "/\\") {
+		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("profile name required"))
+		return
+	}
+	if name == defaultProfileName {
+		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("the default profile has no system prompt"))
+		return
+	}
+	// A profile exists iff its goose.yaml does; reuse the resolver for the
+	// existence check (and its path-traversal guard) before touching system.md.
+	if _, err := cp.gooseConfigPathForProfile(name); err != nil {
+		writeJSONError(w, http.StatusNotFound, err)
+		return
+	}
+	path := filepath.Join(cp.workDir, "configs", "profiles", name, "system.md")
+
+	switch r.Method {
+	case http.MethodGet:
+		b, err := os.ReadFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				// No system.md yet — empty, matching loadProfileSystemPrompt.
+				writeJSON(w, http.StatusOK, map[string]string{"system_md": ""})
+				return
+			}
+			writeJSONError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"system_md": string(b)})
+	case http.MethodPut:
+		var body struct {
+			SystemMd string `json:"system_md"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSONError(w, http.StatusBadRequest, fmt.Errorf("invalid JSON body"))
+			return
+		}
+		if len(body.SystemMd) > maxSystemPromptBytes {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, fmt.Errorf("system prompt too large (max %d bytes)", maxSystemPromptBytes))
+			return
+		}
+		// Atomic write (temp+rename) so a concurrent spawn never reads a torn file.
+		// No newline/YAML-escape check: system.md is a free-form markdown file body,
+		// not a value interpolated into a YAML scalar (unlike provider/model).
+		tmp := path + ".tmp"
+		if err := os.WriteFile(tmp, []byte(body.SystemMd), 0o644); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err)
+			return
+		}
+		if err := os.Rename(tmp, path); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err)
+			return
+		}
+		slog.Info("profile system prompt updated", "profile", name, "bytes", len(body.SystemMd))
+		writeJSON(w, http.StatusOK, map[string]string{"system_md": body.SystemMd})
+	case http.MethodDelete:
+		// Idempotent clear: an already-absent system.md is the desired end state.
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			writeJSONError(w, http.StatusInternalServerError, err)
+			return
+		}
+		slog.Info("profile system prompt cleared", "profile", name)
+		writeJSON(w, http.StatusOK, map[string]string{"deleted": "system.md"})
 	default:
 		writeJSONError(w, http.StatusMethodNotAllowed, fmt.Errorf("method not allowed"))
 	}

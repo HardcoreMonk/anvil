@@ -109,6 +109,7 @@
     "save": "Save",
     "saving": "Saving…",
     "saved": "Profile {name} saved — new VMs will use it.",
+    "editSystem": "System prompt",
     "empty": "No profiles found.",
     "createProfile": "Create profile",
     "delete": "Delete",
@@ -137,6 +138,17 @@
     "creating": "Creating…",
     "createdToast": "Profile {name} created.",
     "noProviders": "No providers have an API key configured. Add one to configs/goose-secrets.yaml first."
+  },
+  "systemPrompt": {
+    "title": "System prompt — {name}",
+    "intro": "The system prompt for agents created from this profile. Changes apply to the next VM, not running ones.",
+    "placeholder": "e.g. You are an orchestrator…",
+    "save": "Save",
+    "saving": "Saving…",
+    "savedToast": "System prompt for {name} saved — new VMs will use it.",
+    "clear": "Clear",
+    "clearConfirm": "Confirm clear",
+    "clearedToast": "System prompt for {name} cleared."
   },
   "snapshots": {
     "title": "Snapshots",
@@ -243,6 +255,7 @@
     "colStatus": "Status",
     "colVm": "VM ID",
     "colActions": "Actions",
+    "sendTask": "Send task",
     "changeRole": "Change role",
     "restart": "Restart",
     "remove": "Remove",
@@ -304,6 +317,17 @@
     "colStatus": "Status",
     "colOutput": "Output / error"
   },
+  "sendTask": {
+    "title": "Send task — {id}",
+    "intro": "Send a one-shot prompt to {role}. It runs as a task; the reply is shown here.",
+    "placeholder": "Prompt for this agent…",
+    "send": "Send",
+    "sending": "Running…",
+    "bodyRequired": "A prompt is required",
+    "canceled": "Task canceled",
+    "resultTitle": "Result — {id}",
+    "again": "Send another"
+  },
   "activityFeed": {
     "title": "Activity Feed",
     "connecting": "connecting…",
@@ -312,6 +336,7 @@
     "reconnect": "Reconnect",
     "empty": "No activity yet.",
     "composerBody": "Post a message to the feed…",
+    "postAs": "Posted as operator",
     "post": "Post",
     "posting": "Posting…"
   }

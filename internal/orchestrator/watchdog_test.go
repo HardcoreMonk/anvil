@@ -100,8 +100,8 @@ func TestWatchdog_MarksDeadAfterThreshold(t *testing.T) {
 	if !strings.Contains(last.Body, "unresponsive") {
 		t.Errorf("Town Wall entry missing unresponsive notice: %q", last.Body)
 	}
-	if last.AgentID != "orchestrator" {
-		t.Errorf("dead notice should be posted as orchestrator, got %q", last.AgentID)
+	if last.AgentID != SystemAuthor {
+		t.Errorf("dead notice should be posted as %s, got %q", SystemAuthor, last.AgentID)
 	}
 }
 

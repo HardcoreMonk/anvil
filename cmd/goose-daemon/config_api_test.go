@@ -304,3 +304,158 @@ func mustRead(t *testing.T, path string) string {
 	}
 	return string(data)
 }
+
+// systemMdPath is the on-disk path of a profile's system.md under the test workDir.
+func systemMdPath(cp *ControlPlane, name string) string {
+	return filepath.Join(cp.workDir, "configs", "profiles", name, "system.md")
+}
+
+func TestHandleConfigProfileSystem_GetEmpty(t *testing.T) {
+	cp := newTestCP(t)
+	writeProfileFixture(t, cp, "worker", sampleGooseYAML)
+
+	rr := httptest.NewRecorder()
+	cp.handleConfigProfileSystem(rr, httptest.NewRequest(http.MethodGet, "/config/profiles/worker/system", nil), "worker")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	var got map[string]string
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got["system_md"] != "" {
+		t.Fatalf("system_md = %q, want empty for a profile with no system.md", got["system_md"])
+	}
+}
+
+func TestHandleConfigProfileSystem_PutThenGet(t *testing.T) {
+	cp := newTestCP(t)
+	writeProfileFixture(t, cp, "worker", sampleGooseYAML)
+	const prompt = "You are an orchestrator.\nFinish the whole job in one session."
+
+	reqBody, _ := json.Marshal(map[string]string{"system_md": prompt})
+	rr := httptest.NewRecorder()
+	cp.handleConfigProfileSystem(rr, httptest.NewRequest(http.MethodPut, "/config/profiles/worker/system", strings.NewReader(string(reqBody))), "worker")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	if got := mustRead(t, systemMdPath(cp, "worker")); got != prompt {
+		t.Fatalf("file = %q, want %q", got, prompt)
+	}
+
+	rr = httptest.NewRecorder()
+	cp.handleConfigProfileSystem(rr, httptest.NewRequest(http.MethodGet, "/config/profiles/worker/system", nil), "worker")
+	var resp map[string]string
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp["system_md"] != prompt {
+		t.Fatalf("GET system_md = %q, want %q", resp["system_md"], prompt)
+	}
+}
+
+func TestHandleConfigProfileSystem_Delete(t *testing.T) {
+	cp := newTestCP(t)
+	writeProfileFixture(t, cp, "worker", sampleGooseYAML)
+	if err := os.WriteFile(systemMdPath(cp, "worker"), []byte("a prompt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	cp.handleConfigProfileSystem(rr, httptest.NewRequest(http.MethodDelete, "/config/profiles/worker/system", nil), "worker")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("DELETE status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	if _, err := os.Stat(systemMdPath(cp, "worker")); !os.IsNotExist(err) {
+		t.Fatalf("system.md not removed")
+	}
+	// Idempotent: clearing an already-absent prompt still succeeds.
+	rr = httptest.NewRecorder()
+	cp.handleConfigProfileSystem(rr, httptest.NewRequest(http.MethodDelete, "/config/profiles/worker/system", nil), "worker")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("idempotent DELETE status = %d, want 200", rr.Code)
+	}
+}
+
+func TestHandleConfigProfileSystem_ProfileNotFound(t *testing.T) {
+	cp := newTestCP(t)
+	for _, m := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
+		rr := httptest.NewRecorder()
+		cp.handleConfigProfileSystem(rr, httptest.NewRequest(m, "/config/profiles/nope/system", strings.NewReader(`{"system_md":"x"}`)), "nope")
+		if rr.Code != http.StatusNotFound {
+			t.Errorf("%s: status = %d, want 404", m, rr.Code)
+		}
+	}
+}
+
+func TestHandleConfigProfileSystem_PathTraversal(t *testing.T) {
+	cp := newTestCP(t)
+	// Drive through the router so the /system suffix dispatch + name guard are exercised.
+	for _, p := range []string{"/config/profiles/../evil/system", "/config/profiles/a/b/system"} {
+		rr := httptest.NewRecorder()
+		cp.handleConfigProfile(rr, httptest.NewRequest(http.MethodPut, p, strings.NewReader(`{"system_md":"x"}`)))
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400", p, rr.Code)
+		}
+	}
+}
+
+func TestHandleConfigProfileSystem_RejectsDefault(t *testing.T) {
+	cp := newTestCP(t)
+	for _, m := range []string{http.MethodGet, http.MethodPut} {
+		rr := httptest.NewRecorder()
+		cp.handleConfigProfile(rr, httptest.NewRequest(m, "/config/profiles/default/system", strings.NewReader(`{"system_md":"x"}`)))
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400", m, rr.Code)
+		}
+	}
+}
+
+func TestHandleConfigProfileSystem_Oversize(t *testing.T) {
+	cp := newTestCP(t)
+	writeProfileFixture(t, cp, "worker", sampleGooseYAML)
+	big := strings.Repeat("a", maxSystemPromptBytes+1)
+	reqBody, _ := json.Marshal(map[string]string{"system_md": big})
+
+	rr := httptest.NewRecorder()
+	cp.handleConfigProfileSystem(rr, httptest.NewRequest(http.MethodPut, "/config/profiles/worker/system", strings.NewReader(string(reqBody))), "worker")
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413; body=%s", rr.Code, rr.Body.String())
+	}
+	if _, err := os.Stat(systemMdPath(cp, "worker")); !os.IsNotExist(err) {
+		t.Fatalf("oversize PUT should not write the file")
+	}
+}
+
+func TestHandleConfigProfileSystem_BadJSON(t *testing.T) {
+	cp := newTestCP(t)
+	writeProfileFixture(t, cp, "worker", sampleGooseYAML)
+	rr := httptest.NewRecorder()
+	cp.handleConfigProfileSystem(rr, httptest.NewRequest(http.MethodPut, "/config/profiles/worker/system", strings.NewReader(`{bad json`)), "worker")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rr.Code)
+	}
+}
+
+func TestLoadProfileSystemPrompt_RoundTrip(t *testing.T) {
+	cp := newTestCP(t)
+	writeProfileFixture(t, cp, "worker", sampleGooseYAML)
+	const prompt = "You are a careful reviewer."
+
+	reqBody, _ := json.Marshal(map[string]string{"system_md": prompt})
+	rr := httptest.NewRecorder()
+	cp.handleConfigProfileSystem(rr, httptest.NewRequest(http.MethodPut, "/config/profiles/worker/system", strings.NewReader(string(reqBody))), "worker")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, want 200", rr.Code)
+	}
+	// The spawn-time read path must see exactly what the handler wrote.
+	if got := cp.loadProfileSystemPrompt("worker"); got != prompt {
+		t.Fatalf("loadProfileSystemPrompt = %q, want %q", got, prompt)
+	}
+	// After a clear it reverts to empty.
+	rr = httptest.NewRecorder()
+	cp.handleConfigProfileSystem(rr, httptest.NewRequest(http.MethodDelete, "/config/profiles/worker/system", nil), "worker")
+	if got := cp.loadProfileSystemPrompt("worker"); got != "" {
+		t.Fatalf("after DELETE loadProfileSystemPrompt = %q, want empty", got)
+	}
+}

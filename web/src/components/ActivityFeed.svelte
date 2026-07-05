@@ -6,7 +6,6 @@
   import { toast } from '../lib/store.js'
 
   export let flockId
-  export let agents = [] // populates the post composer's sender dropdown
 
   let messages = []
   let status = 'connecting' // connecting | connected | disconnected
@@ -14,7 +13,7 @@
   let gen = 0 // generation token: ignore frames from a superseded stream
   let logEl
 
-  let postAgent = 'orchestrator'
+  const postAgent = 'operator' // UI posts are always operator-authored (no agent impersonation)
   let postBody = ''
   let posting = false
 
@@ -117,12 +116,7 @@
   {/if}
 
   <div class="composer row" style="gap:8px; margin-top:12px;">
-    <select class="who-select" bind:value={postAgent}>
-      <option value="orchestrator">orchestrator</option>
-      {#each agents as a (a.agent_id)}
-        <option value={a.agent_id}>{a.agent_id}</option>
-      {/each}
-    </select>
+    <span class="who-static mono" title={$_('activityFeed.postAs')}>operator</span>
     <input bind:value={postBody} placeholder={$_('activityFeed.composerBody')} on:keydown={onKey} disabled={posting} />
     <button on:click={post} disabled={posting || !postBody.trim()}>{posting ? $_('activityFeed.posting') : $_('activityFeed.post')}</button>
   </div>
@@ -144,6 +138,6 @@
   .ts { color: var(--muted); font-size: 11px; flex-shrink: 0; }
   .who { color: var(--accent); flex-shrink: 0; }
   .body { white-space: pre-wrap; word-break: break-word; }
-  .who-select { width: auto; max-width: 160px; flex-shrink: 0; }
+  .who-static { color: var(--accent); font-size: 13px; align-self: center; flex-shrink: 0; }
   .composer input { flex: 1; }
 </style>

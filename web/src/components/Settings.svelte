@@ -5,6 +5,7 @@
   import { apiJSON } from '../lib/api.js'
   import { toast } from '../lib/store.js'
   import ProfileModal from './ProfileModal.svelte'
+  import SystemPromptModal from './SystemPromptModal.svelte'
   import ModelPicker from './ModelPicker.svelte'
 
   let profiles = [] // [{ name, provider, model }]
@@ -15,6 +16,7 @@
   let deletingName = null
   let confirmName = null // profile whose Delete is awaiting in-row confirmation
   let showCreate = false
+  let systemPromptName = null // profile whose system.md editor is open
 
   // Only providers whose API key is configured may be selected.
   $: availableProviders = providers.filter((p) => p.available)
@@ -121,6 +123,7 @@
                   {savingName === p.name ? $_('settings.saving') : $_('settings.save')}
                 </button>
                 {#if p.name !== 'default'}
+                  <button class="ghost" on:click={() => (systemPromptName = p.name)}>{$_('settings.editSystem')}</button>
                   {#if confirmName === p.name}
                     <button class="danger" on:click={() => remove(p)} disabled={deletingName === p.name}>
                       {deletingName === p.name ? $_('settings.deleting') : $_('settings.confirmDeleteBtn')}
@@ -145,4 +148,8 @@
   <ProfileModal providers={availableProviders} {presets}
     on:created={() => { showCreate = false; load() }}
     on:close={() => (showCreate = false)} />
+{/if}
+
+{#if systemPromptName}
+  <SystemPromptModal name={systemPromptName} on:close={() => (systemPromptName = null)} />
 {/if}

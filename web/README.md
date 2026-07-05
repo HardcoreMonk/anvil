@@ -92,7 +92,8 @@ VM's rootfs at spawn time. The UI creates, views, and edits these profiles:
 - **Create VM modal** — a dropdown (from `GET /config/profiles`) picks which
   profile a new VM uses (`default` → the daemon's default config).
 - **Settings screen** — lists profiles, **creates** new ones (name + provider/model
-  + optional **per-VM vCPU/memory**, v0.5.1) and edits provider/model.
+  + optional **per-VM vCPU/memory**, v0.5.1), edits provider/model, and edits each
+  profile's **system prompt** (`system.md`) via a modal editor (v0.5.4).
 
 Endpoints (auth-protected, `cmd/goose-daemon/config_api.go`):
 - `GET /config/providers` → known providers + which have a keychain API key (v0.5.1)
@@ -103,6 +104,10 @@ Endpoints (auth-protected, `cmd/goose-daemon/config_api.go`):
   GOOSE_PROVIDER/GOOSE_MODEL (+ optional `EPHEMERA_VCPU_COUNT`/`EPHEMERA_MEM_SIZE_MIB`) in place
   (comments + `extensions:` block preserved; values validated against newline injection).
 - `DELETE /config/profiles/{name}` — remove a user-defined profile (v0.5.1)
+- `GET /config/profiles/{name}/system` → `{system_md}` — the profile's system.md, empty string if unset (v0.5.4)
+- `PUT /config/profiles/{name}/system` body `{system_md}` — write the profile's system.md (atomic, ≤64 KiB);
+  injected into each VM spawned from the profile as `/root/.goose-system-prompt` at spawn time (v0.5.4)
+- `DELETE /config/profiles/{name}/system` — clear the profile's system.md (idempotent) (v0.5.4)
 
 **Constraints:** API keys (`goose-secrets.yaml`) are **never** exposed or edited
 through the UI — they stay server-side. Config is injected at spawn, so edits

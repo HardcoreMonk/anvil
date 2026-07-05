@@ -109,6 +109,7 @@
     "save": "저장",
     "saving": "저장 중…",
     "saved": "프로파일 {name} 저장됨 — 새 VM부터 적용됩니다.",
+    "editSystem": "시스템 프롬프트",
     "empty": "프로파일이 없습니다.",
     "createProfile": "프로파일 생성",
     "delete": "삭제",
@@ -137,6 +138,17 @@
     "creating": "생성 중…",
     "createdToast": "프로파일 {name} 생성됨.",
     "noProviders": "API 키가 설정된 프로바이더가 없습니다. 먼저 configs/goose-secrets.yaml에 키를 추가하세요."
+  },
+  "systemPrompt": {
+    "title": "시스템 프롬프트 — {name}",
+    "intro": "이 프로파일로 만든 에이전트의 시스템 프롬프트입니다. 변경 사항은 실행 중인 VM이 아니라 다음 VM 생성부터 적용됩니다.",
+    "placeholder": "예: 당신은 오케스트레이터입니다…",
+    "save": "저장",
+    "saving": "저장 중…",
+    "savedToast": "{name} 시스템 프롬프트 저장됨 — 새 VM부터 적용됩니다.",
+    "clear": "비우기",
+    "clearConfirm": "비우기 확인",
+    "clearedToast": "{name} 시스템 프롬프트 비움."
   },
   "snapshots": {
     "title": "스냅샷",
@@ -243,6 +255,7 @@
     "colStatus": "상태",
     "colVm": "VM ID",
     "colActions": "작업",
+    "sendTask": "작업 보내기",
     "changeRole": "역할 변경",
     "restart": "재시작",
     "remove": "제거",
@@ -304,6 +317,17 @@
     "colStatus": "상태",
     "colOutput": "출력 / 오류"
   },
+  "sendTask": {
+    "title": "작업 보내기 — {id}",
+    "intro": "{role} 에이전트에게 일회성 프롬프트를 보냅니다. 작업으로 실행되며 응답이 여기 표시됩니다.",
+    "placeholder": "이 에이전트에게 보낼 프롬프트…",
+    "send": "보내기",
+    "sending": "실행 중…",
+    "bodyRequired": "프롬프트를 입력하세요",
+    "canceled": "작업 취소됨",
+    "resultTitle": "결과 — {id}",
+    "again": "다시 보내기"
+  },
   "activityFeed": {
     "title": "액티비티 피드",
     "connecting": "연결 중…",
@@ -312,6 +336,7 @@
     "reconnect": "재연결",
     "empty": "아직 활동이 없습니다.",
     "composerBody": "피드에 메시지 게시…",
+    "postAs": "operator로 게시됩니다",
     "post": "게시",
     "posting": "게시 중…"
   }

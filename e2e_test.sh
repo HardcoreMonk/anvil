@@ -1124,10 +1124,13 @@ NOAUTH_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
     -d '{"body":"unauthenticated probe"}')
 check_http "$NOAUTH_CODE" "401" "POST /townwall/post without bearer (must be rejected)"
 
-# ── 55. Retrieve Town Wall history ───────────────────────────────
-# createFlock writes one "orchestrator" entry on spawn and step 54 added one
+# Allow the in-VM HTTP forward to finish before reading history.
+sleep 1
+
+# ── 56. Retrieve Town Wall history ───────────────────────────────
+# createFlock writes one "control-plane" entry on spawn; step 54 added one
 # direct control-plane post. Expect ≥2 parseable lines.
-step "55. Retrieve Town Wall history"
+step "56. Retrieve Town Wall history"
 HIST=$(curl -s "$API/flocks/$FLOCK_ID/wall/history")
 HIST_COUNT=$(echo "$HIST" | jq 'length')
 [ "$HIST_COUNT" -ge "2" ] && ok "Town Wall has $HIST_COUNT entries" \
@@ -1681,7 +1684,7 @@ else
         || fail "researcher-1 did not report ok: $BC_OUT"
     # The broadcast notice must land on the Town Wall.
     curl -s -H "$AUTH_HDR" "$API/flocks/$LLM_FLOCK_ID/wall/history" | \
-        jq -e '[.[] | select(.agent_id=="orchestrator" and (.body|contains("Broadcast to 1 agents")))] | length >= 1' >/dev/null \
+        jq -e '[.[] | select(.agent_id=="control-plane" and (.body|contains("Broadcast to 1 agent")))] | length >= 1' >/dev/null \
         && ok "broadcast notice recorded on Town Wall ✓" \
         || fail "Town Wall missing broadcast notice"
 
