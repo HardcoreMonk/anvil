@@ -63,8 +63,10 @@ guest의 bridge-only 격리와 anvil의 credential 경계를 깨지 않는다.
 - **Guest(member VM)**: 지금과 동일. `gtwall`→in-VM agent→로컬 `10.0.1.1:3000`. 원격
   주소를 모르고 네트워크로 안 나감. relay는 로컬 daemon이 처리.
 
-**home 호스트 선정**: `CreateRoutedFlockMembers`가 결정(기본: role[0]의 배치 호스트,
-또는 설정된 coordinator role). `PlacementStore`의 `RoutedFlockRecord.HomeHost`로 영속.
+**home 호스트 선정**: `CreateRoutedFlockMembers`가 결정한다. **기본 규칙: 첫 번째
+요청 role(`roles[0]`)이 배치된 호스트를 home으로 삼는다** — 결정론적이고 추가 설정
+불요. (설정 가능한 coordinator role 지정은 진화 경로이며 이번 범위 밖.)
+`PlacementStore`의 `RoutedFlockRecord.HomeHost`로 영속.
 
 **순서/일관성**: 모든 post가 home의 단일 wall에서 직렬화 → monotonic seq·순서 자명.
 
@@ -80,8 +82,9 @@ guest의 bridge-only 격리와 anvil의 credential 경계를 깨지 않는다.
 - daemon flock 모델에 **flock kind** 도입: `local`(기존, 불변), `hub`(canonical wall
   소유 + 원격 roster), `relay`(wall 없음, home로 forward/proxy). `relay` flock은 얇은
   구조 `{flockID, homeAddr, relayToken}`.
-- `RoutedFlockRecord`(`internal/anvilmcp/placement_store.go`)에 `HomeHost` + relay
-  token 참조 추가. relay token 자체는 redact 대상(아래 보안).
+- `RoutedFlockRecord`(`internal/anvilmcp/placement_store.go`)에 `HomeHost` 추가.
+  **relay_token은 PlacementStore에 영속**(reconcile 재등록에 필요)하되, **모든 직렬화
+  출력·MCP output·audit·로그에서 redact**한다(아래 보안). 즉 저장은 하되 노출은 안 함.
 
 ### (b) 새 daemon 엔드포인트 (internal mux, control-plane bearer, anvil_* 미노출)
 - `POST /flocks/{id}/distributed` (home daemon): hub flock 등록 — 실제 `TownWall`
