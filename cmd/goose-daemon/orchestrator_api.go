@@ -1081,13 +1081,14 @@ func (cp *ControlPlane) registerDistributedFlock(w http.ResponseWriter, r *http.
 		return
 	}
 	cp.flockMgr.RegisterHub(flockID, wall, req.Roster, req.RelayToken)
-	// Admit the relay hop through authMiddleware: register relay_token as an
-	// accepted bearer on this (home) daemon, scoped for later deregistration.
+	// Admit the relay hop through authMiddleware, but ONLY for this flock's Town
+	// Wall sub-paths: register relay_token in the scoped relay-token store, NOT
+	// in cp.clients (a relay token must never be a full control-plane bearer).
 	// authMiddleware is the transport gate; the hub post handler additionally
 	// checks bearer == flock.RelayToken so a valid-but-wrong-flock token is
 	// rejected (Task 4). If the daemon runs auth-disabled, only the hub check
 	// applies.
-	cp.addAcceptedRelayToken(flockID, req.RelayToken)
+	cp.setRelayToken(flockID, req.RelayToken)
 	w.WriteHeader(http.StatusCreated)
 }
 

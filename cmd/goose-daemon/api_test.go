@@ -40,6 +40,7 @@ func newTestCP(t *testing.T) *ControlPlane {
 	os.WriteFile(defaultSec, []byte("DEFAULT_KEY: x\nGOOGLE_API_KEY: \"AIzaSyTestRealKey\"\nANTHROPIC_API_KEY: \"sk-ant-testreal\"\nOPENAI_API_KEY: \"sk-testreal\"\nGROQ_API_KEY: \"gsk_testreal\"\n"), 0644)
 	cp := &ControlPlane{
 		vms:              make(map[string]*runningVM),
+		relayTokens:      map[string]string{},
 		snapshots:        make(map[string]storage.SnapshotMetadata),
 		workDir:          tmp,
 		gooseConfigPath:  defaultCfg,
@@ -920,6 +921,7 @@ func TestAuthMiddlewareIncrementsAuthFailure(t *testing.T) {
 		func() []APIClient {
 			return []APIClient{{Name: "operator", Token: "secret-token"}}
 		},
+		nil,
 		cp.metrics.authTotal,
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			t.Fatal("handler should not run for unauthorized request")
@@ -2820,6 +2822,7 @@ func TestTranscriptEndpointRequiresBearer(t *testing.T) {
 	cp := newTestCP(t)
 	handler := authMiddleware(
 		func() []APIClient { return []APIClient{{Name: "operator", Token: "secret-token"}} },
+		nil,
 		cp.metrics.authTotal,
 		http.HandlerFunc(cp.handleVM),
 	)

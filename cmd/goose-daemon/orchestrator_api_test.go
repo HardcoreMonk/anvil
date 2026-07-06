@@ -107,6 +107,53 @@ func TestFilterTownWall(t *testing.T) {
 	}
 }
 
+// TestRelayToken_AdmitsOnlyWallPaths proves a per-flock relay token is admitted
+// by authMiddleware ONLY for that flock's Town Wall sub-paths and is NEVER a
+// general control-plane bearer. The four 401 assertions are the load-bearing
+// proof the privilege escalation is closed: registering relay token "rt-1" for
+// flock "routed-1" must NOT let "Bearer rt-1" reach /vms, DELETE /vms/{id},
+// /config/clients, or another flock's wall — only routed-1's own wall post.
+func TestRelayToken_AdmitsOnlyWallPaths(t *testing.T) {
+	cp := &ControlPlane{
+		clients:     []APIClient{{Name: "op", Token: "op-tok"}}, // auth ENABLED
+		relayTokens: map[string]string{},
+	}
+	cp.setRelayToken("routed-1", "rt-1")
+	// Drive the REAL authMiddleware chain (relayTokenFor wired), matching the
+	// production apiChain wrap; a 200 downstream isolates the middleware decision.
+	handler := authMiddleware(cp.getClients, cp.relayTokenFor, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	do := func(method, path, authz string) int {
+		req := httptest.NewRequest(method, path, nil)
+		if authz != "" {
+			req.Header.Set("Authorization", authz)
+		}
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	// ALLOWED: the flock's own wall post with its relay token.
+	if code := do(http.MethodPost, "/flocks/routed-1/post", "Bearer rt-1"); code == http.StatusUnauthorized {
+		t.Errorf("own wall post with relay token = 401, want admitted")
+	}
+
+	// REJECTED (401): relay token on admin routes and other flocks.
+	rejected := []struct{ method, path string }{
+		{http.MethodPost, "/vms"},
+		{http.MethodDelete, "/vms/vm-x"},
+		{http.MethodPost, "/config/clients"},
+		{http.MethodPost, "/flocks/other-flock/post"},
+	}
+	for _, tc := range rejected {
+		if code := do(tc.method, tc.path, "Bearer rt-1"); code != http.StatusUnauthorized {
+			t.Errorf("%s %s with relay token = %d, want 401", tc.method, tc.path, code)
+		}
+	}
+}
+
 // TestRegisterDistributedAndRelayFlock covers the two daemon-to-daemon
 // endpoints the anvil control plane calls when creating a cross-host routed
 // flock (v0.7.x): POST /flocks/{id}/distributed on the home daemon registers

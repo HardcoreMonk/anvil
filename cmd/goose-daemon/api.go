@@ -54,7 +54,7 @@ type authFailureRecorder interface {
 // request (no early-exit after the first match) to avoid leaking which client
 // index was hit. The expiry decision (v0.4.1) is made AFTER the full compare loop,
 // and an expired match returns the same 401 body as no match.
-func authMiddleware(getClients func() []APIClient, authTotal *metrics.CounterVec, next http.Handler) http.Handler {
+func authMiddleware(getClients func() []APIClient, relayTokenFor func(flockID string) string, authTotal *metrics.CounterVec, next http.Handler) http.Handler {
 	countAuth := func(outcome string) {
 		if authTotal != nil {
 			authTotal.WithLabelValues(outcome).Inc()
@@ -68,6 +68,23 @@ func authMiddleware(getClients func() []APIClient, authTotal *metrics.CounterVec
 		}
 
 		auth := []byte(r.Header.Get("Authorization"))
+
+		// Relay-token admission: a per-flock relay token authenticates ONLY that
+		// flock's Town Wall sub-paths (post / wall / wall/history). It is never a
+		// general control-plane bearer, so it is checked here — after the
+		// auth-disabled short-circuit above — and admits ONLY when the request
+		// path is that exact flock's wall sub-path AND the bearer matches THAT
+		// flock's relay token. Any other route falls through to the normal
+		// cp.clients loop below and is rejected unless a real client token matches.
+		if relayTokenFor != nil {
+			if flockID, ok := relayWallPathFlockID(r.URL.Path); ok {
+				if tok := relayTokenFor(flockID); tok != "" &&
+					subtle.ConstantTimeCompare(auth, []byte("Bearer "+tok)) == 1 {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+		}
 
 		// Compare against every registered token without short-circuiting.
 		var matches []APIClient
@@ -117,6 +134,27 @@ func authMiddleware(getClients func() []APIClient, authTotal *metrics.CounterVec
 		slog.Info("api request", "client", matchedName, "method", r.Method, "path", r.URL.Path)
 		next.ServeHTTP(w, r)
 	})
+}
+
+// relayWallPathFlockID reports whether path is /flocks/{id}/post,
+// /flocks/{id}/wall, or /flocks/{id}/wall/history, and returns {id}. Only these
+// three Town Wall sub-paths are eligible for per-flock relay-token admission;
+// every other /flocks/{id}/* route (and all non-flock routes) returns false so a
+// relay token can never authenticate them.
+func relayWallPathFlockID(path string) (string, bool) {
+	rest, ok := strings.CutPrefix(path, "/flocks/")
+	if !ok {
+		return "", false
+	}
+	id, sub, _ := strings.Cut(rest, "/")
+	if id == "" {
+		return "", false
+	}
+	switch sub {
+	case "post", "wall", "wall/history":
+		return id, true
+	}
+	return "", false
 }
 
 // VMInfo is stored per-VM and returned by GET /vms (no token).
@@ -300,6 +338,14 @@ type ControlPlane struct {
 	clientsMu sync.RWMutex
 	clients   []APIClient
 
+	// relayTokens maps a routed flock's id to its per-flock relay token. A relay
+	// token authenticates the daemon-to-daemon Town Wall hop for EXACTLY that
+	// flock's wall sub-paths (post / wall / wall/history) — never any other route.
+	// Kept separate from cp.clients so a relay token is NEVER a full control-plane
+	// bearer, and so SIGHUP ReloadClients cannot wipe it.
+	relayTokens   map[string]string
+	relayTokensMu sync.RWMutex
+
 	snapshotsMu      sync.RWMutex
 	snapshots        map[string]storage.SnapshotMetadata
 	tenantStore      *anvilmcp.QuotaStore
@@ -411,6 +457,7 @@ func NewControlPlane(
 	cp := &ControlPlane{
 		vms:              make(map[string]*runningVM),
 		clients:          apiClients,
+		relayTokens:      map[string]string{},
 		snapshots:        make(map[string]storage.SnapshotMetadata),
 		tenantStore:      anvilmcp.NewQuotaStore(filepath.Join(workDir, "tenants", "tenants.json")),
 		egress:           newCommandEgressEnforcer(),
@@ -533,7 +580,7 @@ func NewControlPlane(
 
 	externalMux := http.NewServeMux()
 	if metricsRequireAuth {
-		externalMux.Handle("/metrics", authMiddleware(cp.getClients, cp.metrics.authTotal, http.HandlerFunc(cp.handleMetrics)))
+		externalMux.Handle("/metrics", authMiddleware(cp.getClients, nil, cp.metrics.authTotal, http.HandlerFunc(cp.handleMetrics)))
 	} else {
 		externalMux.HandleFunc("/metrics", cp.handleMetrics)
 	}
@@ -547,7 +594,7 @@ func NewControlPlane(
 	// status, and reads the client name auth back-fills via the request holder.
 	// rootRedirectOr sends the bare "/" to /ui/ while delegating every other path
 	// to the unchanged API chain.
-	apiChain := cp.auditMiddleware(authMiddleware(cp.getClients, cp.metrics.authTotal, internalMux))
+	apiChain := cp.auditMiddleware(authMiddleware(cp.getClients, cp.relayTokenFor, cp.metrics.authTotal, internalMux))
 	externalMux.Handle("/", rootRedirectOr(apiChain))
 
 	cp.srv = &http.Server{Addr: apiAddr, Handler: externalMux}
@@ -561,41 +608,34 @@ func (cp *ControlPlane) getClients() []APIClient {
 	return cp.clients
 }
 
-// relayClientName is the cp.clients Name a flock's relay token is stored
-// under, so removeAcceptedRelayToken (Task 8) can find and strip it by flock.
-func relayClientName(flockID string) string {
-	return "relay:" + flockID
+// setRelayToken registers a per-flock relay token in the scoped relay-token
+// store, so a relayed POST from a member daemon (Task 4) passes authMiddleware
+// on this (home) daemon — but ONLY for that flock's Town Wall sub-paths. It is
+// kept OUT of cp.clients on purpose: a relay token must NEVER be a general
+// control-plane bearer (that was the privilege escalation this store closes).
+// Idempotent: re-registering the same flockID replaces its token. Auth-disabled
+// (empty cp.clients) is unaffected — authMiddleware's len(clients)==0 short-
+// circuit still admits every request unconditionally.
+func (cp *ControlPlane) setRelayToken(flockID, relayToken string) {
+	cp.relayTokensMu.Lock()
+	cp.relayTokens[flockID] = relayToken
+	cp.relayTokensMu.Unlock()
 }
 
-// addAcceptedRelayToken admits a per-flock relay token as a valid control-plane
-// bearer, so a relayed POST from a member daemon (Task 4) passes authMiddleware
-// on this (home) daemon. It reuses cp.clients — the same slice authMiddleware's
-// getClients() consults — rather than a separate token store, so relay tokens
-// get identical auth semantics (timing-safe compare, expiry, SIGHUP-safe
-// locking) as any other API client. Idempotent: re-registering the same
-// flockID replaces its entry instead of appending a duplicate.
-//
-// Guarded for the auth-disabled case: authMiddleware treats an EMPTY
-// cp.clients as "auth disabled" and allows every request unconditionally (see
-// authMiddleware's early return on len(clients) == 0). Appending unconditionally
-// here would flip a previously auth-disabled daemon into auth-enforcing the
-// instant a hub flock registers — rejecting every other caller that isn't the
-// relay. So when cp.clients is empty this is a genuine no-op: the relay's
-// posts already pass unauthenticated, and nothing needs adding.
-func (cp *ControlPlane) addAcceptedRelayToken(flockID, relayToken string) {
-	cp.clientsMu.Lock()
-	defer cp.clientsMu.Unlock()
-	if len(cp.clients) == 0 {
-		return
-	}
-	name := relayClientName(flockID)
-	for i, c := range cp.clients {
-		if c.Name == name {
-			cp.clients[i].Token = relayToken
-			return
-		}
-	}
-	cp.clients = append(cp.clients, APIClient{Name: name, Token: relayToken})
+// relayTokenFor returns the relay token registered for a flock (or "").
+func (cp *ControlPlane) relayTokenFor(flockID string) string {
+	cp.relayTokensMu.RLock()
+	defer cp.relayTokensMu.RUnlock()
+	return cp.relayTokens[flockID]
+}
+
+// removeRelayToken strips a flock's relay token from the scoped store. Task 8
+// calls this on flock deregistration so a stale relay token cannot authenticate
+// a wall hop after the routed flock is gone.
+func (cp *ControlPlane) removeRelayToken(flockID string) {
+	cp.relayTokensMu.Lock()
+	delete(cp.relayTokens, flockID)
+	cp.relayTokensMu.Unlock()
 }
 
 // controlPlaneTokenForVM returns the bearer the in-VM /townwall/post forwarder

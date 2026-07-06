@@ -24,7 +24,7 @@ func TestAuthMiddleware_Outcomes(t *testing.T) {
 		{Name: "bob", Token: "tokB", Expires: time.Now().Add(time.Hour)},    // valid, late index
 		{Name: "carol", Token: "tokC", Expires: time.Now().Add(-time.Hour)}, // expired
 	}
-	h := authMiddleware(func() []APIClient { return clients }, authTotal, next)
+	h := authMiddleware(func() []APIClient { return clients }, nil, authTotal, next)
 
 	// doReq mirrors the audit wrapper: install a clientHolder so we can read the
 	// back-filled client name, like the real outer middleware does.
@@ -74,7 +74,7 @@ func TestAuthMiddleware_Disabled(t *testing.T) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	})
-	h := authMiddleware(func() []APIClient { return nil }, nil, next) // nil authTotal is tolerated
+	h := authMiddleware(func() []APIClient { return nil }, nil, nil, next) // nil relayTokenFor + nil authTotal tolerated
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/vms", nil))
 	if !called || rec.Code != http.StatusOK {
@@ -92,7 +92,7 @@ func TestAuthMiddleware_DuplicateTokenPrefersActiveWhenExpiredAppearsAfter(t *te
 	}
 
 	var ctxClient string
-	h := authMiddleware(func() []APIClient { return clients }, authTotal, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := authMiddleware(func() []APIClient { return clients }, nil, authTotal, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctxClient = clientNameFromContext(r.Context())
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -128,7 +128,7 @@ func TestAuthMiddleware_DuplicateTokenPrefersActiveWhenActiveAppearsAfter(t *tes
 	}
 
 	var ctxClient string
-	h := authMiddleware(func() []APIClient { return clients }, authTotal, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := authMiddleware(func() []APIClient { return clients }, nil, authTotal, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctxClient = clientNameFromContext(r.Context())
 		w.WriteHeader(http.StatusOK)
 	}))
