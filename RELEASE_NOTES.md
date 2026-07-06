@@ -66,13 +66,15 @@ keep-alive stale-connection(`64ec57c`). 검증(parity gate): full KVM e2e `334�
 `v0.4.0`-`v0.7.0` phase 편입 기록, release-gate follow-up batch, snapshot 참고를 순서대로
 담는다.
 
-> 참고: 2026-07-06에 학습·참고 전용 pre-release 스냅샷 4종이 게시됐다 —
-> `anvil-v0.4.5-snapshot`(`8daf6f3`), `anvil-v0.5.5-snapshot`(`7f207a0`),
-> `anvil-v0.6.4-snapshot`(`04e2a12`), `anvil-v0.7.0-snapshot`(`7b3f009`).
-> 각 upstream 시리즈의 adapted baseline 시점 보존용이며 운영 배포용이 아니다.
-> 각 시점의 알려진 결함(v0.4.5: `4c1c803`·`38fbedc`에서 수정, v0.5.5: `64ec57c`에서
-> 수정)과 이후 hardening 내역이 각 릴리즈 노트에 명시돼 있다. 학습 주석 브랜치:
-> `annotate/v0.4.5` ~ `annotate/v0.7.0`.
+> 참고: 2026-07-06에 upstream 시리즈별 baseline tag가 게시됐다(anvil-vX.Y
+> integration 계보와 구분되는 ephemera 베이스라인별 anvil 빌드).
+> - **게이트 검증 정식 baseline release**: `anvil-ephemera-v0.6.4`(`04e2a12`,
+>   e2e 334✓), `anvil-ephemera-v0.7.0`(`7b3f009`, e2e 334✓ + release build).
+>   `--latest=false` — 대표 릴리즈는 `anvil-v0.4.0` 유지.
+> - **학습 전용 pre-release 스냅샷**(해당 시점 결함으로 게이트 미통과):
+>   `anvil-v0.4.5-snapshot`(`8daf6f3` — `4c1c803`·`38fbedc`에서 수정),
+>   `anvil-v0.5.5-snapshot`(`7f207a0` — `64ec57c`에서 수정). 운영 배포용 아님.
+> 모든 baseline tag는 학습 주석 브랜치 `annotate/v0.4.5`~`v0.7.0`와 짝을 이룬다.
 
 
 ## 추가됨

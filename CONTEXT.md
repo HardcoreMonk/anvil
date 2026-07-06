@@ -35,14 +35,18 @@ prefix를 사용한다. 현재 최신 anvil 공개 integration tag는 `anvil-v0.
 tag target은 release docs 커밋 `de82481`("docs: release anvil-v0.4.0")이다.
 `anvil-v0.4.0`은 `anvil-v0.3.2`(upstream baseline `v0.3.6`)의 후속으로, upstream
 ephemera core service `v0.4.0`-`v0.7.0`을 anvil main runtime/operator baseline으로
-편입한 첫 공개 integration release다. 이와 별개로
-**학습·참고 전용 pre-release** 스냅샷 tag 4종(2026-07-06)이 있다:
-`anvil-v0.4.5-snapshot`(`8daf6f3`), `anvil-v0.5.5-snapshot`(`7f207a0`),
-`anvil-v0.6.4-snapshot`(`04e2a12`), `anvil-v0.7.0-snapshot`(`7b3f009`). 각
-upstream 시리즈의 adapted baseline 시점을 보존하며, 해당 시점의 알려진 결함
-(v0.4.5: restore 500 → `4c1c803`, 크래시 재시작 EBUSY → `38fbedc`; v0.5.5:
-keep-alive 커넥션 재사용 → `64ec57c`)과 이후 hardening 내역이 각 릴리즈 노트에
-명시돼 있다. 운영 배포용이 아니다(학습 브랜치 `annotate/v0.4.5`~`v0.7.0` 참조). anvil main runtime
+편입한 첫 공개 integration release다. 이와 별개로 upstream 시리즈별 baseline tag가
+있다(2026-07-06). anvil-vX.Y integration 계보와 구분되는 **ephemera 베이스라인별
+anvil 빌드**다:
+- **게이트 검증 정식 baseline release**(gate green): `anvil-ephemera-v0.6.4`
+  (`04e2a12`, e2e 334✓), `anvil-ephemera-v0.7.0`(`7b3f009`, e2e 334✓ + release build).
+  `--latest=false`로 게시돼 `anvil-v0.4.0`이 대표(Latest) integration release로 유지된다.
+- **학습·참고 전용 pre-release 스냅샷**(해당 시점 결함으로 게이트 미통과):
+  `anvil-v0.4.5-snapshot`(`8daf6f3` — restore 500 → `4c1c803`, 크래시 재시작 EBUSY →
+  `38fbedc`), `anvil-v0.5.5-snapshot`(`7f207a0` — keep-alive 커넥션 재사용 → `64ec57c`).
+  운영 배포용이 아니다.
+모든 baseline tag는 학습 브랜치 `annotate/v0.4.5`~`v0.7.0`와 짝을 이룬다. 설치
+아티팩트와 전체 parity는 `anvil-v0.4.0`이 제공한다. anvil main runtime
 baseline은 upstream ephemera `v0.7.0` 병합·적응분을 포함하며, `anvil-v0.3.2`
 이후의 scheduler control loop, scheduler `/metrics`, manual cross-host snapshot
 replication, scheduler-aware single-host flock placement 위에 `v0.4.0`-`v0.7.0`
