@@ -186,9 +186,10 @@ historical analysis로 보존한다. 현재 채택 상태는
    installer/transcript/hardening 변경은 v0.7 parity sync에서 각각 병합/적응·검증을
    마쳤다(위 채택 상태 표 참조). 이로써 upstream parity scope 코드 편입이 완료됐다.
    남은 항목은 tag 채택이 아니라 `v0.4.2` default COW 전환, `v0.4.4` flock broadcast의
-   MCP tool 노출, flock member spawn의 per-profile sizing 존중, 그리고 open gate(valid
-   provider key `semantic` run — release-gate 코드 4종은 2026-07-06 batch로 닫힘)이며,
-   각각 KVM burn-in과 tenant/rate/audit·sizing 경로 설계 뒤 결정한다.
+   MCP tool 노출, flock member spawn의 per-profile sizing 존중이며, 각각 KVM burn-in과
+   tenant/rate/audit·sizing 경로 설계 뒤 결정한다. release-gate는 코드 4종(2026-07-06
+   batch)과 마지막 open gate(valid provider key `semantic` run, `18c7559`에서 OpenAI
+   `gpt-4o`로 e2e `343✓/0✗`) 모두 닫혔다 — open 항목 없음.
 2. `v0.7.0` 이후 upstream 태그는 2026-07-02 기준 아직 관찰되지 않았다. 새 태그가
    관찰되면 별도 sync branch에서 병합/적응하고 adoption review 문서를 먼저 작성한다.
 3. `v0.7.0`의 kernel SHA 검증, `waitForAgent` per-probe timeout, `EPHEMERA_HOME`은 sync

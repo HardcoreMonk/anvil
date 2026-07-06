@@ -49,8 +49,9 @@ control plane daemon은 하나의 HTTP service를 노출한다.
 | `/flocks/{flock_id}/broadcast` | `cmd/goose-daemon/orchestrator_api.go` | flock 전 member agent에 prompt scatter-gather. daemon-only endpoint이며 `anvil_*` MCP tool로 노출하지 않는다 |
 | `/ui/` | `cmd/goose-daemon/config_api.go`, `cmd/goose-daemon/uidist/` | embedded operator Svelte SPA(정적 bundle + login page). auth chain 밖에 두는 유일한 surface. runtime/operator surface이며 IronClaw MCP surface가 아니다 |
 | `/config/profiles`, `/config/profiles/{name}` | `cmd/goose-daemon/config_api.go` | profile `GOOSE_PROVIDER`/`GOOSE_MODEL`·sizing·`system.md`(`64 KiB` cap) read/write. `goose-secrets.yaml`은 read/write하지 않음(sentinel test). delete in-use → `409`, default profile 예약, traversal 거부. auth 설정 시 bearer 뒤 |
-| `/config/providers` | `cmd/goose-daemon/config_api.go` | provider별 API key 존재 여부만 반환(key 값 비노출, sentinel test) |
-| `/config/clients` | `cmd/goose-daemon/config_api.go` | control-plane client 이름과 만료만 반환(token 값 비노출, sentinel test) |
+| `/config/providers` | `cmd/goose-daemon/providers.go` | provider별 API key 존재 여부만 반환(key 값 비노출, sentinel test) |
+| `/config/presets` | `cmd/goose-daemon/presets.go` | 명명된 VM sizing preset registry 조회 |
+| `/config/clients` | `cmd/goose-daemon/clients.go` | control-plane client 이름과 만료만 반환(token 값 비노출, sentinel test) |
 | `/config/mcp`, `/config/mcp/builtins` | `cmd/goose-daemon/mcp_api.go` | runtime MCP Gateway 설정/builtins 조회. auth 설정 시 bearer 뒤(`v0.6.0`) |
 | `/config/mcp/servers` | `cmd/goose-daemon/mcp_api.go` | backend server 목록을 transport/command + `has_credential`만 노출(credential 값 비노출, leak guard, `v0.6.4`) |
 

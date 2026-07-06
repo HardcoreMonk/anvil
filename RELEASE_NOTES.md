@@ -1,3 +1,41 @@
+# Unreleased — post-v0.4.0 cleanup
+
+`anvil-v0.4.0`(tag → `de82481`) 이후 main에 반영된 post-release backlog batch(PR #18
+merge `726cbdc`)와 open-gate closure다. 모두 anvil 적응 항목이며 upstream 변경과
+구분된다.
+
+## 보안/운영 강화
+
+- snapshot GC가 fail-closed하며 plan을 abort할 때(persisted restored-VM state를 읽지
+  못하는 경우)에도 이미 계산한 `Protected` entry를 응답에 보존한다(`9e2a33d`, #37).
+  아무것도 삭제하지 않되 어떤 snapshot이 왜 보호됐는지 operator가 볼 수 있다.
+- MCP gateway backend `initialize` 실패 error를 VM-facing JSON-RPC 응답에서
+  genericize한다(`ae96c34`, #36). 상세는 host slog에만 남긴다 — stdio stderr
+  scrub(`4a802f5`)과 같은 정책으로, backend 오동작 시 detail이 VM으로 새는 경로를
+  차단한다.
+
+## 유지보수
+
+- web `npm audit` 비파괴 findings 정리(`a0fc935`). non-breaking fix가 없는 remainder는
+  breaking major 업그레이드(vite5→8, svelte4→5)뿐이라 별도 upgrade cycle로 defer한다.
+- `cmd/goose-daemon/config_api.go`를 surface별로 분할한다(`a01d8da`, #19, 순수 이동):
+  `/config/providers`→`providers.go`, `/config/presets`→`presets.go`,
+  `/config/clients`→`clients.go`. `config_api.go`는 profile CRUD·`system.md`·`/ui/`
+  serving을 유지한다.
+- reRestore/restore 공유 helper 추출(#7)은 독립 검토 결과 **기각(재분류)**한다. 두
+  경로의 표면적 유사성보다 divergence 위험이 커 강제 통합하지 않는다(근거는
+  [`docs/operations/2026-07-06-anvil-v0.4.0-release-handoff.md`](docs/operations/2026-07-06-anvil-v0.4.0-release-handoff.md) 참조).
+
+## 검증됨
+
+- **open gate CLOSED**(`18c7559`): 유효 `OPENAI_API_KEY`(`gpt-4o`)로
+  `scripts/anvil-mcp-e2e.sh semantic` PASS + full e2e `343✓ / 0✗`(step 59를 skip 없이
+  실행 — live-LLM flock roundtrip). 이로써 남은 release-gate open 항목이 없다.
+- `go test ./cmd/goose-daemon ./internal/mcpgateway -count=1` (batch 변경 패키지): 둘 다
+  `ok`, EXIT=0.
+
+---
+
 # anvil-v0.4.0 — Ephemera core service parity (upstream v0.4.0–v0.7.0)
 
 - Tag: `anvil-v0.4.0`

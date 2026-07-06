@@ -118,8 +118,9 @@ sync 전 backlog triage와 별도 analysis 문서/sync branch 검증 뒤 채택 
 현재 남은 작업은 tag 채택이 아니다. release-gate 코드 항목 4종(audit-writer sentinel,
 stdio stderr scrub, `credential_env` reserved names, production-mux auth sentinel)은
 2026-07-06 follow-up batch(`4a802f5`, `0376afa`, `613a01b`, `cd2e70b`, `de5a7aa`,
-`0625df5`)로 닫혔고, 남은 open gate는 valid provider key로 `semantic` run(e2e step
-59)뿐이다. 그 밖에 deferred 항목(`v0.4.4` broadcast MCP 노출, `v0.4.2` default COW,
+`0625df5`)로 닫혔고, 마지막 open gate(valid provider key `semantic` run, e2e step 59)도
+`18c7559`에서 OpenAI `gpt-4o`로 닫혔다(full e2e `343✓/0✗`) — release-gate open 항목
+없음. 그 밖에 deferred 항목(`v0.4.4` broadcast MCP 노출, `v0.4.2` default COW,
 auto-snapshot public support, flock per-profile sizing, runtime MCP Gateway의 IronClaw
 표면 승격 금지)이다.
 

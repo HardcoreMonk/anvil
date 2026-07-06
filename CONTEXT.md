@@ -32,10 +32,10 @@ IronClaw 실행 계층으로 통합하는 downstream product fork다. 이 저장
 경로와 기존 API/환경 변수에는 `ephemera` 또는 `goose` 이름이 남아 있다. anvil
 통합 릴리즈는 ephemera runtime tag와 충돌하지 않도록 `anvil-v0.1.0`처럼 별도
 prefix를 사용한다. 현재 최신 anvil 공개 integration tag는 `anvil-v0.4.0`이고,
-tag는 이 `docs: release anvil-v0.4.0` release docs 커밋을 가리킨다(SHA는 orchestrator가
-release handoff에 확정). `anvil-v0.4.0`은 `anvil-v0.3.2`(upstream baseline `v0.3.6`)의
-후속으로, upstream ephemera core service `v0.4.0`-`v0.7.0`을 anvil main runtime/operator
-baseline으로 편입한 첫 공개 integration release다. 이와 별개로
+tag target은 release docs 커밋 `de82481`("docs: release anvil-v0.4.0")이다.
+`anvil-v0.4.0`은 `anvil-v0.3.2`(upstream baseline `v0.3.6`)의 후속으로, upstream
+ephemera core service `v0.4.0`-`v0.7.0`을 anvil main runtime/operator baseline으로
+편입한 첫 공개 integration release다. 이와 별개로
 **학습·참고 전용 pre-release** 스냅샷 tag 4종(2026-07-06)이 있다:
 `anvil-v0.4.5-snapshot`(`8daf6f3`), `anvil-v0.5.5-snapshot`(`7f207a0`),
 `anvil-v0.6.4-snapshot`(`04e2a12`), `anvil-v0.7.0-snapshot`(`7b3f009`). 각
@@ -64,8 +64,10 @@ deferred/비목표는 `v0.4.4` flock broadcast의 MCP tool 노출, `v0.4.2` defa
 auto-snapshot public support, flock member spawn의 per-profile sizing 존중, runtime MCP
 Gateway의 IronClaw 표면 승격 금지(비목표 유지)다. release-gate 코드 항목 4종
 (audit-writer sentinel, stdio stderr scrub, `credential_env` reserved names,
-production-mux auth assert)은 2026-07-06 follow-up batch로 닫혔고, 남은 open gate는
-valid provider key로 `semantic` run(e2e step 59)뿐이다. 2026-07-02 기준 upstream `main`과
+production-mux auth assert)은 2026-07-06 follow-up batch로 닫혔고, 마지막 open gate
+(valid provider key `semantic` run, e2e step 59)도 `18c7559`에서 OpenAI `gpt-4o`로
+닫혔다(full e2e `343✓/0✗`) — 남은 release-gate open 항목은 없다. 2026-07-02 기준
+upstream `main`과
 최신 upstream tag는 `v0.7.0`까지 진행되어 있다. `v0.7.0`의 kernel SHA 검증,
 `waitForAgent` per-probe timeout, `EPHEMERA_HOME` work directory 지정은 sync 전 독립
 hardening backport로 먼저 반영돼 있었고, v0.7.0 병합 시 upstream 버전과 reconcile해 anvil
@@ -317,11 +319,14 @@ daemon으로 보내는 outbound Bearer token이다.
   rate-limit·credential 운영)과 실제 operator 배포 검증
 - release-gate: 코드 항목 4종(audit-writer sentinel `de5a7aa`, stdio stderr scrub
   `4a802f5`, `credential_env` reserved names `0376afa`, production-mux auth sentinel
-  `de5a7aa`)은 2026-07-06 batch로 닫힘. 남은 open gate는 valid provider key로
-  `semantic` run(e2e step 59, 사용자 key 교체 대기)뿐
-- post-merge backlog: reRestore helper extraction, `config_api.go` split, web npm audit,
-  MCP `initialize`-error string genericization review(#36), GC-abort response
-  `Protected` list cosmetic(#37)
+  `de5a7aa`)은 2026-07-06 batch로 닫힘. 마지막 open gate(valid provider key `semantic`
+  run, e2e step 59)도 `18c7559`에서 OpenAI `gpt-4o`로 닫힘(full e2e `343✓/0✗`) —
+  남은 release-gate open 항목 없음
+- post-v0.4.0 backlog(PR #18 `726cbdc`) 처리 결과: GC-abort `Protected` 보존(#37,
+  `9e2a33d`)·MCP `initialize`-error genericization(#36, `ae96c34`)·`config_api.go`
+  surface별 분할(#19, `a01d8da`)·web npm audit 정리(`a0fc935`, breaking major는 defer)는
+  완료. reRestore/restore 공유 helper 추출(#7)은 독립 검토 결과 기각. 남은 backlog는
+  web breaking major 업그레이드(vite5→8, svelte4→5)뿐
 - installer 운영 검증: 실제 systemd host에 `install.sh` 배포와 release build(FULL
   variant) 검증. `uninstall.sh`의 ephemera-scoped `/tmp` scratch 정리는 의도된 cleanup
   (root-gated, prefix-anchored)이며 `/tmp/goose-rootfs`는 현재 source에 producer 없는
