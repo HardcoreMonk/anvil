@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"ephemera/internal/orchestrator"
@@ -103,5 +104,39 @@ func TestFilterTownWall(t *testing.T) {
 	}
 	if _, err := filterTownWall(msgs, "", "not-a-time", "", ""); err == nil {
 		t.Fatal("invalid since returned nil error")
+	}
+}
+
+// TestRegisterDistributedAndRelayFlock covers the two daemon-to-daemon
+// endpoints the anvil control plane calls when creating a cross-host routed
+// flock (v0.7.x): POST /flocks/{id}/distributed on the home daemon registers
+// the hub that owns the canonical Town Wall, and POST /flocks/{id}/relay on
+// each member daemon registers a relay stub pointing back at the home daemon.
+func TestRegisterDistributedAndRelayFlock(t *testing.T) {
+	cp := newTestCP(t)
+
+	// distributed (hub) on the "home" daemon
+	rr := httptest.NewRecorder()
+	body := `{"roster":[{"agent_id":"researcher-1","host":"hostB"}],"relay_token":"rt-1"}`
+	cp.handleFlockItem(rr, httptest.NewRequest(http.MethodPost, "/flocks/routed-1/distributed", strings.NewReader(body)))
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("distributed status = %d, want 201 (%s)", rr.Code, rr.Body.String())
+	}
+	f, ok := cp.flockMgr.Get("routed-1")
+	if !ok || f.Kind != orchestrator.FlockKindHub || f.TownWall == nil {
+		t.Fatalf("hub flock not registered with wall")
+	}
+
+	// relay on a "member" daemon
+	cp2 := newTestCP(t)
+	rr2 := httptest.NewRecorder()
+	body2 := `{"home_addr":"http://hostA:3000","relay_token":"rt-1"}`
+	cp2.handleFlockItem(rr2, httptest.NewRequest(http.MethodPost, "/flocks/routed-1/relay", strings.NewReader(body2)))
+	if rr2.Code != http.StatusCreated {
+		t.Fatalf("relay status = %d, want 201", rr2.Code)
+	}
+	rf, ok := cp2.flockMgr.Get("routed-1")
+	if !ok || rf.Kind != orchestrator.FlockKindRelay || rf.HomeAddr != "http://hostA:3000" {
+		t.Fatalf("relay flock not registered")
 	}
 }

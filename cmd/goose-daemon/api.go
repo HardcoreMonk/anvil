@@ -561,6 +561,43 @@ func (cp *ControlPlane) getClients() []APIClient {
 	return cp.clients
 }
 
+// relayClientName is the cp.clients Name a flock's relay token is stored
+// under, so removeAcceptedRelayToken (Task 8) can find and strip it by flock.
+func relayClientName(flockID string) string {
+	return "relay:" + flockID
+}
+
+// addAcceptedRelayToken admits a per-flock relay token as a valid control-plane
+// bearer, so a relayed POST from a member daemon (Task 4) passes authMiddleware
+// on this (home) daemon. It reuses cp.clients — the same slice authMiddleware's
+// getClients() consults — rather than a separate token store, so relay tokens
+// get identical auth semantics (timing-safe compare, expiry, SIGHUP-safe
+// locking) as any other API client. Idempotent: re-registering the same
+// flockID replaces its entry instead of appending a duplicate.
+//
+// Guarded for the auth-disabled case: authMiddleware treats an EMPTY
+// cp.clients as "auth disabled" and allows every request unconditionally (see
+// authMiddleware's early return on len(clients) == 0). Appending unconditionally
+// here would flip a previously auth-disabled daemon into auth-enforcing the
+// instant a hub flock registers — rejecting every other caller that isn't the
+// relay. So when cp.clients is empty this is a genuine no-op: the relay's
+// posts already pass unauthenticated, and nothing needs adding.
+func (cp *ControlPlane) addAcceptedRelayToken(flockID, relayToken string) {
+	cp.clientsMu.Lock()
+	defer cp.clientsMu.Unlock()
+	if len(cp.clients) == 0 {
+		return
+	}
+	name := relayClientName(flockID)
+	for i, c := range cp.clients {
+		if c.Name == name {
+			cp.clients[i].Token = relayToken
+			return
+		}
+	}
+	cp.clients = append(cp.clients, APIClient{Name: name, Token: relayToken})
+}
+
 // controlPlaneTokenForVM returns the bearer the in-VM /townwall/post forwarder
 // uses when calling back into the control plane. Returns the first NON-EXPIRED
 // API client's token when auth is enabled, or "" when auth is disabled or every

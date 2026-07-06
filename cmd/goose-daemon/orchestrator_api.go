@@ -68,6 +68,22 @@ type TownWallPostRequest struct {
 	Body    string `json:"body"`
 }
 
+// distributedFlockRequest is the POST /flocks/{id}/distributed body: the home
+// daemon uses it to register a hub flock owning the canonical cross-host Town
+// Wall (v0.7.x routed flocks).
+type distributedFlockRequest struct {
+	Roster     []orchestrator.RosterMember `json:"roster"`
+	RelayToken string                      `json:"relay_token"`
+}
+
+// relayFlockRequest is the POST /flocks/{id}/relay body: a member daemon uses
+// it to register a relay flock forwarding Town Wall traffic to the home
+// daemon (v0.7.x routed flocks).
+type relayFlockRequest struct {
+	HomeAddr   string `json:"home_addr"`
+	RelayToken string `json:"relay_token"`
+}
+
 // registerOrchestratorRoutes wires flock endpoints onto the control plane mux.
 func (cp *ControlPlane) registerOrchestratorRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/flocks", cp.handleFlocks)
@@ -115,6 +131,10 @@ func (cp *ControlPlane) handleFlockItem(w http.ResponseWriter, r *http.Request) 
 		cp.resumeFlock(w, flockID)
 	case sub == "broadcast" && r.Method == http.MethodPost:
 		cp.broadcastFlock(w, r, flockID)
+	case sub == "distributed" && r.Method == http.MethodPost:
+		cp.registerDistributedFlock(w, r, flockID)
+	case sub == "relay" && r.Method == http.MethodPost:
+		cp.registerRelayFlock(w, r, flockID)
 	case sub == "agents" || strings.HasPrefix(sub, "agents/"):
 		rest := strings.TrimPrefix(strings.TrimPrefix(sub, "agents"), "/")
 		agentID, action, _ := strings.Cut(rest, "/")
@@ -1035,6 +1055,56 @@ func (cp *ControlPlane) dispatchBroadcastTask(ctx context.Context, vmID, prompt 
 		return broadcastResult{Status: "error", Output: tr.Output, Error: errMsg}
 	}
 	return broadcastResult{Status: "ok", Output: tr.Output, Error: tr.Error}
+}
+
+// registerDistributedFlock (home host) creates the canonical wall for a
+// cross-host routed flock. Idempotent: re-registration reuses the existing wall.
+// POST /flocks/{id}/distributed.
+func (cp *ControlPlane) registerDistributedFlock(w http.ResponseWriter, r *http.Request, flockID string) {
+	var req distributedFlockRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.RelayToken == "" {
+		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("relay_token required"))
+		return
+	}
+	if existing, ok := cp.flockMgr.Get(flockID); ok && existing.Kind == orchestrator.FlockKindHub {
+		w.WriteHeader(http.StatusCreated)
+		return
+	}
+	wallPath := filepath.Join(cp.workDir, "flocks", flockID, "TOWN_WALL.log")
+	wall, err := orchestrator.NewTownWall(flockID, wallPath)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err)
+		return
+	}
+	cp.flockMgr.RegisterHub(flockID, wall, req.Roster, req.RelayToken)
+	// Admit the relay hop through authMiddleware: register relay_token as an
+	// accepted bearer on this (home) daemon, scoped for later deregistration.
+	// authMiddleware is the transport gate; the hub post handler additionally
+	// checks bearer == flock.RelayToken so a valid-but-wrong-flock token is
+	// rejected (Task 4). If the daemon runs auth-disabled, only the hub check
+	// applies.
+	cp.addAcceptedRelayToken(flockID, req.RelayToken)
+	w.WriteHeader(http.StatusCreated)
+}
+
+// registerRelayFlock (member host) registers a forward-to-home stub. Idempotent.
+// POST /flocks/{id}/relay.
+func (cp *ControlPlane) registerRelayFlock(w http.ResponseWriter, r *http.Request, flockID string) {
+	var req relayFlockRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.HomeAddr == "" || req.RelayToken == "" {
+		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("home_addr and relay_token required"))
+		return
+	}
+	cp.flockMgr.RegisterRelay(flockID, req.HomeAddr, req.RelayToken)
+	w.WriteHeader(http.StatusCreated)
 }
 
 // spawnVMForFlock spawns one VM as a flock member. profile is mapped through
