@@ -341,10 +341,57 @@ func (cp *ControlPlane) deleteFlock(w http.ResponseWriter, flockID string) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "flock_id": flockID})
 }
 
+// relayTownWallPost forwards a member's post to the home daemon that owns the
+// canonical wall. Only {agent_id, body} crosses the wire; the per-flock relay
+// token authenticates the daemon-to-daemon hop. No per-VM credential is sent.
+func relayTownWallPost(homeAddr, relayToken, flockID, agentID, body string) (int, []byte, error) {
+	payload, _ := json.Marshal(map[string]string{"agent_id": agentID, "body": body})
+	url := strings.TrimRight(homeAddr, "/") + "/flocks/" + flockID + "/post"
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+relayToken)
+	resp, err := newAgentHTTPClient().Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, respBody, nil
+}
+
 func (cp *ControlPlane) postToTownWall(w http.ResponseWriter, r *http.Request, flockID string) {
 	f, ok := cp.flockMgr.Get(flockID)
 	if !ok {
 		writeJSONError(w, http.StatusNotFound, fmt.Errorf("flock not found"))
+		return
+	}
+	// Relay flocks (member host) own no local wall: forward {agent_id, body} to
+	// the home daemon and mirror its status+body back. The per-flock relay token
+	// authenticates the daemon hop; no per-VM credential crosses the wire. The
+	// hub/local paths fall through to the local f.TownWall.Post below. (A relayed
+	// post arriving at the hub was already scoped to THIS flock's wall by
+	// authMiddleware's relayTokenFor admission, so no re-check is needed here.)
+	if f.Kind == orchestrator.FlockKindRelay {
+		var req TownWallPostRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err)
+			return
+		}
+		if req.AgentID == "" || req.Body == "" {
+			writeJSONError(w, http.StatusBadRequest, fmt.Errorf("agent_id and body required"))
+			return
+		}
+		status, respBody, err := relayTownWallPost(f.HomeAddr, f.RelayToken, flockID, req.AgentID, req.Body)
+		if err != nil {
+			writeJSONError(w, http.StatusBadGateway, fmt.Errorf("town wall relay to home failed: %w", err))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write(respBody)
 		return
 	}
 	var req TownWallPostRequest
@@ -368,6 +415,32 @@ func (cp *ControlPlane) townWallHistory(w http.ResponseWriter, r *http.Request, 
 	f, ok := cp.flockMgr.Get(flockID)
 	if !ok {
 		writeJSONError(w, http.StatusNotFound, fmt.Errorf("flock not found"))
+		return
+	}
+	// Relay flocks proxy history reads to the home daemon that owns the canonical
+	// wall, forwarding the query string (agent_id/since/until/contains filters)
+	// verbatim so filtering happens once, at the home. Hub/local read locally below.
+	if f.Kind == orchestrator.FlockKindRelay {
+		url := strings.TrimRight(f.HomeAddr, "/") + "/flocks/" + flockID + "/wall/history"
+		if raw := r.URL.RawQuery; raw != "" {
+			url += "?" + raw
+		}
+		hreq, err := http.NewRequest(http.MethodGet, url, nil)
+		if err != nil {
+			writeJSONError(w, http.StatusBadGateway, err)
+			return
+		}
+		hreq.Header.Set("Authorization", "Bearer "+f.RelayToken)
+		resp, err := newAgentHTTPClient().Do(hreq)
+		if err != nil {
+			writeJSONError(w, http.StatusBadGateway, err)
+			return
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(b)
 		return
 	}
 	history, err := f.TownWall.History()
@@ -447,6 +520,12 @@ func (cp *ControlPlane) streamTownWall(w http.ResponseWriter, r *http.Request, f
 		writeJSONError(w, http.StatusNotFound, fmt.Errorf("flock not found"))
 		return
 	}
+	// Relay flocks own no local wall/subscriber: proxy the SSE stream from the
+	// home daemon that owns the canonical wall. Hub/local stream locally below.
+	if f.Kind == orchestrator.FlockKindRelay {
+		cp.streamTownWallRelay(w, r, f, flockID)
+		return
+	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeJSONError(w, http.StatusInternalServerError, fmt.Errorf("streaming unsupported"))
@@ -479,6 +558,51 @@ func (cp *ControlPlane) streamTownWall(w http.ResponseWriter, r *http.Request, f
 			}
 			sseEmit(w, m)
 			flusher.Flush()
+		}
+	}
+}
+
+// streamTownWallRelay proxies a member host's Town Wall SSE stream to the home
+// daemon that owns the canonical wall. It dials {HomeAddr}/flocks/{id}/wall with
+// the per-flock relay token and copies each chunk through with a per-chunk
+// Flusher so events reach the caller live (mirrors the local flush loop). The
+// upstream request rides the caller's context, so a client disconnect tears down
+// the home connection too.
+func (cp *ControlPlane) streamTownWallRelay(w http.ResponseWriter, r *http.Request, f *orchestrator.Flock, flockID string) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSONError(w, http.StatusInternalServerError, fmt.Errorf("streaming unsupported"))
+		return
+	}
+	url := strings.TrimRight(f.HomeAddr, "/") + "/flocks/" + flockID + "/wall"
+	hreq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, url, nil)
+	if err != nil {
+		writeJSONError(w, http.StatusBadGateway, err)
+		return
+	}
+	hreq.Header.Set("Authorization", "Bearer "+f.RelayToken)
+	resp, err := newAgentHTTPClient().Do(hreq)
+	if err != nil {
+		writeJSONError(w, http.StatusBadGateway, err)
+		return
+	}
+	defer resp.Body.Close()
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(resp.StatusCode)
+	flusher.Flush()
+	buf := make([]byte, 4096)
+	for {
+		n, rerr := resp.Body.Read(buf)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				return
+			}
+			flusher.Flush()
+		}
+		if rerr != nil {
+			return
 		}
 	}
 }
