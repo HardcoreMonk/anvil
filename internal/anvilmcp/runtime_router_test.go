@@ -50,6 +50,11 @@ type routerFakeDaemon struct {
 	relayCalls             int
 	relayReq               RelayFlockRequest
 	registerRelayErr       error
+	postWallCalls          int
+	postWallFlockID        string
+	postWallReq            TownWallPostRequest
+	historyCalls           int
+	historyFlockID         string
 }
 
 func (f *routerFakeDaemon) RegisterDistributedFlock(_ context.Context, _ string, req DistributedFlockRequest) error {
@@ -1475,7 +1480,11 @@ func TestRuntimeRouterDeleteRoutedFlockTreatsNilDeleteResponseAsCleanupPending(t
 	}
 }
 
-func TestRuntimeRouterRoutedFlockTownWallUnsupported(t *testing.T) {
+// TestRuntimeRouterRoutedFlockTownWallDelegatesToHome locks in the Task 6
+// contract: routed members now relay to the shared Town Wall on the home daemon,
+// so PostRoutedTownWall / RoutedTownWallHistory no longer hard-error — they proxy
+// to the home host's daemon (record.HomeHost) and never touch a member host.
+func TestRuntimeRouterRoutedFlockTownWallDelegatesToHome(t *testing.T) {
 	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
 	if err := store.SaveRoutedFlockAndPlacements(RoutedFlockRecord{
 		FlockID:      "routed-flock-wall",
@@ -1484,30 +1493,57 @@ func TestRuntimeRouterRoutedFlockTownWallUnsupported(t *testing.T) {
 		EgressPolicy: "profile",
 		Mode:         RoutedFlockModeCrossHostMembersOnly,
 		Status:       RoutedFlockStatusReady,
-		Agents:       []RoutedFlockAgent{{AgentID: "worker-1", Role: "worker", VMID: "vm-worker", Host: "host-a", Status: "running"}},
+		HomeHost:     "host-a",
+		Agents: []RoutedFlockAgent{
+			{AgentID: "worker-1", Role: "worker", VMID: "vm-worker", Host: "host-a", Status: "running"},
+			{AgentID: "worker-2", Role: "worker", VMID: "vm-worker-2", Host: "host-b", Status: "running"},
+		},
 	}, nil); err != nil {
 		t.Fatalf("SaveRoutedFlockAndPlacements: %v", err)
 	}
+	home := &routerFakeDaemon{}
+	member := &routerFakeDaemon{}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(nil, nil, nil),
+		map[string]Daemon{"host-a": home, "host-b": member},
+		RuntimeRouterOptions{PlacementStore: store},
+	)
+
+	if _, postErr := router.PostRoutedTownWall(context.Background(), "routed-flock-wall", TownWallPostRequest{AgentID: "worker-1", Body: "hello wall"}); postErr != nil {
+		t.Fatalf("PostRoutedTownWall error = %v, want nil (delegates to home)", postErr)
+	}
+	if home.postWallCalls != 1 || home.postWallFlockID != "routed-flock-wall" || home.postWallReq.Body != "hello wall" {
+		t.Fatalf("home post-wall calls/id/body = %d/%q/%q, want 1/routed-flock-wall/hello wall", home.postWallCalls, home.postWallFlockID, home.postWallReq.Body)
+	}
+	if member.postWallCalls != 0 {
+		t.Fatalf("member post-wall calls = %d, want 0 (post goes only to home)", member.postWallCalls)
+	}
+
+	if _, historyErr := router.RoutedTownWallHistory(context.Background(), "routed-flock-wall"); historyErr != nil {
+		t.Fatalf("RoutedTownWallHistory error = %v, want nil (delegates to home)", historyErr)
+	}
+	if home.historyCalls != 1 || home.historyFlockID != "routed-flock-wall" {
+		t.Fatalf("home history calls/id = %d/%q, want 1/routed-flock-wall", home.historyCalls, home.historyFlockID)
+	}
+	if member.historyCalls != 0 {
+		t.Fatalf("member history calls = %d, want 0 (history read only from home)", member.historyCalls)
+	}
+}
+
+// TestRuntimeRouterRoutedFlockTownWallRejectsUnknownFlock keeps the not-found
+// guard: delegation only applies to a wired routed flock.
+func TestRuntimeRouterRoutedFlockTownWallRejectsUnknownFlock(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
 	router := NewRuntimeRouterWithOptions(
 		NewScheduler(nil, nil, nil),
 		map[string]Daemon{"host-a": &routerFakeDaemon{}},
 		RuntimeRouterOptions{PlacementStore: store},
 	)
-
-	_, postErr := router.PostRoutedTownWall(context.Background(), "routed-flock-wall", TownWallPostRequest{AgentID: "worker-1", Body: "hello wall"})
-	if postErr == nil {
-		t.Fatal("PostRoutedTownWall error = nil, want unsupported error")
+	if _, err := router.PostRoutedTownWall(context.Background(), "missing-flock", TownWallPostRequest{AgentID: "x", Body: "y"}); err == nil {
+		t.Fatal("PostRoutedTownWall error = nil, want not-found error")
 	}
-	if !strings.Contains(postErr.Error(), "Town Wall is not supported for routed members-only flock") {
-		t.Fatalf("PostRoutedTownWall error = %q, want unsupported routed Town Wall phrase", postErr.Error())
-	}
-
-	_, historyErr := router.RoutedTownWallHistory(context.Background(), "routed-flock-wall")
-	if historyErr == nil {
-		t.Fatal("RoutedTownWallHistory error = nil, want unsupported error")
-	}
-	if !strings.Contains(historyErr.Error(), "Town Wall is not supported for routed members-only flock") {
-		t.Fatalf("RoutedTownWallHistory error = %q, want unsupported routed Town Wall phrase", historyErr.Error())
+	if _, err := router.RoutedTownWallHistory(context.Background(), "missing-flock"); err == nil {
+		t.Fatal("RoutedTownWallHistory error = nil, want not-found error")
 	}
 }
 

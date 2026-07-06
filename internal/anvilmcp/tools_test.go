@@ -491,11 +491,16 @@ func (f *routerFakeDaemon) DeleteFlock(context.Context, string) (*RawDaemonRespo
 	return &RawDaemonResponse{StatusCode: 200, Body: "{}"}, nil
 }
 
-func (f *routerFakeDaemon) PostTownWall(context.Context, string, TownWallPostRequest) (*TownWallMessage, error) {
+func (f *routerFakeDaemon) PostTownWall(_ context.Context, flockID string, req TownWallPostRequest) (*TownWallMessage, error) {
+	f.postWallCalls++
+	f.postWallFlockID = flockID
+	f.postWallReq = req
 	return &TownWallMessage{}, nil
 }
 
-func (f *routerFakeDaemon) TownWallHistory(context.Context, string) ([]TownWallMessage, error) {
+func (f *routerFakeDaemon) TownWallHistory(_ context.Context, flockID string) ([]TownWallMessage, error) {
+	f.historyCalls++
+	f.historyFlockID = flockID
 	return []TownWallMessage{}, nil
 }
 

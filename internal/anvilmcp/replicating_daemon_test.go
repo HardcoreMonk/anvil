@@ -112,42 +112,67 @@ func TestReplicatingDaemonDirectRoutedOperationsTrimFlockID(t *testing.T) {
 	}
 
 	_, err = daemon.PostTownWall(context.Background(), " routed-flock-1 ", TownWallPostRequest{AgentID: "worker-1", Body: "hello"})
-	if err == nil {
-		t.Fatal("PostTownWall error = nil, want unsupported")
+	if err != nil {
+		t.Fatalf("PostTownWall error = %v, want nil (delegates to routed controller)", err)
 	}
-	if got := err.Error(); got != `Town Wall is not supported for routed members-only flock "routed-flock-1"` {
-		t.Fatalf("PostTownWall error = %q", got)
+	if router.postWallCalls != 1 || router.postWallFlockID != "routed-flock-1" {
+		t.Fatalf("routed post calls/id = %d/%q, want 1/routed-flock-1 (trimmed)", router.postWallCalls, router.postWallFlockID)
 	}
 	if base.postTownWallCalls != 0 {
 		t.Fatalf("base post calls = %d, want 0", base.postTownWallCalls)
 	}
 }
 
-func TestReplicatingDaemonTownWallRejectsRoutedFlockWithoutBaseFallback(t *testing.T) {
+// TestReplicatingDaemonTownWallDelegatesRoutedFlockToRouter locks in Task 6: a
+// routed flock's wall post/history are delegated to the routed controller (which
+// proxies to the home daemon) and never fall through to the base daemon.
+func TestReplicatingDaemonTownWallDelegatesRoutedFlockToRouter(t *testing.T) {
 	base := &replicatingDaemonBaseFake{}
 	router := &replicatingDaemonRoutedFake{routed: map[string]bool{"routed-flock-1": true}}
 	daemon := NewReplicatingDaemonWithOptions(base, nil, ReplicatingDaemonOptions{RoutedFlocks: router})
 
 	_, postErr := daemon.PostTownWall(context.Background(), "routed-flock-1", TownWallPostRequest{AgentID: "worker-1", Body: "hello"})
-	if postErr == nil {
-		t.Fatal("PostTownWall error = nil, want unsupported")
+	if postErr != nil {
+		t.Fatalf("PostTownWall error = %v, want nil (delegates to routed controller)", postErr)
 	}
-	if got := postErr.Error(); got != `Town Wall is not supported for routed members-only flock "routed-flock-1"` {
-		t.Fatalf("PostTownWall error = %q", got)
+	if router.postWallCalls != 1 || router.postWallFlockID != "routed-flock-1" {
+		t.Fatalf("routed post calls/id = %d/%q, want 1/routed-flock-1", router.postWallCalls, router.postWallFlockID)
 	}
 	if base.postTownWallCalls != 0 {
-		t.Fatalf("base post calls = %d, want 0", base.postTownWallCalls)
+		t.Fatalf("base post calls = %d, want 0 (routed flock never hits base)", base.postTownWallCalls)
 	}
 
 	_, historyErr := daemon.TownWallHistory(context.Background(), "routed-flock-1")
-	if historyErr == nil {
-		t.Fatal("TownWallHistory error = nil, want unsupported")
+	if historyErr != nil {
+		t.Fatalf("TownWallHistory error = %v, want nil (delegates to routed controller)", historyErr)
 	}
-	if got := historyErr.Error(); got != `Town Wall is not supported for routed members-only flock "routed-flock-1"` {
-		t.Fatalf("TownWallHistory error = %q", got)
+	if router.historyCalls != 1 || router.historyFlockID != "routed-flock-1" {
+		t.Fatalf("routed history calls/id = %d/%q, want 1/routed-flock-1", router.historyCalls, router.historyFlockID)
 	}
 	if base.townWallHistoryCalls != 0 {
-		t.Fatalf("base history calls = %d, want 0", base.townWallHistoryCalls)
+		t.Fatalf("base history calls = %d, want 0 (routed flock never hits base)", base.townWallHistoryCalls)
+	}
+}
+
+// TestReplicatingDaemonTownWallFallsBackToBaseForNonRoutedFlock keeps the base
+// path intact: a flock the routed controller does not own is served by the base
+// daemon exactly as before.
+func TestReplicatingDaemonTownWallFallsBackToBaseForNonRoutedFlock(t *testing.T) {
+	base := &replicatingDaemonBaseFake{}
+	router := &replicatingDaemonRoutedFake{routed: map[string]bool{"routed-flock-1": true}}
+	daemon := NewReplicatingDaemonWithOptions(base, nil, ReplicatingDaemonOptions{RoutedFlocks: router})
+
+	if _, err := daemon.PostTownWall(context.Background(), "base-flock", TownWallPostRequest{AgentID: "a", Body: "b"}); err != nil {
+		t.Fatalf("PostTownWall(base-flock) error = %v, want nil", err)
+	}
+	if _, err := daemon.TownWallHistory(context.Background(), "base-flock"); err != nil {
+		t.Fatalf("TownWallHistory(base-flock) error = %v, want nil", err)
+	}
+	if base.postTownWallCalls != 1 || base.townWallHistoryCalls != 1 {
+		t.Fatalf("base post/history calls = %d/%d, want 1/1", base.postTownWallCalls, base.townWallHistoryCalls)
+	}
+	if router.postWallCalls != 0 || router.historyCalls != 0 {
+		t.Fatalf("routed controller calls = %d/%d, want 0/0 for non-routed flock", router.postWallCalls, router.historyCalls)
 	}
 }
 
@@ -406,12 +431,17 @@ func (f *replicatingDaemonSnapshotOnlyFake) ReplicateSnapshot(context.Context, S
 }
 
 type replicatingDaemonRoutedFake struct {
-	routed        map[string]bool
-	records       []RoutedFlockRecord
-	createCalls   int
-	deleteCalls   int
-	deleteFlockID string
-	deleteResp    *RawDaemonResponse
+	routed          map[string]bool
+	records         []RoutedFlockRecord
+	createCalls     int
+	deleteCalls     int
+	deleteFlockID   string
+	deleteResp      *RawDaemonResponse
+	postWallCalls   int
+	postWallFlockID string
+	postWallReq     TownWallPostRequest
+	historyCalls    int
+	historyFlockID  string
 }
 
 func (f *replicatingDaemonRoutedFake) CreateRoutedFlockMembers(context.Context, FlockCreateRequest) (*RoutedFlockCreateOutput, error) {
@@ -453,4 +483,17 @@ func (f *replicatingDaemonRoutedFake) GetRoutedFlock(flockID string) (RoutedFloc
 
 func (f *replicatingDaemonRoutedFake) ListRoutedFlocks() []RoutedFlockRecord {
 	return append([]RoutedFlockRecord(nil), f.records...)
+}
+
+func (f *replicatingDaemonRoutedFake) PostRoutedTownWall(_ context.Context, flockID string, req TownWallPostRequest) (*TownWallMessage, error) {
+	f.postWallCalls++
+	f.postWallFlockID = flockID
+	f.postWallReq = req
+	return &TownWallMessage{AgentID: req.AgentID, Body: req.Body}, nil
+}
+
+func (f *replicatingDaemonRoutedFake) RoutedTownWallHistory(_ context.Context, flockID string) ([]TownWallMessage, error) {
+	f.historyCalls++
+	f.historyFlockID = flockID
+	return []TownWallMessage{{AgentID: "worker-1", Body: "routed-history"}}, nil
 }

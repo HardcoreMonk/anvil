@@ -23,6 +23,8 @@ type routedFlockController interface {
 	DeleteRoutedFlock(context.Context, string) (*RawDaemonResponse, error)
 	GetRoutedFlock(string) (RoutedFlockRecord, bool)
 	ListRoutedFlocks() []RoutedFlockRecord
+	PostRoutedTownWall(context.Context, string, TownWallPostRequest) (*TownWallMessage, error)
+	RoutedTownWallHistory(context.Context, string) ([]TownWallMessage, error)
 }
 
 type ReplicatingDaemonOptions struct {
@@ -102,18 +104,23 @@ func (d *ReplicatingDaemon) ListFlocks(ctx context.Context) ([]FlockInfo, error)
 	return base, nil
 }
 
+// PostTownWall routes a routed flock's wall post to the routed controller, which
+// proxies to the home daemon that owns the shared wall hub (Task 6). Non-routed
+// flocks continue to hit the base daemon directly.
 func (d *ReplicatingDaemon) PostTownWall(ctx context.Context, flockID string, req TownWallPostRequest) (*TownWallMessage, error) {
 	routedFlockID := strings.TrimSpace(flockID)
 	if d != nil && d.routedFlocks != nil && d.routedFlocks.IsRoutedFlock(routedFlockID) {
-		return nil, fmt.Errorf("%s %q", routedTownWallUnsupportedMessage, routedFlockID)
+		return d.routedFlocks.PostRoutedTownWall(ctx, routedFlockID, req)
 	}
 	return d.Daemon.PostTownWall(ctx, flockID, req)
 }
 
+// TownWallHistory reads a routed flock's shared wall from the home daemon via the
+// routed controller; non-routed flocks read from the base daemon.
 func (d *ReplicatingDaemon) TownWallHistory(ctx context.Context, flockID string) ([]TownWallMessage, error) {
 	routedFlockID := strings.TrimSpace(flockID)
 	if d != nil && d.routedFlocks != nil && d.routedFlocks.IsRoutedFlock(routedFlockID) {
-		return nil, fmt.Errorf("%s %q", routedTownWallUnsupportedMessage, routedFlockID)
+		return d.routedFlocks.RoutedTownWallHistory(ctx, routedFlockID)
 	}
 	return d.Daemon.TownWallHistory(ctx, flockID)
 }

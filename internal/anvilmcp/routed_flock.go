@@ -24,7 +24,6 @@ type RoutedFlockCreateOutput struct {
 const (
 	routedFlockAgentStatusCleanupPending = "cleanup_pending"
 	routedFlockReasonCleanupFailed       = "cleanup_failed"
-	routedTownWallUnsupportedMessage     = "Town Wall is not supported for routed members-only flock"
 )
 
 type routedFlockCreateFailureMetric struct {
@@ -555,16 +554,48 @@ func (r *RuntimeRouter) ListRoutedFlocks() []RoutedFlockRecord {
 	return r.placementStore.ListRoutedFlocks()
 }
 
-func (r *RuntimeRouter) PostRoutedTownWall(_ context.Context, flockID string, _ TownWallPostRequest) (*TownWallMessage, error) {
-	if !r.IsRoutedFlock(flockID) {
+// PostRoutedTownWall posts to a routed flock's shared Town Wall. Routed members
+// relay to the wall hub owned by the home daemon (Tasks 3-5), so this helper
+// proxies the post to the home host's daemon rather than hard-erroring. The relay
+// token is never referenced here: the home daemon authenticates the runtime's own
+// control-plane session, and the per-flock relay secret stays server-side.
+func (r *RuntimeRouter) PostRoutedTownWall(ctx context.Context, flockID string, req TownWallPostRequest) (*TownWallMessage, error) {
+	record, ok := r.GetRoutedFlock(flockID)
+	if !ok {
 		return nil, fmt.Errorf("routed flock %q not found", strings.TrimSpace(flockID))
 	}
-	return nil, fmt.Errorf("%s: flock_id=%q", routedTownWallUnsupportedMessage, strings.TrimSpace(flockID))
+	homeDaemon, err := r.homeDaemonForRoutedFlock(record)
+	if err != nil {
+		return nil, err
+	}
+	return homeDaemon.PostTownWall(ctx, strings.TrimSpace(flockID), req)
 }
 
-func (r *RuntimeRouter) RoutedTownWallHistory(_ context.Context, flockID string) ([]TownWallMessage, error) {
-	if !r.IsRoutedFlock(flockID) {
+// RoutedTownWallHistory reads a routed flock's shared Town Wall history from the
+// home daemon that owns the hub (see PostRoutedTownWall).
+func (r *RuntimeRouter) RoutedTownWallHistory(ctx context.Context, flockID string) ([]TownWallMessage, error) {
+	record, ok := r.GetRoutedFlock(flockID)
+	if !ok {
 		return nil, fmt.Errorf("routed flock %q not found", strings.TrimSpace(flockID))
 	}
-	return nil, fmt.Errorf("%s: flock_id=%q", routedTownWallUnsupportedMessage, strings.TrimSpace(flockID))
+	homeDaemon, err := r.homeDaemonForRoutedFlock(record)
+	if err != nil {
+		return nil, err
+	}
+	return homeDaemon.TownWallHistory(ctx, strings.TrimSpace(flockID))
+}
+
+// homeDaemonForRoutedFlock resolves the daemon of the flock's home host, which
+// owns the shared Town Wall hub. It returns a sanitized error (host name only, no
+// secrets) when the record carries no home host or the host has no daemon client.
+func (r *RuntimeRouter) homeDaemonForRoutedFlock(record RoutedFlockRecord) (Daemon, error) {
+	homeHost := strings.TrimSpace(record.HomeHost)
+	if homeHost == "" {
+		return nil, fmt.Errorf("routed flock %q has no home host", strings.TrimSpace(record.FlockID))
+	}
+	daemon, ok := r.daemons[homeHost]
+	if !ok || daemon == nil {
+		return nil, fmt.Errorf("routed flock %q home host %q has no daemon client", strings.TrimSpace(record.FlockID), homeHost)
+	}
+	return daemon, nil
 }
