@@ -1,5 +1,11 @@
 # Unreleased — Scheduler flock placement planner and metrics
 
+> 참고: 2026-07-06에 학습·참고 전용 pre-release `anvil-v0.4.5-snapshot`(target
+> `8daf6f3`)이 게시됐다. v0.4.x adapted baseline 시점 보존용이며 운영 배포용이
+> 아니다 — 해당 시점의 알려진 결함 2건(`4c1c803`, `38fbedc`에서 수정)이 릴리즈
+> 노트에 명시돼 있다. 학습 주석 브랜치: `annotate/v0.4.5`.
+
+
 ## 추가됨
 
 - scheduler service에 `POST /schedule/flock` dry-run endpoint를 추가한다. 이 endpoint는
