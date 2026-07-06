@@ -338,9 +338,57 @@ func scheduleDecisionFromFlockPlan(plan FlockPlacementPlan) ScheduleDecision {
 	}
 }
 
+// deregisterRoutedFlockWall best-effort tears down the cross-host shared Town
+// Wall registrations for a routed flock: the hub flock on the home daemon and the
+// relay flock on each member host that was registered. The home daemon's flock
+// delete also revokes the admitted relay token (cp.removeRelayToken), so a
+// rolled-back or deleted flock's relay secret can no longer authenticate a wall
+// hop. The persisted relay token is stripped from the store too, so no stale
+// secret lingers on disk. Every step is best-effort: failures are swallowed so
+// deregistration never masks the original create/delete outcome.
+func (r *RuntimeRouter) deregisterRoutedFlockWall(ctx context.Context, record RoutedFlockRecord) {
+	if r == nil {
+		return
+	}
+	flockID := strings.TrimSpace(record.FlockID)
+	if flockID == "" {
+		return
+	}
+	seen := make(map[string]bool)
+	hosts := make([]string, 0, len(record.Agents)+1)
+	if home := strings.TrimSpace(record.HomeHost); home != "" {
+		hosts = append(hosts, home)
+		seen[home] = true
+	}
+	for _, agent := range record.Agents {
+		host := strings.TrimSpace(agent.Host)
+		if host == "" || seen[host] {
+			continue
+		}
+		seen[host] = true
+		hosts = append(hosts, host)
+	}
+	for _, host := range hosts {
+		daemon, ok := r.daemons[host]
+		if !ok || daemon == nil {
+			continue
+		}
+		// DELETE /flocks/{id} deregisters the hub (home) or relay (member) flock.
+		// Best-effort: ignore the error so a retried create still starts clean.
+		_, _ = daemon.DeleteFlock(ctx, flockID)
+	}
+	if r.placementStore != nil {
+		_ = r.placementStore.removeRoutedFlockRelayToken(flockID)
+	}
+}
+
 func rollbackRoutedFlockCreate(ctx context.Context, r *RuntimeRouter, record RoutedFlockRecord, metric routedFlockCreateFailureMetric) error {
 	reason := sanitizeRoutedFlockErrorReason(metric.Reason)
 	rollbackStart := time.Now()
+	// Best-effort deregistration of the shared Town Wall before VM teardown, so a
+	// retried create starts clean and no stale hub/relay registration or relay
+	// token lingers. Failures here must not change the rollback outcome.
+	r.deregisterRoutedFlockWall(ctx, record)
 	removeVMIDs, pendingAgents := r.deleteRoutedFlockAgents(ctx, record.Agents)
 	rollbackLatency := time.Since(rollbackStart)
 	r.removeRoutedFlockPlacements(removeVMIDs)
@@ -443,6 +491,10 @@ func (r *RuntimeRouter) DeleteRoutedFlock(ctx context.Context, flockID string) (
 	if err := r.placementStore.SaveRoutedFlockAndPlacements(record, nil); err != nil {
 		return nil, fmt.Errorf("routed flock delete failed: flock_id=%q reason=%s", record.FlockID, sanitizeRoutedFlockErrorReason(FlockPlacementReasonPlacementSaveFailed))
 	}
+
+	// Best-effort deregistration of the shared Town Wall (hub on home, relay on
+	// each member) and removal of the persisted relay token, before VM teardown.
+	r.deregisterRoutedFlockWall(ctx, record)
 
 	removeVMIDs, pendingAgents := r.deleteRoutedFlockAgents(ctx, record.Agents)
 	r.removeRoutedFlockPlacements(removeVMIDs)

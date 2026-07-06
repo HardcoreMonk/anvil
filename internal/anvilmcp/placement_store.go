@@ -708,6 +708,46 @@ func (s *PlacementStore) RoutedFlockRelayToken(flockID string) (string, bool) {
 	return token, ok
 }
 
+// removeRoutedFlockRelayToken deletes a flock's persisted relay secret from the
+// store (and disk) so no stale token lingers after the flock is rolled back or
+// deleted. It mirrors SaveRoutedFlockAndPlacements' read-modify-write so metrics
+// and other routed-flock records persisted concurrently are preserved. It is
+// idempotent: removing an absent token is a no-op. Best-effort: the caller may
+// ignore the returned error (a persistence failure only leaves a token that a
+// later deregistration or reconcile can still purge).
+func (s *PlacementStore) removeRoutedFlockRelayToken(flockID string) error {
+	flockID = strings.TrimSpace(flockID)
+	if flockID == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensureMaps()
+
+	if strings.TrimSpace(s.path) == "" {
+		delete(s.state.RoutedFlockRelayTokens, flockID)
+		return nil
+	}
+
+	previous := clonePlacementStoreState(s.state)
+	base := clonePlacementStoreState(s.state)
+	persisted, exists, err := readPlacementStoreState(s.path)
+	if err != nil {
+		return err
+	}
+	if exists {
+		base = persisted
+	}
+	normalizePlacementStoreState(&base)
+	delete(base.RoutedFlockRelayTokens, flockID)
+	if err := writePlacementStoreState(s.path, base); err != nil {
+		s.state = previous
+		return err
+	}
+	s.state = clonePlacementStoreState(base)
+	return nil
+}
+
 func (s *PlacementStore) ensureMaps() {
 	normalizePlacementStoreState(&s.state)
 }

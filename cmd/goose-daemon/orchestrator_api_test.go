@@ -188,6 +188,36 @@ func TestRegisterDistributedAndRelayFlock(t *testing.T) {
 	}
 }
 
+// TestDeleteFlock_RevokesRelayToken covers Task 8 rollback deregistration on the
+// daemon side: deleting a hub flock (DELETE /flocks/{id}) must also strip its
+// scoped relay-token admission, so a stale relay token can no longer authenticate
+// a wall hop after the routed flock is gone.
+func TestDeleteFlock_RevokesRelayToken(t *testing.T) {
+	cp := newTestCP(t)
+
+	body := `{"roster":[{"agent_id":"researcher-1","host":"hostB"}],"relay_token":"rt-1"}`
+	rr := httptest.NewRecorder()
+	cp.handleFlockItem(rr, httptest.NewRequest(http.MethodPost, "/flocks/routed-1/distributed", strings.NewReader(body)))
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("distributed status = %d, want 201 (%s)", rr.Code, rr.Body.String())
+	}
+	if cp.relayTokenFor("routed-1") != "rt-1" {
+		t.Fatalf("relay token not admitted on hub registration")
+	}
+
+	rrDel := httptest.NewRecorder()
+	cp.handleFlockItem(rrDel, httptest.NewRequest(http.MethodDelete, "/flocks/routed-1", nil))
+	if rrDel.Code != http.StatusOK {
+		t.Fatalf("delete status = %d, want 200 (%s)", rrDel.Code, rrDel.Body.String())
+	}
+	if got := cp.relayTokenFor("routed-1"); got != "" {
+		t.Fatalf("relay token after flock delete = %q, want \"\" (token revoked)", got)
+	}
+	if _, ok := cp.flockMgr.Get("routed-1"); ok {
+		t.Fatalf("hub flock still present after delete")
+	}
+}
+
 // TestRegisterDistributedFlock_ReAdmitsRelayTokenOnReRegister covers the
 // reconcile heal path (Task 7): a re-POST /distributed for an already-registered
 // hub flock must restore the scoped relay-token admission even when it was

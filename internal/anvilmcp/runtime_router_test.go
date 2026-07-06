@@ -55,6 +55,9 @@ type routerFakeDaemon struct {
 	postWallReq            TownWallPostRequest
 	historyCalls           int
 	historyFlockID         string
+	deregisterCalls        int
+	deregisterFlockIDs     []string
+	deregisterErr          error
 }
 
 func (f *routerFakeDaemon) RegisterDistributedFlock(_ context.Context, _ string, req DistributedFlockRequest) error {

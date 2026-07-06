@@ -312,6 +312,9 @@ func (cp *ControlPlane) deleteFlock(w http.ResponseWriter, flockID string) {
 	}
 	defer unlockDelete()
 	cp.flockMgr.Delete(flockID)
+	// Revoke the flock's scoped relay-token admission (Task 8): once the flock is
+	// gone, a stale relay token must no longer authenticate a cross-host wall hop.
+	cp.removeRelayToken(flockID)
 	agents := f.Snapshot()
 	var wg sync.WaitGroup
 	for _, a := range agents {

@@ -487,7 +487,12 @@ func (f *routerFakeDaemon) GetFlock(context.Context, string) (*FlockInfo, error)
 	return &FlockInfo{}, nil
 }
 
-func (f *routerFakeDaemon) DeleteFlock(context.Context, string) (*RawDaemonResponse, error) {
+func (f *routerFakeDaemon) DeleteFlock(_ context.Context, flockID string) (*RawDaemonResponse, error) {
+	f.deregisterCalls++
+	f.deregisterFlockIDs = append(f.deregisterFlockIDs, flockID)
+	if f.deregisterErr != nil {
+		return nil, f.deregisterErr
+	}
 	return &RawDaemonResponse{StatusCode: 200, Body: "{}"}, nil
 }
 
