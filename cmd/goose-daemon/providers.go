@@ -1,5 +1,11 @@
 package main
 
+import (
+	"fmt"
+	"net/http"
+	"os"
+)
+
 // ProviderDef describes a known LLM provider that Goose can target. The id is the
 // value written to GOOSE_PROVIDER; SecretEnv is the key the provider's API token
 // is stored under in the global keychain (configs/goose-secrets.yaml). DefaultModel
@@ -61,4 +67,38 @@ func providerByID(id string) (ProviderDef, bool) {
 		}
 	}
 	return ProviderDef{}, false
+}
+
+// providerStatus is one element of the GET /config/providers response: a known
+// provider annotated with whether its API key is present in the global keychain.
+// Secret values never leave the server — only the availability flag is exposed.
+type providerStatus struct {
+	ID              string   `json:"id"`
+	Label           string   `json:"label"`
+	Available       bool     `json:"available"`
+	DefaultModel    string   `json:"default_model"`
+	SuggestedModels []string `json:"suggested_models"`
+}
+
+// handleConfigProviders serves GET /config/providers — the registry of known LLM
+// providers, each flagged available iff its API key is set (uncommented and not a
+// placeholder) in the single global keychain configs/goose-secrets.yaml. The UI
+// uses this to restrict the Provider dropdown to providers that can actually run.
+func (cp *ControlPlane) handleConfigProviders(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSONError(w, http.StatusMethodNotAllowed, fmt.Errorf("method not allowed"))
+		return
+	}
+	data, _ := os.ReadFile(cp.gooseSecretsPath) // best-effort: a missing file → all unavailable
+	out := make([]providerStatus, 0, len(providerRegistry))
+	for _, p := range providerRegistry {
+		out = append(out, providerStatus{
+			ID:              p.ID,
+			Label:           p.Label,
+			Available:       secretKeyPresent(data, p.SecretEnv),
+			DefaultModel:    p.DefaultModel,
+			SuggestedModels: p.SuggestedModels,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
 }
