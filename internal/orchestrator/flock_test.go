@@ -286,3 +286,29 @@ func TestFlock_ToMetadataOmitsReservedPlaceholder(t *testing.T) {
 		t.Fatalf("reserved placeholder persisted in metadata: %+v", meta.Agents)
 	}
 }
+
+func TestFlockManager_RegisterHubAndRelay(t *testing.T) {
+	tmp := t.TempDir()
+	fm := NewFlockManager(tmp)
+	wall, err := NewTownWall("routed-1", filepath.Join(t.TempDir(), "TOWN_WALL.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub := fm.RegisterHub("routed-1", wall, []RosterMember{{AgentID: "researcher-1", Host: "hostB"}}, "relay-tok")
+	if hub.Kind != FlockKindHub {
+		t.Fatalf("hub.Kind = %q, want %q", hub.Kind, FlockKindHub)
+	}
+	if got, ok := fm.Get("routed-1"); !ok || got.TownWall == nil {
+		t.Fatalf("hub flock not registered with a wall")
+	}
+
+	tmp2 := t.TempDir()
+	fm2 := NewFlockManager(tmp2)
+	relay := fm2.RegisterRelay("routed-1", "http://hostA:3000", "relay-tok")
+	if relay.Kind != FlockKindRelay || relay.HomeAddr != "http://hostA:3000" || relay.RelayToken != "relay-tok" {
+		t.Fatalf("relay flock fields wrong: %+v", relay)
+	}
+	if relay.TownWall != nil {
+		t.Fatalf("relay flock must not own a wall")
+	}
+}
