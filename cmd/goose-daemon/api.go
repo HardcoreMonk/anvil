@@ -2020,11 +2020,22 @@ func (cp *ControlPlane) planSnapshotGC(policy SnapshotGCPolicy, now time.Time) S
 		// is unrecoverable. Abort the plan with no candidates, matching
 		// deleteSnapshotByID, which 500s (fail closed) on the same error.
 		slog.Warn("snapshot gc: list vm state failed; aborting plan (fail closed)", "err", err)
+		// Preserve the protections already computed before the abort (referenced-by-diff
+		// and live-restored source snapshots). Discarding them would misreport still-live
+		// protections as unprotected. Candidates stays empty (nothing is planned for
+		// deletion); the abort error is surfaced in Errors. Emit in snapshot-list order
+		// to match the non-aborted path.
+		abortedProtected := make([]SnapshotGCEntry, 0, len(protected))
+		for _, meta := range snapshots {
+			if entry, ok := protected[meta.SnapshotID]; ok {
+				abortedProtected = append(abortedProtected, entry)
+			}
+		}
 		return SnapshotGCResponse{
 			RequestedAt: now,
 			Policy:      policy,
 			Candidates:  []SnapshotGCEntry{},
-			Protected:   []SnapshotGCEntry{},
+			Protected:   abortedProtected,
 			Deleted:     []SnapshotGCEntry{},
 			Errors: []SnapshotGCError{{
 				Error: fmt.Sprintf("snapshot gc aborted: cannot verify restored-VM source snapshots: %v", err),

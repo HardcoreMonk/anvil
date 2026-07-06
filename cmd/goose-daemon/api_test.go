@@ -1474,6 +1474,14 @@ func TestPlanSnapshotGCFailsClosedWhenVMStateUnreadable(t *testing.T) {
 	addTestSnapshot(t, cp, testSnapshotMeta("snap-source", "vm-source", "full", now.Add(-72*time.Hour)))
 	addTestSnapshot(t, cp, testSnapshotMeta("snap-old", "vm-other", "full", now.Add(-96*time.Hour)))
 
+	// A live restored VM references snap-source. Its protection is computed from
+	// in-memory state before the persisted-state read that triggers the abort, so
+	// the fail-closed response must still surface it as Protected.
+	cp.vms["vm-restored"] = &runningVM{
+		VMInfo:           VMInfo{VMID: "vm-restored"},
+		sourceSnapshotID: "snap-source",
+	}
+
 	// Make {workDir}/vms a regular file so storage.ListVMState's os.ReadDir fails
 	// with a non-IsNotExist error (ENOTDIR) — the injected verification failure.
 	vmsPath := filepath.Join(cp.workDir, "vms")
@@ -1497,6 +1505,14 @@ func TestPlanSnapshotGCFailsClosedWhenVMStateUnreadable(t *testing.T) {
 	}
 	if len(got.Errors) == 0 {
 		t.Fatal("fail-closed GC must record an error explaining the abort")
+	}
+	// Protections already computed before the abort (here: the live restored VM's
+	// source snapshot) must be preserved, not discarded to an empty list.
+	if len(got.Protected) == 0 {
+		t.Fatal("fail-closed GC must keep protections computed before the abort, got empty Protected")
+	}
+	if _, ok := gcEntryByID(got.Protected, "snap-source"); !ok {
+		t.Fatalf("live restored source snapshot missing from aborted plan protections; protected=%v", snapshotIDs(got.Protected))
 	}
 }
 
