@@ -367,6 +367,51 @@ func TestCommandEgressEnforcerProfileApplyFailureReportsCleanupFailure(t *testin
 	}
 }
 
+// TestSpawnVM_AcceptsFlockIdentity locks in the POST /vms wiring that routed
+// flock members (cross-host town wall, Task 1) depend on: flock_id/agent_id/
+// control_plane_token in the request body must reach the same
+// storage.VMPrepareOptions fields the single-host spawnVMForFlock path already
+// populates (orchestrator_api.go's FlockID/AgentID/ControlPlaneToken). The
+// prepareVM hook returns an error after capturing opts so the test doesn't
+// need to stub the Firecracker start / waitForAgent chain past it.
+func TestSpawnVM_AcceptsFlockIdentity(t *testing.T) {
+	cp := newTestCP(t)
+	workspace := t.TempDir()
+	golden := filepath.Join(workspace, "golden.ext4")
+	if err := os.WriteFile(golden, []byte("golden"), 0600); err != nil {
+		t.Fatalf("write golden image: %v", err)
+	}
+	cp.provisioner = &storage.Provisioner{GoldenImagePath: golden, WorkspaceDir: workspace}
+	cp.allocateNetwork = func() (string, string, string, error) {
+		return "tap-test", "10.0.1.77", "AA:FC:00:00:00:4D", nil
+	}
+	cp.releaseVMNetwork = func(tapDevice, guestIP string) error { return nil }
+	cp.cloneDisk = func(vmID string) (string, error) {
+		return filepath.Join(workspace, vmID+".ext4"), nil
+	}
+
+	var captured storage.VMPrepareOptions
+	cp.prepareVM = func(vmID string, opts storage.VMPrepareOptions) error {
+		captured = opts
+		return errors.New("stop before firecracker start")
+	}
+
+	body := `{"profile":"researcher","flock_id":"routed-flock-1","agent_id":"researcher-1","control_plane_token":"cp-tok-xyz"}`
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/vms", strings.NewReader(body))
+	cp.spawnVM(rr, req)
+
+	if captured.FlockID != "routed-flock-1" {
+		t.Fatalf("FlockID = %q, want routed-flock-1", captured.FlockID)
+	}
+	if captured.AgentID != "researcher-1" {
+		t.Fatalf("AgentID = %q, want researcher-1", captured.AgentID)
+	}
+	if captured.ControlPlaneToken != "cp-tok-xyz" {
+		t.Fatalf("ControlPlaneToken not threaded to provisioner")
+	}
+}
+
 func TestSpawnVMRollbackCleansEgressAndReleasesNetworkOnce(t *testing.T) {
 	cp := newTestCP(t)
 	workspace := t.TempDir()

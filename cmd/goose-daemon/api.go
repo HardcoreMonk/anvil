@@ -147,6 +147,13 @@ type VMSpawnRequest struct {
 	Profile      string `json:"profile,omitempty"`
 	TenantID     string `json:"tenant_id,omitempty"`
 	EgressPolicy string `json:"egress_policy,omitempty"`
+	// Cross-host flock identity (routed flock members, anvil orchestrator-side
+	// spawn). When set, threaded into spawnVMOptions the same as the
+	// single-host spawnVMForFlock path so the provisioner injects
+	// .ephemera-flock / .ephemera-cp-token into the guest.
+	FlockID           string `json:"flock_id,omitempty"`
+	AgentID           string `json:"agent_id,omitempty"`
+	ControlPlaneToken string `json:"control_plane_token,omitempty"`
 }
 
 type runningVM struct {
@@ -1393,13 +1400,16 @@ func (cp *ControlPlane) spawnVM(w http.ResponseWriter, r *http.Request) {
 	}
 
 	info, agentToken, err := cp.spawnVMInternal(spawnVMOptions{
-		Profile:      req.Profile,
-		ConfigPath:   configPath,
-		SecretsPath:  secretsPath,
-		TenantID:     req.TenantID,
-		EgressPolicy: req.EgressPolicy,
-		VcpuCount:    vcpu,
-		MemSizeMib:   mem,
+		Profile:           req.Profile,
+		ConfigPath:        configPath,
+		SecretsPath:       secretsPath,
+		TenantID:          req.TenantID,
+		EgressPolicy:      req.EgressPolicy,
+		FlockID:           req.FlockID,
+		AgentID:           req.AgentID,
+		ControlPlaneToken: req.ControlPlaneToken,
+		VcpuCount:         vcpu,
+		MemSizeMib:        mem,
 	})
 	if err != nil {
 		status := http.StatusInternalServerError

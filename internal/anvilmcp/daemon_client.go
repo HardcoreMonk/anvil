@@ -43,6 +43,11 @@ type SpawnVMRequest struct {
 	Profile      string `json:"profile,omitempty"`
 	TenantID     string `json:"tenant_id,omitempty"`
 	EgressPolicy string `json:"egress_policy,omitempty"`
+	// Cross-host flock identity (routed flock members). When set, the daemon
+	// injects .ephemera-flock and .ephemera-cp-token so gtwall works in-VM.
+	FlockID           string `json:"flock_id,omitempty"`
+	AgentID           string `json:"agent_id,omitempty"`
+	ControlPlaneToken string `json:"control_plane_token,omitempty"`
 }
 
 type SnapshotInfo struct {
