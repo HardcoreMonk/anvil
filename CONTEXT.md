@@ -31,8 +31,11 @@ ephemera는 계속 버전업되는 runtime engine upstream이며, anvil은 그 r
 IronClaw 실행 계층으로 통합하는 downstream product fork다. 이 저장소의 Go 모듈
 경로와 기존 API/환경 변수에는 `ephemera` 또는 `goose` 이름이 남아 있다. anvil
 통합 릴리즈는 ephemera runtime tag와 충돌하지 않도록 `anvil-v0.1.0`처럼 별도
-prefix를 사용한다. 현재 최신 anvil 공개 integration tag는 `anvil-v0.3.2`이고,
-tag target은 `18b4506204a68a8fd9e3608976727953869f94a6`다. 이와 별개로
+prefix를 사용한다. 현재 최신 anvil 공개 integration tag는 `anvil-v0.4.0`이고,
+tag는 이 `docs: release anvil-v0.4.0` release docs 커밋을 가리킨다(SHA는 orchestrator가
+release handoff에 확정). `anvil-v0.4.0`은 `anvil-v0.3.2`(upstream baseline `v0.3.6`)의
+후속으로, upstream ephemera core service `v0.4.0`-`v0.7.0`을 anvil main runtime/operator
+baseline으로 편입한 첫 공개 integration release다. 이와 별개로
 **학습·참고 전용 pre-release** 스냅샷 tag 4종(2026-07-06)이 있다:
 `anvil-v0.4.5-snapshot`(`8daf6f3`), `anvil-v0.5.5-snapshot`(`7f207a0`),
 `anvil-v0.6.4-snapshot`(`04e2a12`), `anvil-v0.7.0-snapshot`(`7b3f009`). 각

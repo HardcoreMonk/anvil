@@ -1,4 +1,32 @@
-# Unreleased — Scheduler flock placement planner and metrics
+# anvil-v0.4.0 — Ephemera core service parity (upstream v0.4.0–v0.7.0)
+
+- Tag: `anvil-v0.4.0`
+- GitHub Release:
+  <https://github.com/HardcoreMonk/anvil/releases/tag/anvil-v0.4.0> (게시 예정)
+- Published: orchestrator 태그·게시 후 확정
+- Target commit: 이 `docs: release anvil-v0.4.0` 커밋 (SHA는 orchestrator가 release
+  handoff에 확정)
+
+`anvil-v0.4.0`은 `anvil-v0.3.2` 이후 첫 공개 integration release이며, upstream ephemera
+core service를 `v0.4.0`부터 `v0.7.0`까지 anvil main runtime/operator baseline으로
+편입한다. anvil은 token redaction, tenant/egress, scheduler, audit, IronClaw MCP surface
+separation 적응을 유지한 채 upstream `v0.7.0`을 지원한다 — IronClaw `anvil_*` MCP 경계는
+그대로이고(`cmd/anvil-mcp` 불변), runtime MCP Gateway(`EPHEMERA_MCP_*`)와 operator Web
+UI/`/config/*`/end-user installer는 runtime/operator surface로만 채택돼 `cmd/anvil-mcp`를
+대체하지 않는다. parity gate 중 발견된 3개 pre-existing latent defect를 고쳤다:
+restore-over-`meta.DiskPath`(`4c1c803`), golden image mount skip(`38fbedc`), proxy
+keep-alive stale-connection(`64ec57c`). 검증(parity gate): full KVM e2e `334✓ / 0✗`
+("All test steps passed", step 59 real-LLM smoke만 provider key 부재로 skip), MCP
+`anvil-mcp-e2e` lifecycle+flock PASS, script-only workload E2E PASS, release build
+(SLIM/FULL + `.sha256`) PASS. main 병합 후 e2e 재실행 결과는 orchestrator가 태그 전
+확인한다. 전 태그 upstream feature 분류는
+[`docs/analysis/11-v0.5.0-v0.7.0-core-service-parity-review.md`](docs/analysis/11-v0.5.0-v0.7.0-core-service-parity-review.md)의
+52-feature parity matrix(14 adopted / 30 adapted / 4 deferred / 4 excluded)에 있다.
+남은 open gate는 valid provider key `semantic` run(e2e step 59)뿐이다.
+
+아래 하위 절은 `anvil-v0.3.2` 이후 anvil-side scheduler/routed-flock 작업, upstream
+`v0.4.0`-`v0.7.0` phase 편입 기록, release-gate follow-up batch, snapshot 참고를 순서대로
+담는다.
 
 > 참고: 2026-07-06에 학습·참고 전용 pre-release 스냅샷 4종이 게시됐다 —
 > `anvil-v0.4.5-snapshot`(`8daf6f3`), `anvil-v0.5.5-snapshot`(`7f207a0`),

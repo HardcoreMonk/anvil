@@ -18,6 +18,7 @@ Release 본문에서 두 이름을 섞어 쓰지 않는다.
 | ephemera runtime | `v0.2.0` | Firecracker MicroVM runtime source snapshot | `cmd/goose-daemon`, `cmd/goose-agent`, `cmd/micro-init`, `internal/storage`, `internal/network`, `internal/vm` |
 | anvil integration | `anvil-v0.1.0` | IronClaw 통합 MCP adapter와 운영 계약 | `cmd/anvil-mcp`, `internal/anvilmcp`, workspace copy-in/out, snapshot MCP tools, daemon env alias, IronClaw E2E 검증 |
 | anvil runtime foundation | `anvil-v0.2.0` | scheduler, network policy, observability, Goosetown MCP foundation | `cmd/anvil-scheduler`, `internal/anvilmcp`, daemon tenant/audit/metrics API, profile egress, optional trace export, Goosetown flock/Town Wall MCP tools |
+| anvil core service parity | `anvil-v0.4.0` | upstream ephemera `v0.4.0`-`v0.7.0` runtime/operator 표면(storage/recovery, auth/audit, COW, flock lifecycle, streaming/depth/watchdog, snapshot-restore recovery, operator Web UI/`/config/*`, runtime MCP Gateway, end-user installer/transcript) + IronClaw `anvil_*` MCP 경계 유지 | parity matrix `docs/analysis/11-v0.5.0-v0.7.0-core-service-parity-review.md`; token redaction·tenant/egress·scheduler·audit·IronClaw MCP surface separation 적응; `cmd/anvil-mcp` 불변, `EPHEMERA_MCP_*` gateway는 `ANVIL_MCP_*` adapter를 대체하지 않음 |
 
 ## 게시 전 확인 명령
 
