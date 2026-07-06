@@ -1,5 +1,10 @@
 package main
 
+import (
+	"fmt"
+	"net/http"
+)
+
 // SizingPreset describes a named VM resource tier offered in the Settings UI's
 // profile editor. The id is a stable slug; Label is the display name. VcpuCount
 // and MemSizeMib are the values applied to a profile when the preset is chosen.
@@ -27,4 +32,16 @@ var sizingPresetRegistry = []SizingPreset{
 	{ID: "light", Label: "Light", VcpuCount: 1, MemSizeMib: 512},
 	{ID: "standard", Label: "Standard", VcpuCount: 1, MemSizeMib: 1024},
 	{ID: "advanced", Label: "Advanced", VcpuCount: 2, MemSizeMib: 2048},
+}
+
+// handleConfigPresets serves GET /config/presets — the registry of named VM sizing
+// tiers (Light/Standard/Advanced) the profile editor offers as quick presets. The
+// values are advisory: a profile may still carry any sizing within validateSizing's
+// bounds. The "standard" tier matches the daemon's default sizing.
+func (cp *ControlPlane) handleConfigPresets(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSONError(w, http.StatusMethodNotAllowed, fmt.Errorf("method not allowed"))
+		return
+	}
+	writeJSON(w, http.StatusOK, sizingPresetRegistry)
 }

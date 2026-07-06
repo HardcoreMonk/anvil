@@ -11,7 +11,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // ProfileConfig is the UI-facing view of a profile's editable LLM settings.
@@ -303,84 +302,6 @@ func (cp *ControlPlane) vmsUsingProfile(name string) []string {
 		}
 	}
 	return ids
-}
-
-// providerStatus is one element of the GET /config/providers response: a known
-// provider annotated with whether its API key is present in the global keychain.
-// Secret values never leave the server — only the availability flag is exposed.
-type providerStatus struct {
-	ID              string   `json:"id"`
-	Label           string   `json:"label"`
-	Available       bool     `json:"available"`
-	DefaultModel    string   `json:"default_model"`
-	SuggestedModels []string `json:"suggested_models"`
-}
-
-// handleConfigProviders serves GET /config/providers — the registry of known LLM
-// providers, each flagged available iff its API key is set (uncommented and not a
-// placeholder) in the single global keychain configs/goose-secrets.yaml. The UI
-// uses this to restrict the Provider dropdown to providers that can actually run.
-func (cp *ControlPlane) handleConfigProviders(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeJSONError(w, http.StatusMethodNotAllowed, fmt.Errorf("method not allowed"))
-		return
-	}
-	data, _ := os.ReadFile(cp.gooseSecretsPath) // best-effort: a missing file → all unavailable
-	out := make([]providerStatus, 0, len(providerRegistry))
-	for _, p := range providerRegistry {
-		out = append(out, providerStatus{
-			ID:              p.ID,
-			Label:           p.Label,
-			Available:       secretKeyPresent(data, p.SecretEnv),
-			DefaultModel:    p.DefaultModel,
-			SuggestedModels: p.SuggestedModels,
-		})
-	}
-	writeJSON(w, http.StatusOK, out)
-}
-
-// handleConfigPresets serves GET /config/presets — the registry of named VM sizing
-// tiers (Light/Standard/Advanced) the profile editor offers as quick presets. The
-// values are advisory: a profile may still carry any sizing within validateSizing's
-// bounds. The "standard" tier matches the daemon's default sizing.
-func (cp *ControlPlane) handleConfigPresets(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeJSONError(w, http.StatusMethodNotAllowed, fmt.Errorf("method not allowed"))
-		return
-	}
-	writeJSON(w, http.StatusOK, sizingPresetRegistry)
-}
-
-// clientView is the UI-facing view of a configured API client. The bearer Token
-// is structurally absent from this struct — it never leaves the server (mirrors
-// providerStatus, which exposes only an availability flag, never the API key).
-type clientView struct {
-	Name    string     `json:"name"`
-	Expires *time.Time `json:"expires"` // nil = never expires
-	Expired bool       `json:"expired"` // derived: Expires set and in the past
-}
-
-// handleConfigClients serves GET /config/clients — the configured API clients'
-// name and token expiry only, for the System UI's client list. The bearer token
-// value is NEVER included in the response.
-func (cp *ControlPlane) handleConfigClients(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeJSONError(w, http.StatusMethodNotAllowed, fmt.Errorf("method not allowed"))
-		return
-	}
-	clients := cp.getClients()
-	out := make([]clientView, 0, len(clients))
-	now := time.Now()
-	for _, c := range clients {
-		cv := clientView{Name: c.Name} // Token deliberately not copied.
-		if !c.Expires.IsZero() {
-			exp := c.Expires
-			cv.Expires = &exp
-			cv.Expired = now.After(exp)
-		}
-		out = append(out, cv)
-	}
-	writeJSON(w, http.StatusOK, out)
 }
 
 // handleConfigMonitoring serves GET /config/monitoring — the Grafana base URL the

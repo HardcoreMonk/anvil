@@ -171,6 +171,41 @@ func TestHTTPBackend_ListAndCall(t *testing.T) {
 	}
 }
 
+// TestHTTPBackend_InitializeError_ScrubsBackendDetail verifies #36 for the HTTP
+// transport: an initialize response carrying a sentinel-bearing protocol error
+// must yield a generic backend error (no sentinel) while the full detail reaches
+// the host log for operators.
+func TestHTTPBackend_InitializeError_ScrubsBackendDetail(t *testing.T) {
+	logs := captureSlog(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Method == "initialize" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32001, Message: "SENTINEL_INIT_BOOM proprietary handshake refusal"}})
+			return
+		}
+		writeJSONResp(w, req.ID, map[string]any{})
+	}))
+	t.Cleanup(srv.Close)
+
+	b := NewHTTPBackend("mock", "mock", srv.URL, nil, nil)
+	_, err := b.ListTools(context.Background())
+	if err == nil {
+		t.Fatal("expected an error when initialize fails")
+	}
+	if strings.Contains(err.Error(), "SENTINEL_INIT_BOOM") {
+		t.Fatalf("backend initialize error leaked backend detail: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "mock") {
+		t.Fatalf("generic error should still name the backend, got: %q", err.Error())
+	}
+	waitForLog(t, logs, "SENTINEL_INIT_BOOM")
+}
+
 func TestHTTPBackend_SSE(t *testing.T) {
 	m := newMockMCP(t, true) // tools/list responds via SSE
 	b := NewHTTPBackend("mock", "mock", m.srv.URL, nil, nil)

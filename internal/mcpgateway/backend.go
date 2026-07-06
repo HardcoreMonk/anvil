@@ -5,8 +5,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -81,11 +83,16 @@ func (b *HTTPBackend) ensureInit(ctx context.Context) error {
 		ClientInfo:      json.RawMessage(`{"name":"` + gatewayServerName + `","version":"` + gatewayServerVersion + `"}`),
 	}
 	resp, sid, err := b.roundTrip(ctx, "initialize", mustMarshal(params), "")
-	if err != nil {
-		return fmt.Errorf("initialize %s: %w", b.id, err)
+	if err == nil && resp.Error != nil {
+		err = errors.New(resp.Error.Message)
 	}
-	if resp.Error != nil {
-		return fmt.Errorf("initialize %s: %s", b.id, resp.Error.Message)
+	if err != nil {
+		// See StdioBackend.handshake (#36): an initialize failure can carry
+		// backend-influenced detail that would otherwise reach the VM verbatim, so
+		// the VM-facing error is generic (server name only) and the full detail is
+		// logged host-side for operators.
+		slog.Warn("mcp http backend initialize failed", "server", b.id, "err", err)
+		return fmt.Errorf("initialize %s: backend unavailable", b.id)
 	}
 	var ir initializeResult
 	_ = json.Unmarshal(resp.Result, &ir)

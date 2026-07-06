@@ -363,7 +363,14 @@ func (b *StdioBackend) handshake(p *stdioProc) {
 		err = errors.New(resp.Error.Message)
 	}
 	if err != nil {
-		p.readyErr = fmt.Errorf("initialize %s: %w", b.id, err)
+		// An initialize failure can carry backend-influenced protocol content
+		// (the backend's own error message, or transport bytes). readyErr reaches
+		// the VM verbatim via cause → exitError → "tool call failed: "+err, so it
+		// is scrubbed exactly as the stderr tail is (#32): the VM-facing readyErr
+		// is generic and names only the server, while the full detail is logged
+		// host-side for operators (#36).
+		slog.Warn("mcp stdio backend initialize failed", "server", b.id, "err", err)
+		p.readyErr = fmt.Errorf("initialize %s: backend unavailable", b.id)
 		close(p.ready)
 		p.terminate(p.readyErr)
 		return
