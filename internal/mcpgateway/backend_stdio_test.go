@@ -120,6 +120,12 @@ func runStdioMCPHelper() {
 		}
 		switch req.Method {
 		case "initialize":
+			if mode == "init-error" {
+				// Backend rejects the handshake with a sentinel-bearing protocol
+				// error, exercising the initialize-error scrub (#36).
+				write(map[string]any{"jsonrpc": "2.0", "id": req.ID, "error": map[string]any{"code": -32001, "message": "SENTINEL_INIT_BOOM proprietary handshake refusal"}})
+				continue
+			}
 			respond(req.ID, map[string]any{
 				"protocolVersion": "2025-03-26",
 				"capabilities":    map[string]any{"tools": map[string]any{}},
@@ -473,6 +479,37 @@ func TestGateway_ToolCallError_ScrubsBackendStderr(t *testing.T) {
 	}
 	// Operator observability: the stderr is still in the host log.
 	waitForLog(t, logs, "boom: refusing to start")
+}
+
+// TestGateway_InitializeError_ScrubsBackendDetail is the VM-facing half of #36:
+// a stdio backend that rejects the MCP initialize handshake with a sentinel-
+// bearing protocol error must produce a generic JSON-RPC error to the VM, with
+// the backend-influenced detail surfaced only host-side (mirrors #32's stderr
+// scrub).
+func TestGateway_InitializeError_ScrubsBackendDetail(t *testing.T) {
+	logs := captureSlog(t)
+	b := helperBackend(t, "init-error", nil) // initialize responds with "SENTINEL_INIT_BOOM ..."
+	reg := &Registry{
+		servers:  []ServerConfig{{ID: "helper", Namespace: "helper", Transport: "stdio", Command: b.spec.Command}},
+		backends: map[string]Backend{"helper": b},
+		byNS:     map[string]Backend{"helper": b},
+	}
+	g := New(Options{
+		Resolver: stubResolver{Caller{VMID: "vm1", Profile: "leader"}},
+		Registry: reg,
+	})
+	resp := doRPC(t, g, "tools/call", toolsCallParams{Name: "helper__echo", Arguments: json.RawMessage(`{}`)})
+	if resp.Error == nil {
+		t.Fatal("expected a JSON-RPC error for a backend that fails initialize")
+	}
+	if strings.Contains(resp.Error.Message, "SENTINEL_INIT_BOOM") {
+		t.Fatalf("VM-facing gateway error leaked backend initialize detail: %q", resp.Error.Message)
+	}
+	if !strings.Contains(resp.Error.Message, "helper") {
+		t.Fatalf("generic error should still name the backend, got: %q", resp.Error.Message)
+	}
+	// Operator observability: the full initialize failure is still in the host log.
+	waitForLog(t, logs, "SENTINEL_INIT_BOOM")
 }
 
 func TestStdioBackend_CloseGraceful(t *testing.T) {
