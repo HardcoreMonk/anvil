@@ -31,22 +31,22 @@ ephemera는 계속 버전업되는 runtime engine upstream이며, anvil은 그 r
 IronClaw 실행 계층으로 통합하는 downstream product fork다. 이 저장소의 Go 모듈
 경로와 기존 API/환경 변수에는 `ephemera` 또는 `goose` 이름이 남아 있다. anvil
 통합 릴리즈는 ephemera runtime tag와 충돌하지 않도록 `anvil-v0.1.0`처럼 별도
-prefix를 사용한다. 현재 최신 anvil 공개 integration tag는 `anvil-v0.4.0`이고,
-tag target은 release docs 커밋 `de82481`("docs: release anvil-v0.4.0")이다.
-`anvil-v0.4.0`은 `anvil-v0.3.2`(upstream baseline `v0.3.6`)의 후속으로, upstream
-ephemera core service `v0.4.0`-`v0.7.0`을 anvil main runtime/operator baseline으로
-편입한 첫 공개 integration release다. 이와 별개로 upstream 시리즈별 baseline tag가
-있다(2026-07-06). anvil-vX.Y integration 계보와 구분되는 **ephemera 베이스라인별
-anvil 빌드**다:
-- **게이트 검증 정식 baseline release**(gate green): `anvil-ephemera-v0.6.4`
-  (`04e2a12`, e2e 334✓), `anvil-ephemera-v0.7.0`(`7b3f009`, e2e 334✓ + release build).
-  `--latest=false`로 게시돼 `anvil-v0.4.0`이 대표(Latest) integration release로 유지된다.
-- **학습·참고 전용 pre-release 스냅샷**(해당 시점 결함으로 게이트 미통과):
-  `anvil-v0.4.5-snapshot`(`8daf6f3` — restore 500 → `4c1c803`, 크래시 재시작 EBUSY →
-  `38fbedc`), `anvil-v0.5.5-snapshot`(`7f207a0` — keep-alive 커넥션 재사용 → `64ec57c`).
-  운영 배포용이 아니다.
-모든 baseline tag는 학습 브랜치 `annotate/v0.4.5`~`v0.7.0`와 짝을 이룬다. 설치
-아티팩트와 전체 parity는 `anvil-v0.4.0`이 제공한다. anvil main runtime
+prefix를 사용한다. **`anvil-v0.7.0`부터 anvil 공개 릴리즈 버전은 upstream ephemera
+버전과 동일하게 정렬한다.** 현재 최신(Latest) 릴리즈는 `anvil-v0.7.0`이고 tag
+target은 main HEAD(parity + release-gate hardening + post-release backlog +
+open-gate 마감; full KVM e2e 343✓, step 59 실 LLM 포함)이며 설치 아티팩트
+(SLIM/FULL tarball + sha256)를 제공한다.
+
+이전 anvil 통합 번호 계보(`anvil-v0.1.0`→`v0.4.0`)와 upstream 시리즈별 마일스톤은
+**개발 내역으로 보존한다**(전부 non-latest):
+- `anvil-v0.4.0`(`de82481`) — upstream parity(`v0.4.0`-`v0.7.0`)를 처음 통합한 anvil
+  통합 릴리즈. 내용상 `anvil-v0.7.0`의 직전 상태.
+- `anvil-ephemera-v0.7.0`(`7b3f009`) — v0.7.0 parity 경계 마일스톤(게이트 334✓).
+- `anvil-ephemera-v0.6.4`(`04e2a12`) — v0.6.4 (MCP Gateway) 마일스톤(게이트 334✓, source-only).
+- `anvil-v0.5.5-snapshot`(`7f207a0` — keep-alive → `64ec57c`), `anvil-v0.4.5-snapshot`
+  (`8daf6f3` — restore 500 → `4c1c803`, 크래시 EBUSY → `38fbedc`): 해당 시점 결함으로
+  게이트 미통과인 학습 스냅샷 pre-release. 운영 배포용이 아니다.
+모든 개발 내역 tag는 학습 브랜치 `annotate/v0.4.5`~`v0.7.0`와 짝을 이룬다. anvil main runtime
 baseline은 upstream ephemera `v0.7.0` 병합·적응분을 포함하며, `anvil-v0.3.2`
 이후의 scheduler control loop, scheduler `/metrics`, manual cross-host snapshot
 replication, scheduler-aware single-host flock placement 위에 `v0.4.0`-`v0.7.0`
