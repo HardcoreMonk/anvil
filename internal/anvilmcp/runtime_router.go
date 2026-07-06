@@ -340,6 +340,24 @@ func normalizeScheduleDecisionReason(reason string) string {
 	}
 }
 
+// daemonAddr returns the reachable base URL of a host's daemon, taken from the
+// scheduler's host inventory (RuntimeHost.Endpoint) — the same source the
+// runtime uses to reach each daemon. It is sent to member daemons as the home
+// daemon address for wall relaying; it is never persisted in the routed-flock
+// record or surfaced in MCP output.
+func (r *RuntimeRouter) daemonAddr(host string) string {
+	host = strings.TrimSpace(host)
+	if host == "" || r == nil || r.scheduler == nil {
+		return ""
+	}
+	for _, h := range r.scheduler.hosts {
+		if strings.TrimSpace(h.Name) == host {
+			return strings.TrimSpace(h.Endpoint)
+		}
+	}
+	return ""
+}
+
 func (r *RuntimeRouter) daemonForVM(vmID string) (Daemon, error) {
 	vmID = strings.TrimSpace(vmID)
 	r.mu.RLock()

@@ -50,6 +50,28 @@ type SpawnVMRequest struct {
 	ControlPlaneToken string `json:"control_plane_token,omitempty"`
 }
 
+// DistributedFlockRequest registers the shared Town Wall hub on the home
+// daemon: the full agent roster plus the per-flock relay secret the home
+// daemon admits for the flock's wall sub-paths.
+type DistributedFlockRequest struct {
+	Roster     []RosterMember `json:"roster"`
+	RelayToken string         `json:"relay_token"`
+}
+
+// RelayFlockRequest registers a relay flock on a member daemon so its guests'
+// wall traffic is forwarded to the home daemon at HomeAddr using RelayToken.
+type RelayFlockRequest struct {
+	HomeAddr   string `json:"home_addr"`
+	RelayToken string `json:"relay_token"`
+}
+
+// RosterMember is the anvilmcp-side roster entry (distinct from the
+// orchestrator package's same-named type) sent to the home daemon.
+type RosterMember struct {
+	AgentID string `json:"agent_id"`
+	Host    string `json:"host"`
+}
+
 type SnapshotInfo struct {
 	SnapshotID     string    `json:"snapshot_id"`
 	SourceVMID     string    `json:"source_vm_id"`
@@ -403,6 +425,21 @@ func (c *DaemonClient) TownWallHistory(ctx context.Context, flockID string) ([]T
 		resp = []TownWallMessage{}
 	}
 	return resp, nil
+}
+
+// RegisterDistributedFlock registers the shared Town Wall hub flock on the home
+// daemon. The daemon persists the relay token via its flock-scoped store and
+// returns 201 on success (any 2xx is accepted by the shared request helper).
+func (c *DaemonClient) RegisterDistributedFlock(ctx context.Context, flockID string, req DistributedFlockRequest) error {
+	_, _, err := c.do(ctx, http.MethodPost, flockPath(flockID)+"/distributed", req)
+	return err
+}
+
+// RegisterRelayFlock registers a relay flock on a member daemon so its guests'
+// wall traffic reaches the home daemon. Returns 201 on success.
+func (c *DaemonClient) RegisterRelayFlock(ctx context.Context, flockID string, req RelayFlockRequest) error {
+	_, _, err := c.do(ctx, http.MethodPost, flockPath(flockID)+"/relay", req)
+	return err
 }
 
 func (c *DaemonClient) DaemonHealth(ctx context.Context) (*DaemonHealthResponse, error) {

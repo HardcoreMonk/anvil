@@ -372,6 +372,14 @@ func (f *replicatingDaemonBaseFake) TownWallHistory(context.Context, string) ([]
 	return []TownWallMessage{}, nil
 }
 
+func (f *replicatingDaemonBaseFake) RegisterDistributedFlock(context.Context, string, DistributedFlockRequest) error {
+	return nil
+}
+
+func (f *replicatingDaemonBaseFake) RegisterRelayFlock(context.Context, string, RelayFlockRequest) error {
+	return nil
+}
+
 type replicatingDaemonRouterFake struct {
 	createFlockCalls int
 	createFlockReq   FlockCreateRequest

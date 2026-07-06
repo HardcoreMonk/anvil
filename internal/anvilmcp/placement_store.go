@@ -60,9 +60,17 @@ type RoutedFlockRecord struct {
 	EgressPolicy string             `json:"egress_policy,omitempty"`
 	Mode         string             `json:"mode"`
 	Status       string             `json:"status"`
+	HomeHost     string             `json:"home_host,omitempty"`
 	Agents       []RoutedFlockAgent `json:"agents"`
 	CreatedAt    time.Time          `json:"created_at"`
 	UpdatedAt    time.Time          `json:"updated_at"`
+	// relayToken carries the flock's per-flock relay secret from create ->
+	// store persistence. It is unexported so it is NEVER JSON-serialized into
+	// MCP output, audit, or the scheduler placements endpoint. On save it is
+	// copied into the store's dedicated RoutedFlockRelayTokens map (which
+	// State() redacts from every external view) and then scrubbed from the
+	// record retained in the store.
+	relayToken string
 }
 
 type RoutedFlockAgent struct {
@@ -98,6 +106,10 @@ type PlacementStoreState struct {
 	ControlLoopStatus     ControlLoopStatus             `json:"control_loop_status,omitempty"`
 	FlockPlacementMetrics FlockPlacementMetricsState    `json:"flock_placement_metrics,omitempty"`
 	RoutedFlocks          map[string]RoutedFlockRecord  `json:"routed_flocks,omitempty"`
+	// RoutedFlockRelayTokens holds per-flock relay secrets keyed by flock id.
+	// Persisted for reconcile re-registration (Task 7) but REDACTED by State()
+	// so it never reaches the scheduler placements endpoint or any MCP output.
+	RoutedFlockRelayTokens map[string]string `json:"routed_flock_relay_tokens,omitempty"`
 }
 
 type PlacementStore struct {
@@ -119,8 +131,9 @@ func NewPlacementStore(path string) *PlacementStore {
 			ControlLoopStatus: ControlLoopStatus{
 				Hosts: make(map[string]HostObservation),
 			},
-			FlockPlacementMetrics: newFlockPlacementMetricsState(),
-			RoutedFlocks:          make(map[string]RoutedFlockRecord),
+			FlockPlacementMetrics:  newFlockPlacementMetricsState(),
+			RoutedFlocks:           make(map[string]RoutedFlockRecord),
+			RoutedFlockRelayTokens: make(map[string]string),
 		},
 	}
 }
@@ -676,7 +689,23 @@ func (s *PlacementStore) SetControlLoopStatus(status ControlLoopStatus) error {
 func (s *PlacementStore) State() PlacementStoreState {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return clonePlacementStoreState(s.state)
+	state := clonePlacementStoreState(s.state)
+	// Relay tokens are per-flock secrets: never expose them through State(),
+	// which feeds the scheduler placements endpoint and other external views.
+	// Disk persistence clones s.state directly, so it retains the tokens.
+	state.RoutedFlockRelayTokens = nil
+	return state
+}
+
+// RoutedFlockRelayToken returns the persisted per-flock relay secret. It is an
+// internal accessor for reconcile re-registration (Task 7); the token is never
+// surfaced through State() or any MCP-facing projection.
+func (s *PlacementStore) RoutedFlockRelayToken(flockID string) (string, bool) {
+	flockID = strings.TrimSpace(flockID)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	token, ok := s.state.RoutedFlockRelayTokens[flockID]
+	return token, ok
 }
 
 func (s *PlacementStore) ensureMaps() {
@@ -718,6 +747,9 @@ func normalizePlacementStoreState(state *PlacementStoreState) {
 		state.ControlLoopStatus.Hosts = make(map[string]HostObservation)
 	}
 	normalizeFlockPlacementMetricsState(&state.FlockPlacementMetrics)
+	if state.RoutedFlockRelayTokens == nil {
+		state.RoutedFlockRelayTokens = make(map[string]string)
+	}
 	if state.RoutedFlocks == nil {
 		state.RoutedFlocks = make(map[string]RoutedFlockRecord)
 	}
@@ -749,13 +781,14 @@ func normalizeVMPlacements(placements map[string]string) map[string]string {
 
 func clonePlacementStoreState(state PlacementStoreState) PlacementStoreState {
 	out := PlacementStoreState{
-		Hosts:               make(map[string]RuntimeHost, len(state.Hosts)),
-		VMPlacements:        make(map[string]string, len(state.VMPlacements)),
-		SnapshotLocations:   make(map[string][]string, len(state.SnapshotLocations)),
-		ConfigManagedHosts:  make(map[string]bool, len(state.ConfigManagedHosts)),
-		HostObservations:    make(map[string]HostObservation, len(state.HostObservations)),
-		SuspectVMPlacements: make(map[string]SuspectVMPlacement, len(state.SuspectVMPlacements)),
-		RoutedFlocks:        make(map[string]RoutedFlockRecord, len(state.RoutedFlocks)),
+		Hosts:                  make(map[string]RuntimeHost, len(state.Hosts)),
+		VMPlacements:           make(map[string]string, len(state.VMPlacements)),
+		SnapshotLocations:      make(map[string][]string, len(state.SnapshotLocations)),
+		ConfigManagedHosts:     make(map[string]bool, len(state.ConfigManagedHosts)),
+		HostObservations:       make(map[string]HostObservation, len(state.HostObservations)),
+		SuspectVMPlacements:    make(map[string]SuspectVMPlacement, len(state.SuspectVMPlacements)),
+		RoutedFlocks:           make(map[string]RoutedFlockRecord, len(state.RoutedFlocks)),
+		RoutedFlockRelayTokens: make(map[string]string, len(state.RoutedFlockRelayTokens)),
 	}
 	for name, host := range state.Hosts {
 		out.Hosts[name] = cloneRuntimeHost(host)
@@ -777,6 +810,9 @@ func clonePlacementStoreState(state PlacementStoreState) PlacementStoreState {
 	}
 	for flockID, record := range state.RoutedFlocks {
 		out.RoutedFlocks[flockID] = cloneRoutedFlockRecord(record)
+	}
+	for flockID, token := range state.RoutedFlockRelayTokens {
+		out.RoutedFlockRelayTokens[flockID] = token
 	}
 	out.ControlLoopStatus = state.ControlLoopStatus
 	out.ControlLoopStatus.Hosts = make(map[string]HostObservation, len(state.ControlLoopStatus.Hosts))
@@ -826,6 +862,14 @@ func (s *PlacementStore) SaveRoutedFlockAndPlacements(record RoutedFlockRecord, 
 
 func applyRoutedFlockAndPlacements(state *PlacementStoreState, record RoutedFlockRecord, removeVMIDs []string) {
 	normalizePlacementStoreState(state)
+	// Persist the relay secret in the dedicated (State()-redacted) map, then
+	// scrub it from the record retained in the store so no record projection
+	// can leak it. Only overwrite when the carrier is set, so record re-saves
+	// that do not carry the token preserve the persisted value.
+	if token := strings.TrimSpace(record.relayToken); token != "" {
+		state.RoutedFlockRelayTokens[record.FlockID] = token
+	}
+	record.relayToken = ""
 	state.RoutedFlocks[record.FlockID] = cloneRoutedFlockRecord(record)
 	for _, vmID := range removeVMIDs {
 		delete(state.VMPlacements, strings.TrimSpace(vmID))
@@ -867,6 +911,7 @@ func normalizeRoutedFlockRecord(record RoutedFlockRecord) RoutedFlockRecord {
 	record.Task = strings.TrimSpace(record.Task)
 	record.TenantID = strings.TrimSpace(record.TenantID)
 	record.EgressPolicy = strings.TrimSpace(record.EgressPolicy)
+	record.HomeHost = strings.TrimSpace(record.HomeHost)
 	record.Mode = strings.TrimSpace(record.Mode)
 	if record.Mode == "" {
 		record.Mode = RoutedFlockModeCrossHostMembersOnly

@@ -39,6 +39,8 @@ type Daemon interface {
 	DeleteFlock(ctx context.Context, flockID string) (*RawDaemonResponse, error)
 	PostTownWall(ctx context.Context, flockID string, req TownWallPostRequest) (*TownWallMessage, error)
 	TownWallHistory(ctx context.Context, flockID string) ([]TownWallMessage, error)
+	RegisterDistributedFlock(ctx context.Context, flockID string, req DistributedFlockRequest) error
+	RegisterRelayFlock(ctx context.Context, flockID string, req RelayFlockRequest) error
 }
 
 type snapshotReplicator interface {

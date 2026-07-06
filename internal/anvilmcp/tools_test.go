@@ -467,6 +467,14 @@ func (f *fakeDaemon) TownWallHistory(_ context.Context, flockID string) ([]TownW
 	return []TownWallMessage{{Timestamp: time.Date(2026, 5, 12, 1, 0, 0, 0, time.UTC), AgentID: "agent-worker", Body: "hello wall"}}, nil
 }
 
+func (f *fakeDaemon) RegisterDistributedFlock(context.Context, string, DistributedFlockRequest) error {
+	return nil
+}
+
+func (f *fakeDaemon) RegisterRelayFlock(context.Context, string, RelayFlockRequest) error {
+	return nil
+}
+
 func (f *routerFakeDaemon) CreateFlock(context.Context, FlockCreateRequest) (*FlockCreateResponse, error) {
 	return &FlockCreateResponse{FlockID: "flock-1", Agents: []FlockAgentInfo{}}, nil
 }

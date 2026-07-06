@@ -11,39 +11,57 @@ import (
 )
 
 type routerFakeDaemon struct {
-	spawnCalls           int
-	spawnReq             SpawnVMRequest
-	spawnResp            *SpawnVMResponse
-	spawnResponses       []*SpawnVMResponse
-	spawnReqs            []SpawnVMRequest
-	spawnErr             error
-	runTaskCalls         int
-	runTaskVMID          string
-	healthCalls          int
-	healthVMID           string
-	createSnapshotCalls  int
-	createSnapshotVMID   string
-	restoreSnapshotCalls int
-	restoreSnapshotID    string
-	restoreResp          *RestoreSnapshotResponse
-	restoreErr           error
-	deleteCalls          int
-	deleteVMID           string
-	deleteVMIDs          []string
-	deleteErr            error
-	deleteErrForVMID     map[string]error
-	deleteNilResp        bool
-	afterDelete          func()
-	listVMResp           []VMInfo
-	snapshotList         []SnapshotInfo
-	listSnapshotErr      error
-	exportCalls          []string
-	exportBodies         map[string]string
-	exportStreams        map[string]io.ReadCloser
-	exportErr            error
-	importCalls          []string
-	importErrForBody     map[string]error
-	importStatusForBody  map[string]string
+	spawnCalls             int
+	spawnReq               SpawnVMRequest
+	spawnResp              *SpawnVMResponse
+	spawnResponses         []*SpawnVMResponse
+	spawnReqs              []SpawnVMRequest
+	spawnErr               error
+	runTaskCalls           int
+	runTaskVMID            string
+	healthCalls            int
+	healthVMID             string
+	createSnapshotCalls    int
+	createSnapshotVMID     string
+	restoreSnapshotCalls   int
+	restoreSnapshotID      string
+	restoreResp            *RestoreSnapshotResponse
+	restoreErr             error
+	deleteCalls            int
+	deleteVMID             string
+	deleteVMIDs            []string
+	deleteErr              error
+	deleteErrForVMID       map[string]error
+	deleteNilResp          bool
+	afterDelete            func()
+	listVMResp             []VMInfo
+	snapshotList           []SnapshotInfo
+	listSnapshotErr        error
+	exportCalls            []string
+	exportBodies           map[string]string
+	exportStreams          map[string]io.ReadCloser
+	exportErr              error
+	importCalls            []string
+	importErrForBody       map[string]error
+	importStatusForBody    map[string]string
+	distributedCalls       int
+	distributedReq         DistributedFlockRequest
+	registerDistributedErr error
+	relayCalls             int
+	relayReq               RelayFlockRequest
+	registerRelayErr       error
+}
+
+func (f *routerFakeDaemon) RegisterDistributedFlock(_ context.Context, _ string, req DistributedFlockRequest) error {
+	f.distributedCalls++
+	f.distributedReq = req
+	return f.registerDistributedErr
+}
+
+func (f *routerFakeDaemon) RegisterRelayFlock(_ context.Context, _ string, req RelayFlockRequest) error {
+	f.relayCalls++
+	f.relayReq = req
+	return f.registerRelayErr
 }
 
 func (f *routerFakeDaemon) SpawnVM(_ context.Context, req SpawnVMRequest) (*SpawnVMResponse, error) {
@@ -609,8 +627,8 @@ func TestRuntimeRouterCreateRoutedFlockMembersSpawnsAcrossHosts(t *testing.T) {
 	if out.Status != RoutedFlockStatusReady {
 		t.Fatalf("status = %q, want %q", out.Status, RoutedFlockStatusReady)
 	}
-	if out.TownWallEnabled {
-		t.Fatal("town wall enabled = true, want false")
+	if !out.TownWallEnabled {
+		t.Fatal("town wall enabled = false, want true (shared town wall wired)")
 	}
 	if len(out.Agents) != 2 {
 		t.Fatalf("agents len = %d, want 2: %+v", len(out.Agents), out.Agents)
@@ -681,6 +699,104 @@ func TestRuntimeRouterCreateRoutedFlockMembersSpawnsAcrossHosts(t *testing.T) {
 		if host, ok := store.VMHost(vmID); !ok || host != wantHost {
 			t.Fatalf("store placement for %s = %q,%v want %s,true", vmID, host, ok, wantHost)
 		}
+	}
+}
+
+func TestCreateRoutedFlockMembers_WiresSharedTownWall(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
+	home := &routerFakeDaemon{spawnResponses: []*SpawnVMResponse{{
+		VMID: "vm-coordinator-1", GuestIP: "10.0.1.10", AgentURL: "http://10.0.1.10:8080", TenantID: "tenant-1", EgressPolicy: "profile",
+	}}}
+	member := &routerFakeDaemon{spawnResponses: []*SpawnVMResponse{{
+		VMID: "vm-researcher-1", GuestIP: "10.0.2.10", AgentURL: "http://10.0.2.10:8080", TenantID: "tenant-1", EgressPolicy: "profile",
+	}}}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(
+			[]RuntimeHost{
+				{Name: "hostA", Endpoint: "http://hostA.internal:8080", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+				{Name: "hostB", Endpoint: "http://hostB.internal:8080", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+			},
+			nil,
+			nil,
+		),
+		map[string]Daemon{"hostA": home, "hostB": member},
+		RuntimeRouterOptions{PlacementStore: store},
+	)
+
+	out, err := router.CreateRoutedFlockMembers(context.Background(), FlockCreateRequest{
+		Task:         "smoke",
+		Roles:        []string{"coordinator", "researcher"},
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.TownWallEnabled {
+		t.Fatalf("TownWallEnabled = false, want true")
+	}
+	rec, ok := store.RoutedFlock(out.FlockID)
+	if !ok {
+		t.Fatalf("routed flock %q not found in registry", out.FlockID)
+	}
+	if rec.HomeHost != "hostA" {
+		t.Fatalf("HomeHost = %q, want hostA (roles[0] placement)", rec.HomeHost)
+	}
+	if home.distributedCalls != 1 {
+		t.Fatalf("home distributed (hub) registrations = %d, want 1", home.distributedCalls)
+	}
+	if member.relayCalls != 1 {
+		t.Fatalf("member relay registrations = %d, want 1", member.relayCalls)
+	}
+	if home.relayCalls != 0 {
+		t.Fatalf("home relay registrations = %d, want 0 (home already owns the hub)", home.relayCalls)
+	}
+	// spawn identity injected on the member
+	if member.spawnReq.FlockID != out.FlockID || member.spawnReq.AgentID == "" || member.spawnReq.ControlPlaneToken == "" {
+		t.Fatalf("member spawn missing flock identity: %+v", member.spawnReq)
+	}
+	// tenant/egress propagation preserved on the member spawn
+	if member.spawnReq.TenantID != "tenant-1" || member.spawnReq.EgressPolicy != "profile" {
+		t.Fatalf("member spawn dropped tenant/egress: %+v", member.spawnReq)
+	}
+	// relay registration carries the home daemon base URL + the shared relay token
+	if member.relayReq.HomeAddr == "" || member.relayReq.RelayToken == "" {
+		t.Fatalf("relay registration missing home addr/token: %+v", member.relayReq)
+	}
+	// the guest control-plane token equals the flock relay token
+	if member.spawnReq.ControlPlaneToken != member.relayReq.RelayToken {
+		t.Fatalf("guest cp token %q != relay token %q", member.spawnReq.ControlPlaneToken, member.relayReq.RelayToken)
+	}
+	// the hub registration carries the full roster + the same relay token
+	if len(home.distributedReq.Roster) != 2 || home.distributedReq.RelayToken != member.relayReq.RelayToken {
+		t.Fatalf("hub registration roster/token mismatch: %+v", home.distributedReq)
+	}
+	// relay token persisted for reconcile but redacted from every MCP-facing view
+	token, ok := store.RoutedFlockRelayToken(out.FlockID)
+	if !ok || token == "" {
+		t.Fatalf("relay token not persisted for flock %q", out.FlockID)
+	}
+	if token != member.relayReq.RelayToken {
+		t.Fatalf("persisted relay token %q != registered token %q", token, member.relayReq.RelayToken)
+	}
+	outJSON, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal output: %v", err)
+	}
+	recJSON, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatalf("marshal record: %v", err)
+	}
+	if strings.Contains(string(outJSON), token) || strings.Contains(string(recJSON), token) {
+		t.Fatalf("relay token leaked into MCP-facing output/record: out=%s rec=%s", outJSON, recJSON)
+	}
+	// State() (scheduler placements endpoint) must not expose the relay token
+	stateJSON, err := json.Marshal(store.State())
+	if err != nil {
+		t.Fatalf("marshal state: %v", err)
+	}
+	if strings.Contains(string(stateJSON), token) {
+		t.Fatalf("relay token leaked into placement store State(): %s", stateJSON)
 	}
 }
 

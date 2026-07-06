@@ -2,6 +2,8 @@ package anvilmcp
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -91,6 +93,19 @@ func (r *RuntimeRouter) CreateRoutedFlockMembers(ctx context.Context, req FlockC
 	if record.Task == "" {
 		return nil, fmt.Errorf("task must be non-empty")
 	}
+	if len(plan.Agents) == 0 {
+		return nil, fmt.Errorf("routed flock create failed: flock_id=%q reason=%s", record.FlockID, sanitizeRoutedFlockErrorReason(FlockPlacementReasonNoEligibleHost))
+	}
+
+	// Home host is deterministic: the host where roles[0] (plan.Agents[0]) is
+	// placed. The home daemon owns the shared Town Wall hub; every other member
+	// host relays to it under one per-flock secret.
+	homeHost := strings.TrimSpace(plan.Agents[0].Host.Name)
+	relayToken, err := newRelayToken()
+	if err != nil {
+		return nil, fmt.Errorf("routed flock create failed: flock_id=%q reason=%s", record.FlockID, sanitizeRoutedFlockErrorReason(FlockPlacementReasonUnknown))
+	}
+	record.HomeHost = homeHost
 
 	var registrySaveLatency time.Duration
 	registrySaveStart := time.Now()
@@ -109,6 +124,33 @@ func (r *RuntimeRouter) CreateRoutedFlockMembers(ctx context.Context, req FlockC
 	}
 	registrySaveLatency += time.Since(registrySaveStart)
 
+	// Register the shared Town Wall hub on the home daemon: the full roster plus
+	// the per-flock relay secret it will admit for the flock's wall sub-paths.
+	roster := make([]RosterMember, 0, len(plan.Agents))
+	for _, a := range plan.Agents {
+		roster = append(roster, RosterMember{AgentID: strings.TrimSpace(a.AgentID), Host: strings.TrimSpace(a.Host.Name)})
+	}
+	homeDaemon, ok := r.daemons[homeHost]
+	if !ok || homeDaemon == nil {
+		return nil, rollbackRoutedFlockCreate(ctx, r, record, routedFlockCreateFailureMetric{
+			Outcome:             FlockPlacementOutcomeCrossHostSpawnError,
+			Reason:              FlockPlacementReasonDaemonCreateFailed,
+			PlanLatency:         planLatency,
+			RegistrySaveLatency: registrySaveLatency,
+			TotalStart:          totalStart,
+		})
+	}
+	if err := homeDaemon.RegisterDistributedFlock(ctx, record.FlockID, DistributedFlockRequest{Roster: roster, RelayToken: relayToken}); err != nil {
+		return nil, rollbackRoutedFlockCreate(ctx, r, record, routedFlockCreateFailureMetric{
+			Outcome:             FlockPlacementOutcomeCrossHostSpawnError,
+			Reason:              FlockPlacementReasonDaemonCreateFailed,
+			PlanLatency:         planLatency,
+			RegistrySaveLatency: registrySaveLatency,
+			TotalStart:          totalStart,
+		})
+	}
+	homeAddr := r.daemonAddr(homeHost)
+
 	var agentSpawnLatency time.Duration
 	for _, planned := range plan.Agents {
 		hostName := strings.TrimSpace(planned.Host.Name)
@@ -124,11 +166,32 @@ func (r *RuntimeRouter) CreateRoutedFlockMembers(ctx context.Context, req FlockC
 			})
 		}
 
+		// Register a relay flock on each member host so its guests' wall traffic
+		// forwards to the home daemon. Skip the home host: it already owns the hub.
+		if hostName != homeHost {
+			if err := daemon.RegisterRelayFlock(ctx, record.FlockID, RelayFlockRequest{HomeAddr: homeAddr, RelayToken: relayToken}); err != nil {
+				return nil, rollbackRoutedFlockCreate(ctx, r, record, routedFlockCreateFailureMetric{
+					Outcome:             FlockPlacementOutcomeCrossHostSpawnError,
+					Reason:              FlockPlacementReasonDaemonCreateFailed,
+					PlanLatency:         planLatency,
+					AgentSpawnLatency:   agentSpawnLatency,
+					RegistrySaveLatency: registrySaveLatency,
+					TotalStart:          totalStart,
+				})
+			}
+		}
+
 		spawnStart := time.Now()
 		resp, err := daemon.SpawnVM(ctx, SpawnVMRequest{
 			Profile:      planned.Role,
 			TenantID:     plan.TenantID,
 			EgressPolicy: string(plan.EgressPolicy),
+			// Flock identity: the daemon injects .ephemera-flock / .ephemera-cp-token
+			// so gtwall works in-VM. The guest CP token is the per-flock relay token,
+			// which the home daemon admits only for this flock's wall sub-paths.
+			FlockID:           record.FlockID,
+			AgentID:           strings.TrimSpace(planned.AgentID),
+			ControlPlaneToken: relayToken,
 		})
 		agentSpawnLatency += time.Since(spawnStart)
 		if err != nil {
@@ -190,6 +253,9 @@ func (r *RuntimeRouter) CreateRoutedFlockMembers(ctx context.Context, req FlockC
 	}
 
 	record.Status = RoutedFlockStatusReady
+	// Persist the relay secret only on full success. The store copies it into
+	// the redacted RoutedFlockRelayTokens map and scrubs it from the record.
+	record.relayToken = relayToken
 	record.UpdatedAt = time.Now().UTC()
 	registrySaveStart = time.Now()
 	if err := r.placementStore.SaveRoutedFlockAndPlacements(record, nil); err != nil {
@@ -227,9 +293,18 @@ func routedFlockCreateOutput(record RoutedFlockRecord) *RoutedFlockCreateOutput 
 		EgressPolicy:    record.EgressPolicy,
 		Mode:            record.Mode,
 		Status:          record.Status,
-		TownWallEnabled: false,
+		TownWallEnabled: true,
 		Agents:          append([]RoutedFlockAgent(nil), record.Agents...),
 	}
+}
+
+// newRelayToken returns a fresh per-flock relay secret (32 random bytes, hex).
+func newRelayToken() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("generate relay token: %w", err)
+	}
+	return hex.EncodeToString(buf), nil
 }
 
 func (r *RuntimeRouter) recordRoutedFlockMetric(obs FlockPlacementMetricObservation) {
