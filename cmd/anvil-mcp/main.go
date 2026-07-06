@@ -150,7 +150,7 @@ func toolRegistrations() []toolRegistration {
 		},
 		{
 			name:        "anvil_get_townwall_history",
-			description: "Return the full Town Wall history for a Goosetown flock.",
+			description: "Return the active Town Wall history for a Goosetown flock.",
 			register: func(server *mcp.Server, tool *mcp.Tool, tools *anvilmcp.Tools) {
 				mcp.AddTool(server, tool, tools.MCPTownWallHistory)
 			},

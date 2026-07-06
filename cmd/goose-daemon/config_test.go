@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"testing"
 )
@@ -14,10 +15,12 @@ var daemonConfigEnvKeys = []string{
 	"ANVIL_API_TOKENS",
 	"EPHEMERA_API_TOKEN",
 	"ANVIL_API_TOKEN",
+	"EPHEMERA_API_TOKENS_FILE",
 	"EPHEMERA_AGENT_PORT",
 	"ANVIL_AGENT_PORT",
 	"EPHEMERA_PUBLIC_URL",
 	"ANVIL_PUBLIC_URL",
+	"EPHEMERA_DISK_MODE",
 	"EPHEMERA_HOME",
 }
 
@@ -155,6 +158,22 @@ func TestLoadAPIClients_FromAnvilMultiTokenAlias(t *testing.T) {
 	}
 	if clients[1].Name != "operator" || clients[1].Token != "tokenB" {
 		t.Errorf("unexpected client[1]: %+v", clients[1])
+	}
+}
+
+func TestLoadAPIClients_AnvilTokenAliasSupportsExpiry(t *testing.T) {
+	clearDaemonConfigEnv(t)
+	t.Setenv("ANVIL_API_TOKENS", "ironclaw:tok:4102444800")
+
+	clients := loadAPIClients()
+	if len(clients) != 1 {
+		t.Fatalf("clients = %d, want 1", len(clients))
+	}
+	if clients[0].Name != "ironclaw" || clients[0].Token != "tok" {
+		t.Fatalf("client = %+v, want ironclaw/tok", clients[0])
+	}
+	if clients[0].Expires.IsZero() {
+		t.Fatal("Expires is zero, want parsed expiry")
 	}
 }
 
@@ -307,5 +326,129 @@ func TestResolveAgentPort_EphemeraPrecedesAnvilAlias(t *testing.T) {
 
 	if got := resolveAgentPort(); got != 8081 {
 		t.Fatalf("expected EPHEMERA_AGENT_PORT value, got %d", got)
+	}
+}
+
+// TestEnvBool_Autosnapshot documents the EPHEMERA_AUTOSNAPSHOT (v0.4.0) mapping.
+// It exercises envBool directly rather than the enableAutoSnapshot package var,
+// which is captured once at init and would not reflect env changes made here.
+func TestEnvBool_Autosnapshot(t *testing.T) {
+	const key = "EPHEMERA_AUTOSNAPSHOT"
+	cases := []struct {
+		name string
+		val  string
+		set  bool
+		want bool
+	}{
+		{name: "unset defaults off", set: false, want: false},
+		{name: "empty defaults off", val: "", set: true, want: false},
+		{name: "true", val: "true", set: true, want: true},
+		{name: "1", val: "1", set: true, want: true},
+		{name: "yes", val: "yes", set: true, want: true},
+		{name: "on", val: "on", set: true, want: true},
+		{name: "false", val: "false", set: true, want: false},
+		{name: "off", val: "off", set: true, want: false},
+		{name: "garbage defaults off", val: "garbage", set: true, want: false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if c.set {
+				os.Setenv(key, c.val)
+				defer os.Unsetenv(key)
+			} else {
+				os.Unsetenv(key)
+			}
+			if got := envBool(key, false); got != c.want {
+				t.Errorf("envBool(%q=%q) = %v, want %v", key, c.val, got, c.want)
+			}
+		})
+	}
+}
+
+func TestResolveDiskModeCOW_AnvilDefaultPlain(t *testing.T) {
+	clearDaemonConfigEnv(t)
+
+	probes := 0
+	got := resolveDiskModeCOW(func() error {
+		probes++
+		return nil
+	})
+	if got {
+		t.Fatalf("unset EPHEMERA_DISK_MODE should resolve to plain/full clone")
+	}
+	if probes != 0 {
+		t.Fatalf("unset EPHEMERA_DISK_MODE probe calls = %d, want 0", probes)
+	}
+}
+
+func TestResolveDiskModeCOW_ExplicitCowProbes(t *testing.T) {
+	clearDaemonConfigEnv(t)
+	t.Setenv("EPHEMERA_DISK_MODE", "cow")
+
+	probes := 0
+	got := resolveDiskModeCOW(func() error {
+		probes++
+		return nil
+	})
+	if !got {
+		t.Fatalf("EPHEMERA_DISK_MODE=cow with passing probe should enable COW")
+	}
+	if probes != 1 {
+		t.Fatalf("EPHEMERA_DISK_MODE=cow probe calls = %d, want 1", probes)
+	}
+}
+
+func TestResolveDiskModeCOW_ExplicitCowFallsBackWhenProbeFails(t *testing.T) {
+	clearDaemonConfigEnv(t)
+	t.Setenv("EPHEMERA_DISK_MODE", "cow")
+
+	probes := 0
+	got := resolveDiskModeCOW(func() error {
+		probes++
+		return errors.New("no dm-snapshot")
+	})
+	if got {
+		t.Fatalf("EPHEMERA_DISK_MODE=cow with failing probe should fall back to plain")
+	}
+	if probes != 1 {
+		t.Fatalf("EPHEMERA_DISK_MODE=cow probe calls = %d, want 1", probes)
+	}
+}
+
+func TestResolveDiskModeCOW_PlainAndFullSkipProbe(t *testing.T) {
+	for _, val := range []string{"plain", "full", "PLAIN"} {
+		t.Run(val, func(t *testing.T) {
+			clearDaemonConfigEnv(t)
+			t.Setenv("EPHEMERA_DISK_MODE", val)
+
+			probes := 0
+			got := resolveDiskModeCOW(func() error {
+				probes++
+				return nil
+			})
+			if got {
+				t.Fatalf("EPHEMERA_DISK_MODE=%q should resolve to plain/full clone", val)
+			}
+			if probes != 0 {
+				t.Fatalf("EPHEMERA_DISK_MODE=%q probe calls = %d, want 0", val, probes)
+			}
+		})
+	}
+}
+
+func TestResolveDiskModeCOW_UnsupportedValueSkipsProbe(t *testing.T) {
+	clearDaemonConfigEnv(t)
+	t.Setenv("EPHEMERA_DISK_MODE", "unsupported")
+
+	probes := 0
+	got := resolveDiskModeCOW(func() error {
+		probes++
+		return nil
+	})
+	if got {
+		t.Fatalf("unsupported EPHEMERA_DISK_MODE should resolve to plain/full clone")
+	}
+	if probes != 0 {
+		t.Fatalf("unsupported EPHEMERA_DISK_MODE probe calls = %d, want 0", probes)
 	}
 }

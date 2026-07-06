@@ -217,7 +217,7 @@ func (wd *Watchdog) onSuccess(vmID string) {
 		slog.Warn("watchdog: persist auto-heal failed", "agent_id", agentID, "err", err)
 	}
 	if _, err := flock.TownWall.Post(
-		"orchestrator",
+		SystemAuthor,
 		fmt.Sprintf("%s recovered - auto-healed to ready", agentID),
 	); err != nil {
 		slog.Warn("watchdog: post auto-heal notice failed", "agent_id", agentID, "err", err)
@@ -228,18 +228,10 @@ func (wd *Watchdog) onSuccess(vmID string) {
 }
 
 // onFailure increments the fail counter and, on the threshold transition,
-// updates the agent status and posts a Town Wall notice exactly once.
+// updates the agent status and posts a Town Wall notice exactly once. Paused
+// agents are skipped before counting because Firecracker pause intentionally
+// makes /health unavailable.
 func (wd *Watchdog) onFailure(v VMRef) {
-	wd.mu.Lock()
-	wd.failCount[v.VMID]++
-	count := wd.failCount[v.VMID]
-	alreadyMarked := wd.deadMarked[v.VMID]
-	wd.mu.Unlock()
-
-	if alreadyMarked || count < wd.dyingThreshold {
-		return
-	}
-
 	flockID, agentID, ok := wd.locator(v.VMID)
 	if !ok {
 		// Not a flock member — standalone VMs aren't watchdog targets.
@@ -250,7 +242,31 @@ func (wd *Watchdog) onFailure(v VMRef) {
 		// Flock was deleted between the lister snapshot and now. Race-tolerant.
 		return
 	}
-	flock.UpdateAgentStatus(agentID, AgentStatusDead)
+	if flock.AgentStatus(agentID) == AgentStatusPaused {
+		// A paused flock member intentionally doesn't answer /health (v0.4.3);
+		// don't count this as a failure or mark it dead.
+		wd.mu.Lock()
+		delete(wd.failCount, v.VMID)
+		wd.mu.Unlock()
+		return
+	}
+
+	wd.mu.Lock()
+	wd.failCount[v.VMID]++
+	count := wd.failCount[v.VMID]
+	alreadyMarked := wd.deadMarked[v.VMID]
+	wd.mu.Unlock()
+
+	if alreadyMarked || count < wd.dyingThreshold {
+		return
+	}
+
+	if !flock.MarkAgentDeadIfNotPaused(agentID) {
+		wd.mu.Lock()
+		delete(wd.failCount, v.VMID)
+		wd.mu.Unlock()
+		return
+	}
 	if err := flock.Persist(wd.flockMgr.WorkDir()); err != nil {
 		// The in-memory mark already took effect; a missed disk write means
 		// the dead state will be lost on the next daemon restart, which the
@@ -258,7 +274,7 @@ func (wd *Watchdog) onFailure(v VMRef) {
 		slog.Warn("watchdog: persist dead status failed", "agent_id", agentID, "err", err)
 	}
 	if _, err := flock.TownWall.Post(
-		"orchestrator",
+		SystemAuthor,
 		fmt.Sprintf("%s unresponsive after %d health probes - marked dead",
 			agentID, wd.dyingThreshold),
 	); err != nil {
@@ -283,4 +299,44 @@ func (wd *Watchdog) ForgetVM(vmID string) {
 	defer wd.mu.Unlock()
 	delete(wd.failCount, vmID)
 	delete(wd.deadMarked, vmID)
+}
+
+// WatchdogStatus is a point-in-time snapshot of the watchdog's tunables and
+// per-VM health state, served by GET /watchdog/status (v0.4.4). VMFailCounts
+// holds only VMs with a non-zero consecutive-failure count; VMDeadMarked lists
+// VMs the watchdog has marked dead. Both are empty when every agent is healthy.
+type WatchdogStatus struct {
+	IntervalSec    int            `json:"interval_sec"`
+	TimeoutSec     int            `json:"timeout_sec"`
+	DyingThreshold int            `json:"dying_threshold"`
+	AutoHeal       bool           `json:"auto_heal"`
+	VMFailCounts   map[string]int `json:"vm_fail_counts"`
+	VMDeadMarked   []string       `json:"vm_dead_marked"`
+}
+
+// Status returns a deep-copied snapshot of the watchdog's current configuration
+// and per-VM health state under the same lock the polling loop uses, so a
+// concurrent tick can never observe a half-built response. Safe to call any
+// time after construction.
+func (wd *Watchdog) Status() WatchdogStatus {
+	wd.mu.Lock()
+	defer wd.mu.Unlock()
+	failCounts := make(map[string]int, len(wd.failCount))
+	for vmID, n := range wd.failCount {
+		failCounts[vmID] = n
+	}
+	dead := make([]string, 0, len(wd.deadMarked))
+	for vmID, marked := range wd.deadMarked {
+		if marked {
+			dead = append(dead, vmID)
+		}
+	}
+	return WatchdogStatus{
+		IntervalSec:    int(wd.interval.Seconds()),
+		TimeoutSec:     int(wd.httpTimeout.Seconds()),
+		DyingThreshold: wd.dyingThreshold,
+		AutoHeal:       wd.autoHeal,
+		VMFailCounts:   failCounts,
+		VMDeadMarked:   dead,
+	}
 }

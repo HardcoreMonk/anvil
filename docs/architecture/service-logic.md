@@ -2,7 +2,7 @@
 
 ## 상태
 
-- 기준 버전: upstream ephemera `v0.3.6` + anvil runtime control-plane updates
+- 기준 버전: upstream ephemera `v0.7.0` + anvil runtime control-plane updates
 - 범위: ephemera daemon HTTP 동작, VM lifecycle, agent proxy, snapshot lifecycle,
   Goosetown flock/Town Wall, tenant/egress/audit/observability endpoint, guest agent 동작
 - 제외 범위: IronClaw MCP client 동작. 해당 내용은
@@ -21,17 +21,19 @@ control plane daemon은 하나의 HTTP service를 노출한다.
 | `/health` | `cmd/goose-daemon/api.go` | daemon 상태, VM 수, snapshot 수, auth 활성 여부 |
 | `/metrics` | `cmd/goose-daemon/metrics_handler.go` | Prometheus text 형식 daemon metrics. 기본 unauth, `EPHEMERA_METRICS_REQUIRE_AUTH=true`일 때 Bearer token 필요 |
 | `/metrics/vms` | `cmd/goose-daemon/api.go` | 실행 중인 VM별 legacy JSON metadata metrics |
+| `/watchdog/status` | `cmd/goose-daemon/api.go` | health watchdog tunable과 per-VM fail/dead 상태 read-only 조회 (count/ID/config만) |
 | `/tenants` | `cmd/goose-daemon/api.go` | tenant quota/usage 목록 |
 | `/tenants/{tenant_id}` | `cmd/goose-daemon/api.go` | tenant quota/usage 조회와 quota 설정 |
 | `/audit/runtime` | `cmd/goose-daemon/api.go` | runtime audit 조회 |
 | `/audit/runtime/prune` | `cmd/goose-daemon/api.go` | runtime audit 보관 정책 적용 |
 | `/vms` | `cmd/goose-daemon/api.go` | VM 생성, 목록, 삭제. `?stats=true`면 per-VM stats inline |
 | `/vms/{vm_id}/stats` | `cmd/goose-daemon/stats_handler.go` | VM별 cpu/mem/net/uptime/agent_busy point-in-time stats |
-| `/vms/{vm_id}/tasks` | `cmd/goose-daemon/api.go` | guest agent로 task 실행 proxy |
+| `/vms/{vm_id}/tasks` | `cmd/goose-daemon/api.go` | guest agent로 task 실행 proxy. `?stream=1`이면 NDJSON progress+result streaming, 기본은 buffered `{"output","error"}`. `EPHEMERA_MAX_TASK_DEPTH` depth guard(`508`) 적용 |
 | `/vms/{vm_id}/workloads/run` | `cmd/goose-daemon/api.go` | guest agent로 script-only workload 실행 proxy |
 | `/vms/{vm_id}/workspace` | `cmd/goose-daemon/api.go` | guest `/workspace` 단일 파일 read/write proxy |
 | `/vms/{vm_id}/health` | `cmd/goose-daemon/api.go` | guest health proxy |
 | `/vms/{vm_id}/stop` | `cmd/goose-daemon/api.go` | guest agent에 stop 요청 |
+| `/vms/{vm_id}/sessions/{name}/transcript` | `cmd/goose-daemon/api.go` | guest agent `/sessions/{name}/transcript` proxy(bearer). read-only 대화 transcript 복원, 응답 `{turns:[{role,text}]}`(`v0.7.0`) |
 | `/vms/{vm_id}/snapshot` | `cmd/goose-daemon/api.go` | full 또는 diff VM snapshot 생성 |
 | `/snapshots` | `cmd/goose-daemon/api.go` | 저장된 snapshot 목록 |
 | `/snapshots/gc` | `cmd/goose-daemon/api.go` | snapshot retention GC dry-run/apply |
@@ -44,6 +46,13 @@ control plane daemon은 하나의 HTTP service를 노출한다.
 | `/flocks/{flock_id}/post` | `cmd/goose-daemon/orchestrator_api.go` | Town Wall message append |
 | `/flocks/{flock_id}/wall` | `cmd/goose-daemon/orchestrator_api.go` | Town Wall SSE stream |
 | `/flocks/{flock_id}/wall/history` | `cmd/goose-daemon/orchestrator_api.go` | Town Wall history 조회 |
+| `/flocks/{flock_id}/broadcast` | `cmd/goose-daemon/orchestrator_api.go` | flock 전 member agent에 prompt scatter-gather. daemon-only endpoint이며 `anvil_*` MCP tool로 노출하지 않는다 |
+| `/ui/` | `cmd/goose-daemon/config_api.go`, `cmd/goose-daemon/uidist/` | embedded operator Svelte SPA(정적 bundle + login page). auth chain 밖에 두는 유일한 surface. runtime/operator surface이며 IronClaw MCP surface가 아니다 |
+| `/config/profiles`, `/config/profiles/{name}` | `cmd/goose-daemon/config_api.go` | profile `GOOSE_PROVIDER`/`GOOSE_MODEL`·sizing·`system.md`(`64 KiB` cap) read/write. `goose-secrets.yaml`은 read/write하지 않음(sentinel test). delete in-use → `409`, default profile 예약, traversal 거부. auth 설정 시 bearer 뒤 |
+| `/config/providers` | `cmd/goose-daemon/config_api.go` | provider별 API key 존재 여부만 반환(key 값 비노출, sentinel test) |
+| `/config/clients` | `cmd/goose-daemon/config_api.go` | control-plane client 이름과 만료만 반환(token 값 비노출, sentinel test) |
+| `/config/mcp`, `/config/mcp/builtins` | `cmd/goose-daemon/mcp_api.go` | runtime MCP Gateway 설정/builtins 조회. auth 설정 시 bearer 뒤(`v0.6.0`) |
+| `/config/mcp/servers` | `cmd/goose-daemon/mcp_api.go` | backend server 목록을 transport/command + `has_credential`만 노출(credential 값 비노출, leak guard, `v0.6.4`) |
 
 VM 내부의 `goose-agent`는 다음 endpoint를 제공한다.
 
@@ -56,9 +65,19 @@ VM 내부의 `goose-agent`는 다음 endpoint를 제공한다.
 | `GET /health` | 없음 | `idle` 또는 `busy` 반환 |
 | `POST /stop` | VM별 Bearer token | agent HTTP server graceful stop |
 | `POST /townwall/post` | VM별 Bearer token | flock context를 읽어 host Town Wall에 message 전달 |
+| `GET /sessions/{name}/transcript` | VM별 Bearer token | 대화 transcript 복원(`v0.7.0`) |
 
 외부 caller는 private guest IP에 직접 접근하기보다 control plane proxy endpoint를
 사용해야 한다.
+
+conversation transcript restore(`v0.7.0`): `GET /sessions/{name}/transcript`는 캐시된
+transcript를 우선 serve하고, cache-miss일 때만 read-only `goose session export -n
+{name} --format json`(model call 없음)으로 채운다. 응답 schema `{turns:[{role,text}]}`는
+auth-free여서 Web UI가 daemon token 없이 렌더할 수 있다. daemon은 이 endpoint를
+`GET /vms/{vm_id}/sessions/{name}/transcript`로 proxy하며 control-plane bearer를 요구한다.
+4개 transcript-safety guard가 불변식을 고정한다: bearer 없으면 `401`, payload는 provider
+key/CP token/`agent_token` sentinel-free, cache-hit는 agent spawn 없이 serve, export
+argv는 `session export -n {name} --format json`이며 run-token을 거부한다.
 
 ## Runtime 설정 alias
 
@@ -81,6 +100,7 @@ Canonical-only upstream runtime 설정:
 |---|---|
 | `EPHEMERA_API_TOKENS_FILE` | `name:token` entry file. 파일 source는 SIGHUP 때 다시 읽히므로 hot rotation의 권장 경로 |
 | `EPHEMERA_HOME` | daemon work directory. `artifacts/`, `configs/`, `snapshots/` 같은 runtime path의 기준 directory |
+| `EPHEMERA_MAX_TASK_DEPTH` | nested `/tasks` dispatch depth 한계, 기본 `5`. 한계 도달 시 `508`, `X-Ephemera-Task-Depth`를 `depth+1`로 forwarding. 신설 canonical env, ANVIL alias 없음 |
 | `EPHEMERA_WATCHDOG_INTERVAL_SEC` | watchdog poll cadence, 기본 `5` |
 | `EPHEMERA_WATCHDOG_TIMEOUT_SEC` | watchdog per-probe HTTP timeout, 기본 `1` |
 | `EPHEMERA_WATCHDOG_THRESHOLD` | dead marking 전 연속 실패 횟수, 기본 `3` |
@@ -101,6 +121,12 @@ ephemera 배포의 동작을 보존하면서 anvil 운영 문서에서 `ANVIL_*`
 있게 한다.
 
 ## 제어 평면 인증
+
+operator Web UI(`v0.5.0`)에서 auth 밖에 두는 surface는 `/ui/`(정적 bundle + login
+page)뿐이다. `/config/profiles`·`/config/providers`·`/config/clients`를 포함한 모든
+data API는 auth 설정 시 bearer token 뒤에 유지한다(guard `config_api_anvil_test.go`).
+`/config/*` surface는 `goose-secrets.yaml` 값(API key)이나 control-plane token 값을
+응답에 담지 않는다(sentinel test).
 
 모든 control-plane route는 `authMiddleware`로 감싼다.
 
@@ -364,7 +390,11 @@ Town Wall body는 사용자가 제공한 message다. runtime audit record에는 
 daemon startup은 `flocks/*/metadata.json`을 scan해 flock registry와 Town Wall log를
 복구한 뒤, `vms/<vm_id>/state.json`이 남아 있는 spawn-path VM을 cold-restart한다.
 복구 성공한 flock member VM은 `cp.vms`에 다시 등록되므로 proxy endpoint와 watchdog
-probe 대상이 된다. COW-mode VM과 snapshot-restored VM은 자동 복구 대상이 아니다.
+probe 대상이 된다. spawn-path VM은 plain·COW disk mode 모두 cold-restart되고,
+snapshot-restored VM은 `v0.4.5`부터 `source_snapshot_id`를 담은 `state.json`으로
+source snapshot에서 re-restore(`recoverRestoredVM`/`reRestoreMachine`)된다.
+bind-mount-fallback restore와 source snapshot이 삭제된 restored VM은 복구 대상이
+아니며 drop되어 surface된다.
 
 ## VM 삭제 로직
 
@@ -410,9 +440,18 @@ proxyAgentEndpoint()
   -> incoming context와 body로 새 request 생성
   -> Content-Type 보존
   -> /health가 아니면 "Authorization: Bearer <agent_token>" 주입
-  -> cp.agentHTTPClient로 request 전송
+  -> cp.agentHTTPClient(request마다 fresh dial, `DisableKeepAlives`)로 request 전송
   -> response header, status code, body를 caller에게 복사
 ```
+
+`cp.agentHTTPClient`는 connection pooling을 끈다(`DisableKeepAlives`, `64ec57c`).
+guest IP는 VM destroy/create/restore 사이에 재활용되는데, 공유 keep-alive client가
+destroy된 VM으로 향하던 stale pooled connection을 재사용하면(특히 `v0.5.x`
+`gracefulAgentStop`이 넓힌 window에서) restored VM의 첫 proxied `/tasks`가 hang하거나
+`502`(peer RST)로 실패한다. proxied body는 rewindable하지 않아 net/http가 재시도할 수
+없으므로, request마다 새로 dial해 이 재사용을 원천 차단한다. 이는 v0.2.0부터 잠재하던
+upstream pooled-client 결함을 고친 것으로, upstream connection pooling과의 의도적
+divergence이며 upstream 기여 후보다.
 
 proxy는 외부 caller에게 하나의 인증 모델만 노출한다. caller는 control plane에만
 인증하고, daemon이 필요한 guest agent token을 내부적으로 주입한다.
@@ -472,6 +511,8 @@ createSnapshot()
 - diff snapshot도 rootfs는 full copy한다. memory만 sparse/diff다.
 - `metadata.json`은 tenant ID, egress policy, original TAP name, MAC, vsock path,
   agent token, disk path, memory path, state path, base snapshot ID를 보존한다.
+  `v0.5.3`부터 per-VM `VcpuCount`/`MemSizeMib`도 기록하며, legacy snapshot(0 값)은
+  restore 시 historical 2 vCPU / 2048 MiB로 fallback한다.
 - snapshot API response에는 `agent_token`을 노출하지 않는다.
 
 ### Snapshot token 수명 주기
@@ -541,7 +582,15 @@ restore된 VM은 guest agent 연속성을 위해 snapshot metadata의 original a
 내부적으로 유지한다. 외부 client는 guest agent token이 아니라 control-plane
 token과 daemon proxy를 사용해야 한다. restore success response에는
 `source_snapshot_id`, restored VM info, tenant ID, egress policy만 포함하고
-`agent_token`은 포함하지 않는다.
+`agent_token`/`agent_tokens`/`Authorization`/`Bearer`는 포함하지 않는다.
+
+`v0.4.5`부터 restore는 `source_snapshot_id`, `tenant_id`, `egress_policy`
+attribution을 담은 `vms/<new_vm_id>/state.json`을 persist한다. daemon restart 시
+`recoverRestoredVM`이 이 state를 읽어 source snapshot에서 auto-re-restore하며,
+graceful shutdown은 dm device와 transient exception store만 정리하고 `state.json`은
+남긴다. restored VM은 opt-in memory auto-snapshot에서 제외된다(재기동 시 source에서
+re-restore하므로 `auto/` image가 쓰이지 않는다). restore 시 복원되는 상태는
+snapshot-time memory·disk이며 post-restore write는 재기동 후 보존되지 않는다.
 
 restore 실패는 `Content-Type: application/json`인 `RestoreErrorResponse`를
 반환한다.
@@ -650,13 +699,19 @@ Route: `DELETE /snapshots/{id}`
 deleteSnapshot()
   -> cp.snapshots에서 base_snapshot_id == requested ID인 diff 검색
   -> 있으면 409 반환
+  -> live 또는 persisted restored VM state가 이 snapshot을 source로 참조하면
+     409 ("referenced by restored VM ...") 반환
   -> cp.snapshots에서 snapshot metadata 제거
   -> snapshots/<id>/를 disk에서 삭제
   -> {"status":"deleted","snapshot_id":"..."} 반환
 ```
 
-이 규칙은 diff snapshot이 아직 필요로 하는 full snapshot을 삭제하지 못하게
-막는다.
+이 규칙은 diff snapshot이 아직 필요로 하는 full snapshot을, 그리고 live·persisted
+restored VM이 재기동 recovery에 필요로 하는 source snapshot을 삭제하지 못하게
+막는다. upstream e2e 46c는 live restored VM이 참조하는 snapshot의 `DELETE`를 `200`으로
+허용하고 VM을 orphan으로 두지만, anvil은 이 `409` 보호를 유지하고 restored VM을
+먼저 삭제하도록 요구한다(의도적 divergence, `docs/ADR_INDEX.md`·
+`docs/operations/upstream-sync-policy.md`에 `adapted`로 기록).
 
 ## Snapshot GC 로직
 
@@ -710,12 +765,70 @@ response 안의 `errors`에 `snapshot_id: ""`, `error: "write GC audit: ..."` �
 - `apply` 기본값은 `false`다.
 - 응답에 `agent_token`을 포함하지 않는다.
 - diff snapshot이 참조 중인 full snapshot은 삭제하지 않는다.
+- live·persisted restored VM state가 참조하는 source snapshot은 GC 후보에서
+  제외한다(`DELETE`와 동일한 restored-VM dependency 보호).
 - `max_total_bytes`를 만족하지 못하더라도 diff snapshot이 참조 중인 full snapshot은
   보호 상태로 남긴다.
 - 같은 GC 호출에서 diff를 삭제한 뒤 해당 full을 연쇄 삭제하지 않는다.
 - 하나의 create/restore/delete/GC lifecycle operation만 동시에 실행된다. snapshot
   graph locking이 설계되기 전까지 restore/delete race와 진행 중인 restore 파일
   읽기 중 diff base 삭제를 피하기 위한 보수적 직렬화다.
+
+## runtime MCP Gateway 로직 (v0.6.x)
+
+runtime MCP Gateway(`internal/mcpgateway`, `EPHEMERA_MCP_*`)는 VM 내부 goose agent가
+host가 중개하는 backend MCP server(tools/resources/prompts)를 사용하게 하는
+daemon-side runtime/operator surface다. IronClaw MCP adapter(`cmd/anvil-mcp`,
+`ANVIL_MCP_*`)와 별개 계층이며 그것을 대체하지 않는다. VM에는 gateway URL만
+주입되고 backend endpoint·credential은 host가 소유한다.
+
+활성화와 설정:
+
+- `EPHEMERA_MCP_ENABLED`로 켜고, backend 목록은 `EPHEMERA_MCP_SERVERS`(또는
+  `configs/mcp/servers.yaml`)로 정의한다. backend credential은
+  `configs/mcp/secrets.yaml`(gitignored)에만 둔다.
+- listener는 기본적으로 안전한 bridge IP에 bind한다. `EPHEMERA_MCP_BIND_IP`로
+  override할 수 있으며, source-IP 검사가 defense-in-depth로 남는다.
+
+caller identity와 policy:
+
+```text
+gateway request
+  -> source IP를 VM registry(`10.0.1.x`)와 대조해 caller VM/profile을 server-side 판정
+  -> registry에 없는 caller는 403 (guest가 identity를 주입하지 못한다)
+  -> profile policy를 servers.yaml에 교차 적용
+       policy는 허용 backend/tool을 좁히기만 하고 넓힐 수 없다(intersection)
+  -> resources/prompts도 tools와 같은 policy와 rate bucket을 공유한다
+```
+
+rate limit: per-(VM, backend server) token-bucket. `EPHEMERA_MCP_RATE`(기본 `0` =
+unlimited)와 `EPHEMERA_MCP_BURST`로 조정한다. `v0.6.1` 안티스푸핑(`EPHEMERA_NET_ANTISPOOF`,
+기본 on, ebtables best-effort)은 guest가 다른 VM의 IP를 위조하지 못하게 보강한다.
+
+credential 경계:
+
+- backend credential은 host-side에만 존재한다. `VMPrepareOptions`에는 credential
+  필드가 없어 VM에는 gateway URL만 전달된다.
+- stdio backend의 credential은 `credential_env`로 지정한 환경 변수로만 child에
+  주입하고 argv에는 절대 넣지 않는다.
+- `GET /config/mcp/servers`는 transport/command와 `has_credential` boolean만 노출하고
+  credential 값은 반환하지 않는다(leak guard + sentinel).
+
+audit: gateway 호출은 `audit/mcp.jsonl`에 고정 key set metadata만 남긴다. tool
+argument, result, 그리고 `Err` 문자열까지 제외한다(metadata-only, sentinel test).
+
+stdio backend(`v0.6.4`):
+
+- child 환경은 매번 `[PATH, HOME, LANG]` + backend `spec.Env`로 새로 구성한다.
+  daemon의 `EPHEMERA_*`를 포함한 host env는 child로 새지 않는다(canary test).
+- daemon이 root면 `EPHEMERA_MCP_STDIO_USER`(기본 `nobody`)로 privilege drop하고,
+  `/var/lib/ephemera/mcp-stdio` 아래 per-server scratch를 cwd·HOME으로 쓴다.
+- child는 자신의 process group으로 실행(`Setpgid`)해, shutdown 시 group을 통째로
+  reap한다. pgid 재사용에도 안전하다.
+
+anvil boundary guard: IronClaw schema/adapter tool 목록은 gateway tool을 제외하고,
+`/config/mcp*`는 auth 설정 시 bearer 없이는 `401`이며, VM은 URL(credential 아님)만
+받고 policy는 widen할 수 없다.
 
 ## Guest agent 로직
 
@@ -821,7 +934,9 @@ micro-init
 
 - Control-plane auth 실패: `401`, body `{"error":"unauthorized"}`
 - VM 없음: 일반적으로 `404`
-- Snapshot base dependency conflict: `409`
+- Snapshot base dependency conflict(diff가 참조하는 full, 또는 live·persisted
+  restored VM이 참조하는 source snapshot): `409`
+- Nested task depth 초과(`EPHEMERA_MAX_TASK_DEPTH` 이상): `508 Loop Detected`
 - Snapshot restore 실패: `{"error":"...","code":"...","source_snapshot_id":"..."}`
   JSON body와 함께 `snapshot_not_found`, `source_vm_running`,
   `network_unavailable`, `diff_base_missing`, `memory_merge_failed`,

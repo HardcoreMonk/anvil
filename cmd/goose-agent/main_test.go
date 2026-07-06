@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -710,6 +712,21 @@ func TestExtractGooseJSONText_MultipleAssistantBlocks(t *testing.T) {
 	}
 }
 
+func TestExtractGooseJSONText_ResumeReturnsOnlyLatestTurn(t *testing.T) {
+	// goose --resume re-emits the whole transcript each turn; the extractor must
+	// return only the reply to the LAST user message, not every prior assistant
+	// block (the multi-turn accumulation bug). Thinking blocks are ignored.
+	in := []byte(`{"messages":[
+	  {"role":"user","content":[{"type":"text","text":"q1"}]},
+	  {"role":"assistant","content":[{"type":"text","text":"answer one"}]},
+	  {"role":"user","content":[{"type":"text","text":"q2"}]},
+	  {"role":"assistant","content":[{"type":"thinking","thinking":"..."},{"type":"text","text":"answer two"}]}
+	]}`)
+	if got := extractGooseJSONText(in); got != "answer two" {
+		t.Errorf("expected only the latest turn %q, got %q", "answer two", got)
+	}
+}
+
 func TestExtractGooseJSONText_NonJSONInput_ReturnsEmpty(t *testing.T) {
 	// goose may crash before producing JSON — caller falls back to raw stdout.
 	if got := extractGooseJSONText([]byte("panic at the disco")); got != "" {
@@ -727,5 +744,304 @@ func TestExtractGooseJSONText_StripsBannerPrefix(t *testing.T) {
 		`{"messages":[{"role":"assistant","content":[{"type":"text","text":"hi"}]}]}`)
 	if got := extractGooseJSONText(in); got != "hi" {
 		t.Errorf("expected %q after banner strip, got %q", "hi", got)
+	}
+}
+
+// TestRunTaskStreaming_Frames exercises the NDJSON streaming path (v0.4.4)
+// without invoking the real goose binary: a stub command writes two stderr
+// lines (relayed as progress frames) and a goose-shaped JSON envelope on stdout
+// (parsed into the final result frame). httptest.ResponseRecorder satisfies
+// http.Flusher, so the streaming branch is taken end to end.
+func TestRunTaskStreaming_Frames(t *testing.T) {
+	script := `echo "thinking..." >&2; echo "tool call" >&2; ` +
+		`printf '%s' '{"messages":[{"role":"assistant","content":[{"type":"text","text":"hello"}]}]}'`
+	cmd := exec.Command("sh", "-c", script)
+
+	w := httptest.NewRecorder()
+	runTaskStreaming(w, cmd)
+
+	if ct := w.Header().Get("Content-Type"); ct != "application/x-ndjson" {
+		t.Errorf("expected NDJSON content-type, got %q", ct)
+	}
+
+	var frames []streamFrame
+	for _, line := range strings.Split(strings.TrimRight(w.Body.String(), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		var fr streamFrame
+		if err := json.Unmarshal([]byte(line), &fr); err != nil {
+			t.Fatalf("frame is not valid JSON (%q): %v", line, err)
+		}
+		frames = append(frames, fr)
+	}
+	if len(frames) == 0 {
+		t.Fatal("no frames emitted")
+	}
+
+	// The last frame must be the result with the parsed assistant text.
+	last := frames[len(frames)-1]
+	if last.Type != "result" {
+		t.Errorf("last frame type = %q, want result", last.Type)
+	}
+	if last.Output != "hello" {
+		t.Errorf("result output = %q, want hello", last.Output)
+	}
+	if last.Error != "" {
+		t.Errorf("result error = %q, want empty", last.Error)
+	}
+
+	// At least the first stderr line must have arrived as a progress frame.
+	sawProgress := false
+	for _, fr := range frames {
+		if fr.Type == "progress" && fr.Text == "thinking..." {
+			sawProgress = true
+		}
+	}
+	if !sawProgress {
+		t.Error("expected a progress frame carrying the stderr line \"thinking...\"")
+	}
+}
+
+// TestRunTaskBuffered_DefaultShape locks in the buffered /tasks contract that the
+// default (no ?stream=1) path must preserve: a single JSON object
+// {"output","error"} with Content-Type application/json — NOT newline-delimited
+// stream frames. A stub cmd emits a goose-shaped envelope on stdout so no real
+// goose binary is needed. Regression guard for the v0.4.4 streaming split.
+func TestRunTaskBuffered_DefaultShape(t *testing.T) {
+	cmd := exec.Command("sh", "-c",
+		`printf '%s' '{"messages":[{"role":"assistant","content":[{"type":"text","text":"hello"}]}]}'`)
+
+	w := httptest.NewRecorder()
+	runTaskBuffered(w, cmd)
+
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("buffered Content-Type = %q, want application/json", ct)
+	}
+	body := strings.TrimSpace(w.Body.String())
+	// Exactly one JSON object — no newline-delimited frames.
+	if strings.Contains(body, "\n") {
+		t.Fatalf("buffered body must be a single JSON object, got multiple lines: %q", body)
+	}
+	var res TaskResult
+	if err := json.Unmarshal([]byte(body), &res); err != nil {
+		t.Fatalf("buffered body is not a single JSON object (%q): %v", body, err)
+	}
+	if res.Output != "hello" {
+		t.Errorf("buffered output = %q, want hello", res.Output)
+	}
+	if res.Error != "" {
+		t.Errorf("buffered error = %q, want empty", res.Error)
+	}
+	// The buffered object must not carry stream-frame typing.
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(body), &raw); err != nil {
+		t.Fatalf("buffered body not decodable as object (%q): %v", body, err)
+	}
+	if _, ok := raw["type"]; ok {
+		t.Errorf("buffered object unexpectedly has a stream-frame 'type' field: %v", raw)
+	}
+}
+
+func TestNoThinkForModel(t *testing.T) {
+	cases := map[string]string{
+		"qwen/qwen3-32b":          "/nothink\n",
+		"qwen3-32b":               "/nothink\n",
+		"Qwen/Qwen3-32B":          "/nothink\n", // case-insensitive
+		"llama-3.3-70b-versatile": "",
+		"claude-sonnet-4-6":       "",
+		"gpt-4o":                  "",
+		"":                        "",
+	}
+	for model, want := range cases {
+		if got := noThinkForModel(model); got != want {
+			t.Errorf("noThinkForModel(%q) = %q, want %q", model, got, want)
+		}
+	}
+}
+
+func TestExtractGooseTranscript_FullConversation(t *testing.T) {
+	// Unlike extractGooseJSONText (latest turn only), the transcript extractor
+	// returns EVERY user/assistant turn in order, for the Web UI to repaint a
+	// resumed chat. Thinking/tool blocks are dropped; only text is kept.
+	in := []byte(`{"messages":[
+	  {"role":"user","content":[{"type":"text","text":"q1"}]},
+	  {"role":"assistant","content":[{"type":"text","text":"a1"}]},
+	  {"role":"user","content":[{"type":"text","text":"q2"}]},
+	  {"role":"assistant","content":[{"type":"thinking","thinking":"..."},{"type":"text","text":"a2"}]}
+	]}`)
+	want := []TranscriptTurn{
+		{Role: "user", Text: "q1"},
+		{Role: "assistant", Text: "a1"},
+		{Role: "user", Text: "q2"},
+		{Role: "assistant", Text: "a2"},
+	}
+	got := extractGooseTranscript(in)
+	if len(got) != len(want) {
+		t.Fatalf("got %d turns, want %d: %+v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("turn %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestExtractGooseTranscript_CleansUserPrefixes(t *testing.T) {
+	// The user message carries goose-agent's injected prefixes; the restored
+	// transcript must show only what the user actually typed.
+	in := []byte(`{"messages":[
+	  {"role":"user","content":[{"type":"text","text":"/nothink\n[SYSTEM INSTRUCTIONS]\nbe terse\n\n[USER TASK]\nhello there"}]},
+	  {"role":"assistant","content":[{"type":"text","text":"hi"}]}
+	]}`)
+	got := extractGooseTranscript(in)
+	if len(got) != 2 || got[0].Text != "hello there" {
+		t.Fatalf("user prompt not cleaned: %+v", got)
+	}
+}
+
+func TestExtractGooseTranscript_NonJSON_ReturnsNil(t *testing.T) {
+	if got := extractGooseTranscript([]byte("panic at the disco")); got != nil {
+		t.Errorf("expected nil for non-JSON input, got %+v", got)
+	}
+}
+
+func TestCleanUserPrompt(t *testing.T) {
+	cases := map[string]string{
+		"/nothink\n[SYSTEM INSTRUCTIONS]\nrole\n\n[USER TASK]\nactual": "actual",
+		"/nothink\nactual": "actual",
+		"plain prompt":     "plain prompt",
+		"[SYSTEM INSTRUCTIONS]\nx\n\n[USER TASK]\nmulti\nline": "multi\nline",
+	}
+	for in, want := range cases {
+		if got := cleanUserPrompt(in); got != want {
+			t.Errorf("cleanUserPrompt(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// --- anvil transcript-safety guards (v0.7 parity) ---
+//
+// These lock the three transcript-restore invariants the merge introduced:
+//   1. the cache-hit hot path never shells out to goose (no model call);
+//   2. the cache-miss fallback is a read-only `goose session export` — never `run`;
+//   3. the transcript payload cannot echo the agent's bearer token.
+
+// writeGooseStub writes an executable shell stub at a temp path and returns it.
+func writeGooseStub(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "goose-stub.sh")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+		t.Fatalf("write goose stub: %v", err)
+	}
+	return path
+}
+
+// seedSession installs a session with a cached transcript and returns a cleanup.
+func seedSession(t *testing.T, name string, turns []TranscriptTurn) {
+	t.Helper()
+	sessionMu.Lock()
+	sessions[name] = &sessionInfo{Name: name, transcript: turns}
+	sessionMu.Unlock()
+	t.Cleanup(func() {
+		sessionMu.Lock()
+		delete(sessions, name)
+		sessionMu.Unlock()
+	})
+}
+
+// Guard 1: a cache hit serves the cached transcript WITHOUT invoking goose at all
+// (proves the hot path makes no model call and spawns no process).
+func TestHandleSessionItem_CacheHitSkipsGooseExport(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "goose-was-called")
+	stub := writeGooseStub(t, "touch '"+marker+"'\nexit 1\n")
+	orig := gooseExportBinary
+	gooseExportBinary = stub
+	t.Cleanup(func() { gooseExportBinary = orig })
+
+	want := []TranscriptTurn{{Role: "user", Text: "q1"}, {Role: "assistant", Text: "a1"}}
+	seedSession(t, "sess1", want)
+
+	req := httptest.NewRequest(http.MethodGet, "/sessions/sess1/transcript", nil)
+	rr := httptest.NewRecorder()
+	handleSessionItem(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("goose was invoked on a cache hit — the transcript hot path must not call the agent")
+	}
+	var got struct {
+		Turns []TranscriptTurn `json:"turns"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Turns) != 2 || got.Turns[0] != want[0] || got.Turns[1] != want[1] {
+		t.Fatalf("turns = %+v, want %+v", got.Turns, want)
+	}
+}
+
+// Guard 2: the cache-miss fallback runs `goose session export` (read-only) and
+// never the model-invoking `run` subcommand.
+func TestExportSessionTranscript_ReadOnlyNoModelCall(t *testing.T) {
+	argvFile := filepath.Join(t.TempDir(), "argv")
+	stub := writeGooseStub(t, "printf '%s\\n' \"$*\" > '"+argvFile+"'\n"+
+		`printf '%s' '{"messages":[{"role":"user","content":[{"type":"text","text":"q1"}]},{"role":"assistant","content":[{"type":"text","text":"a1"}]}]}'`+"\n")
+	orig := gooseExportBinary
+	gooseExportBinary = stub
+	t.Cleanup(func() { gooseExportBinary = orig })
+
+	turns, err := exportSessionTranscript(context.Background(), "sess1")
+	if err != nil {
+		t.Fatalf("exportSessionTranscript: %v", err)
+	}
+	if len(turns) != 2 || turns[0].Text != "q1" || turns[1].Text != "a1" {
+		t.Fatalf("turns = %+v, want q1/a1", turns)
+	}
+	argv, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatalf("read argv: %v", err)
+	}
+	got := strings.TrimSpace(string(argv))
+	if got != "session export -n sess1 --format json" {
+		t.Fatalf("export argv = %q, want a read-only session export", got)
+	}
+	for _, f := range strings.Fields(got) {
+		if f == "run" {
+			t.Fatalf("transcript export invoked the model-running subcommand: %q", got)
+		}
+	}
+}
+
+// Guard 3: the transcript payload never carries the agent's bearer token even when
+// one is configured — the response schema is role/text only, no auth material.
+func TestHandleSessionItem_PayloadOmitsAgentAuth(t *testing.T) {
+	const sentinel = "SENTINEL-AGENT-BEARER-do-not-leak"
+	orig := agentToken
+	setCurrentAgentToken(sentinel)
+	t.Cleanup(func() { setCurrentAgentToken(orig) })
+
+	seedSession(t, "sess2", []TranscriptTurn{
+		{Role: "user", Text: "what time is it"},
+		{Role: "assistant", Text: "it is noon"},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/sessions/sess2/transcript", nil)
+	rr := httptest.NewRecorder()
+	handleSessionItem(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if strings.Contains(body, sentinel) {
+		t.Fatalf("transcript payload leaked the agent bearer token: %s", body)
+	}
+	for _, k := range []string{"agent_token", "authorization", "Authorization", "Bearer"} {
+		if strings.Contains(body, k) {
+			t.Fatalf("transcript payload exposed auth field %q: %s", k, body)
+		}
 	}
 }

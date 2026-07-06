@@ -100,8 +100,8 @@ func TestWatchdog_MarksDeadAfterThreshold(t *testing.T) {
 	if !strings.Contains(last.Body, "unresponsive") {
 		t.Errorf("Town Wall entry missing unresponsive notice: %q", last.Body)
 	}
-	if last.AgentID != "orchestrator" {
-		t.Errorf("dead notice should be posted as orchestrator, got %q", last.AgentID)
+	if last.AgentID != SystemAuthor {
+		t.Errorf("dead notice should be posted as %s, got %q", SystemAuthor, last.AgentID)
 	}
 }
 
@@ -271,6 +271,35 @@ func TestWatchdog_ForgetVM_ClearsState(t *testing.T) {
 	}
 }
 
+func TestWatchdog_PausedAgentFailureDoesNotAccumulate(t *testing.T) {
+	tmp := t.TempDir()
+	fm := NewFlockManager(tmp)
+	flock, _ := fm.Create("flock-paused", "test", filepath.Join(tmp, "flock-paused", "TOWN_WALL.log"))
+	flock.AddAgent(&AgentInfo{AgentID: "w", Role: "worker", VMID: "vm-1", Status: AgentStatusReady})
+	flock.MarkAgentPaused("w")
+
+	locator := func(string) (string, string, bool) { return "flock-paused", "w", true }
+	wd := NewWatchdog(fm, locator, func() []VMRef { return nil }, 8080)
+	wd.dyingThreshold = 1
+	wd.failCount["vm-1"] = 2
+
+	wd.onFailure(VMRef{VMID: "vm-1", GuestIP: "127.0.0.1"})
+
+	if got := flock.AgentStatus("w"); got != AgentStatusPaused {
+		t.Fatalf("paused failure changed status to %q", got)
+	}
+	wd.mu.Lock()
+	_, hasFail := wd.failCount["vm-1"]
+	_, hasDead := wd.deadMarked["vm-1"]
+	wd.mu.Unlock()
+	if hasFail {
+		t.Fatal("paused failure should clear accumulated fail count")
+	}
+	if hasDead {
+		t.Fatal("paused failure should not mark dead")
+	}
+}
+
 // TestWatchdog_Configure_AppliesTunables verifies the public Configure
 // entry-point lands all four tunables and clamps interval >= httpTimeout.
 func TestWatchdog_Configure_AppliesTunables(t *testing.T) {
@@ -407,6 +436,71 @@ func TestWatchdog_AutoHeal_ResetsDeadMark(t *testing.T) {
 	}
 	if got := reloaded.Snapshot()[0].Status; got != AgentStatusReady {
 		t.Errorf("expected on-disk status=ready after auto-heal, got %q", got)
+	}
+}
+
+// TestWatchdog_Status verifies the GET /watchdog/status snapshot reflects the
+// configured tunables and the live per-VM health state: a failing VM appears in
+// VMDeadMarked once the threshold is crossed, and the returned maps are copies
+// (mutating them does not corrupt the watchdog's internal state).
+func TestWatchdog_Status(t *testing.T) {
+	tmp := t.TempDir()
+	fm := NewFlockManager(tmp)
+	flock, err := fm.Create("flock-status", "test", filepath.Join(tmp, "flock-status", "TOWN_WALL.log"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	flock.AddAgent(&AgentInfo{AgentID: "worker-1", Role: "worker", VMID: "vm-1", Status: AgentStatusReady})
+
+	agent := newTestAgent(t)
+	locator := func(vmID string) (string, string, bool) {
+		if vmID == "vm-1" {
+			return "flock-status", "worker-1", true
+		}
+		return "", "", false
+	}
+	lister := func() []VMRef { return []VMRef{{VMID: "vm-1", GuestIP: "127.0.0.1"}} }
+
+	wd := NewWatchdog(fm, locator, lister, agent.port)
+	wd.Configure(50*time.Millisecond, 50*time.Millisecond, 3, true)
+
+	// Config must be reflected before any probe runs.
+	st := wd.Status()
+	if st.DyingThreshold != 3 || !st.AutoHeal {
+		t.Fatalf("status config mismatch: %+v", st)
+	}
+	if st.VMDeadMarked == nil || len(st.VMDeadMarked) != 0 {
+		t.Errorf("expected empty (non-nil) dead-marked list, got %+v", st.VMDeadMarked)
+	}
+
+	agent.setFail(true)
+	wd.Start()
+	defer wd.Stop()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if flock.Snapshot()[0].Status == AgentStatusDead {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	st = wd.Status()
+	foundDead := false
+	for _, vmID := range st.VMDeadMarked {
+		if vmID == "vm-1" {
+			foundDead = true
+		}
+	}
+	if !foundDead {
+		t.Errorf("expected vm-1 in dead-marked list, got %+v", st.VMDeadMarked)
+	}
+
+	// The returned maps must be copies — mutating them must not affect the
+	// watchdog's internal state observed by a subsequent Status() call.
+	st.VMFailCounts["vm-1"] = 9999
+	if again := wd.Status(); again.VMFailCounts["vm-1"] == 9999 {
+		t.Error("Status() leaked its internal failCount map (not a copy)")
 	}
 }
 

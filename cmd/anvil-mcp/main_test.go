@@ -37,7 +37,7 @@ func TestToolRegistrationsIncludeSnapshotTools(t *testing.T) {
 		"anvil_get_flock":                   "Return a Goosetown flock and its agent status by flock_id.",
 		"anvil_delete_flock":                "Delete a Goosetown flock and let the daemon tear down member VMs.",
 		"anvil_post_townwall":               "Append a message to a Goosetown flock Town Wall.",
-		"anvil_get_townwall_history":        "Return the full Town Wall history for a Goosetown flock.",
+		"anvil_get_townwall_history":        "Return the active Town Wall history for a Goosetown flock.",
 	}
 
 	for _, registration := range registrations {
@@ -77,6 +77,40 @@ func TestToolRegistrationsIncludeSnapshotTools(t *testing.T) {
 	}
 	if routedIdx != spawnIdx+1 {
 		t.Fatalf("anvil_create_routed_flock_members index = %d, want directly after anvil_spawn_flock index %d", routedIdx, spawnIdx)
+	}
+}
+
+// TestToolRegistrationsExcludeBroadcast locks in the Task 6 phase decision:
+// upstream ephemera v0.4.4 added POST /flocks/{id}/broadcast, but anvil keeps it
+// a daemon-only endpoint and never registers anvil_broadcast_flock (or any
+// broadcast tool) on the MCP surface in this phase. A stray broadcast
+// registration fails this guard first.
+func TestToolRegistrationsExcludeBroadcast(t *testing.T) {
+	for _, registration := range toolRegistrations() {
+		if strings.Contains(strings.ToLower(registration.name), "broadcast") {
+			t.Fatalf("anvil-mcp unexpectedly registers a broadcast tool: %q", registration.name)
+		}
+	}
+}
+
+// TestToolRegistrationsExcludeGatewayTools locks in the Phase 3 (v0.6.0) boundary
+// decision: the runtime MCP Gateway (internal/mcpgateway) is the operator/in-VM
+// tool surface, and cmd/anvil-mcp remains the ONLY IronClaw-facing adapter.
+// Nothing gateway-originated may leak into the anvil_* tool schema. The gateway
+// names its aggregated tools with a "__" namespace separator (e.g.
+// "github__create_issue"); every anvil-mcp tool is an "anvil_"-prefixed native
+// tool. This guard fails if any registration is not anvil_-prefixed or carries a
+// gateway namespace separator. The separator is hardcoded (not imported from
+// mcpgateway) precisely because anvil-mcp must not depend on the gateway package.
+func TestToolRegistrationsExcludeGatewayTools(t *testing.T) {
+	const gatewayNamespaceSep = "__" // mcpgateway.namespaceSep, intentionally duplicated
+	for _, registration := range toolRegistrations() {
+		if !strings.HasPrefix(registration.name, "anvil_") {
+			t.Fatalf("tool registration %q is not an anvil_ native tool; a gateway tool must never reach the IronClaw surface", registration.name)
+		}
+		if strings.Contains(registration.name, gatewayNamespaceSep) {
+			t.Fatalf("tool registration %q carries the gateway namespace separator %q; gateway-aggregated tools must not leak into the anvil_ schema", registration.name, gatewayNamespaceSep)
+		}
 	}
 }
 

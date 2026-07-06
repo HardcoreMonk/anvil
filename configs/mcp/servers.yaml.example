@@ -1,0 +1,81 @@
+# MCP gateway backend servers.
+#
+# The daemon aggregates these backend MCP servers behind ONE host-resident MCP
+# endpoint (injected into VMs as http://ephemera-gw:3001/mcp, an alias for the
+# bridge IP) that the in-VM goose clients connect to.
+# Each VM sees a single, namespaced, profile-filtered catalog; backend
+# credentials stay on the host and are never injected into a VM.
+#
+# Usage:
+#   cp configs/mcp/servers.yaml.example   configs/mcp/servers.yaml
+#   cp configs/mcp/secrets.yaml.example   configs/mcp/secrets.yaml
+#   # edit both, then start the daemon with the gateway enabled:
+#   EPHEMERA_MCP_ENABLED=1 sudo ./ephemera-daemon
+#
+# configs/mcp/servers.yaml and secrets.yaml are gitignored — do not commit them.
+#
+# Per-server fields:
+#   id:         stable identifier and default tool-name namespace (required)
+#   namespace:  tool-name prefix in the aggregated catalog; defaults to id.
+#               Must not contain "__" (the gateway's namespace separator).
+#   transport:  "http" (MCP Streamable HTTP, default) or "stdio" (a local host
+#               subprocess speaking newline-delimited JSON-RPC, v0.6.4).
+#   url:        the backend MCP server endpoint (http transport only; required).
+#   command:    the executable to spawn (stdio only; required). A bare name is
+#               resolved on the daemon's PATH once at startup; the resolved
+#               absolute path is what gets executed.
+#   args:       command arguments (stdio only). NEVER put secrets here — the
+#               argument vector is world-readable via /proc/<pid>/cmdline.
+#   credential: optional key into secrets.yaml. http: the gateway injects
+#               "Authorization: Bearer <token>" on every call. stdio: the token
+#               is injected into the child environment as $credential_env
+#               (both fields must be set together).
+#   credential_env: name of the env var that receives the credential token
+#               (stdio only; child env only — never the cmdline or the API).
+#   profiles:   Ephemera profiles permitted to use this server. Empty/omitted
+#               means every profile may use it. Scoping per profile keeps each
+#               agent's per-request tool schema small (token-budget control).
+#   tools_allow: optional whitelist — if set, ONLY these tool names are exposed
+#                from this server (applies to tools/list and tools/call) (v0.6.2).
+#   tools_deny:  optional blacklist — these tool names are hidden (ignored when
+#                tools_allow is set) (v0.6.2).
+#
+# A profile may further narrow which of these servers it uses via the API
+# (PUT /config/profiles/{name}/mcp). That binding INTERSECTS with `profiles:`
+# above, so it can only narrow a profile's access, never widen it (v0.6.2).
+#
+# stdio backends (v0.6.4) — how the subprocess is run:
+#   - Spawned lazily on first use; restarted on demand after a crash, but at
+#     most once per 5s (crash-loop cooldown). Killed (stdin EOF, then SIGKILL
+#     of its process group after 2s) when the daemon shuts down.
+#   - Runs as the unprivileged user EPHEMERA_MCP_STDIO_USER (default "nobody")
+#     when the daemon is root. The command must be readable + executable by
+#     that user (e.g. under /usr/local/bin, not /root). All stdio servers
+#     share that one uid in v0.6.4 — they are not isolated from each other.
+#   - cwd and HOME are a per-server scratch dir (/var/lib/ephemera/mcp-stdio/<id>,
+#     kept across restarts so npx/uvx-style servers can cache; outside the work
+#     dir so the de-privileged child can traverse into it). The child env is
+#     minimal (PATH, HOME, LANG + credential_env); the daemon's own env is
+#     never inherited.
+#   - rlimits: RLIMIT_NOFILE=256 and RLIMIT_CORE=0 always; RLIMIT_NPROC=512
+#     when de-privileged. Prefer pre-installed servers/absolute paths — a
+#     first-run "npx ..." install may exceed the 60s handshake budget.
+
+servers:
+  - id: example
+    namespace: example
+    transport: http
+    url: https://mcp.example.com/mcp
+    credential: example_token
+    profiles: [leader]
+    # tools_allow: [read_wiki_structure, ask_question]   # expose only these tools
+    # tools_deny:  [dangerous_tool]                       # hide these (if no allow-list)
+
+  # A local stdio backend (v0.6.4): the gateway runs the MCP server itself.
+  # - id: localtools
+  #   transport: stdio
+  #   command: /usr/local/bin/my-mcp-server   # or a name on the daemon's PATH
+  #   args: ["--flag"]                        # no secrets here (cmdline is public)
+  #   credential: localtools_token            # optional; requires credential_env
+  #   credential_env: MY_SERVER_TOKEN         # env var the token is injected as
+  #   profiles: [leader]

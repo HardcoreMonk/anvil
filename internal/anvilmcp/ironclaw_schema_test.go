@@ -1,6 +1,41 @@
 package anvilmcp
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+// TestCurrentIronClawSchemasExcludeBroadcastTool locks in the Task 6 phase
+// decision: upstream ephemera v0.4.4 added a flock broadcast endpoint, but anvil
+// keeps it a daemon-only route and does NOT surface it as an anvil_* MCP tool in
+// this phase. The IronClaw tool-input schema is the surface IronClaw advertises,
+// so if a broadcast tool ever leaks into it, this guard fails first.
+func TestCurrentIronClawSchemasExcludeBroadcastTool(t *testing.T) {
+	for _, schema := range CurrentIronClawToolInputSchemas() {
+		if strings.Contains(strings.ToLower(schema.ToolName), "broadcast") {
+			t.Fatalf("IronClaw schema unexpectedly exposes a broadcast tool: %q", schema.ToolName)
+		}
+	}
+}
+
+// TestCurrentIronClawSchemasExcludeGatewayNamespacedTools locks in the Phase 3
+// (v0.6.0) boundary: the runtime MCP Gateway aggregates backend tools under a
+// "__" namespace separator (e.g. "github__create_issue") and is the in-VM tool
+// surface — never the IronClaw surface. The IronClaw tool-input schema must stay
+// exactly the anvil_* native set; a gateway-originated (namespaced) tool leaking
+// into it fails this guard first. The separator is duplicated here rather than
+// imported so internal/anvilmcp keeps no dependency on internal/mcpgateway.
+func TestCurrentIronClawSchemasExcludeGatewayNamespacedTools(t *testing.T) {
+	const gatewayNamespaceSep = "__" // mcpgateway.namespaceSep, intentionally duplicated
+	for _, schema := range CurrentIronClawToolInputSchemas() {
+		if !strings.HasPrefix(schema.ToolName, "anvil_") {
+			t.Fatalf("IronClaw schema exposes non-anvil tool %q; only anvil_ native tools belong on the IronClaw surface", schema.ToolName)
+		}
+		if strings.Contains(schema.ToolName, gatewayNamespaceSep) {
+			t.Fatalf("IronClaw schema exposes gateway-namespaced tool %q; runtime-gateway tools must never reach the IronClaw surface", schema.ToolName)
+		}
+	}
+}
 
 func TestIronClawSchemaValidationRejectsEmptyGeminiType(t *testing.T) {
 	err := ValidateIronClawToolInputSchemas([]IronClawToolInputSchema{{

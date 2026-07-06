@@ -16,15 +16,26 @@ import (
 )
 
 // forwardSignals is the explicit signal list the firecracker-go-sdk forwards
-// to each Firecracker child process. SIGHUP is DELIBERATELY omitted: the
-// daemon uses SIGHUP for its own token-reload + vsock fan-out flow, and
-// Firecracker has no SIGHUP handler — forwarding it would kill every running
-// VM mid-rotation. Leaving ForwardSignals at the SDK default would silently
-// re-introduce the bug.
+// to each Firecracker child process. It is deliberately narrower than the SDK
+// default ([SIGINT, SIGQUIT, SIGTERM, SIGHUP, SIGABRT]):
+//
+//   - SIGHUP is omitted: the daemon uses SIGHUP for its own token-reload +
+//     vsock fan-out flow, and Firecracker has no SIGHUP handler — forwarding it
+//     would kill every running VM mid-rotation.
+//   - SIGINT and SIGTERM are omitted: the daemon traps them itself (main.go)
+//     and runs a graceful teardown that explicitly StopVMM's each child (which
+//     sends its own SIGTERM), so forwarding is redundant. It is also harmful —
+//     v0.4.0 auto-snapshot runs a Pause+CreateSnapshot on each VM inside that
+//     teardown window (DestroyAll), and a forwarded SIGTERM would race it and
+//     kill the child mid-snapshot.
+//
+// SIGQUIT and SIGABRT stay forwarded precisely because the daemon does NOT trap
+// them: on such an abnormal exit the deferred teardown never runs, so forwarding
+// is what prevents orphaned Firecracker children. Leaving ForwardSignals at the
+// SDK default would silently re-introduce the SIGHUP/SIGTERM bugs; never add
+// SIGHUP, SIGINT, or SIGTERM back while the daemon owns reload + graceful exit.
 var forwardSignals = []os.Signal{
-	os.Interrupt,
 	syscall.SIGQUIT,
-	syscall.SIGTERM,
 	syscall.SIGABRT,
 }
 
@@ -44,18 +55,18 @@ type VMConfig struct {
 	GatewayIP      string
 	VsockUDSPath   string // host-side UDS for Firecracker vsock proxy; enables post-restore IP reconfiguration
 
-	// VcpuCount and MemSizeMib allow per-VM resource sizing. Non-positive values
-	// fall back to the legacy defaults (2 vCPU, 2048 MiB) so existing call sites
-	// stay compatible.
+	// VcpuCount and MemSizeMib allow per-VM resource sizing. Zero values fall back
+	// to the package defaults (1 vCPU, 1024 MiB) so existing call sites stay compatible.
 	VcpuCount  int64
 	MemSizeMib int64
 }
 
 // defaultVcpuCount and defaultMemSizeMib are the fallback values used when a
-// VMConfig leaves the fields zero. They match the historical hardcoded values.
+// VMConfig leaves the fields zero. They match the "Standard" sizing preset — the
+// sizing an agent VM gets when created without an explicit per-profile override.
 const (
-	defaultVcpuCount  int64 = 2
-	defaultMemSizeMib int64 = 2048
+	defaultVcpuCount  int64 = 1
+	defaultMemSizeMib int64 = 1024
 )
 
 // resolveMachineSize returns the vCPU and memory size to use, applying defaults

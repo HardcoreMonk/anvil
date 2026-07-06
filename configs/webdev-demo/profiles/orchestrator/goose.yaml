@@ -1,0 +1,27 @@
+# webdev_demo.sh role profile — Google Gemini (orchestrator).
+#
+# Drives a multi-step operating loop (gtcall/gtwall delegation) — the most
+# tool-calling-intensive role. This role runs on Google Gemini, NOT Groq: Groq's
+# Llama models reject the tool-call format ("Failed to call a function") and its
+# gpt-oss reasoning models reject reasoning_content on follow-up tool turns (and
+# sometimes emit the tool command as plain text) — both break the loop, and neither
+# goose 1.36 nor 1.37 fixed it. Gemini handles multi-turn tool use reliably.
+# worker/reviewer stay on Groq gpt-oss (single-shot generation, no multi-turn tools).
+# Sizing: 1 vCPU / 1024 MiB (Standard preset) — inference is remote, so the VM only
+# orchestrates. The API key (GOOGLE_API_KEY) comes from the global goose-secrets.yaml.
+#
+# Override per run with WEBDEV_ORCH_MODEL (e.g. gemini-2.5-pro) to experiment.
+GOOSE_PROVIDER: google
+GOOSE_MODEL: gemini-2.5-flash
+GOOSE_TELEMETRY_ENABLED: false
+GOOSE_DISABLE_KEYRING: true
+EPHEMERA_VCPU_COUNT: 1
+EPHEMERA_MEM_SIZE_MIB: 1024
+
+extensions:
+  developer:
+    bundled: true
+    enabled: true
+    name: developer
+    timeout: 600
+    type: builtin

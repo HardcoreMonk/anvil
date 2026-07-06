@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -33,7 +34,10 @@ func newTestCP(t *testing.T) *ControlPlane {
 	defaultCfg := filepath.Join(tmp, "goose.yaml")
 	defaultSec := filepath.Join(tmp, "goose-secrets.yaml")
 	os.WriteFile(defaultCfg, []byte("GOOSE_PROVIDER: default\n"), 0644)
-	os.WriteFile(defaultSec, []byte("DEFAULT_KEY: x\n"), 0644)
+	// Global keychain seeded with the anvil DEFAULT_KEY leak sentinel plus
+	// real-looking keys for every registry provider so provider-availability
+	// guards (profile create/update) pass in tests.
+	os.WriteFile(defaultSec, []byte("DEFAULT_KEY: x\nGOOGLE_API_KEY: \"AIzaSyTestRealKey\"\nANTHROPIC_API_KEY: \"sk-ant-testreal\"\nOPENAI_API_KEY: \"sk-testreal\"\nGROQ_API_KEY: \"gsk_testreal\"\n"), 0644)
 	cp := &ControlPlane{
 		vms:              make(map[string]*runningVM),
 		snapshots:        make(map[string]storage.SnapshotMetadata),
@@ -292,6 +296,392 @@ func TestCommandEgressEnforcerAllowAllIsNoop(t *testing.T) {
 	}
 }
 
+func TestCommandEgressEnforcerProfileApplyFailureRollsBackAppliedRules(t *testing.T) {
+	profileDir := t.TempDir()
+	writeEgressProfileFixture(t, profileDir, "restricted")
+
+	var commands [][]string
+	enforcer := &commandEgressEnforcer{
+		profileDir: profileDir,
+		run: func(name string, args ...string) error {
+			command := append([]string{name}, args...)
+			commands = append(commands, command)
+			if len(commands) == 2 {
+				return errors.New("second insert failed")
+			}
+			return nil
+		},
+	}
+
+	err := enforcer.ApplyWithProfile("vm-1", "tap-vm-1", "10.0.1.10", "profile", "restricted")
+	if err == nil {
+		t.Fatal("ApplyWithProfile returned nil error, want command failure")
+	}
+	if !strings.Contains(err.Error(), "second insert failed") {
+		t.Fatalf("error = %v, want apply failure detail", err)
+	}
+	want := [][]string{
+		{"iptables", "-I", "FORWARD", "-s", "10.0.1.10", "-j", "REJECT", "-m", "comment", "--comment", "anvil-egress-vm-1-default"},
+		{"iptables", "-I", "FORWARD", "-s", "10.0.1.10", "-d", "203.0.113.10/32", "-j", "ACCEPT", "-m", "comment", "--comment", "anvil-egress-vm-1-cidr-0"},
+		{"iptables", "-D", "FORWARD", "-s", "10.0.1.10", "-j", "REJECT", "-m", "comment", "--comment", "anvil-egress-vm-1-default"},
+	}
+	if len(commands) != len(want) {
+		t.Fatalf("commands = %#v, want %#v", commands, want)
+	}
+	for i := range want {
+		if strings.Join(commands[i], " ") != strings.Join(want[i], " ") {
+			t.Fatalf("command[%d] = %#v, want %#v", i, commands[i], want[i])
+		}
+	}
+	if _, ok := enforcer.rules["vm-1"]; ok {
+		t.Fatalf("partial failed apply left egress rule state: %+v", enforcer.rules["vm-1"])
+	}
+}
+
+func TestCommandEgressEnforcerProfileApplyFailureReportsCleanupFailure(t *testing.T) {
+	profileDir := t.TempDir()
+	writeEgressProfileFixture(t, profileDir, "restricted")
+
+	enforcer := &commandEgressEnforcer{
+		profileDir: profileDir,
+		run: func(name string, args ...string) error {
+			if len(args) > 0 && args[0] == "-D" {
+				return errors.New("cleanup failed")
+			}
+			if len(args) > 0 && args[0] == "-I" && strings.Contains(strings.Join(args, " "), "cidr-0") {
+				return errors.New("insert failed")
+			}
+			return nil
+		},
+	}
+
+	err := enforcer.ApplyWithProfile("vm-1", "tap-vm-1", "10.0.1.10", "profile", "restricted")
+	if err == nil {
+		t.Fatal("ApplyWithProfile returned nil error, want apply and cleanup failure")
+	}
+	if !strings.Contains(err.Error(), "insert failed") || !strings.Contains(err.Error(), "cleanup failed") {
+		t.Fatalf("error = %v, want both apply and cleanup failure details", err)
+	}
+	if _, ok := enforcer.rules["vm-1"]; ok {
+		t.Fatalf("partial failed apply left egress rule state: %+v", enforcer.rules["vm-1"])
+	}
+}
+
+func TestSpawnVMRollbackCleansEgressAndReleasesNetworkOnce(t *testing.T) {
+	cp := newTestCP(t)
+	workspace := t.TempDir()
+	golden := filepath.Join(workspace, "golden.ext4")
+	if err := os.WriteFile(golden, []byte("golden"), 0600); err != nil {
+		t.Fatalf("write golden image: %v", err)
+	}
+	cp.provisioner = &storage.Provisioner{GoldenImagePath: golden, WorkspaceDir: workspace}
+	var events []string
+	recorder := &recordingEgressEnforcer{shared: &events}
+	cp.egress = recorder
+	cp.allocateNetwork = func() (string, string, string, error) {
+		events = append(events, "allocate")
+		return "tap-test", "10.0.1.77", "AA:FC:00:00:00:4D", nil
+	}
+	cp.releaseVMNetwork = func(tapDevice, guestIP string) error {
+		events = append(events, "release:"+tapDevice+":"+guestIP)
+		return nil
+	}
+	cp.cloneDisk = func(vmID string) (string, error) {
+		events = append(events, "clone-fail")
+		return "", errors.New("clone failed")
+	}
+
+	_, _, err := cp.spawnVMInternal(spawnVMOptions{
+		Profile:      "dev",
+		ConfigPath:   cp.gooseConfigPath,
+		SecretsPath:  cp.gooseSecretsPath,
+		EgressPolicy: "deny_all",
+	})
+	if err == nil {
+		t.Fatal("spawnVMInternal returned nil error, want clone failure")
+	}
+	gotEvents := strings.Join(events, ",")
+	if !strings.HasPrefix(gotEvents, "allocate,apply:") {
+		t.Fatalf("events = %s, want allocate then egress apply", gotEvents)
+	}
+	if !strings.Contains(gotEvents, ",clone-fail,cleanup:") {
+		t.Fatalf("events = %s, want clone failure followed by egress cleanup", gotEvents)
+	}
+	if !strings.HasSuffix(gotEvents, ",release:tap-test:10.0.1.77") {
+		t.Fatalf("events = %s, want network release last", gotEvents)
+	}
+	if strings.Count(gotEvents, "release:") != 1 {
+		t.Fatalf("events = %s, want exactly one network release", gotEvents)
+	}
+}
+
+func TestRecoveryDropsRestoredCOWStateAfterSafeResourceCleanup(t *testing.T) {
+	cp := newTestCP(t)
+	workspace := t.TempDir()
+	cp.provisioner = &storage.Provisioner{WorkspaceDir: workspace}
+
+	vmID := "vm-restored"
+	socketPath := filepath.Join(t.TempDir(), "firecracker-vm-restored.sock")
+	vsockPath := filepath.Join(t.TempDir(), "vm-restored.vsock")
+	if err := storage.SaveVMState(cp.workDir, storage.VMState{
+		VMID:             vmID,
+		GuestIP:          "10.0.1.99",
+		TapDevice:        "tap99",
+		MacAddr:          "AA:FC:00:00:00:63",
+		SocketPath:       socketPath,
+		VsockPath:        vsockPath,
+		DiskPath:         filepath.Join(workspace, vmID+".ext4"),
+		DiskMode:         storage.DiskModeCOW,
+		SourceSnapshotID: "snap-source",
+	}); err != nil {
+		t.Fatalf("SaveVMState: %v", err)
+	}
+	memPath, _ := storage.AutoSnapshotPaths(cp.workDir, vmID)
+	if err := os.MkdirAll(filepath.Dir(memPath), 0700); err != nil {
+		t.Fatalf("mkdir auto snapshot dir: %v", err)
+	}
+	if err := os.WriteFile(memPath, []byte("memory"), 0600); err != nil {
+		t.Fatalf("write auto snapshot: %v", err)
+	}
+
+	oldRemoveOrphans := removeOrphanCOWDevices
+	oldKillStaleFirecracker := killStaleFirecracker
+	oldRemoveStaleVMArtifacts := removeStaleVMArtifacts
+	oldRemoveRestoredCOWDevice := removeRestoredCOWDevice
+	var events []string
+	removeOrphanCOWDevices = func(workspaceDir string, liveVMIDs map[string]struct{}) int {
+		events = append(events, "orphan-sweep")
+		if workspaceDir != workspace {
+			t.Fatalf("workspaceDir = %q, want %q", workspaceDir, workspace)
+		}
+		if _, ok := liveVMIDs[vmID]; !ok {
+			t.Fatalf("restored COW state %q was not protected in initial live set %v", vmID, liveVMIDs)
+		}
+		return 0
+	}
+	killStaleFirecracker = func(gotSocketPath string) error {
+		events = append(events, "kill")
+		if gotSocketPath != socketPath {
+			t.Fatalf("KillStaleFirecracker socket = %q, want %q", gotSocketPath, socketPath)
+		}
+		if !storage.VMStateExists(cp.workDir, vmID) {
+			t.Fatal("state was dropped before stale Firecracker cleanup")
+		}
+		return nil
+	}
+	removeStaleVMArtifacts = func(gotSocketPath, gotVsockPath, gotLogFifoPath string) {
+		events = append(events, "artifacts")
+		if gotSocketPath != socketPath {
+			t.Fatalf("artifact socket = %q, want %q", gotSocketPath, socketPath)
+		}
+		if gotVsockPath != vsockPath {
+			t.Fatalf("artifact vsock = %q, want %q", gotVsockPath, vsockPath)
+		}
+		wantLog := fmt.Sprintf("/tmp/fc-%s-log.fifo", vmID)
+		if gotLogFifoPath != wantLog {
+			t.Fatalf("artifact log fifo = %q, want %q", gotLogFifoPath, wantLog)
+		}
+		if !storage.VMStateExists(cp.workDir, vmID) {
+			t.Fatal("state was dropped before stale artifact cleanup")
+		}
+	}
+	removeRestoredCOWDevice = func(workspaceDir, gotVMID string) {
+		events = append(events, "cow-cleanup")
+		if workspaceDir != workspace {
+			t.Fatalf("restored COW cleanup workspace = %q, want %q", workspaceDir, workspace)
+		}
+		if gotVMID != vmID {
+			t.Fatalf("restored COW cleanup vmID = %q, want %q", gotVMID, vmID)
+		}
+		if !storage.VMStateExists(cp.workDir, vmID) {
+			t.Fatal("state was dropped before restored COW cleanup")
+		}
+	}
+	defer func() {
+		removeOrphanCOWDevices = oldRemoveOrphans
+		killStaleFirecracker = oldKillStaleFirecracker
+		removeStaleVMArtifacts = oldRemoveStaleVMArtifacts
+		removeRestoredCOWDevice = oldRemoveRestoredCOWDevice
+	}()
+
+	var releases []string
+	cp.releaseVMNetwork = func(tapDevice, guestIP string) error {
+		events = append(events, "release")
+		releases = append(releases, tapDevice+" "+guestIP)
+		if !storage.VMStateExists(cp.workDir, vmID) {
+			t.Fatal("state was dropped before network release")
+		}
+		return nil
+	}
+
+	recovered, failed, err := cp.RecoverVMs()
+	if err != nil {
+		t.Fatalf("RecoverVMs: %v", err)
+	}
+	if recovered != 0 {
+		t.Fatalf("recovered = %d, want 0", recovered)
+	}
+	if len(failed) != 1 || failed[0] != vmID {
+		t.Fatalf("failed = %v, want [%s]", failed, vmID)
+	}
+	if len(releases) != 1 || releases[0] != "tap99 10.0.1.99" {
+		t.Fatalf("network releases = %v, want restored VM release", releases)
+	}
+	if got, want := strings.Join(events, ","), "orphan-sweep,kill,artifacts,cow-cleanup,release"; got != want {
+		t.Fatalf("events = %s, want %s", got, want)
+	}
+	if storage.VMStateExists(cp.workDir, vmID) {
+		t.Fatal("restored VM state still exists after recovery drop")
+	}
+	if storage.AutoSnapshotExists(cp.workDir, vmID) {
+		t.Fatal("restored VM auto snapshot still exists after recovery drop")
+	}
+}
+
+func TestRecoveryNetworkReclaimFailureDropsAutoSnapshot(t *testing.T) {
+	cp := newTestCP(t)
+	workspace := t.TempDir()
+	diskPath := filepath.Join(workspace, "vm-reclaim.ext4")
+	if err := os.MkdirAll(workspace, 0700); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	if err := os.WriteFile(diskPath, []byte("rootfs"), 0600); err != nil {
+		t.Fatalf("write disk: %v", err)
+	}
+	vmID := "vm-reclaim"
+	if err := storage.SaveVMState(cp.workDir, storage.VMState{
+		VMID:      vmID,
+		GuestIP:   "10.0.1.55",
+		TapDevice: "tap55",
+		MacAddr:   "AA:FC:00:00:00:37",
+		DiskPath:  diskPath,
+		DiskMode:  storage.DiskModePlain,
+	}); err != nil {
+		t.Fatalf("SaveVMState: %v", err)
+	}
+	memPath, _ := storage.AutoSnapshotPaths(cp.workDir, vmID)
+	if err := os.MkdirAll(filepath.Dir(memPath), 0700); err != nil {
+		t.Fatalf("mkdir auto snapshot dir: %v", err)
+	}
+	if err := os.WriteFile(memPath, []byte("memory"), 0600); err != nil {
+		t.Fatalf("write auto snapshot: %v", err)
+	}
+	cp.reclaimNetwork = func(tapDevice, guestIP, macAddr string) error {
+		return errors.New("tap already allocated")
+	}
+
+	recovered, failed, err := cp.RecoverVMs()
+	if err != nil {
+		t.Fatalf("RecoverVMs: %v", err)
+	}
+	if recovered != 0 {
+		t.Fatalf("recovered = %d, want 0", recovered)
+	}
+	if len(failed) != 1 || failed[0] != vmID {
+		t.Fatalf("failed = %v, want [%s]", failed, vmID)
+	}
+	if storage.VMStateExists(cp.workDir, vmID) {
+		t.Fatal("VM state still exists after reclaim failure")
+	}
+	if storage.AutoSnapshotExists(cp.workDir, vmID) {
+		t.Fatal("auto snapshot still exists after reclaim failure")
+	}
+}
+
+func TestRegisterRecoveredVMRecreatesMissingFlockFromVMState(t *testing.T) {
+	cp := newTestCP(t)
+	state := storage.VMState{
+		VMID:         "vm-recovered",
+		GuestIP:      "10.0.1.77",
+		AgentToken:   "agent-token",
+		DiskPath:     filepath.Join(cp.workDir, "vm-recovered.ext4"),
+		Profile:      "worker",
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+		FlockID:      "flock-recovered",
+		AgentID:      "worker-1",
+		CreatedAt:    time.Date(2026, 7, 3, 1, 2, 3, 0, time.UTC),
+	}
+
+	cp.registerRecoveredVM(state, nil, nil)
+
+	flock, ok := cp.flockMgr.Get("flock-recovered")
+	if !ok {
+		t.Fatal("missing flock was not recreated from VM state")
+	}
+	agents := flock.Snapshot()
+	if len(agents) != 1 {
+		t.Fatalf("recovered agents = %d, want 1", len(agents))
+	}
+	agent := agents[0]
+	if agent.AgentID != "worker-1" || agent.Role != "worker" || agent.VMID != "vm-recovered" || agent.AgentURL != "http://10.0.1.77:8080" || agent.Status != orchestrator.AgentStatusReady {
+		t.Fatalf("recovered agent = %+v, want worker-1/worker/vm-recovered/ready", agent)
+	}
+	if flock.TenantID != "tenant-1" || flock.EgressPolicy != "profile" {
+		t.Fatalf("recovered flock tenant/egress = %q/%q, want tenant-1/profile", flock.TenantID, flock.EgressPolicy)
+	}
+	meta, err := orchestrator.LoadFlockMetadata(cp.workDir, "flock-recovered")
+	if err != nil {
+		t.Fatalf("LoadFlockMetadata: %v", err)
+	}
+	if _, ok := meta.Agents["worker-1"]; !ok {
+		t.Fatalf("persisted metadata missing recovered worker-1: %+v", meta.Agents)
+	}
+	if meta.Agents["worker-1"].AgentURL != "http://10.0.1.77:8080" {
+		t.Fatalf("persisted recovered agent_url = %q, want private IP fallback", meta.Agents["worker-1"].AgentURL)
+	}
+}
+
+func TestRegisterRecoveredVMAddsMissingAgentToExistingFlock(t *testing.T) {
+	cp := newTestCP(t)
+	flock, err := cp.flockMgr.Create("flock-existing", "existing task", "tenant-1", "profile", filepath.Join(cp.workDir, "flocks", "flock-existing", "TOWN_WALL.log"))
+	if err != nil {
+		t.Fatalf("Create flock: %v", err)
+	}
+	flock.AddAgent(&orchestrator.AgentInfo{AgentID: "orchestrator-1", Role: "orchestrator", VMID: "vm-orch", Status: orchestrator.AgentStatusReady})
+	if err := flock.Persist(cp.workDir); err != nil {
+		t.Fatalf("Persist existing flock: %v", err)
+	}
+	state := storage.VMState{
+		VMID:         "vm-worker",
+		GuestIP:      "10.0.1.78",
+		AgentURL:     "http://10.0.1.78:8080",
+		AgentToken:   "agent-token",
+		DiskPath:     filepath.Join(cp.workDir, "vm-worker.ext4"),
+		Profile:      "worker",
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+		FlockID:      "flock-existing",
+		AgentID:      "worker-1",
+		CreatedAt:    time.Date(2026, 7, 3, 1, 2, 3, 0, time.UTC),
+	}
+
+	cp.registerRecoveredVM(state, nil, nil)
+
+	agents := map[string]*orchestrator.AgentInfo{}
+	for _, agent := range flock.Snapshot() {
+		copy := *agent
+		agents[agent.AgentID] = &copy
+	}
+	if len(agents) != 2 {
+		t.Fatalf("agents = %d, want 2: %+v", len(agents), agents)
+	}
+	worker := agents["worker-1"]
+	if worker == nil {
+		t.Fatalf("missing recovered worker-1: %+v", agents)
+	}
+	if worker.Role != "worker" || worker.VMID != "vm-worker" || worker.AgentURL != "http://10.0.1.78:8080" || worker.Status != orchestrator.AgentStatusReady {
+		t.Fatalf("recovered worker = %+v, want worker/vm-worker/ready", worker)
+	}
+	meta, err := orchestrator.LoadFlockMetadata(cp.workDir, "flock-existing")
+	if err != nil {
+		t.Fatalf("LoadFlockMetadata: %v", err)
+	}
+	if _, ok := meta.Agents["worker-1"]; !ok {
+		t.Fatalf("persisted metadata missing recovered worker-1: %+v", meta.Agents)
+	}
+}
+
 func TestRuntimeAuditAPIListFiltersAndRedacts(t *testing.T) {
 	cp := newTestCP(t)
 	cp.runtimeAuditPath = filepath.Join(cp.workDir, "audit", "runtime-audit.jsonl")
@@ -480,12 +870,12 @@ func TestControlPlanePerVMMetricsEndpoint(t *testing.T) {
 }
 
 func TestAuthMiddlewareIncrementsAuthFailure(t *testing.T) {
-	var metrics controlPlaneMetrics
+	cp := newTestCP(t)
 	handler := authMiddleware(
 		func() []APIClient {
 			return []APIClient{{Name: "operator", Token: "secret-token"}}
 		},
-		&metrics,
+		cp.metrics.authTotal,
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			t.Fatal("handler should not run for unauthorized request")
 		}),
@@ -497,8 +887,8 @@ func TestAuthMiddlewareIncrementsAuthFailure(t *testing.T) {
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d body = %s, want 401", rr.Code, rr.Body.String())
 	}
-	if got := metrics.snapshot().authFailure; got != 1 {
-		t.Fatalf("authFailure = %d, want 1", got)
+	if got := cp.metrics.authTotal.WithLabelValues("denied").Get(); got != 1 {
+		t.Fatalf("auth denied count = %v, want 1", got)
 	}
 	if strings.Contains(rr.Body.String(), "secret-token") {
 		t.Fatalf("auth failure response leaked token: %s", rr.Body.String())
@@ -608,6 +998,59 @@ func gcEntryByID(entries []SnapshotGCEntry, snapshotID string) (SnapshotGCEntry,
 	return SnapshotGCEntry{}, false
 }
 
+type recordingEgressEnforcer struct {
+	events []string
+	shared *[]string
+}
+
+func (e *recordingEgressEnforcer) Apply(vmID, tapDevice, guestIP, policy string) error {
+	event := "apply:" + vmID + ":" + tapDevice + ":" + guestIP + ":" + policy
+	e.events = append(e.events, event)
+	if e.shared != nil {
+		*e.shared = append(*e.shared, event)
+	}
+	return nil
+}
+
+func (e *recordingEgressEnforcer) Cleanup(vmID string) error {
+	event := "cleanup:" + vmID
+	e.events = append(e.events, event)
+	if e.shared != nil {
+		*e.shared = append(*e.shared, event)
+	}
+	return nil
+}
+
+type egressEnforcerFunc struct {
+	apply   func(vmID, tapDevice, guestIP, policy string) error
+	cleanup func(vmID string) error
+}
+
+func (e egressEnforcerFunc) Apply(vmID, tapDevice, guestIP, policy string) error {
+	if e.apply != nil {
+		return e.apply(vmID, tapDevice, guestIP, policy)
+	}
+	return nil
+}
+
+func (e egressEnforcerFunc) Cleanup(vmID string) error {
+	if e.cleanup != nil {
+		return e.cleanup(vmID)
+	}
+	return nil
+}
+
+func writeEgressProfileFixture(t *testing.T, baseDir, profileName string) {
+	t.Helper()
+	profileDir := filepath.Join(baseDir, profileName)
+	if err := os.MkdirAll(profileDir, 0700); err != nil {
+		t.Fatalf("mkdir egress profile dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(profileDir, "egress.json"), []byte(`{"allow_cidrs":["203.0.113.10/32"]}`), 0600); err != nil {
+		t.Fatalf("write egress profile: %v", err)
+	}
+}
+
 func decodeGCResponse(t *testing.T, rr *httptest.ResponseRecorder) SnapshotGCResponse {
 	t.Helper()
 	var resp SnapshotGCResponse
@@ -654,34 +1097,46 @@ func TestProfileConfigPaths_ValidProfile_ReturnsPaths(t *testing.T) {
 	if cfg != filepath.Join(profileDir, "goose.yaml") {
 		t.Errorf("unexpected configPath: %q", cfg)
 	}
-	if sec != filepath.Join(profileDir, "goose-secrets.yaml") {
-		t.Errorf("unexpected secretsPath: %q", sec)
+	// Secrets always resolve to the global keychain, never a per-profile file.
+	if sec != cp.gooseSecretsPath {
+		t.Errorf("expected global secretsPath %q, got %q", cp.gooseSecretsPath, sec)
 	}
 }
 
-func TestProfileConfigPaths_MissingConfigYaml_Error(t *testing.T) {
+func TestProfileConfigPaths_AbsentConfigYaml_FallsBackToDefault(t *testing.T) {
 	cp := newTestCP(t)
 	profileDir := filepath.Join(cp.workDir, "configs", "profiles", "partial")
 	os.MkdirAll(profileDir, 0755)
-	// Only goose-secrets.yaml, no goose.yaml
-	os.WriteFile(filepath.Join(profileDir, "goose-secrets.yaml"), []byte("KEY: x\n"), 0644)
-
-	_, _, err := cp.profileConfigPaths("partial")
-	if err == nil {
-		t.Error("expected error for missing goose.yaml")
+	// Profile dir present but no goose.yaml → config falls back to the default,
+	// secrets to the global keychain. No error.
+	cfg, sec, err := cp.profileConfigPaths("partial")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg != cp.gooseConfigPath {
+		t.Errorf("expected fallback configPath %q, got %q", cp.gooseConfigPath, cfg)
+	}
+	if sec != cp.gooseSecretsPath {
+		t.Errorf("expected global secretsPath %q, got %q", cp.gooseSecretsPath, sec)
 	}
 }
 
-func TestProfileConfigPaths_MissingSecretsYaml_Error(t *testing.T) {
+func TestProfileConfigPaths_SecretsAlwaysGlobal(t *testing.T) {
 	cp := newTestCP(t)
 	profileDir := filepath.Join(cp.workDir, "configs", "profiles", "partial2")
 	os.MkdirAll(profileDir, 0755)
-	// Only goose.yaml, no goose-secrets.yaml
+	// Only goose.yaml present; there is no per-profile secrets file anymore.
 	os.WriteFile(filepath.Join(profileDir, "goose.yaml"), []byte("GOOSE_PROVIDER: test\n"), 0644)
 
-	_, _, err := cp.profileConfigPaths("partial2")
-	if err == nil {
-		t.Error("expected error for missing goose-secrets.yaml")
+	cfg, sec, err := cp.profileConfigPaths("partial2")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg != filepath.Join(profileDir, "goose.yaml") {
+		t.Errorf("expected profile configPath, got %q", cfg)
+	}
+	if sec != cp.gooseSecretsPath {
+		t.Errorf("expected global secretsPath %q, got %q", cp.gooseSecretsPath, sec)
 	}
 }
 
@@ -955,6 +1410,96 @@ func TestPlanSnapshotGCProtectsReferencedAndKeepLast(t *testing.T) {
 	}
 }
 
+func TestPlanSnapshotGCKeepsSourceSnapshotForRestoredVM(t *testing.T) {
+	now := time.Now().UTC()
+	cp := newTestCP(t)
+
+	sourceID := "snap-source"
+	addTestSnapshot(t, cp, testSnapshotMeta(sourceID, "vm-source", "full", now.Add(-48*time.Hour)))
+	addTestSnapshot(t, cp, testSnapshotMeta("snap-old", "vm-other", "full", now.Add(-72*time.Hour)))
+	if err := storage.SaveVMState(cp.workDir, storage.VMState{
+		VMID:             "vm-restored",
+		DiskMode:         storage.DiskModeCOW,
+		SourceSnapshotID: sourceID,
+	}); err != nil {
+		t.Fatalf("SaveVMState: %v", err)
+	}
+
+	got := cp.planSnapshotGC(SnapshotGCPolicy{
+		OlderThanSeconds: int64((24 * time.Hour) / time.Second),
+		KeepLastPerVM:    0,
+	}, now)
+	if _, ok := gcEntryByID(got.Candidates, sourceID); ok {
+		t.Fatalf("source snapshot %q selected for GC while restored VM references it", sourceID)
+	}
+	if _, ok := gcEntryByID(got.Candidates, "snap-old"); !ok {
+		t.Fatalf("unreferenced old snapshot not selected; candidates=%v", snapshotIDs(got.Candidates))
+	}
+}
+
+func TestPlanSnapshotGCKeepsLiveRestoredSourceSnapshotWithoutVMState(t *testing.T) {
+	now := time.Now().UTC()
+	cp := newTestCP(t)
+
+	sourceID := "snap-source"
+	addTestSnapshot(t, cp, testSnapshotMeta(sourceID, "vm-source", "full", now.Add(-48*time.Hour)))
+	addTestSnapshot(t, cp, testSnapshotMeta("snap-old", "vm-other", "full", now.Add(-72*time.Hour)))
+	cp.vms["vm-restored"] = &runningVM{
+		VMInfo:           VMInfo{VMID: "vm-restored"},
+		sourceSnapshotID: sourceID,
+	}
+
+	got := cp.planSnapshotGC(SnapshotGCPolicy{
+		OlderThanSeconds: int64((24 * time.Hour) / time.Second),
+		KeepLastPerVM:    0,
+	}, now)
+	if _, ok := gcEntryByID(got.Candidates, sourceID); ok {
+		t.Fatalf("live restored source snapshot %q selected for GC", sourceID)
+	}
+	if _, ok := gcEntryByID(got.Candidates, "snap-old"); !ok {
+		t.Fatalf("unreferenced old snapshot not selected; candidates=%v", snapshotIDs(got.Candidates))
+	}
+}
+
+// TestPlanSnapshotGCFailsClosedWhenVMStateUnreadable verifies the GC planner
+// fails CLOSED when it cannot enumerate persisted VM state: if ListVMState
+// errors, the daemon cannot verify which snapshots are the restore source of a
+// persisted (recoverable) VM, so it must plan NO deletions rather than risk
+// deleting a still-referenced source snapshot. This matches deleteSnapshotByID's
+// fail-closed posture (that path 500s on the same error).
+func TestPlanSnapshotGCFailsClosedWhenVMStateUnreadable(t *testing.T) {
+	now := time.Now().UTC()
+	cp := newTestCP(t)
+
+	addTestSnapshot(t, cp, testSnapshotMeta("snap-source", "vm-source", "full", now.Add(-72*time.Hour)))
+	addTestSnapshot(t, cp, testSnapshotMeta("snap-old", "vm-other", "full", now.Add(-96*time.Hour)))
+
+	// Make {workDir}/vms a regular file so storage.ListVMState's os.ReadDir fails
+	// with a non-IsNotExist error (ENOTDIR) — the injected verification failure.
+	vmsPath := filepath.Join(cp.workDir, "vms")
+	if err := os.RemoveAll(vmsPath); err != nil {
+		t.Fatalf("clear vms path: %v", err)
+	}
+	if err := os.WriteFile(vmsPath, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("plant vms file: %v", err)
+	}
+	// Precondition: the injection really does make persistedRestoredSourceSnapshotRefs fail.
+	if _, err := cp.persistedRestoredSourceSnapshotRefs(); err == nil {
+		t.Fatal("precondition: ListVMState must fail with the planted vms file")
+	}
+
+	got := cp.planSnapshotGC(SnapshotGCPolicy{
+		OlderThanSeconds: int64((24 * time.Hour) / time.Second),
+	}, now)
+
+	if len(got.Candidates) != 0 {
+		t.Fatalf("fail-closed GC must plan no deletions, got candidates=%v", snapshotIDs(got.Candidates))
+	}
+	if len(got.Errors) == 0 {
+		t.Fatal("fail-closed GC must record an error explaining the abort")
+	}
+}
+
 func TestPlanSnapshotGCMaxTotalBytesSelectsOldestUnprotected(t *testing.T) {
 	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
 	cp := newTestCP(t)
@@ -998,6 +1543,33 @@ func TestPlanSnapshotGCMaxTotalBytesSelectsOldestUnprotected(t *testing.T) {
 	}
 	if protected.SizeBytes != 22 {
 		t.Fatalf("protected size_bytes = %d, want 22", protected.SizeBytes)
+	}
+}
+
+func TestApplySnapshotGCRechecksLiveRestoredSourceSnapshot(t *testing.T) {
+	now := time.Now().UTC()
+	cp := newTestCP(t)
+	meta := testSnapshotMeta("snap-source", "vm-source", "full", now.Add(-72*time.Hour))
+	addTestSnapshot(t, cp, meta)
+	cp.vms["vm-restored"] = &runningVM{
+		VMInfo:           VMInfo{VMID: "vm-restored"},
+		sourceSnapshotID: "snap-source",
+	}
+
+	resp := SnapshotGCResponse{
+		Applied:    true,
+		Candidates: []SnapshotGCEntry{snapshotGCEntryFrom(meta, snapshotGCReasonOlderThan, nil, 0)},
+	}
+	cp.applySnapshotGC(&resp)
+
+	if len(resp.Deleted) != 0 {
+		t.Fatalf("deleted = %v, want no deletion of live restored source", snapshotIDs(resp.Deleted))
+	}
+	if len(resp.Errors) != 1 || !strings.Contains(resp.Errors[0].Error, "referenced by restored VM") {
+		t.Fatalf("errors = %+v, want restored VM dependency error", resp.Errors)
+	}
+	if _, ok := cp.snapshots["snap-source"]; !ok {
+		t.Fatal("live restored source snapshot was removed from snapshot map")
 	}
 }
 
@@ -1483,6 +2055,53 @@ func TestDeleteSnapshotStillProtectsDiffBase(t *testing.T) {
 	}
 }
 
+func TestDeleteSnapshotProtectsLiveRestoredSourceSnapshot(t *testing.T) {
+	now := time.Now().UTC()
+	cp := newTestCP(t)
+	meta := testSnapshotMeta("snap-source", "vm-source", "full", now.Add(-10*24*time.Hour))
+	addTestSnapshot(t, cp, meta)
+	cp.vms["vm-restored"] = &runningVM{
+		VMInfo:           VMInfo{VMID: "vm-restored"},
+		sourceSnapshotID: "snap-source",
+	}
+
+	rr := httptest.NewRecorder()
+	cp.deleteSnapshot(rr, "snap-source")
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, body = %q; want 409", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "referenced by restored VM vm-restored") {
+		t.Fatalf("body = %q, want restored VM dependency error", rr.Body.String())
+	}
+	if _, ok := cp.snapshots["snap-source"]; !ok {
+		t.Fatal("protected source snapshot was removed from map")
+	}
+}
+
+func TestDeleteSnapshotProtectsPersistedRestoredSourceSnapshot(t *testing.T) {
+	now := time.Now().UTC()
+	cp := newTestCP(t)
+	meta := testSnapshotMeta("snap-source", "vm-source", "full", now.Add(-10*24*time.Hour))
+	addTestSnapshot(t, cp, meta)
+	if err := storage.SaveVMState(cp.workDir, storage.VMState{
+		VMID:             "vm-restored",
+		SourceSnapshotID: "snap-source",
+	}); err != nil {
+		t.Fatalf("SaveVMState: %v", err)
+	}
+
+	rr := httptest.NewRecorder()
+	cp.deleteSnapshot(rr, "snap-source")
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, body = %q; want 409", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "referenced by restored VM vm-restored") {
+		t.Fatalf("body = %q, want restored VM state dependency error", rr.Body.String())
+	}
+}
+
 func TestCreateSnapshotRejectsMalformedJSONWithJSONError(t *testing.T) {
 	cp := newTestCP(t)
 	rr := httptest.NewRecorder()
@@ -1597,9 +2216,17 @@ func TestRestoreSnapshotFirecrackerFailureCleansNetworkAndDMSnapshot(t *testing.
 		if baseDiskPath != meta.DiskCopyPath {
 			t.Fatalf("baseDiskPath = %q, want %q", baseDiskPath, meta.DiskCopyPath)
 		}
+		// Firecracker LoadSnapshot opens the disk path baked into state.bin at snapshot
+		// time (meta.DiskPath); the restored COW device MUST be bind-mounted over that
+		// exact path, matching upstream and reRestoreMachine (recovery.go). Per-restore
+		// isolation lives in the unique exception store, not the shared mount target.
 		if mountTargetPath != meta.DiskPath {
-			t.Fatalf("mountTargetPath = %q, want %q", mountTargetPath, meta.DiskPath)
+			t.Fatalf("mountTargetPath = %q, want original snapshot DiskPath %q (Firecracker opens the recorded path)", mountTargetPath, meta.DiskPath)
 		}
+		if !strings.HasPrefix(exceptionStorePath, cp.provisioner.WorkspaceDir) || !strings.HasSuffix(exceptionStorePath, ".cow") {
+			t.Fatalf("exceptionStorePath = %q, want per-restore .cow under %q", exceptionStorePath, cp.provisioner.WorkspaceDir)
+		}
+		dmInfo.MountTarget = mountTargetPath
 		return dmInfo, nil
 	}
 	cp.teardownDMSnapshot = func(info *storage.DMSnapshotInfo) {
@@ -1607,7 +2234,7 @@ func TestRestoreSnapshotFirecrackerFailureCleansNetworkAndDMSnapshot(t *testing.
 	}
 	cp.restoreMachine = func(ctx context.Context, cfg vm.VMConfig, memFilePath, snapshotPath string) (*firecracker.Machine, error) {
 		if cfg.RootfsPath != meta.DiskPath {
-			t.Fatalf("RootfsPath = %q, want %q", cfg.RootfsPath, meta.DiskPath)
+			t.Fatalf("RootfsPath = %q, want original snapshot DiskPath %q", cfg.RootfsPath, meta.DiskPath)
 		}
 		if cfg.VsockUDSPath != meta.VsockPath {
 			t.Fatalf("VsockUDSPath = %q, want %q", cfg.VsockUDSPath, meta.VsockPath)
@@ -1657,6 +2284,192 @@ func TestRestoreSnapshotFirecrackerFailureCleansNetworkAndDMSnapshot(t *testing.
 		t.Fatal("snapshotLifecycleMu remained locked after restore failure")
 	}
 	cp.snapshotLifecycleMu.Unlock()
+}
+
+func TestRestoreSnapshotDiffMemoryTempRemovedWhenEgressFails(t *testing.T) {
+	cp := newTestCP(t)
+	cp.provisioner = &storage.Provisioner{WorkspaceDir: t.TempDir()}
+	baseID := "snap-base"
+	diffID := "snap-diff"
+	baseDir := storage.SnapshotDir(cp.workDir, baseID)
+	diffDir := storage.SnapshotDir(cp.workDir, diffID)
+	if err := os.MkdirAll(baseDir, 0700); err != nil {
+		t.Fatalf("mkdir base snapshot: %v", err)
+	}
+	if err := os.MkdirAll(diffDir, 0700); err != nil {
+		t.Fatalf("mkdir diff snapshot: %v", err)
+	}
+	baseMem := filepath.Join(baseDir, "memory.bin")
+	diffMem := filepath.Join(diffDir, "memory.bin")
+	if err := os.WriteFile(baseMem, bytes.Repeat([]byte{0x11}, 8192), 0600); err != nil {
+		t.Fatalf("write base memory: %v", err)
+	}
+	if err := os.WriteFile(diffMem, bytes.Repeat([]byte{0x22}, 4096), 0600); err != nil {
+		t.Fatalf("write diff memory: %v", err)
+	}
+
+	baseMeta := testSnapshotMeta(baseID, "vm-source", "full", time.Now().UTC())
+	baseMeta.MemFilePath = baseMem
+	baseMeta.DiskCopyPath = filepath.Join(baseDir, "rootfs.ext4")
+	cp.snapshots[baseID] = baseMeta
+
+	diffMeta := testSnapshotMeta(diffID, "vm-source", "diff", time.Now().UTC())
+	diffMeta.BaseSnapshotID = baseID
+	diffMeta.TapDevice = "tap9"
+	diffMeta.MacAddr = "AA:FC:00:00:00:09"
+	diffMeta.VsockPath = filepath.Join(t.TempDir(), "old.vsock")
+	diffMeta.DiskPath = filepath.Join(t.TempDir(), "source.ext4")
+	diffMeta.DiskCopyPath = filepath.Join(diffDir, "rootfs.ext4")
+	diffMeta.MemFilePath = diffMem
+	diffMeta.StatFilePath = filepath.Join(diffDir, "state.bin")
+	diffMeta.EgressPolicy = "deny_all"
+	cp.snapshots[diffID] = diffMeta
+
+	var mergedMemPath string
+	cp.allocateForRestore = func(string, string) (string, string, error) {
+		return "tap-restored", "10.0.1.44", nil
+	}
+	cp.releaseNetwork = func(string, string) error {
+		return nil
+	}
+	cp.setupDMSnapshot = func(baseDiskPath, exceptionStorePath, mountTargetPath string) (*storage.DMSnapshotInfo, error) {
+		newVMID := strings.TrimSuffix(filepath.Base(exceptionStorePath), ".cow")
+		mergedMemPath = pickMergedMemPath(cp.workDir, newVMID)
+		return &storage.DMSnapshotInfo{
+			DMDevice:       "dm-test",
+			LoopDevice:     "/dev/loop-test-base",
+			COWLoopDevice:  "/dev/loop-test-cow",
+			ExceptionStore: exceptionStorePath,
+			MountTarget:    mountTargetPath,
+		}, nil
+	}
+	cp.teardownDMSnapshot = func(*storage.DMSnapshotInfo) {}
+	cp.egress = egressEnforcerFunc{
+		apply: func(vmID, tapDevice, guestIP, policy string) error {
+			if mergedMemPath == "" {
+				t.Fatal("merged memory path was not captured before egress apply")
+			}
+			if _, err := os.Stat(mergedMemPath); err != nil {
+				t.Fatalf("merged memory temp missing before egress failure: %v", err)
+			}
+			return errors.New("egress failed")
+		},
+		cleanup: func(vmID string) error { return nil },
+	}
+
+	rr := httptest.NewRecorder()
+	cp.restoreSnapshot(rr, diffID)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, body = %q; want %d", rr.Code, rr.Body.String(), http.StatusInternalServerError)
+	}
+	resp := decodeRestoreErrorResponse(t, rr)
+	if resp.Code != "egress_policy_failed" {
+		t.Fatalf("code = %q, want egress_policy_failed", resp.Code)
+	}
+	if mergedMemPath == "" {
+		t.Fatal("merged memory path was not captured")
+	}
+	if _, err := os.Stat(mergedMemPath); !os.IsNotExist(err) {
+		t.Fatalf("merged memory temp still exists after egress failure: err=%v path=%s", err, mergedMemPath)
+	}
+}
+
+// TestRestoreSnapshotPersistsRecoverableVMState covers the v0.4.5 behavior change:
+// a dm-snapshot restore now persists a recovery record (state.json) carrying
+// source_snapshot_id so a daemon restart re-restores the VM from its source
+// snapshot (see recoverRestoredVM). This inverts the pre-v0.4.5 anvil guarantee
+// (restore left no recoverable state). anvil adaptation: the persisted record also
+// carries tenant_id / egress_policy attribution and the snapshot's baked agent
+// token — re-restore reloads the snapshot's memory, so the recovered guest carries
+// that token, not any post-restore rotation. The wire response still omits tokens
+// (see TestVMRestoreResultOmitsAgentToken); the state.json is daemon-private.
+func TestRestoreSnapshotPersistsRecoverableVMState(t *testing.T) {
+	cp := newTestCP(t)
+	cp.provisioner = &storage.Provisioner{WorkspaceDir: t.TempDir()}
+	snapshotID := "snap-restore-live"
+	meta := testSnapshotMeta(snapshotID, "vm-source", "full", time.Now().UTC())
+	meta.GuestIP = "10.0.1.2"
+	meta.TapDevice = "tap9"
+	meta.MacAddr = "AA:FC:00:00:00:09"
+	meta.VsockPath = filepath.Join(t.TempDir(), "old.vsock")
+	meta.DiskPath = filepath.Join(t.TempDir(), "source.ext4")
+	meta.DiskCopyPath = filepath.Join(t.TempDir(), "rootfs.ext4")
+	meta.MemFilePath = filepath.Join(t.TempDir(), "memory.bin")
+	meta.StatFilePath = filepath.Join(t.TempDir(), "state.bin")
+	meta.AgentToken = "restored-token"
+	meta.TenantID = "tenant-1"
+	meta.EgressPolicy = "profile"
+	cp.snapshots[snapshotID] = meta
+
+	dmInfo := &storage.DMSnapshotInfo{
+		DMDevice:       "dm-test",
+		LoopDevice:     "/dev/loop-test-base",
+		COWLoopDevice:  "/dev/loop-test-cow",
+		ExceptionStore: filepath.Join(t.TempDir(), "restore.cow"),
+	}
+	cp.allocateForRestore = func(string, string) (string, string, error) {
+		return "tap-restored", "10.0.1.44", nil
+	}
+	cp.setupDMSnapshot = func(baseDiskPath, exceptionStorePath, mountTargetPath string) (*storage.DMSnapshotInfo, error) {
+		dmInfo.MountTarget = mountTargetPath
+		return dmInfo, nil
+	}
+	cp.restoreMachine = func(ctx context.Context, cfg vm.VMConfig, memFilePath, snapshotPath string) (*firecracker.Machine, error) {
+		return &firecracker.Machine{}, nil
+	}
+	cp.reconfigureGuestIP = func(vsockPath, ipCIDR, gateway string) error {
+		return nil
+	}
+	cp.waitForAgent = func(guestIP string, timeout time.Duration) error {
+		return nil
+	}
+
+	rr := httptest.NewRecorder()
+	cp.restoreSnapshot(rr, snapshotID)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %q; want 201", rr.Code, rr.Body.String())
+	}
+	var resp VMRestoreResult
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode restore response: %v", err)
+	}
+	if resp.SourceSnapshotID != snapshotID {
+		t.Fatalf("response source_snapshot_id = %q, want %q", resp.SourceSnapshotID, snapshotID)
+	}
+
+	restored := cp.vms[resp.VMID]
+	if restored == nil {
+		t.Fatalf("restored VM %q not registered", resp.VMID)
+	}
+	if restored.sourceSnapshotID != snapshotID {
+		t.Fatalf("sourceSnapshotID = %q, want %q", restored.sourceSnapshotID, snapshotID)
+	}
+
+	// v0.4.5: the recovery record must be persisted so RecoverVMs re-restores it.
+	if !storage.VMStateExists(cp.workDir, resp.VMID) {
+		t.Fatalf("restored VM %q did not persist a recovery state.json", resp.VMID)
+	}
+	state, err := storage.LoadVMState(cp.workDir, resp.VMID)
+	if err != nil {
+		t.Fatalf("LoadVMState: %v", err)
+	}
+	if state.SourceSnapshotID != snapshotID {
+		t.Errorf("persisted source_snapshot_id = %q, want %q", state.SourceSnapshotID, snapshotID)
+	}
+	if state.TenantID != "tenant-1" {
+		t.Errorf("persisted tenant_id = %q, want tenant-1", state.TenantID)
+	}
+	if state.EgressPolicy != "profile" {
+		t.Errorf("persisted egress_policy = %q, want profile", state.EgressPolicy)
+	}
+	if state.AgentToken != "restored-token" {
+		t.Errorf("persisted agent_token = %q, want restored-token (snapshot's baked token)", state.AgentToken)
+	}
+	if state.DiskMode != storage.DiskModeCOW {
+		t.Errorf("persisted disk_mode = %q, want %q", state.DiskMode, storage.DiskModeCOW)
+	}
 }
 
 func TestAgentTokenForRestoredSnapshotUsesExistingToken(t *testing.T) {
@@ -1736,8 +2549,11 @@ func TestRestoreSnapshotDMSnapshotFallbackReleasesNetworkOnlyAfterBindMountFailu
 		if !strings.HasPrefix(newDiskPath, cp.provisioner.WorkspaceDir) {
 			t.Fatalf("newDiskPath = %q, want under %q", newDiskPath, cp.provisioner.WorkspaceDir)
 		}
+		// The bind mount target must be the original recorded disk path (meta.DiskPath)
+		// that Firecracker opens on LoadSnapshot; per-restore isolation is the unique
+		// newDiskPath bind source, not the target.
 		if mountTargetPath != meta.DiskPath {
-			t.Fatalf("mountTargetPath = %q, want %q", mountTargetPath, meta.DiskPath)
+			t.Fatalf("mountTargetPath = %q, want original snapshot DiskPath %q (Firecracker opens the recorded path)", mountTargetPath, meta.DiskPath)
 		}
 		return errors.New("bind unavailable")
 	}
@@ -1798,6 +2614,31 @@ func TestRestoreSnapshotUsesSnapshotLifecycleLock(t *testing.T) {
 	}
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, body = %q; want %d", rr.Code, rr.Body.String(), http.StatusNotFound)
+	}
+}
+
+func TestDestroyVMWaitsForSnapshotLifecycleLock(t *testing.T) {
+	cp := newTestCP(t)
+	done := make(chan struct{})
+
+	cp.snapshotLifecycleMu.Lock()
+	go func() {
+		defer close(done)
+		cp.destroyVM("missing-vm")
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("destroyVM finished while snapshotLifecycleMu was held")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	cp.snapshotLifecycleMu.Unlock()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("destroyVM did not finish after snapshotLifecycleMu was released")
 	}
 }
 
@@ -1905,5 +2746,53 @@ func TestHandleVMWorkloadRunRequiresPost(t *testing.T) {
 
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status = %d, want 405", rr.Code)
+	}
+}
+
+// TestTranscriptEndpointRequiresBearer is an anvil transcript-safety guard (v0.7
+// parity): GET /vms/{id}/sessions/{name}/transcript is served inside handleVM,
+// which production wraps in authMiddleware. A request with no bearer must be
+// rejected before the handler (and thus before any agent proxy) runs; a valid
+// bearer must pass auth and reach the transcript routing (404 vm-not-found here,
+// never 401), proving it is the auth boundary — not a coincidence — that gates it.
+func TestTranscriptEndpointRequiresBearer(t *testing.T) {
+	cp := newTestCP(t)
+	handler := authMiddleware(
+		func() []APIClient { return []APIClient{{Name: "operator", Token: "secret-token"}} },
+		cp.metrics.authTotal,
+		http.HandlerFunc(cp.handleVM),
+	)
+	const path = "/vms/vm-404/sessions/sess1/transcript"
+
+	// No Authorization header → 401, and no token echoed back.
+	noAuth := httptest.NewRecorder()
+	handler.ServeHTTP(noAuth, httptest.NewRequest(http.MethodGet, path, nil))
+	if noAuth.Code != http.StatusUnauthorized {
+		t.Fatalf("no-bearer status = %d, want 401; body = %s", noAuth.Code, noAuth.Body.String())
+	}
+	if strings.Contains(noAuth.Body.String(), "secret-token") {
+		t.Fatalf("401 response leaked token: %s", noAuth.Body.String())
+	}
+
+	// Wrong bearer → still 401.
+	badAuth := httptest.NewRecorder()
+	badReq := httptest.NewRequest(http.MethodGet, path, nil)
+	badReq.Header.Set("Authorization", "Bearer not-the-token")
+	handler.ServeHTTP(badAuth, badReq)
+	if badAuth.Code != http.StatusUnauthorized {
+		t.Fatalf("bad-bearer status = %d, want 401", badAuth.Code)
+	}
+
+	// Correct bearer → auth passes; the transcript route runs and 404s on the
+	// missing VM. The point is only that it is NOT 401 (auth did not block it).
+	okAuth := httptest.NewRecorder()
+	okReq := httptest.NewRequest(http.MethodGet, path, nil)
+	okReq.Header.Set("Authorization", "Bearer secret-token")
+	handler.ServeHTTP(okAuth, okReq)
+	if okAuth.Code == http.StatusUnauthorized {
+		t.Fatalf("valid bearer was rejected: %d %s", okAuth.Code, okAuth.Body.String())
+	}
+	if okAuth.Code != http.StatusNotFound {
+		t.Fatalf("valid-bearer status = %d, want 404 (vm not found); body = %s", okAuth.Code, okAuth.Body.String())
 	}
 }

@@ -135,9 +135,17 @@ scripts/anvil-mcp-e2e.sh flock
 
 ### 현재 upstream runtime baseline
 
-2026-05-26 기준 `sync/ephemera-v0.3.6`은 upstream ephemera `v0.3.6`까지 병합된
-runtime baseline을 사용한다. 새 anvil release 후보가 이 baseline을 포함한다면
-release 본문에는 upstream runtime 변경과 anvil product 변경을 분리해서 적는다.
+anvil main runtime baseline은 upstream ephemera `v0.7.0`까지 병합·적응한 runtime을
+포함한다. `v0.3.2`-`v0.3.6`은 이전 release가 채택한 baseline이고, `v0.4.0`-`v0.4.5`는
+v0.4 sync, `v0.5.0`-`v0.5.5`는 v0.5 operator sync, `v0.6.0`-`v0.6.4`는 v0.6 MCP gateway
+sync, `v0.7.0`은 v0.7 parity sync에서 병합·적응해 full KVM gate로 검증했다 — upstream
+parity scope(`v0.4.0`-`v0.7.0`) 코드 편입이 완료됐다. anvil runtime/operator baseline
+supports upstream ephemera v0.7.0 with anvil adaptations for token redaction,
+tenant/egress, scheduler, audit, and IronClaw MCP surface separation. 전 태그별 parity
+matrix는 [`docs/analysis/11-v0.5.0-v0.7.0-core-service-parity-review.md`](../analysis/11-v0.5.0-v0.7.0-core-service-parity-review.md)에
+있다. upstream `main`과 최신 upstream tag는 `v0.7.0`까지 진행되어 있다. 새 anvil release
+후보가 이 baseline을 포함한다면 release 본문에는 upstream runtime 변경과 anvil product
+변경을 분리해서 적는다.
 
 - upstream `v0.3.2`: live VM cold-restart, `vms/<vm_id>/state.json`, orphan cleanup,
   기존 TAP/IP/MAC 재예약, graceful daemon shutdown 시 rootfs/state 보존.
@@ -152,13 +160,146 @@ release 본문에는 upstream runtime 변경과 anvil product 변경을 분리�
 - upstream `v0.3.6`: autonomous webdev demo, in-VM `gtcall`, multi-line-safe
   `gtwall`, Goose `--output-format json` assistant text extraction, golden image
   `curl`/`jq` dependency.
+- upstream `v0.4.0`-`v0.4.3`: memory auto-snapshot(opt-in `EPHEMERA_AUTOSNAPSHOT`),
+  diff/COW rootfs, client identity + `GET /audit` + per-token TTL + `ephemera-ctl`,
+  COW spawn probe/fallback(`EPHEMERA_DISK_MODE=cow` 명시적 opt-in), dynamic flock
+  membership/pause/resume/`max_agents`/Town Wall filter·rotation.
+- upstream `v0.4.4`: streaming `POST /vms/{id}/tasks?stream=1`(NDJSON, buffered
+  기본 계약 유지), nested task depth guard `EPHEMERA_MAX_TASK_DEPTH`/`508`,
+  read-only `GET /watchdog/status`, flock broadcast(daemon API/`ephemera-ctl` only,
+  `anvil_*` MCP tool 미노출), goose-agent slog.
+- upstream `v0.4.5`: snapshot-restore auto-recovery(daemon restart 시 source
+  snapshot에서 re-restore). anvil은 live·persisted restored VM이 참조하는 source
+  snapshot `DELETE`를 `409`로 막아 upstream e2e 46c의 `200` orphan과 divergent하다.
+- upstream `v0.5.0`: operator Web UI(`/ui/`, embedded `cmd/goose-daemon/uidist/`) +
+  `/config/profiles` + multi-turn goose session + graceful VM delete. Web UI는
+  runtime/operator surface(IronClaw MCP 아님), `/ui/`만 auth 밖·data API는 bearer 뒤,
+  `/config/profiles`는 `goose-secrets.yaml` 비노출.
+- upstream `v0.5.1`-`v0.5.5`: `/config/providers`·`/config/clients`(secret 비노출),
+  `system.md` 편집(64 KiB), profile guard(in-use `409`/default 예약/traversal 거부),
+  sizing preset + per-VM `VcpuCount`/`MemSizeMib`, `SystemAuthor`, restore wait 60s.
+- upstream `v0.6.0`: runtime MCP Gateway(`internal/mcpgateway`, daemon `/config/mcp*`,
+  `configs/mcp/*.example`, Web UI MCP console). runtime/operator surface(IronClaw MCP
+  아님, `cmd/anvil-mcp` 대체 아님). source IP로 caller profile 판정(unknown `403`),
+  backend credential host-side only(VM엔 gateway URL만), `audit/mcp.jsonl` metadata-only,
+  `/config/mcp*`는 bearer 뒤, profile policy는 widen 불가.
+- upstream `v0.6.1`/`v0.6.2`/`v0.6.4`(upstream `v0.6.3` 없음): `EPHEMERA_NET_ANTISPOOF`
+  기본 on, per-(VM,server) rate limit(`EPHEMERA_MCP_RATE`/`BURST`, 기본 `0`=unlimited),
+  resources/prompts policy·rate 공유, `GET /config/mcp/servers`는 `has_credential`만,
+  stdio backend(`nobody`/`/var/lib/ephemera/mcp-stdio` scratch, `credential_env`,
+  child env 재구성, process-group reap).
+- upstream `v0.7.0`: end-user installer(`install.sh`/`uninstall.sh`/`INSTALL.md`/
+  `ephemera.service.in`)와 release workflow(`scripts/build_release.sh`), conversation
+  transcript restore, upstream hardening reconcile. installer는 runtime/operator surface,
+  systemd는 canonical `ephemera`(alias wrapper 없음). transcript는 daemon proxy
+  `GET /vms/{id}/sessions/{name}/transcript`(bearer), agent export read-only(model call
+  없음), 응답 `{turns:[{role,text}]}` auth-free. `uninstall.sh`는 ephemera-scoped `/tmp`
+  scratch(`/tmp/goose-workspaces` 등, stale no-op `/tmp/goose-rootfs` 포함)를 root-gated·
+  prefix-anchored로 정리한다(의도된 cleanup).
+- anvil transcript-safety guard 4종: bearer 없으면 `401`, payload는 provider key/CP
+  token/`agent_token` sentinel-free, cache-hit는 agent spawn 없이 serve, export argv는
+  `session export -n {name} --format json`이며 run-token 거부.
+- anvil backport reconciliation: 사전 backport 3종(kernel SHA atomic temp+rename,
+  `resolveWorkDir`/`EPHEMERA_HOME`, `waitForAgent` per-probe)이 v0.7.0 reconcile에서
+  single definition으로 남았고(anvil stricter, net Go diff doc-comment-only) 기존 anvil
+  adaptation(agent-stamp skip, restore-over-`meta.DiskPath`, `DisableKeepAlives`)은
+  rollback 없음. release build integrity: `build_release.sh`가 kernel/firecracker를
+  `main.go` pin과 `sha256sum -c`로 검증(FULL-tarball supply-chain gap 차단).
+- anvil sizing 결정: default VM sizing `1` vCPU / `1024` MiB(v0.5.3 이전 2/2048,
+  KVM 근거로 승인). flock member spawn의 per-profile sizing override 미존중 gap은
+  follow-up으로 기록한다.
+- anvil keep-alive divergence(`64ec57c`): proxy agent client가 request마다 fresh
+  dial(`DisableKeepAlives`)한다. `v0.5.x` `gracefulAgentStop`이 드러낸 v0.2.0-since
+  pooled-client 결함(guest IP 재활용 시 stale connection → restored VM `/tasks`
+  hang/`502`)을 막는 upstream pooling divergence다. 2026-07-06 결정으로 anvil-side에서
+  유지하고 upstream 제안(기여)은 하지 않는다.
 - anvil adaptation: `agent_token`과 control-plane token이 MCP output, audit, metrics,
   trace, replay fixture, release artifact에 노출되지 않도록 수정 또는 검증한 내용.
   `ephemera_*` metric namespace와 `EPHEMERA_*` env는 runtime compatibility로
   설명하고 anvil product rename으로 처리하지 않는다.
 
-v0.3.6 기반 upstream E2E는 `/metrics`, `/stats`, real-LLM smoke, in-VM helper 경로를
-포함할 수 있다. provider key가 있는 환경에서는 `GOOGLE_API_KEY`,
+v0.4 sync Phase 1 KVM gate 결과와 전제:
+
+- CI-safe gate all green: `go build ./cmd/{goose-daemon,anvil-mcp,anvil-scheduler}`,
+  `go test ./... -count=1`(EXIT=0). broadcast 비노출·buffered 기본 계약·depth `508`
+  guard test 포함.
+- 실제 KVM host `sudo bash e2e_test.sh`: `316✓ / 0✗`("All test steps passed").
+  step 59 real-LLM smoke만 provider key 부재로 skip.
+- KVM gate 전제: working directory에 gitignore된 로컬 operator 파일
+  `configs/goose.yaml`, `configs/goose-secrets.yaml`이 있어야 한다. 없으면
+  `POST /vms`가 config injection 단계에서 `500`으로 실패한다.
+
+v0.5 sync Phase 2 KVM gate — 필수 스크립트(재발 방지):
+
+KVM runtime/operator 변경 release 후보는 아래 스크립트를 **모두** 실행한다. Phase 1은
+`e2e_test.sh`만 실행하고 `anvil-mcp-e2e.sh`(3개 모드)와 `vm-workload-e2e.sh`를 누락했다.
+이 목록은 그 누락이 재발하지 않도록 게시 전 필수 항목으로 고정한다.
+
+```bash
+sudo bash e2e_test.sh
+scripts/anvil-mcp-e2e.sh lifecycle
+scripts/anvil-mcp-e2e.sh semantic
+scripts/anvil-mcp-e2e.sh flock
+sudo -n bash scripts/vm-workload-e2e.sh
+bash install.sh --help && bash uninstall.sh --help   # installer help, no system mutation (v0.7.0)
+sudo bash scripts/build_release.sh v0.7.0             # FULL+SLIM tarball + .sha256 (dist/ gitignored, v0.7.0)
+```
+
+Phase 2 결과:
+
+- CI-safe gate all green: `git diff --check`, targeted test group, web build 재현
+  가능(`cmd/goose-daemon/uidist/` drift 없음), `go test ./... -count=1`(EXIT=0),
+  `go build ./cmd/{goose-daemon,anvil-mcp,anvil-scheduler}`.
+- KVM: `sudo bash e2e_test.sh` `316✓ / 0✗` ×3(step 59 real-LLM smoke만 provider-key
+  부재로 skip). `anvil-mcp-e2e.sh` lifecycle PASS·flock PASS, `vm-workload-e2e.sh`
+  PASS.
+- `anvil-mcp-e2e.sh semantic`은 key-free 구간(workspace copy-in/out, task proxy,
+  cleanup)이 모두 `200`이고 마지막 LLM-echo substep만 로컬 Google API key가 invalid해
+  실패했다. provider-key 의존 실패이며 코드 결함이 아니다(계획대로 기록).
+
+v0.6 sync Phase 3 KVM gate — gateway steps:
+
+- `e2e_test.sh`는 이제 MCP gateway step `84`-`89`를 포함한다. gateway를 건드리는 release
+  후보는 이 step들이 green인지 확인한다(real tool call / real stdio tool call step은
+  provider key가 필요할 수 있다).
+- Phase 3 결과: CI-safe gate all green(`git diff --check`, targeted group, web build
+  drift 없음, `go test ./... -count=1` EXIT=0, 3 builds). KVM `sudo bash e2e_test.sh`
+  `334✓ / 0✗`("All test steps passed") — gateway step 84-89 최초 실행 green, provider-key
+  skip 3건(LLM smoke, real tool call, real stdio tool call). `anvil-mcp-e2e.sh`
+  lifecycle PASS·flock PASS(runtime gateway live 상태에서 adapter 영향 없음),
+  `vm-workload-e2e.sh` PASS. `anvil-mcp-e2e.sh semantic`은 key-free 구간 `200`, LLM-echo
+  substep만 known-invalid local Google key로 실패(provider-key 의존, Phase 2와 동일 기록).
+- stdio backend 운영 주의: `EPHEMERA_MCP_STDIO_USER`(기본 `nobody`)와
+  `/var/lib/ephemera/mcp-stdio` scratch default를 확인한다. `EPHEMERA_MCP_BIND_IP`는
+  기본 안전한 bridge IP bind를 override할 수 있고, source-IP `403`이 defense-in-depth로
+  남는다.
+
+v0.7 sync Phase 4 KVM/installer gate:
+
+- CI-safe gate all green: `git diff --check`, installer `bash -n` ×3(install.sh/
+  uninstall.sh/build_release.sh), targeted test group, full glob EXIT=0, web build drift
+  없음, 3 builds.
+- KVM: `sudo bash e2e_test.sh` `334✓ / 0✗`. `anvil-mcp-e2e.sh` lifecycle+flock PASS,
+  `vm-workload-e2e.sh` PASS. `anvil-mcp-e2e.sh semantic`은 standing provider-key caveat
+  (key-free 구간 `200`, LLM-echo substep만 known-invalid local Google key로 실패).
+- installer/release build: `bash install.sh --help`/`bash uninstall.sh --help` OK(시스템
+  변경 없음). release build를 root로 실행 → SLIM(≈27M) + FULL(≈250M) tarball + `.sha256`
+  checksum(dist/ gitignored). `build_release.sh`가 kernel/firecracker를 `sha256sum -c`로
+  검증한다.
+- 외부 Web UI 노출은 reverse proxy/TLS 또는 private network 뒤에서만 한다.
+
+upstream parity scope 채택 완료:
+
+- `v0.4.0`-`v0.7.0`은 모두 anvil main baseline으로 병합·적응됐다. 2026-07-02 기준 관찰된
+  upstream 최신 tag는 `v0.7.0`이며 pending sync 후보는 없다. `v0.7.0` 이후 새 tag가
+  관찰되면 별도 sync/adoption review로 처리한다.
+- release-gate: 코드 항목 4종(audit-writer sentinel, stdio stderr scrub, `credential_env`
+  reserved names, production-mux auth sentinel)은 2026-07-06 follow-up batch(`4a802f5`,
+  `0376afa`, `613a01b`, `cd2e70b`, `de5a7aa`, `0625df5`)로 닫혔다. 남은 open gate는
+  valid provider key로 `semantic` run(e2e step 59, 사용자 key 교체 대기)뿐이다.
+
+현재 baseline 기반 upstream E2E는 `/metrics`, `/stats`, streaming/depth/watchdog,
+snapshot-restore recovery, real-LLM smoke, in-VM helper 경로를 포함할 수 있다. provider key가 있는 환경에서는 `GOOGLE_API_KEY`,
 `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` 값이 문서와 fixture에 남지 않았는지 별도로
 확인한다. `/metrics`는 기본 unauthenticated이므로 외부 노출 release 후보에서는
 `EPHEMERA_METRICS_REQUIRE_AUTH=true` 또는 network isolation 정책을 함께 적는다.

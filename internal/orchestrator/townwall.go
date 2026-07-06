@@ -13,6 +13,13 @@ import (
 	"time"
 )
 
+// SystemAuthor is the Town Wall author label for messages the control plane posts
+// on its own behalf — flock lifecycle events (spawn / join / leave / role change /
+// pause / resume / broadcast) and watchdog notices — as opposed to messages
+// authored by an agent. It is intentionally not a name a user would assign to an
+// agent role or profile, so it never collides with a user-defined "orchestrator".
+const SystemAuthor = "control-plane"
+
 // Message is a single Town Wall entry. Seq is a monotonic per-flock counter
 // starting at 1; subscribers can detect dropped messages by checking for gaps.
 type Message struct {
@@ -26,11 +33,13 @@ type Message struct {
 // All Post calls and subscriber notifications are serialized through mu so
 // the on-disk file order matches the order subscribers observe.
 type TownWall struct {
-	mu      sync.Mutex
-	path    string
-	flockID string
-	subs    map[chan Message]struct{}
-	nextSeq uint64
+	mu       sync.Mutex
+	path     string
+	flockID  string
+	subs     map[chan Message]struct{}
+	nextSeq  uint64
+	maxBytes int64 // size-based rotation threshold (v0.4.3); 0 = no rotation
+	keep     int   // number of rotated backups to retain
 }
 
 // NewTownWall opens (creating if missing) the log file at path. The file's
@@ -80,13 +89,22 @@ func (tw *TownWall) Post(agentID, body string) (Message, error) {
 		AgentID:   agentID,
 		Body:      body,
 	}
-	f, err := os.OpenFile(tw.path, os.O_APPEND|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(tw.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		return msg, fmt.Errorf("townwall: open for append: %w", err)
 	}
-	defer f.Close()
-	if _, err := fmt.Fprintf(f, "[%s] <%s> %s\n", msg.Timestamp, msg.AgentID, msg.Body); err != nil {
-		return msg, fmt.Errorf("townwall: append: %w", err)
+	_, werr := fmt.Fprintf(f, "[%s] <%s> %s\n", msg.Timestamp, msg.AgentID, msg.Body)
+	f.Close()
+	if werr != nil {
+		return msg, fmt.Errorf("townwall: append: %w", werr)
+	}
+	// Size-based rotation (v0.4.3): once the active log reaches maxBytes, shift it
+	// to .1 (…→.keep) and let the next Post recreate a fresh active file. History
+	// then reflects only the active file (rotated backups stay on disk).
+	if tw.maxBytes > 0 {
+		if fi, statErr := os.Stat(tw.path); statErr == nil && fi.Size() >= tw.maxBytes {
+			tw.rotateLocked()
+		}
 	}
 	for sub := range tw.subs {
 		select {
@@ -169,4 +187,32 @@ func parseLine(line string) (Message, bool) {
 	agent := rest[1:angleEnd]
 	body := strings.TrimLeft(rest[angleEnd+1:], " ")
 	return Message{Timestamp: ts, AgentID: agent, Body: body}, true
+}
+
+// SetRotation enables size-based rotation of the Town Wall log (v0.4.3).
+// maxBytes <= 0 disables it (the default, preserving unbounded append).
+func (tw *TownWall) SetRotation(maxBytes int64, keep int) {
+	tw.mu.Lock()
+	defer tw.mu.Unlock()
+	tw.maxBytes = maxBytes
+	tw.keep = keep
+}
+
+// rotateLocked shifts path.(keep-1)→.keep … path→.1, dropping the oldest beyond
+// the window, so the next Post recreates a fresh active file. Mirrors the audit
+// logger's rotation. Caller must hold tw.mu.
+func (tw *TownWall) rotateLocked() {
+	if tw.keep < 1 {
+		return
+	}
+	os.Remove(fmt.Sprintf("%s.%d", tw.path, tw.keep)) // drop oldest beyond the window
+	for i := tw.keep - 1; i >= 1; i-- {
+		os.Rename(fmt.Sprintf("%s.%d", tw.path, i), fmt.Sprintf("%s.%d", tw.path, i+1))
+	}
+	os.Rename(tw.path, tw.path+".1")
+	// Recreate an empty active file so History and the next Post always find
+	// tw.path (mirrors the audit logger reopening after rotate).
+	if f, err := os.OpenFile(tw.path, os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+		f.Close()
+	}
 }

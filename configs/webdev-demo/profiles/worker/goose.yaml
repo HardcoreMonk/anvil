@@ -1,0 +1,24 @@
+# webdev_demo.sh role profile — Groq (worker).
+#
+# Single-shot raw-code generation for a 4-file React + Vite site. Runs the fast
+# openai/gpt-oss-20b (OpenAI-format tool calls Groq accepts reliably). Sizing:
+# 1 vCPU / 512 MiB (Light preset) — generation is lightweight and the host (not the
+# VM) runs the npm/vite build. The API key comes from the global
+# configs/goose-secrets.yaml (GROQ_API_KEY).
+#
+# Override per run with WEBDEV_WORKER_MODEL (e.g. openai/gpt-oss-120b for stronger
+# code) to experiment.
+GOOSE_PROVIDER: groq
+GOOSE_MODEL: openai/gpt-oss-20b
+GOOSE_TELEMETRY_ENABLED: false
+GOOSE_DISABLE_KEYRING: true
+EPHEMERA_VCPU_COUNT: 1
+EPHEMERA_MEM_SIZE_MIB: 512
+
+extensions:
+  developer:
+    bundled: true
+    enabled: true
+    name: developer
+    timeout: 600
+    type: builtin

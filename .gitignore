@@ -8,7 +8,9 @@
 /anvil-scheduler
 /e2e-replay-server
 /ephemera-daemon
+/ephemera-ctl
 /goose-daemon
+/goose-agent
 /cmd/goose-daemon/goose-daemon
 *.exe
 *.exe~
@@ -24,6 +26,8 @@
 *.bin
 *.tgz
 vmlinux*
+# Release tarballs built by scripts/build_release.sh
+/dist/
 
 # 3. Unix domain sockets & logs
 *.sock
@@ -35,14 +39,19 @@ vmlinux*
 /snapshots/
 /flocks/
 /vms/
+/audit/
 /tmp/
 
 # 5. Goose runtime config (contains API keys)
 configs/anvil-mcp.yaml
 configs/goose.yaml
 configs/goose-secrets.yaml
-configs/profiles/*/goose.yaml
-configs/profiles/*/goose-secrets.yaml
+# Runtime profiles (created via Settings UI or installed by webdev_demo.sh).
+# Demo profile assets live under configs/webdev-demo/profiles/ and ARE tracked.
+configs/profiles/
+# MCP gateway backend config + credentials (.example templates ARE tracked).
+configs/mcp/servers.yaml
+configs/mcp/secrets.yaml
 
 # 6. Claude Code context file
 CLAUDE.md
@@ -56,3 +65,10 @@ EPHEMERA_v0.3.2_WORK_ORDER.md
 .vscode/
 .idea/
 .DS_Store
+
+# 8. Web UI (v0.5.0)
+# Source lives in web/. The Vite build output is intentionally committed to
+# cmd/goose-daemon/uidist/ (go:embed) so `go build` works without Node — do NOT
+# ignore that directory. Only the node toolchain + any stray dist/ are ignored.
+/web/node_modules/
+/web/dist/

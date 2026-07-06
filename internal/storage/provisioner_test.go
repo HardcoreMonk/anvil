@@ -424,3 +424,43 @@ func TestInstallGooseAgentIntoMountedImageWritesBinaryAndStamp(t *testing.T) {
 		t.Fatalf("image stamp = %q, want abc123 newline", string(stamp))
 	}
 }
+
+// TestGoldenAgentMarkerSkipDecision drives the out-of-image marker that lets
+// EnsureGoldenImageGooseAgent skip the loop mount when the golden image already carries the
+// current goose-agent. Skipping the mount is what keeps daemon startup alive after a SIGKILL
+// left a COW VM's dm-snapshot pinning the golden image through a busy loop device.
+func TestGoldenAgentMarkerSkipDecision(t *testing.T) {
+	dir := t.TempDir()
+	golden := filepath.Join(dir, "golden-image.ext4")
+	if err := os.WriteFile(golden, []byte("image-v1"), 0644); err != nil {
+		t.Fatalf("write golden: %v", err)
+	}
+	const hash = "abc123def456"
+
+	// No marker yet → must mount to verify.
+	if goldenAgentMarkerCurrent(golden, hash) {
+		t.Fatal("expected not-current with no marker present")
+	}
+
+	// After recording the marker → current for the same hash + unchanged image → skip mount.
+	if err := writeGoldenAgentMarker(golden, hash); err != nil {
+		t.Fatalf("writeGoldenAgentMarker: %v", err)
+	}
+	if !goldenAgentMarkerCurrent(golden, hash) {
+		t.Fatal("expected current after writing marker for the same hash and unchanged image")
+	}
+
+	// A different goose-agent source hash → stale → must mount.
+	if goldenAgentMarkerCurrent(golden, "different-hash") {
+		t.Fatal("expected not-current when the agent source hash changed")
+	}
+
+	// A golden-image rebuild (content/size/mtime change) invalidates the marker → must mount.
+	time.Sleep(10 * time.Millisecond)
+	if err := os.WriteFile(golden, []byte("image-v2-rebuilt-larger"), 0644); err != nil {
+		t.Fatalf("rewrite golden: %v", err)
+	}
+	if goldenAgentMarkerCurrent(golden, hash) {
+		t.Fatal("expected not-current after the golden image was rebuilt (size/mtime changed)")
+	}
+}

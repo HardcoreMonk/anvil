@@ -1,7 +1,7 @@
 # anvil 공개 릴리즈 경계
 
 > **대상:** anvil downstream repository
-> **현행화 기준:** 2026-05-26
+> **현행화 기준:** 2026-07-02
 > **목적:** anvil이 공개적으로 책임지는 기능 표면과, upstream ephemera에서 가져오더라도 anvil 정책상 수정하거나 제외해야 하는 표면을 구분한다.
 
 ---
@@ -29,10 +29,15 @@
 | 영역 | 공개 표면 | 구현/문서 위치 |
 |---|---|---|
 | MCP adapter | IronClaw가 호출하는 `anvil_*` stdio MCP tool | `cmd/anvil-mcp`, `internal/anvilmcp`, `docs/architecture/mcp-architecture.md` |
-| VM lifecycle | VM 생성, task 실행, health, stop, delete | ephemera daemon API + anvil MCP wrapper |
+| VM lifecycle | VM 생성, task 실행(`POST /vms/{id}/tasks?stream=1` optional NDJSON streaming, 기본은 buffered `{"output","error"}` 계약), health, stop, delete | ephemera daemon API + anvil MCP wrapper |
 | Snapshot lifecycle | full/diff snapshot 생성, 목록, restore, 삭제 | `internal/storage`, `anvil_create_snapshot` 계열 MCP tool |
 | Runtime boundary | Firecracker MicroVM, TAP/IP, rootfs, guest agent proxy | `cmd/goose-daemon`, `internal/vm`, `internal/network`, `internal/storage` |
-| Runtime observability | `/metrics`, `/metrics/vms`, `/vms/{vm_id}/stats`, structured daemon logs | upstream ephemera runtime namespace + anvil 운영 문서 |
+| Runtime observability | `/metrics`, `/metrics/vms`, `/vms/{vm_id}/stats`, `GET /watchdog/status`(read-only count/ID/config), structured daemon logs | upstream ephemera runtime namespace + anvil 운영 문서 |
+| Operator Web console | daemon이 `/ui/`로 serve하는 embedded Svelte SPA(EN/KO). `/ui/`(정적 bundle + login)만 auth 밖, VM list/create/detail/stats/settings/delete·multi-turn session data API는 bearer 뒤. runtime/operator surface이며 IronClaw MCP surface가 아니다 | `cmd/goose-daemon/uidist/`, `cmd/goose-daemon/config_api.go`, `docs/architecture/service-logic.md` |
+| Profile config surface | `/config/profiles`(provider/model), `/config/providers`(key 존재 여부만), `/config/clients`(이름+만료만), profile `system.md` 편집(`64 KiB` cap). `goose-secrets.yaml` 값은 read/write·노출하지 않음 | `cmd/goose-daemon/config_api.go` |
+| Runtime MCP Gateway | daemon이 VM 내부 agent에 backend MCP server를 policy·rate-limit·audit로 중개(`EPHEMERA_MCP_*`, `internal/mcpgateway`, `configs/mcp/*`, Web UI MCP console). caller profile은 source IP↔VM registry로 판정(unknown → `403`), backend credential은 host-side only(VM엔 gateway URL만), `audit/mcp.jsonl` metadata-only, `/config/mcp*`는 bearer 뒤. **runtime/operator surface이며 IronClaw MCP surface가 아니다 — `cmd/anvil-mcp` IronClaw adapter를 대체하지 않는다** | `internal/mcpgateway`, `cmd/goose-daemon`, `configs/mcp/`, `docs/architecture/mcp-architecture.md` |
+| Operator installer | end-user installer(`install.sh`/`uninstall.sh`/`INSTALL.md`/`ephemera.service.in`)와 release build(`scripts/build_release.sh`, 다운로드 kernel/firecracker를 `main.go` pin과 `sha256sum -c` 검증). runtime/operator installer surface. systemd service는 canonical `ephemera` 이름을 유지한다(rule-permitted, anvil alias wrapper 없음). 외부 노출은 reverse proxy/TLS 또는 private network 뒤에서만 | `install.sh`, `uninstall.sh`, `ephemera.service.in`, `scripts/build_release.sh`, `INSTALL.md` |
+| Conversation transcript | daemon proxy `GET /vms/{id}/sessions/{name}/transcript`(bearer)로 대화 transcript 복원. agent export는 read-only(`goose session export`, model call 없음), 응답 schema `{turns:[{role,text}]}`는 auth-free여서 Web UI가 daemon token 없이 렌더한다. payload는 provider key/CP token/`agent_token` sentinel-free(guard) | `cmd/goose-daemon/api.go`, `cmd/goose-agent/main.go` |
 | Workload automation | script-only `POST /vms/{vm_id}/workloads/run` 계약 | `cmd/goose-agent`, `cmd/goose-daemon`, `scripts/vm-workload-e2e.sh` |
 | Goosetown in-VM helpers | `gtwall`, `gtcall`, `webdev_demo.sh` operator demo | upstream ephemera runtime namespace + anvil 보안 경계 문서 |
 | Token policy | daemon token과 guest `agent_token` 분리, MCP output token redaction | `CONTEXT.md`, `README.md`, MCP adapter |
@@ -72,6 +77,11 @@
 - IronClaw가 ephemera low-level HTTP API를 직접 다루는 결합 구조
 - `POST /vms` 응답 외부의 `agent_token` 노출
 - upstream ephemera의 flock `agent_tokens` 응답을 anvil public API로 그대로 노출
+- flock broadcast(`POST /flocks/{id}/broadcast`, `ephemera-ctl flock broadcast`)를
+  `anvil_*` MCP tool로 노출하는 것. 이 phase에서 broadcast는 daemon-only runtime
+  operator 표면으로만 두며, MCP tool 노출은 tenant/rate/audit 설계 전까지
+  deferred다(`TestToolRegistrationsExcludeBroadcast`,
+  `TestCurrentIronClawSchemasExcludeBroadcastTool`로 고정).
 - 실제 구현 계약 없이 `EPHEMERA_*`, `goose-*` API/env/path를 anvil 이름으로
   일괄 rename하는 변경
 - purecvisor의 libvirt/QEMU, LXC, ZFS zvol clone, multi-node HA, live migration,
@@ -99,7 +109,7 @@ upstream ephemera 변경을 병합할 때는 다음 상태 중 하나로 분류�
 `adapted`, `excluded`, `deferred` 판단은 README나 RELEASE_NOTES만으로 처리하지
 말고 ADR 또는 ADR_INDEX에 남긴다.
 
-현재 anvil `main`의 upstream runtime baseline 채택 상태:
+현재 anvil main runtime baseline의 upstream runtime 채택 상태:
 
 | upstream tag | 주요 변경 | 현재 anvil 분류 |
 |---|---|---|
@@ -108,6 +118,27 @@ upstream ephemera 변경을 병합할 때는 다음 상태 중 하나로 분류�
 | `v0.3.4` | `EPHEMERA_API_TOKENS_FILE`, SIGHUP CP-token vsock fan-out, watchdog tunables/auto-heal, Firecracker SIGHUP forwarding hot-fix | `adapted` — hot rotation은 채택, file permission/VM version caveat를 운영 문서에 명시 |
 | `v0.3.5` | Prometheus `/metrics`, `/vms/{vm_id}/stats`, `log/slog`, observability demo | `adapted` — runtime observability는 채택, `ephemera_*` metric namespace와 `/metrics` auth 정책을 compatibility로 설명 |
 | `v0.3.6` | autonomous webdev demo, in-VM `gtcall`, multi-line-safe `gtwall`, Goose JSON output parsing | `adapted` — demo/helper는 runtime operator 표면으로 채택, peer `agent_token`은 계속 control-plane proxy가 주입하며 직접 노출하지 않음 |
+| `v0.4.0` | memory auto-snapshot, diff/COW rootfs, spawn-path cold-restart | `adapted` — storage/recovery 채택, `EPHEMERA_AUTOSNAPSHOT=true`는 opt-in·disk-expensive로 두고 public support로 승격하지 않음 |
+| `v0.4.1` | client identity, `GET /audit`, per-token TTL, `ephemera-ctl` | `adapted` — daemon access audit/CLI 채택, `ephemera-ctl`은 runtime operator CLI(IronClaw MCP 대체 아님) |
+| `v0.4.2` | COW spawn probe/fallback, COW+Diff snapshot | `adapted`, default cow deferred — `EPHEMERA_DISK_MODE=cow`는 명시적 opt-in, default 전환은 KVM burn-in 뒤 |
+| `v0.4.3` | dynamic flock membership, pause/resume, `max_agents`, Town Wall filter/rotation | `adapted` — single-host flock lifecycle 채택, routed cross-host flock에는 미적용 |
+| `v0.4.4` | streaming `/tasks`, depth guard, `/watchdog/status`, flock broadcast, slog | `adapted`, broadcast MCP exposure deferred — streaming은 buffered 기본 계약 유지, `GET /watchdog/status`는 read-only 공개 표면, flock broadcast는 daemon-only(MCP tool 노출 deferred) |
+| `v0.4.5` | snapshot-restore auto-recovery | `adapted` — restore state persist + token redaction 유지. live·persisted restored VM이 참조하는 source snapshot `DELETE`는 `409`로 보호(upstream e2e 46c의 `200` orphan과 의도적 divergent) |
+| `v0.5.0` | operator Web UI `/ui/`, `/config/profiles`, multi-turn session, graceful delete | `adapted` — Web UI/`/config/*`는 runtime/operator 표면으로 채택(IronClaw MCP surface 아님). `/ui/`(정적 bundle + login)만 auth 밖, data API는 bearer 뒤(guard). `/config/profiles`는 `goose-secrets.yaml` 비노출(sentinel). `cmd/anvil-mcp` 불변, `VMInfo` provider/model additive |
+| `v0.5.1`-`v0.5.5` | `/config/providers`·`/config/clients`, `system.md` 편집, profile guard, sizing preset + per-VM `VcpuCount`/`MemSizeMib`, `SystemAuthor`, restore wait 60s | `adapted` — provider/client surface는 secret 비노출(sentinel), default sizing `1` vCPU/`1024` MiB 채택(이전 2/2048). keep-alive divergence(`64ec57c`)는 ADR_INDEX/upstream-sync-policy 참조 |
+| `v0.6.0` | runtime MCP Gateway(`internal/mcpgateway`, `/config/mcp*`, `configs/mcp/*`, Web UI MCP console) | `adapted` — **runtime/operator 표면, IronClaw MCP surface 아님, `cmd/anvil-mcp` 대체 아님.** source IP로 caller profile 판정(unknown `403`), backend credential host-side only(VM엔 URL만 주입), `audit/mcp.jsonl` metadata-only, profile policy는 `servers.yaml`을 좁히기만 함. IronClaw schema/adapter가 gateway tool 제외(guard) |
+| `v0.6.1`, `v0.6.2`, `v0.6.4` | anti-spoof, per-(VM,server) rate limit, resources/prompts policy·rate 공유, stdio backends | `adapted` — `EPHEMERA_NET_ANTISPOOF` 기본 on, `EPHEMERA_MCP_RATE` 기본 `0`=unlimited, `GET /config/mcp/servers`는 transport/command + `has_credential`만(leak guard), stdio child env 재구성 + `credential_env` + `nobody`/scratch + process-group reap. upstream에 `v0.6.3` 없음 |
+| `v0.7.0` | end-user installer, release workflow, conversation transcript restore, upstream hardening reconcile | `adapted` — installer는 runtime/operator surface이고 systemd는 canonical `ephemera`(alias wrapper 없음). transcript는 daemon proxy(bearer), agent export read-only(model call 없음), payload sentinel-free(guard). 사전 backport 3종이 reconcile에서 single definition으로 남고(anvil stricter) 기존 anvil adaptation rollback 없음 |
+
+2026-07-02 기준 upstream `main`과 최신 upstream tag는 `v0.7.0`이다. `v0.4.0`-`v0.7.0`은
+anvil main runtime baseline으로 병합·적응되어 full KVM gate로 검증됐으며(위 표), upstream
+parity scope 코드 편입이 완료됐다. anvil runtime/operator baseline supports upstream
+ephemera v0.7.0 with anvil adaptations for token redaction, tenant/egress, scheduler,
+audit, and IronClaw MCP surface separation. 전 태그별 채택/적응/deferred/excluded 분류는
+[`docs/analysis/11-v0.5.0-v0.7.0-core-service-parity-review.md`](analysis/11-v0.5.0-v0.7.0-core-service-parity-review.md)의
+parity matrix에 있다. 현재 관찰 범위(`v0.7.0`까지)에는 조건부/제외로 남은 upstream
+tag가 없다. `v0.7.0` 이후 새 upstream tag가 관찰되면 별도 adoption review 뒤 공개
+경계를 분류한다.
 
 `v0.3.2`/`v0.3.3` 병합 전 검토 근거는
 `docs/analysis/08-v0.3.2-v0.3.3-upstream-change-review.md`에 historical analysis로

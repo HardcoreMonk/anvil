@@ -213,6 +213,19 @@ type VMPrepareOptions struct {
 	// when calling back into the control plane. Auto-derived from the host's
 	// apiClients[0] by the daemon; empty when control plane auth is disabled.
 	ControlPlaneToken string
+
+	// MCPGatewayURL, when non-empty, is written to /root/.ephemera-mcp. The in-VM
+	// agent reads it and adds the host MCP gateway as a goose streamable-HTTP
+	// extension, so the agent's tools include the gateway's aggregated catalog.
+	// Empty (gateway off or profile has no allowed servers) injects nothing.
+	MCPGatewayURL string
+
+	// MCPGatewayHostsEntry, when non-empty, is appended to the guest's /etc/hosts
+	// (e.g. "10.0.1.1 ephemera-gw"). It lets the letter-starting hostname in
+	// MCPGatewayURL resolve to the bridge gateway IP, so goose derives a
+	// provider-valid extension/tool-name prefix from the URL. Paired with
+	// MCPGatewayURL.
+	MCPGatewayHostsEntry string
 }
 
 // PrepareVM injects all VM-specific files in a single mount/unmount cycle.
@@ -240,6 +253,7 @@ func (p *Provisioner) PrepareVM(vmID string, opts VMPrepareOptions) error {
 //   - /root/.ephemera-flock                  (FLOCK_ID + AGENT_ID; mode 0600; optional)
 //   - /root/.goose-system-prompt             (role system prompt; optional)
 //   - /root/.ephemera-cp-token               (bearer for in-VM /townwall/post forward; mode 0600; optional)
+//   - /root/.ephemera-mcp                     (host MCP gateway URL; optional)
 func injectVMFiles(mntDir string, opts VMPrepareOptions) error {
 	gooseConfigDir := filepath.Join(mntDir, "root", ".config", "goose")
 	if err := os.MkdirAll(gooseConfigDir, 0755); err != nil {
@@ -296,6 +310,34 @@ func injectVMFiles(mntDir string, opts VMPrepareOptions) error {
 		cpTokenPath := filepath.Join(mntDir, "root", ".ephemera-cp-token")
 		if err := os.WriteFile(cpTokenPath, []byte(opts.ControlPlaneToken), 0600); err != nil {
 			return fmt.Errorf("failed to write CP token: %w", err)
+		}
+	}
+
+	// MCP gateway URL: read by the in-VM agent to add the host gateway as a goose
+	// streamable-HTTP extension. Not a secret (caller identity is by source IP), so
+	// mode 0644 like the system prompt.
+	if opts.MCPGatewayURL != "" {
+		mcpPath := filepath.Join(mntDir, "root", ".ephemera-mcp")
+		if err := os.WriteFile(mcpPath, []byte(opts.MCPGatewayURL), 0644); err != nil {
+			return fmt.Errorf("failed to write mcp gateway url: %w", err)
+		}
+	}
+
+	// MCP gateway /etc/hosts entry: maps the letter-starting gateway hostname to the
+	// bridge IP so the URL above resolves (guest nsswitch is files→dns). Appended so
+	// the image's existing localhost line is preserved.
+	if opts.MCPGatewayHostsEntry != "" {
+		hostsPath := filepath.Join(mntDir, "etc", "hosts")
+		f, err := os.OpenFile(hostsPath, os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			return fmt.Errorf("failed to open /etc/hosts: %w", err)
+		}
+		if _, err := f.WriteString(opts.MCPGatewayHostsEntry + "\n"); err != nil {
+			f.Close()
+			return fmt.Errorf("failed to append mcp hosts entry: %w", err)
+		}
+		if err := f.Close(); err != nil {
+			return fmt.Errorf("failed to close /etc/hosts: %w", err)
 		}
 	}
 	return nil
@@ -530,6 +572,51 @@ func installGooseAgentIntoMountedImage(mntDir, binaryPath, sourceHash string) er
 	return nil
 }
 
+// goldenAgentMarkerPath returns the path of the out-of-image marker that records which
+// goose-agent source hash is baked into the golden image, keyed to the image's on-disk
+// identity (size + mtime). Kept beside the golden image so EnsureGoldenImageGooseAgent can
+// tell WITHOUT mounting whether the image already carries the current agent — the mount is
+// what fails after a crash leaves a COW VM's dm-snapshot pinning the golden image through a
+// read-only loop device ("/dev/loopN already mounted or mount point busy").
+func goldenAgentMarkerPath(goldenImagePath string) string {
+	return goldenImagePath + ".agent-stamp"
+}
+
+// goldenAgentMarkerCurrent reports whether the marker beside goldenImagePath shows the image
+// already carries sourceHash at its current size+mtime. A missing, unreadable, or mismatched
+// marker returns false so the caller mounts and re-verifies. A golden-image rebuild changes
+// size/mtime and thus invalidates the marker automatically (no coupling to EnsureGoldenImage).
+func goldenAgentMarkerCurrent(goldenImagePath, sourceHash string) bool {
+	data, err := os.ReadFile(goldenAgentMarkerPath(goldenImagePath))
+	if err != nil {
+		return false
+	}
+	var markHash string
+	var markSize, markModNs int64
+	// Marker format: "<sourceHash> <imageSize> <imageModNs>". A sha256 hex hash has no
+	// spaces, so %s parses it cleanly.
+	if n, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%s %d %d", &markHash, &markSize, &markModNs); err != nil || n != 3 {
+		return false
+	}
+	info, err := os.Stat(goldenImagePath)
+	if err != nil {
+		return false
+	}
+	return markHash == sourceHash && markSize == info.Size() && markModNs == info.ModTime().UnixNano()
+}
+
+// writeGoldenAgentMarker records that goldenImagePath currently carries sourceHash, keyed to
+// the image's (post-operation) size+mtime. Best-effort: a write failure only forfeits the
+// next start's mount-skip optimization, never correctness.
+func writeGoldenAgentMarker(goldenImagePath, sourceHash string) error {
+	info, err := os.Stat(goldenImagePath)
+	if err != nil {
+		return err
+	}
+	line := fmt.Sprintf("%s %d %d\n", sourceHash, info.Size(), info.ModTime().UnixNano())
+	return os.WriteFile(goldenAgentMarkerPath(goldenImagePath), []byte(line), 0644)
+}
+
 // EnsureGoldenImageGooseAgent patches an existing golden image when its embedded
 // goose-agent source-hash stamp is stale. It assumes EnsureGooseAgent already ran.
 func EnsureGoldenImageGooseAgent(goldenImagePath, binaryPath string) error {
@@ -540,6 +627,17 @@ func EnsureGoldenImageGooseAgent(goldenImagePath, binaryPath string) error {
 	sourceHash := strings.TrimSpace(string(stamp))
 	if sourceHash == "" {
 		return fmt.Errorf("goose-agent source stamp is empty")
+	}
+
+	// Fast path: if a prior run already synced this exact agent into this exact image, skip
+	// the loop mount entirely. Beyond avoiding wasteful I/O when nothing changed, this is
+	// what keeps daemon startup alive after a SIGKILL: an orphaned COW VM's dm-snapshot
+	// still pins the golden image through a read-only loop device, so `mount -o loop` would
+	// reuse that busy loop and fail with EBUSY ("/dev/loopN already mounted or mount point
+	// busy"), aborting startup before RecoverVMs could reclaim the orphan.
+	if goldenAgentMarkerCurrent(goldenImagePath, sourceHash) {
+		log.Printf("golden image goose-agent already current (source hash %s); skipping mount.", sourceHash)
+		return nil
 	}
 
 	mntDir, err := os.MkdirTemp("", "goose-golden-image-*")
@@ -567,10 +665,26 @@ func EnsureGoldenImageGooseAgent(goldenImagePath, binaryPath string) error {
 	}
 	if current {
 		log.Printf("golden image goose-agent is current (source hash %s).", sourceHash)
+	} else {
+		log.Printf("Patching golden image goose-agent (source hash %s) ...", sourceHash)
+		if err := installGooseAgentIntoMountedImage(mntDir, binaryPath, sourceHash); err != nil {
+			return err
+		}
+	}
+
+	// Success: unmount synchronously so writes flush and the golden image's on-disk mtime
+	// settles, then record the marker so the next start can skip this mount. If the sync
+	// unmount fails, fall back to the deferred lazy unmount and skip the marker (a missing
+	// marker only costs one extra mount next start — never correctness).
+	if out, err := exec.Command("umount", mntDir).CombinedOutput(); err != nil {
+		log.Printf("Warning: sync unmount of golden image %s failed, leaving lazy unmount: %v: %s", mntDir, err, strings.TrimSpace(string(out)))
 		return nil
 	}
-	log.Printf("Patching golden image goose-agent (source hash %s) ...", sourceHash)
-	return installGooseAgentIntoMountedImage(mntDir, binaryPath, sourceHash)
+	mounted = false
+	if err := writeGoldenAgentMarker(goldenImagePath, sourceHash); err != nil {
+		log.Printf("Warning: could not record golden agent marker: %v", err)
+	}
+	return nil
 }
 
 // EnsureGooseAgent builds the goose-agent binary into binaryPath if it doesn't exist
@@ -622,7 +736,12 @@ func EnsureGooseAgent(binaryPath, projectRoot string) error {
 }
 
 // EnsureKernel downloads the Firecracker kernel binary to kernelPath if it does
-// not exist and verifies the downloaded bytes against expectedSHA256.
+// not exist, verifying its SHA256 against expectedSHA256. The kernel is the
+// trust root of every guest (booted via init=), so it gets the same integrity
+// pin as the Firecracker binary. The download streams to a sibling temp file and
+// is renamed onto kernelPath only after the SHA256 matches, so an unverified or
+// partial vmlinux.bin is never published (a mismatch or write failure leaves the
+// temp file, which the deferred cleanup removes — no bad artifact survives a crash).
 func EnsureKernel(kernelPath, downloadURL, expectedSHA256 string) error {
 	if _, err := os.Stat(kernelPath); err == nil {
 		slog.Warn("kernel found", "path", kernelPath)
@@ -652,6 +771,7 @@ func EnsureKernel(kernelPath, downloadURL, expectedSHA256 string) error {
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
 
+	// Stream to disk and compute SHA256 simultaneously (mirrors EnsureFirecracker).
 	h := sha256.New()
 	if _, err := io.Copy(io.MultiWriter(tmp, h), resp.Body); err != nil {
 		tmp.Close()

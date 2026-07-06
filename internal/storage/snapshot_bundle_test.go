@@ -132,6 +132,58 @@ func TestImportSnapshotBundleRejectsDiffWithoutBaseAndCleansTemp(t *testing.T) {
 	}
 }
 
+func TestExportImportDiffSnapshotBundleUsesRootfsDiff(t *testing.T) {
+	sourceWorkDir := t.TempDir()
+	writeSnapshotBundleFixture(t, sourceWorkDir, "snap-base", "full", "")
+	diffMeta := writeSnapshotBundleFixture(t, sourceWorkDir, "snap-diff", "diff", "snap-base")
+	diffDir := SnapshotDir(sourceWorkDir, "snap-diff")
+	if err := os.Remove(filepath.Join(diffDir, "rootfs.ext4")); err != nil {
+		t.Fatalf("remove legacy full rootfs from diff fixture: %v", err)
+	}
+	rootfsDiffPath := filepath.Join(diffDir, "rootfs.diff")
+	if err := os.WriteFile(rootfsDiffPath, []byte("rootfs-diff-snap-diff"), 0600); err != nil {
+		t.Fatalf("write rootfs diff: %v", err)
+	}
+	diffMeta.DiskCopyPath = ""
+	diffMeta.RootfsDiffPath = rootfsDiffPath
+	if err := SaveMetadata(diffDir, diffMeta); err != nil {
+		t.Fatalf("save diff metadata: %v", err)
+	}
+
+	var buf bytes.Buffer
+	manifest, err := ExportSnapshotBundle(sourceWorkDir, "snap-diff", &buf)
+	if err != nil {
+		t.Fatalf("export diff snapshot bundle: %v", err)
+	}
+	if snapshotBundleManifestFileFixture(t, manifest, "rootfs.diff").Path != "rootfs.diff" {
+		t.Fatalf("manifest missing rootfs.diff: %+v", manifest.Files)
+	}
+	entries := readSnapshotBundleTar(t, buf.Bytes())
+	if _, ok := entries["rootfs.diff"]; !ok {
+		t.Fatalf("bundle missing rootfs.diff entries=%v", sortedBundleEntryNames(entries))
+	}
+	if _, ok := entries["rootfs.ext4"]; ok {
+		t.Fatalf("diff bundle unexpectedly contains rootfs.ext4 entries=%v", sortedBundleEntryNames(entries))
+	}
+
+	targetWorkDir := t.TempDir()
+	writeSnapshotBundleFixture(t, targetWorkDir, "snap-base", "full", "")
+	result, err := ImportSnapshotBundle(targetWorkDir, bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("import diff snapshot bundle: %v", err)
+	}
+	targetSnapDir := SnapshotDir(targetWorkDir, "snap-diff")
+	if result.Metadata.RootfsDiffPath != filepath.Join(targetSnapDir, "rootfs.diff") {
+		t.Fatalf("imported RootfsDiffPath = %q, want target rootfs.diff", result.Metadata.RootfsDiffPath)
+	}
+	if result.Metadata.DiskCopyPath != "" {
+		t.Fatalf("imported DiskCopyPath = %q, want empty for rootfs diff snapshot", result.Metadata.DiskCopyPath)
+	}
+	if _, err := os.Stat(filepath.Join(targetSnapDir, "rootfs.diff")); err != nil {
+		t.Fatalf("published rootfs.diff missing: %v", err)
+	}
+}
+
 func TestImportSnapshotBundleIdempotentAndConflict(t *testing.T) {
 	sourceWorkDir := t.TempDir()
 	writeSnapshotBundleFixture(t, sourceWorkDir, "snap-1", "full", "")
@@ -181,6 +233,15 @@ func TestImportSnapshotBundleIdempotentAndConflict(t *testing.T) {
 	if !errors.Is(err, ErrSnapshotBundleConflict) {
 		t.Fatalf("conflict import error = %v, want ErrSnapshotBundleConflict", err)
 	}
+}
+
+func sortedBundleEntryNames(entries map[string][]byte) []string {
+	names := make([]string, 0, len(entries))
+	for name := range entries {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func TestImportSnapshotBundleScrubsUnsafeMetadataFields(t *testing.T) {
@@ -261,6 +322,17 @@ func TestImportSnapshotBundleRejectsFullSnapshotWithBaseID(t *testing.T) {
 	err := importSnapshotBundleDiscard(t.TempDir(), bundleBytes)
 	if !errors.Is(err, ErrSnapshotBundleInvalid) {
 		t.Fatalf("import error = %v, want ErrSnapshotBundleInvalid", err)
+	}
+}
+
+func TestSnapshotBundleFilesRejectRootfsDiffForNonDiffSnapshot(t *testing.T) {
+	_, err := snapshotBundleFilesForMetadata(SnapshotMetadata{
+		SnapshotID:     "snap-1",
+		SnapshotType:   "full",
+		RootfsDiffPath: "rootfs.diff",
+	})
+	if !errors.Is(err, ErrSnapshotBundleInvalid) {
+		t.Fatalf("snapshotBundleFilesForMetadata error = %v, want ErrSnapshotBundleInvalid", err)
 	}
 }
 

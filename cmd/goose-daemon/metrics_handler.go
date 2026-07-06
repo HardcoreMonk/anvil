@@ -25,6 +25,8 @@ type daemonMetrics struct {
 	snapshotCreate    *metrics.CounterVec // type=full|diff
 	snapshotRestore   *metrics.CounterVec // outcome=ok|fail
 	snapshotGC        *metrics.Counter
+	autoSnapshot      *metrics.CounterVec // outcome=ok|fail (graceful-shutdown memory snapshot)
+	autoRestore       *metrics.CounterVec // outcome=ok|fail (recovery warm-restore)
 	flockSpawn        *metrics.Counter
 	flockDestroy      *metrics.Counter
 	watchdogDead      *metrics.Counter
@@ -33,6 +35,8 @@ type daemonMetrics struct {
 	cleanupFailure    *metrics.Counter
 	authFailure       *metrics.Counter
 	cpTokenPropagated *metrics.CounterVec // outcome=ok|fail
+	authTotal         *metrics.CounterVec // outcome=ok|denied|expired (v0.4.1)
+	mcpToolCalls      *metrics.CounterVec // server, outcome=ok|fail|forbidden|rate_limited (v0.6.0)
 
 	// Histograms (seconds).
 	vmSpawnDuration         *metrics.Histogram
@@ -70,7 +74,17 @@ func newDaemonMetrics(cp *ControlPlane) *daemonMetrics {
 			"Total snapshot restore attempts by outcome.",
 			"outcome",
 		),
-		snapshotGC:   r.NewCounter("ephemera_snapshot_gc_total", "Total snapshot GC applications."),
+		snapshotGC: r.NewCounter("ephemera_snapshot_gc_total", "Total snapshot GC applications."),
+		autoSnapshot: r.NewCounterVec(
+			"ephemera_auto_snapshot_total",
+			"Total graceful-shutdown memory auto-snapshot attempts by outcome.",
+			"outcome",
+		),
+		autoRestore: r.NewCounterVec(
+			"ephemera_auto_restore_total",
+			"Total recovery warm-restore attempts by outcome.",
+			"outcome",
+		),
 		flockSpawn:   r.NewCounter("ephemera_flock_spawn_total", "Total flock create attempts."),
 		flockDestroy: r.NewCounter("ephemera_flock_destroy_total", "Total flock destroy operations."),
 		watchdogDead: r.NewCounter("ephemera_watchdog_dead_total", "Total agents marked dead by watchdog."),
@@ -88,6 +102,16 @@ func newDaemonMetrics(cp *ControlPlane) *daemonMetrics {
 			"ephemera_cp_token_propagated_total",
 			"Total CP token propagation attempts to running VMs by outcome.",
 			"outcome",
+		),
+		authTotal: r.NewCounterVec(
+			"ephemera_auth_total",
+			"Total API auth decisions by outcome.",
+			"outcome",
+		),
+		mcpToolCalls: r.NewCounterVec(
+			"ephemera_mcp_tool_calls_total",
+			"Total MCP gateway tool calls by backend server and outcome.",
+			"server", "outcome",
 		),
 
 		vmSpawnDuration: r.NewHistogram(

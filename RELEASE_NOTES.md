@@ -1,5 +1,14 @@
 # Unreleased — Scheduler flock placement planner and metrics
 
+> 참고: 2026-07-06에 학습·참고 전용 pre-release 스냅샷 4종이 게시됐다 —
+> `anvil-v0.4.5-snapshot`(`8daf6f3`), `anvil-v0.5.5-snapshot`(`7f207a0`),
+> `anvil-v0.6.4-snapshot`(`04e2a12`), `anvil-v0.7.0-snapshot`(`7b3f009`).
+> 각 upstream 시리즈의 adapted baseline 시점 보존용이며 운영 배포용이 아니다.
+> 각 시점의 알려진 결함(v0.4.5: `4c1c803`·`38fbedc`에서 수정, v0.5.5: `64ec57c`에서
+> 수정)과 이후 hardening 내역이 각 릴리즈 노트에 명시돼 있다. 학습 주석 브랜치:
+> `annotate/v0.4.5` ~ `annotate/v0.7.0`.
+
+
 ## 추가됨
 
 - scheduler service에 `POST /schedule/flock` dry-run endpoint를 추가한다. 이 endpoint는
@@ -40,8 +49,184 @@
     한다.
   - `EPHEMERA_HOME`으로 daemon work directory를 명시할 수 있다. unset이면 기존처럼
     process current working directory를 사용한다.
+- recovery는 VM `state.json`의 `flock_id` / `agent_id`를 flock membership의
+  fallback source로 사용한다. daemon crash가 VM state persistence와 flock metadata
+  persistence 사이에서 발생해도, 다음 startup에서 missing flock 또는 missing agent를
+  재연결하고 repaired metadata를 다시 persist한다.
+- `webdev_demo.sh`는 `POST /flocks` 응답의 `agent_tokens`를 읽지 않고, orchestrator
+  `vm_id`를 사용해 control-plane proxy `POST /vms/{vm_id}/tasks`로 brief를 보낸다.
+- anvil main runtime baseline은 upstream ephemera `v0.7.0` adapted runtime·operator
+  support를 포함한다(수정 없는 `v0.7.0`가 아니다). 2026-07-02 기준 upstream latest
+  observed는 `v0.7.0`이며 anvil은 관찰 범위 전체를 병합했다 — upstream parity
+  scope(`v0.4.0`-`v0.7.0`) 코드 편입이 완료돼 pending sync 후보는 없다. anvil
+  runtime/operator baseline supports upstream ephemera v0.7.0 with anvil adaptations for
+  token redaction, tenant/egress, scheduler, audit, and IronClaw MCP surface separation.
+  전 태그별 adopted/adapted/deferred/excluded parity matrix는
+  `docs/analysis/11-v0.5.0-v0.7.0-core-service-parity-review.md`에 있다.
+- 2026-07-06 release-gate follow-up batch (anvil 적응 — upstream 변경 아님; commits
+  `4a802f5`, `0376afa`, `613a01b`, `cd2e70b`, `de5a7aa`, `0625df5`, 상태 close
+  `ccc5127`):
+  - **behavior change**: stdio backend 자식 stderr를 VM-facing gateway error에서 scrub하고
+    host slog에만 남긴다(`4a802f5`). backend 오동작 시 backend credential이 VM에 도달할 수
+    있던 유일한 신규 경로를 차단한다.
+  - **behavior change**: `credential_env`가 예약 이름 `PATH`/`HOME`/`LANG`을 쓰면 config
+    validation error로 거부한다(`0376afa`).
+  - **behavior change**: snapshot GC가 persisted restored-VM state를 읽지 못하면
+    fail-closed한다(`613a01b`) — plan이 `Errors` entry로 abort하고 아무것도 삭제하지 않는다.
+  - **behavior change**: `PUT /config/profiles/default`가 `goose.yaml` 부재 시 `404`를
+    반환한다(`cd2e70b`, 이전 `500`).
+  - new guard: MCP audit writer JSONL key-set sentinel(`de5a7aa`,
+    `mcp_audit_writer_anvil_test.go`); KVM-free flock broadcast unit test(`de5a7aa`,
+    `orchestrator_broadcast_test.go`); auth sentinel을 `/config/clients`·`/config/providers`·
+    profile DELETE·`/system` verbs로 확장(real production mux, `de5a7aa`).
+  - e2e/README step-label reconciliation(`0625df5`); keep-alive(`64ec57c`) upstream 제안은
+    DECLINED. batch 검증: 13 pkgs ok, review Approved(0 Crit/Imp), full e2e `334✓/0✗` at
+    `ccc5127`, PR #17 push.
+- upstream `v0.7.0` (end-user installer + conversation transcript restore + upstream
+  hardening reconcile)를 sync 한다. anvil adaptation:
+  - end-user installer(`install.sh`/`uninstall.sh`/`INSTALL.md`/`ephemera.service.in`)와
+    release workflow(`scripts/build_release.sh`)는 **runtime/operator installer
+    surface**로 채택한다. systemd service는 canonical `ephemera` 이름을 유지한다
+    (rule-permitted, anvil alias wrapper 없음). `uninstall.sh`는 ephemera-scoped `/tmp`
+    scratch(`/tmp/goose-workspaces` 등; stale no-op `/tmp/goose-rootfs` 포함)를
+    root-gated·prefix-anchored로 정리한다. 외부 Web UI 노출은 reverse proxy/TLS 또는
+    private network 뒤에서만 한다.
+  - conversation transcript restore는 daemon proxy `GET /vms/{id}/sessions/{name}/
+    transcript`(bearer)로 노출한다. agent export는 read-only `goose session export`
+    (model call 없음)이고 응답 schema `{turns:[{role,text}]}`는 auth-free여서 Web UI가
+    daemon token 없이 렌더한다. 4개 transcript-safety guard(TDD): endpoint는 bearer
+    없으면 `401`, payload는 provider key/CP token/`agent_token` sentinel-free, cache-hit는
+    agent spawn 없이 serve, export argv는 `session export -n {name} --format json`이며
+    run-token 거부.
+  - release build integrity: `build_release.sh`가 다운로드한 kernel/firecracker를
+    `main.go`에서 parse한 pin과 `sha256sum -c`로 검증해, runtime `EnsureKernel`이 기존
+    파일을 `os.Stat`로 skip하던 FULL-tarball supply-chain gap을 닫는다.
+  - upstream hardening reconcile: 사전 독립 backport 3종(kernel SHA atomic temp+rename
+    무조건 검증, `resolveWorkDir`/`EPHEMERA_HOME`, `waitForAgent` per-probe timeout
+    deadline cap)이 upstream `v0.7.0` 버전을 이기고 single definition으로 남았다(anvil이
+    stricter, net Go diff는 doc-comment-only). 기존 anvil adaptation(agent-stamp mount
+    skip, restore-over-`meta.DiskPath`, proxy `DisableKeepAlives`)은 하나도 rollback되지
+    않았다.
+- upstream `v0.6.0` (runtime MCP Gateway)를 sync 한다. `EPHEMERA_MCP_ENABLED`로 켜는
+  host-resident MCP Gateway(`internal/mcpgateway`)가 backend MCP server(tools/
+  resources/prompts)를 VM 내부 goose client에 중개한다. **이 gateway는 runtime/operator
+  surface이고 IronClaw MCP surface가 아니며, `cmd/anvil-mcp` IronClaw adapter를
+  대체하지 않는다**(`EPHEMERA_MCP_*` gateway ≠ `ANVIL_MCP_*` adapter). anvil은 경계를
+  구조적으로 강제한다:
+  - caller profile은 source IP를 VM registry와 대조해 server-side로 판정한다. registry에
+    없는 caller는 `403`이며 guest가 identity를 주입하지 못한다.
+  - backend credential은 host-side(`configs/mcp/secrets.yaml`, gitignored)에만 있고 VM에는
+    gateway URL만 주입된다(`VMPrepareOptions`에 credential 필드 없음).
+  - `audit/mcp.jsonl`은 고정 key set의 metadata만 기록하고 tool argument/result와 `Err`
+    문자열까지 제외한다(sentinel test).
+  - profile policy는 `servers.yaml`을 좁히기만 하고 넓힐 수 없다(intersection).
+  - anvil boundary guard 4종: IronClaw schema/adapter가 gateway tool 제외
+    (`TestToolRegistrationsExcludeGatewayTools`,
+    `TestCurrentIronClawSchemasExcludeGatewayNamespacedTools`), audit metadata-only
+    sentinel, `/config/mcp*` bearer 없으면 `401`, VM은 URL(credential 아님)만 받고
+    policy는 widen 불가.
+- upstream `v0.6.1`/`v0.6.2`/`v0.6.4`(upstream에 `v0.6.3` 없음) MCP Gateway hardening을
+  sync 한다:
+  - `v0.6.1`: `EPHEMERA_NET_ANTISPOOF`(기본 on, ebtables best-effort)로 guest IP 위조를
+    막고, per-(VM, backend server) token-bucket rate limit(`EPHEMERA_MCP_RATE` 기본 `0`
+    =unlimited, `EPHEMERA_MCP_BURST`)을 적용한다.
+  - `v0.6.2`: backend resources/prompts를 aggregate하고 per-tool·per-profile policy를
+    적용한다. resources/prompts는 tools와 같은 policy와 rate bucket을 공유한다(anvil
+    guard). audit에 `kind` field 추가.
+  - `v0.6.4`: stdio backend를 subprocess로 실행한다. child env는 `[PATH,HOME,LANG]`+
+    backend `spec.Env`로 새로 구성해 daemon `EPHEMERA_*`가 새지 않고(canary test),
+    credential은 `credential_env`로만 주입(argv 아님), daemon이 root면 `nobody`로
+    privilege drop + `/var/lib/ephemera/mcp-stdio` scratch를 cwd·HOME으로 쓰며 shutdown이
+    process group을 reap한다(pgid recycling-safe). `GET /config/mcp/servers`는
+    transport/command와 `has_credential`만 노출한다(leak guard). `EPHEMERA_MCP_BIND_IP`로
+    기본 bridge IP bind를 override할 수 있고 source-IP `403`이 defense-in-depth로 남는다.
+- upstream `v0.5.0` (operator Web UI + `/config/profiles` + multi-turn agent
+  `session` + graceful VM delete)를 sync 한다. anvil adaptation은 runtime/operator
+  surface를 IronClaw MCP surface와 분리해서 유지한다:
+  - embedded Web UI는 `/ui/`(정적 bundle + login page)만 auth/audit chain 밖에
+    두고, `/config/profiles`를 포함한 모든 data API는 auth 설정 시 bearer 뒤에
+    유지한다(guard `TestConfigProfilesRequireAuthWhenConfigured`). UI bundle은
+    token/secret을 담지 않는다.
+  - profile config handler는 `goose.yaml`의 `GOOSE_PROVIDER`/`GOOSE_MODEL`만
+    read/write하며 `goose-secrets.yaml`은 절대 read/write하지 않는다(guard
+    `TestConfigProfileSurfaceNeverReadsOrWritesSecrets`).
+  - `VMInfo`는 anvil `tenant_id`/`egress_policy` propagation을 유지한 채 upstream의
+    spawn-time `provider`/`model` snapshot 필드를 additive로 추가한다. `cmd/anvil-mcp`
+    tool surface는 그대로다.
+  - anvil `ANVIL_*` alias와 `EPHEMERA_*` canonical env 이름을 유지한다.
+- upstream `v0.5.1`-`v0.5.5` (profile config API 확장, snapshot/restore UI,
+  orchestration UI/Activity Feed, sizing preset, `system.md` 편집, System console)를
+  sync 한다. anvil adaptation:
+  - `/config/providers`는 provider별 API key 존재 여부만, `/config/clients`는
+    control-plane client 이름과 만료만 반환하고 key/token 값은 노출하지 않는다
+    (sentinel test).
+  - profile `system.md` 편집은 `system.md`만 대상으로 하고 `64 KiB` cap을 적용하며,
+    profile delete는 running VM이 그 profile을 쓰면 `409`, default profile은 예약,
+    path traversal은 거부한다.
+  - sizing preset과 per-VM `EPHEMERA_VCPU_COUNT`/`EPHEMERA_MEM_SIZE_MIB`(struct
+    `VcpuCount`/`MemSizeMib`)를 지원한다. snapshot metadata가 per-VM sizing을 기록하고
+    legacy snapshot(0)은 restore 시 historical 2 vCPU / 2048 MiB로 fallback한다.
+  - Town Wall author를 `SystemAuthor`로 migration하고, restore agent-wait를 30s에서
+    60s로 늘린다.
+- anvil sizing 결정 (KVM 근거로 승인): `v0.5.3`부터 upstream default VM sizing
+  `1` vCPU / `1024` MiB를 채택한다(이전 2/2048). full e2e 3× `316✓`가 1024에서
+  통과했다. flock member spawn이 per-profile `EPHEMERA_VCPU_COUNT`/
+  `EPHEMERA_MEM_SIZE_MIB` override를 무시하고 `LookupProfile` default로만 sizing하는
+  upstream-inherited gap은 follow-up으로 기록한다.
+- Phase 2 KVM gate 중 고친 latent defect (`64ec57c`, 분류: `v0.5.x`
+  `gracefulAgentStop`이 v0.2.0부터 잠재하던 upstream pooled-client 결함을 노출):
+  guest IP가 VM destroy/create/restore 사이에 재활용되는데 shared keep-alive agent
+  proxy client가 destroy된 VM으로 향하던 stale pooled connection을 재사용해, restored
+  VM의 첫 proxied `/tasks`가 hang하거나 `502`(peer RST)로 실패했다(Phase 2 gate
+  step 15 "Run task on restored VM"). fix는 proxy client의 keep-alive pooling을
+  끄고(`DisableKeepAlives`) request마다 fresh dial하며 connection-reuse guard test를
+  추가한다. upstream connection pooling과의 의도적 divergence이며 upstream 기여 후보다.
+- upstream `v0.4.4` (streaming `/tasks`, nested-invocation depth guard,
+  watchdog status route, flock broadcast, goose-agent slog migration)를 sync
+  한다. anvil adaptation: buffered `POST /vms/{id}/tasks` 기본 계약(`stream=1`
+  없으면 `{"output","error"}`)을 그대로 유지하고 MCP stdio tool은 이 phase에서
+  buffered path만 호출한다(guard `TestRunTaskBuffered_DefaultShape`). nested task
+  depth는 신설 canonical env `EPHEMERA_MAX_TASK_DEPTH`(기본 `5`, ANVIL alias
+  없음)로 제한하며 한계 도달 시 `508`, `X-Ephemera-Task-Depth`를 `depth+1`로
+  forwarding하고 header 부재는 `0`으로 취급한다. watchdog 상태는 read-only
+  `GET /watchdog/status`(count/ID/config만)로 노출한다. flock broadcast는
+  daemon API와 `ephemera-ctl flock broadcast` CLI로 채택하되 daemon-only endpoint로
+  두며 `anvil_*` MCP tool로 노출하지 않는다(guard
+  `TestToolRegistrationsExcludeBroadcast`,
+  `TestCurrentIronClawSchemasExcludeBroadcastTool`). goose-agent는 `log/slog`로
+  이전하고 `gtcall`이 depth header를 재전송한다. golden image rebake는 KVM gate에서
+  확인했다.
+- upstream `v0.4.5` (snapshot-restore auto-recovery)를 sync 한다. restore가
+  `source_snapshot_id`(및 `tenant_id`/`egress_policy` attribution)를 담은
+  `state.json`을 persist하고, daemon restart 시 `recoverRestoredVM`/
+  `reRestoreMachine`이 source snapshot에서 auto-re-restore한다. restore 응답은
+  `source_snapshot_id`/`tenant_id`/`egress_policy`/`profile`/`vm_id`/`guest_ip`/
+  `agent_url`을 포함할 수 있고 `agent_token`/`agent_tokens`/`Authorization`/`Bearer`는
+  절대 노출하지 않는다. snapshot GC와 `DELETE /snapshots/{id}`는 live·persisted
+  restored VM state가 참조하는 source snapshot을 보호하며, 참조 중이면 `DELETE`가
+  `409`를 반환한다. pre-v0.4.5 anvil test의 "restore leaves no recoverable state"
+  assertion은 계획대로 persistence를 검증하도록 반전했고 redaction guard는 그대로
+  유지한다.
+- 의도적 divergence (upstream 대비): upstream e2e 46c는 live restored VM이 참조하는
+  snapshot의 `DELETE`를 `200`으로 허용하고 VM을 orphan으로 둔다. anvil은 그 대신
+  `409` 보호를 유지하고 VM을 먼저 삭제한 뒤 snapshot을 삭제하도록 요구한다. e2e 46c는
+  이 divergence에 맞게 조정했고(commit `63df804`) `e2e_test.sh`에 divergence 주석을
+  남겼다. 이 divergence는 `docs/ADR_INDEX.md`와
+  `docs/operations/upstream-sync-policy.md`에 `adapted`로 기록한다.
+- Phase 1 KVM gate 중 발견해 고친 두 pre-existing latent defect(이번 sync가 만든
+  결함 아님).
+  - `4c1c803`: restore handler가 COW device를 per-restore path 위에 bind-mount하는
+    동안 Firecracker `LoadSnapshot`은 `state.bin`(`meta.DiskPath`)에 기록된 path를
+    연다. source VM 삭제 후의 모든 restore가 v0.4.0 적응 이후 `500`으로 실패하던
+    문제를 `meta.DiskPath` 위로 restore하도록 고쳐 upstream 및 recovery 경로와
+    일치시켰다. 결함을 고정하던 v0.4.0-era test assertion 두 개도 함께 수정했다.
+  - `38fbedc`: anvil 전용 `EnsureGoldenImageGooseAgent`가 시작 시 golden image를
+    무조건 loop-mount해, SIGKILL crash 후 COW VM이 image를 pin한 상태에서 `EBUSY`로
+    죽던 문제를, agent-stamp(source hash + image size + mtimeNs)가 current면 mount를
+    건너뛰도록 고쳤다. live COW VM이 origin을 pin한 채 agent hash가 바뀌는 경우의
+    loud-fail은 의도적으로 유지한다.
 
-## 검증 예정
+## 검증됨
 
 - `go test ./internal/anvilmcp -count=1`
 - `go test ./cmd/anvil-scheduler -count=1`
@@ -54,6 +239,287 @@
 - `go build ./cmd/anvil-mcp`
 - `go build ./cmd/goose-daemon`
 
+v0.4 sync Phase 1 gate (upstream `v0.4.4`/`v0.4.5` 적응):
+
+- CI-safe gate all green: `go build ./cmd/{goose-daemon,anvil-mcp,anvil-scheduler}`,
+  `go test ./... -count=1` (EXIT=0).
+- guard test: `TestRunTaskBuffered_DefaultShape`,
+  `TestToolRegistrationsExcludeBroadcast`,
+  `TestCurrentIronClawSchemasExcludeBroadcastTool`, proxy depth `508` guard.
+- 실제 KVM host full e2e `sudo bash e2e_test.sh`: `316✓ / 0✗`
+  ("All test steps passed"). step 59 real-LLM smoke만 provider key 부재로 skip.
+- 전제: KVM gate는 working directory에 gitignore된 로컬 operator 파일
+  `configs/goose.yaml`, `configs/goose-secrets.yaml`이 있어야 한다. 없으면
+  `POST /vms`가 config injection 단계에서 `500`으로 실패한다.
+
+v0.5 sync Phase 2 gate (upstream `v0.5.0`-`v0.5.5` operator support 적응):
+
+- CI-safe gate all green: `git diff --check`, targeted test group, web build 재현
+  가능(`cmd/goose-daemon/uidist/` drift 없음), `go test ./... -count=1` (EXIT=0),
+  `go build ./cmd/{goose-daemon,anvil-mcp,anvil-scheduler}`.
+- guard/sentinel test: `config_api_anvil_test.go`(`/config/profiles` auth·secret
+  sentinel, `/config/providers`·`/config/clients` secret 비노출, profile in-use
+  `409`), proxy connection-reuse guard.
+- 실제 KVM host: `sudo bash e2e_test.sh` `316✓ / 0✗` ×3(step 59 real-LLM smoke만
+  provider key 부재로 skip). `scripts/anvil-mcp-e2e.sh` lifecycle PASS·flock PASS,
+  `scripts/vm-workload-e2e.sh` PASS.
+- `scripts/anvil-mcp-e2e.sh semantic`은 key-free 구간(workspace copy-in/out, task
+  proxy, cleanup)이 모두 `200`이고 마지막 LLM-echo substep만 로컬 Google API key가
+  invalid해 실패했다(provider-key 의존, 코드 결함 아님).
+- gate coverage correction: Phase 1 KVM gate는 `e2e_test.sh`만 실행하고
+  `anvil-mcp-e2e.sh`(3개 모드)와 `vm-workload-e2e.sh`를 누락했다. 이 스크립트들은 현재
+  HEAD(post-v0.5.5+fix)에서 처음 실행돼 두 baseline의 superset을 검증했다.
+
+v0.6 sync Phase 3 gate (upstream `v0.6.0`-`v0.6.4` MCP gateway 적응):
+
+- CI-safe gate all green: `git diff --check`, targeted test group(mcpgateway/boundary/
+  audit/ratelimit/stdio guard 포함), web build 재현 가능(`uidist` drift 없음),
+  `go test ./... -count=1`(EXIT=0), `go build ./cmd/{goose-daemon,anvil-mcp,anvil-scheduler}`.
+- boundary guard: `TestToolRegistrationsExcludeGatewayTools`,
+  `TestCurrentIronClawSchemasExcludeGatewayNamespacedTools`,
+  `TestConfigMCPRoutesRequireAuthWhenConfigured`, `TestMCPInjectionCarriesURLNotCredential`,
+  audit metadata-only sentinel, rate-limit per-(VM,server), resources/prompts shared-bucket,
+  stdio env-canary/leak guards.
+- 실제 KVM host `sudo bash e2e_test.sh`: `334✓ / 0✗`("All test steps passed").
+  gateway step `84`-`89`가 최초 실행에서 green. provider-key skip 3건(LLM smoke,
+  real tool call, real stdio tool call).
+- `anvil-mcp-e2e.sh` lifecycle PASS·flock PASS — runtime gateway가 live인 상태에서도
+  IronClaw adapter는 영향받지 않는다. `vm-workload-e2e.sh` PASS.
+- `anvil-mcp-e2e.sh semantic`은 key-free 구간이 `200`이고 LLM-echo substep만
+  known-invalid local Google key로 실패했다(provider-key 의존, Phase 2와 동일한
+  release-gate item, 코드 결함 아님).
+
+v0.7 sync Phase 4 gate (upstream `v0.7.0` installer/transcript/hardening 적응 — parity
+scope 코드 편입 완료):
+
+- CI-safe gate all green: `git diff --check`, installer `bash -n` ×3(install.sh/
+  uninstall.sh/build_release.sh), targeted test group(transcript-safety guard 4종 포함),
+  full glob `go test ./... -count=1` EXIT=0, web build drift 없음, 3 builds.
+- 실제 KVM/installer gate: `sudo bash e2e_test.sh` `334✓ / 0✗`("All test steps passed").
+  `anvil-mcp-e2e.sh` lifecycle+flock PASS, `vm-workload-e2e.sh` PASS. `anvil-mcp-e2e.sh
+  semantic`은 standing provider-key caveat(key-free 구간 `200`).
+- installer: `bash install.sh --help`/`bash uninstall.sh --help` OK(시스템 변경 없음).
+  release build를 root로 실행 → SLIM(≈27M) + FULL(≈250M) tarball + `.sha256` checksum
+  (dist/ gitignored). `build_release.sh`가 kernel/firecracker를 `sha256sum -c`로 검증.
+- release-gate: 코드 항목 4종(audit-writer sentinel, stdio stderr scrub, `credential_env`
+  reserved names, production-mux auth sentinel)은 2026-07-06 follow-up batch로 닫혔다
+  (위 batch 항목 참조). 남은 open gate는 valid provider key로 `semantic` run(e2e step
+  59, 사용자 key 교체 대기)뿐이다.
+
+---
+
+# v0.5.0 — Web UI
+
+**Ephemera** v0.5.0 adds a **browser console** served by the daemon itself, replacing the script-form external client for everyday use. The existing control-plane API is unchanged and fully backward compatible; the only new server routes are `/ui/` (the embedded UI) and `/config/profiles` (profile model/provider editing). **Golden-image rebake**: `cmd/goose-agent` gains optional goose-session support, so the daemon rebuilds the golden image on first start after the change.
+
+---
+
+## What's New
+
+### Embedded Web console (`/ui/`)
+
+- The daemon serves a Svelte + Vite single-page app at **`/ui/`** on the same address as the API (`go:embed`, same origin — no CORS). The build output (`cmd/goose-daemon/uidist/`) is committed, so `go build` needs no Node toolchain; rebuild only after editing `web/` (`cd web && npm run build`). `/ui/` is mounted **outside** the auth/audit chain (the login page + JS bundle must load token-free; the bundle has no secrets), while every data call still flows through Bearer auth. `/` redirects to `/ui/`.
+- Screens: token **Login** (auto-skipped when auth is disabled), **VM list** (live stats + model), **Create VM** (profile dropdown, one-time `agent_token`), **VM detail** (live stats + a cancelable streaming conversation panel), **Settings** (per-profile model/provider).
+
+### English / Korean localization
+
+- All UI strings are externalized to `web/src/locales/{en,ko}.json` and rendered via `svelte-i18n`. The initial language follows the browser (`ko*` → Korean, else English); a nav toggle switches and persists the choice in `localStorage`. Server-originated error text is shown verbatim.
+- UI vocabulary is generic IT (display labels only — API identifiers unchanged): **Platform Agent** (in-VM goose agent), **Agent Group** (flock), **Activity Feed** (Town Wall), **Create/Delete** (spawn/destroy).
+
+### Profile model/provider editing (`/config/profiles`)
+
+- `GET /config/profiles` lists each profile (`default` + `configs/profiles/*`) with its `provider`/`model`; `PUT /config/profiles/{name}` rewrites `GOOSE_PROVIDER`/`GOOSE_MODEL` in place — comments and the `extensions:` block are preserved, values are validated against newline injection, and **API keys (`goose-secrets.yaml`) are never read or written** through this surface. The Settings screen drives both.
+- Config is injected at spawn, so an edit applies to the **next** VM from that profile; already-running VMs keep their spawn-time model. `VMInfo` now records each VM's `provider`/`model` (returned by `GET /vms`, shown in the UI) so the distinction is visible.
+
+### Multi-turn agent conversation
+
+- `POST /vms/{id}/tasks` accepts an optional `session`. With it, `goose-agent` runs `goose run --output-format json -n <session> [--resume] -i -` — the first turn creates the named session, later turns `--resume` it — so the agent keeps conversation context across turns. Omitting `session` preserves the original stateless one-shot behavior (`ephemera-ctl`, `gtcall`, depth-guard tests unaffected). The control plane proxies the request body verbatim, so no control-plane change was needed.
+
+### Graceful VM delete; "stop agent" removed
+
+- `DELETE /vms/{id}` now best-effort asks the in-VM agent to shut down cleanly (`POST /stop`, 2 s) before force-stopping Firecracker, then frees TAP/IP/disk and deregisters. The old UI "stop agent" action — which actually halted the whole guest (the agent is the VM's init) while leaving the VM registered and the stats poller spamming the log — was removed; **Delete is the single teardown**. The stats agent-busy probe-failure log was demoted to Debug so a down/halted VM can no longer spam.
+
+> **Caveats**: the Web UI conversation transcript is in-memory (a page reload starts a fresh `session`; the goose session persists in the VM but is not re-displayed). `scripts/build_image.sh` now removes any stale tarball before download, hardening the golden-image build against a leftover at the fixed `/tmp` path.
+
+---
+
+# v0.4.5 — Snapshot-Restore Auto-Recovery
+
+**Ephemera** v0.4.5 closes a recovery gap from the Known Limitations audit. Additive — no wire format changed; no golden-image rebake (daemon/storage only).
+
+---
+
+## What's New
+
+### Snapshot-restored VMs are auto-recovered across a daemon restart
+
+- A VM created via `POST /snapshots/{id}/restore` now persists a `state.json` carrying `source_snapshot_id`. On the next daemon start, `RecoverVMs` **re-restores it from that source snapshot** (it cannot cold-boot like a spawn VM) instead of dropping it — automating what previously required a manual re-restore.
+- Semantics: the VM returns to its **snapshot-time** memory and disk. Writes made *after* the original restore are not preserved across the restart (identical to a manual re-restore); the COW exception store is recreated fresh so the re-loaded snapshot memory and disk stay consistent.
+- Shutdown handling: graceful shutdown discards a restored VM's dm device + transient exception store but **keeps its `state.json`** (recovery re-restores fresh). Restored VMs are excluded from the opt-in memory auto-snapshot (they re-restore from source, so an `auto/` image would never be used).
+- Caveats (documented, by design): **bind-mount-fallback** restores (when dm-snapshot tooling is unavailable) are not auto-recovered; and if the **source snapshot was deleted** while the restored VM ran, recovery drops the VM and surfaces it (via `failed[]` / a flock agent marked dead) rather than silently keeping it.
+
+### Known-Limitations refresh
+
+- Removed the "Snapshot-restored VMs are not auto-recovered" limitation (now resolved above).
+- Reworded the CP-token-rotation limitation to "CP token hot-rotation requires `_TOKENS_FILE`": the old "needs v0.3.4 VMs" clause is obsolete — the golden image auto-rebakes on any `goose-agent` change, so every current VM carries the `SET_CP_TOKEN` vsock handler. The only real requirement is sourcing tokens from a file (env tokens are fixed at exec and cannot change on SIGHUP).
+
+---
+
+# v0.4.4 — Feature Extensions
+
+**Ephemera** v0.4.4 is the last single-host cycle, rounding out the operator surface: **PR-A** flock broadcast + a watchdog status route; **PR-B** streaming `/tasks`, the `goose-agent` slog migration, and a nested-invocation depth guard. Additive — no wire format changed.
+
+---
+
+## What's New
+
+### Flock broadcast (PR-A)
+
+- `POST /flocks/{id}/broadcast` `{"body":"…"}` scatters one prompt to **every** member agent's `/tasks` endpoint in parallel and gathers each agent's result (scatter-gather). The response carries a `sent`/`skipped`/`failed` tally plus a per-agent `results` map (`status` = `ok`/`busy`/`error`, with `output`/`error`). Agents already running a task answer `503` and are reported `busy` (skipped); unreachable agents are `error`. The call blocks until every agent finishes, like calling `/tasks` on each — cancellation rides on the request context.
+- The broadcast is also recorded once on the Town Wall (`orchestrator` author) so observers see it happened.
+- `ephemera-ctl flock broadcast <flock_id> <message>` wraps the endpoint (trailing words are joined, so the message need not be quoted).
+
+### Watchdog status route (PR-A)
+
+- `GET /watchdog/status` exposes the health watchdog's tunables (`interval_sec`, `timeout_sec`, `dying_threshold`, `auto_heal`) and live per-VM state (`vm_fail_counts` — VMs with a non-zero consecutive-failure count; `vm_dead_marked` — VMs the watchdog has marked dead). Read-only, behind the same auth as the other internal routes. The watchdog has run since v0.3.4 but had no status route until now; the snapshot is taken under the same lock the polling loop uses, and the returned maps are copies.
+
+### Streaming `/tasks` (PR-B)
+
+- `POST /vms/{id}/tasks?stream=1` streams the task as **newline-delimited JSON** over chunked transfer instead of buffering the whole result: zero or more `{"type":"progress","text":"…"}` frames (relayed from goose's stderr activity, plus a 15s heartbeat) followed by exactly one `{"type":"result","output":"…","error":"…"}` frame that mirrors the legacy `TaskResult`. The default (no `stream=1`) path is **unchanged** — full backward compatibility. The control-plane proxy now flushes per chunk (the same `http.Flusher` plumbing the Town Wall SSE stream relies on), so the stream reaches the caller incrementally.
+- **Caveat**: streaming commits a `200` before goose runs, so a goose failure can no longer be a `500` — the error rides in the `result` frame's `error` field. Streaming clients must inspect `result.error`, not the status code. The buffered path keeps its `500`.
+
+### Nested-invocation depth guard (PR-B)
+
+- Agent→agent dispatch (`gtcall`) is now loop-guarded. The control plane reads `X-Ephemera-Task-Depth` on every proxied `/tasks` hop (absent → 0), refuses a hop at/over `EPHEMERA_MAX_TASK_DEPTH` (default 5) with **`508 Loop Detected`**, and forwards `depth+1`. `goose-agent` injects the incoming depth into the goose subprocess environment (`EPHEMERA_TASK_DEPTH`), and `gtcall` re-sends it as the header, so depth accumulates across the whole nested call tree. Distinct from the agent's own `503` busy response.
+
+### `goose-agent` slog migration (PR-B)
+
+- The in-VM `goose-agent` moved off the plain `log` package to `log/slog`, mirroring the host daemon's `EPHEMERA_LOG_FORMAT` (text|json) / `EPHEMERA_LOG_LEVEL` handling (default level Warn). Completes the slog migration begun in v0.3.5.
+
+> **Golden-image rebake**: PR-B edits `cmd/goose-agent` and `scripts/gtcall`, so the daemon rebuilds the golden image on first start after the change (mtime check in `EnsureGoldenImage`).
+
+> **anvil adaptation**: The buffered `POST /vms/{id}/tasks` contract is preserved verbatim — without `?stream=1` the daemon still returns the single `{"output","error"}` object, and anvil's MCP stdio tools keep calling the buffered path. `POST /flocks/{id}/broadcast` stays a **daemon-only** endpoint; it is **not** registered as an `anvil_*` MCP tool in this phase, so the IronClaw tool schema carries no broadcast tool.
+
+---
+
+# v0.4.3 — Flock Lifecycle
+
+**Ephemera** v0.4.3 makes flocks adjustable at runtime: **PR-A** dynamic agent
+membership (add/remove/role-change), **PR-B** flock pause/resume + per-flock
+agent cap, **PR-C** Town Wall history filters + log rotation. Additive — no
+wire format changed.
+
+---
+
+## What's New
+
+### Dynamic flock agent management (PR-A)
+
+- `POST /flocks/{id}/agents` `{"role":"worker"}` — spawn and attach a new
+  agent. The `agent_id` follows the per-role `role-N` rule (max existing N + 1).
+  In anvil, the daemon keeps the one-time guest token internally and omits
+  `agent_token`/`agent_tokens` from this response. The 20-agent-per-flock cap is
+  enforced.
+- `DELETE /flocks/{id}/agents/{agent_id}` — tear down the agent's VM and remove
+  it from the flock. Removing the last agent leaves an empty flock (recoverable
+  via add; use `DELETE /flocks/{id}` for the whole flock).
+- `PATCH /flocks/{id}/agents/{agent_id}` `{"role":"reviewer"}` — change an
+  agent's role. Because role binds VM sizing + system prompt at spawn time, the
+  VM is recreated under the new role (`agent_id` and `agent_token` preserved,
+  like restart).
+- `ephemera-ctl flock add-agent`/`rm-agent`/`set-role` wrap the three endpoints.
+- Each membership change is posted to the Town Wall; the watchdog auto-discovers
+  added VMs and forgets removed ones.
+
+### Flock pause/resume + per-flock max_agents (PR-B)
+
+- `POST /flocks/{id}/pause` / `POST /flocks/{id}/resume` — pause/resume **all**
+  member VMs via Firecracker PauseVM/ResumeVM. **Runtime-only**: agent status
+  flips to `paused` while paused, then resumes to the pre-pause lifecycle status;
+  `Flock.Paused` toggles, but nothing is persisted (a daemon restart brings
+  members back running). A partial pause failure rolls back (resumes
+  already-paused members and restores their prior statuses).
+- The health watchdog **skips dead-marking `paused` agents** — a paused VM
+  intentionally doesn't answer `/health`, so it must not be marked dead.
+- `POST /flocks` accepts `max_agents` — a per-flock agent cap (default 20),
+  enforced on create **and** on `POST /flocks/{id}/agents`. Persisted in
+  metadata (backward-compatible; an absent/0 value falls back to the default).
+- `ephemera-ctl flock pause`/`resume`; `flock create --max-agents N`.
+
+### Town Wall query filters + log rotation (PR-C)
+
+- `GET /flocks/{id}/wall/history` accepts filters: `agent_id` (exact),
+  `since`/`until` (RFC3339, inclusive), `contains` (body substring). Combinable;
+  an all-empty filter returns the active-log history.
+- The Town Wall log now **rotates by size**: past `EPHEMERA_TOWNWALL_MAX_MIB`
+  (default 10) the active log shifts to `.1` (…→`EPHEMERA_TOWNWALL_KEEP`,
+  default 3) and a fresh file continues. `History` reflects the active file
+  (rotated backups stay on disk, mirroring the audit log).
+
+---
+
+# v0.4.2 — COW Spawn Support Without Default Flip
+
+**anvil**은 upstream ephemera v0.4.2의 COW spawn rootfs와 COW+Diff snapshot 지원을
+merge하지만, runtime 기본 disk mode는 아직 바꾸지 않는다. `EPHEMERA_DISK_MODE`
+unset, `plain`, `full`은 기존 full byte-for-byte clone을 사용하고 COW probe도
+수행하지 않는다. `EPHEMERA_DISK_MODE=cow`를 명시한 경우에만 dm-snapshot COW를
+probe하고, probe 실패 시 plain clone으로 fallback한다.
+
+Upstream ephemera v0.4.2 promotes copy-on-write spawn disks to the default, with
+measured ~43% faster spawn (1.96s -> 1.12s warm) and ~0 MiB initial per-VM disk.
+anvil keeps the feature opt-in for this slice so operators can adopt the kernel
+device-mapper dependency explicitly. Additive — no wire format changed.
+
+---
+
+## What's New
+
+### COW spawn rootfs is available explicitly
+
+- `EPHEMERA_DISK_MODE=cow` selects COW. Unset, `plain`, and `full` select the existing full byte-for-byte copy and skip the COW probe.
+- `storage.DMSnapshotAvailable()` probes the host when COW is explicitly requested (tool presence + a `dmsetup version` device-mapper round-trip + the `dm_snapshot` module); on failure the daemon logs a warning and uses a full clone. The strategy is resolved once into `ControlPlane.useCOW` instead of re-reading the env on every spawn.
+- Recovery is unaffected: each VM's `DiskMode` is recorded from the actual provisioning result, so plain and COW VMs both cold-restart correctly.
+- COW spawn VMs now support **Diff snapshots**: `WriteRootfsDiff` reads the rootfs size via `blockdev` when the current rootfs is a dm-snapshot block device (whose `Stat().Size()` is 0), so a COW VM's 2nd-and-later snapshot is a sparse rootfs diff. Previously this hit a size-mismatch — the COW+Diff combination was untested while COW was opt-in.
+
+---
+
+# v0.4.1 — Operational Interfaces
+
+**Ephemera** v0.4.1 makes the daemon operable as a service: authenticated **client identity** threaded into request handling, a per-request **access audit log** (`GET /audit`), **per-token TTL/rotation**, and a dependency-free **operator CLI** (`ephemera-ctl`). Additive — no wire format changed; the only behavior changes are that an expired token is now rejected (401) and the in-VM CP token is the first non-expired client.
+
+---
+
+## What's New
+
+### Client identity in request context (F1)
+
+- `authMiddleware` now surfaces the authenticated caller: the matched client name is threaded to handlers via the request context and to the outer audit middleware via a request-scoped holder. Timing-safety is preserved: every token is still compared with no early-exit, and the expiry check runs after the constant-time loop.
+
+### Access audit log — `GET /audit` (F2)
+
+- Every API request is appended as one JSON line to `{workDir}/audit/access.jsonl`: `{ts, client, method, path, status, duration_ms, remote_addr, bytes}`. The record never contains tokens, the `Authorization` header, request/response bodies, or the query string. Unauthenticated requests record `client="-"`; `/metrics` is excluded so scrapes do not flood the log.
+- The file is size-rotated (`EPHEMERA_AUDIT_MAX_MIB`, default 100; `EPHEMERA_AUDIT_KEEP`, default 5). On by default; `EPHEMERA_AUDIT_DISABLE=true` turns it off.
+- `GET /audit?limit=&client=&status=&method=` returns recent records as a JSON array, newest first, with limit default 100 and max 1000.
+- `statusRecorder` captures status/bytes and forwards `http.Flusher` so the SSE Town Wall stream keeps working; the audit middleware wraps auth so it also records 401s and final status.
+
+### Per-token TTL + rotation (F3)
+
+- Token entries gain an optional expiry: `name:token:expires` (RFC3339 or Unix seconds). A two-field `name:token` never expires. Tokens may contain `:`; the expiry is recognized only when the trailing colon-separated field parses as a timestamp.
+- Expiry is enforced per request: an expired-but-matched token returns 401 with the same body as an unknown token, distinguished only by the server log and `ephemera_auth_total{outcome="expired"}`.
+- The in-VM control-plane token is now the first non-expired client. If all tokens have expired, an empty unauthenticated token is propagated with a warning.
+- New metric `ephemera_auth_total{outcome=ok|denied|expired}`; startup/SIGHUP banners log expired and expiring-within-24h counts.
+
+### Operator CLI — `ephemera-ctl` (F4)
+
+- New `cmd/ephemera-ctl`, a stdlib-only HTTP wrapper over the control-plane API: `vm spawn/ls/rm/health/stop/task/stats/snapshot`, `flock create/ls/get/rm/post/wall/restart`, `snapshot ls/restore/rm`, `audit`, and `metrics`. Build with `go build -o ephemera-ctl ./cmd/ephemera-ctl/`.
+- Reads `EPHEMERA_CTL_URL` (default `http://127.0.0.1:3000`) and a bearer from `--token`, `EPHEMERA_CTL_TOKEN`, or `EPHEMERA_API_TOKEN`. Human-readable tables are the default; `--json` returns raw output. Non-2xx responses go to stderr and exit non-zero.
+
+### Tests
+
+- Unit: token TTL parsing, `parseExpiry`, `firstActiveClient`, `countTokenExpiry`; `authMiddleware` outcomes and metric behavior; audit rotation/tail filters/no-secret-leak; `statusRecorder` Flusher forwarding; client-identity context; CLI client round-trip, URL/token resolution, and flag parsing.
+- E2E steps 78–83 cover audit records, 401 audit entries, per-token TTL expiry, SSE through the audit wrapper, and `ephemera-ctl` spawn/list/delete plus audit access against the live daemon.
+
 # anvil v0.3.2 — Scheduler replication and flock placement
 
 - Tag: `anvil-v0.3.2`
@@ -63,8 +529,8 @@
 - Target commit: `18b4506204a68a8fd9e3608976727953869f94a6`
 
 `anvil-v0.3.2`는 `anvil-v0.3.1` 이후 scheduler 기반 runtime 운영성을 확장한
-release다. upstream ephemera runtime baseline은 계속 `v0.3.6`이다. upstream
-`v0.4.0` PR-A storage/recovery 변경은 포함하지 않는다.
+historical release다. 해당 release의 upstream ephemera runtime baseline은
+`v0.3.6`이며, upstream `v0.4.0` PR-A storage/recovery 변경은 포함하지 않는다.
 
 ## 추가됨
 
@@ -1186,7 +1652,7 @@ Two safety nets also landed alongside: `SetGuestCPToken`'s retry budget moved fr
 
 - `POST /flocks` writes `flocks/<flock-id>/metadata.json` atomically (tmp + rename) before returning the response
 - `DELETE /flocks/{id}` removes the metadata file (the `TOWN_WALL.log` is kept as an audit artifact)
-- Daemon startup scans `flocks/*/metadata.json` and re-registers every flock in memory; the Town Wall log is reopened in append mode so full history (and `seq` numbering) continues across restarts
+- Daemon startup scans `flocks/*/metadata.json` and re-registers every flock in memory; the active Town Wall log is reopened in append mode so active history (and `seq` numbering) continues across restarts
 - Recovered flocks are read-mostly: their VM IDs no longer correspond to live Firecracker processes (those died with the previous daemon), so `/tasks` against them will fail; `/post`, `/wall`, `/wall/history`, and `DELETE` continue to work
 - Schema versioned (`schema_version: 1`) for future migrations
 - Live VM auto-restart is deferred to v0.3.2
@@ -1250,7 +1716,7 @@ These items extend the v0.3.0 work to cover what the original e2e couldn't:
 ### Town Wall — Per-Flock Append-Only Log
 
 - `POST /flocks/{id}/post` — append a message (`{agent_id, body}`) to the flock's shared log
-- `GET /flocks/{id}/wall` — **SSE stream** that emits full history once, then forwards every new post live
+- `GET /flocks/{id}/wall` — **SSE stream** that emits active-log history once, then forwards every new post live
 - `GET /flocks/{id}/wall/history` — one-shot dump of the log as JSON
 - Backed by `flocks/<flock-id>/TOWN_WALL.log` on disk (kept as an audit artifact after `DELETE`)
 - Mutex-serialized writes with a buffered subscriber fan-out — slow subscribers are dropped from the current message rather than blocking the writer

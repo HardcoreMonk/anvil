@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -34,14 +35,21 @@ const (
 // APIClient represents a named caller with its own Bearer token.
 // Using separate tokens per client allows individual revocation and audit logging.
 type APIClient struct {
-	Name  string
-	Token string
+	Name    string
+	Token   string
+	Expires time.Time // zero value = never expires (v0.4.1)
 }
 
 var (
 	// agentPort is the port goose-agent listens on inside each VM.
 	// Must match GOOSE_AGENT_PORT if overridden on the VM side.
 	agentPort = resolveAgentPort()
+
+	// maxTaskDepth caps nested agent→agent /tasks invocations (v0.4.4). The proxy
+	// reads X-Ephemera-Task-Depth on each /tasks hop, rejects at/over the cap with
+	// 508 Loop Detected, and forwards depth+1. Default 5; a large value effectively
+	// disables the guard. envInt rejects <=0, so the default always holds.
+	maxTaskDepth = envInt("EPHEMERA_MAX_TASK_DEPTH", 5)
 
 	// Watchdog tunables (v0.3.4). Defaults match the original hard-coded values
 	// so existing deployments observe no change unless the env var is set.
@@ -54,6 +62,20 @@ var (
 	// authentication as the rest of the API. Default false matches the
 	// standard Prometheus scrape model (network-level isolation expected).
 	metricsRequireAuth = envBool("EPHEMERA_METRICS_REQUIRE_AUTH", false)
+
+	// diskMinFreeMiB is the free-space floor (MiB) that must remain available
+	// after a disk-consuming operation (VM clone, snapshot copy). The daemon
+	// refuses such an operation with 507 Insufficient Storage when it would dip
+	// below this margin (v0.4.0). Default 1024 MiB.
+	diskMinFreeMiB = envInt("EPHEMERA_DISK_MIN_FREE_MIB", 1024)
+
+	// enableAutoSnapshot opts into memory auto-snapshot (v0.4.0): on graceful
+	// shutdown the daemon snapshots each recoverable VM's memory+state into
+	// vms/<id>/auto/ so RecoverVMs can warm-restore (memory preserved) instead
+	// of cold-booting. One-shot per shutdown; falls back to cold boot on any
+	// restore failure or a SIGKILL (no graceful teardown runs). Default off
+	// (a 5-agent flock snapshot is ~10 GB).
+	enableAutoSnapshot = envBool("EPHEMERA_AUTOSNAPSHOT", false)
 
 	// apiAddr is the address the control plane API binds to.
 	// Default 127.0.0.1:3000 makes the API reachable only on localhost,
@@ -113,15 +135,37 @@ func loadAPIClients() []APIClient {
 		return parseAPIClients(raw)
 	}
 	if t := envWithAlias(envEphemeraAPIToken, envAnvilAPIToken); t != "" {
+		// A ':' here almost always means the operator meant EPHEMERA_API_TOKENS
+		// (plural, name:token) — the singular form uses the whole value as the
+		// token and fixes the client name to "default". Warn rather than silently
+		// surprising them in the Clients view.
+		if strings.Contains(t, ":") {
+			slog.Warn("EPHEMERA_API_TOKEN contains ':'; its whole value is used as the token and the client name is \"default\" — use EPHEMERA_API_TOKENS (plural) as name:token to set a client name")
+		}
 		return []APIClient{{Name: "default", Token: t}}
 	}
 	return nil
 }
 
-// parseAPIClients parses a raw token list. Entries are name:token pairs
-// separated by commas or newlines (operators write one-per-line in files;
-// env stays CSV). Whitespace is trimmed; entries without a ':' or with an
-// empty name are skipped silently.
+// parseAPIClients parses a raw token list. Entries are name:token[:expires]
+// records separated by commas or newlines (operators write one-per-line in
+// files; env stays CSV). Whitespace is trimmed; entries without a ':' or with
+// an empty name/token are skipped silently.
+//
+// The name is everything before the FIRST colon. Both the token and the expiry
+// (RFC3339 contains ':') may contain colons, so the expiry is found by scanning
+// colon boundaries in the remainder left-to-right and taking the FIRST whose
+// suffix parses as a timestamp (RFC3339 or Unix seconds, see parseExpiry). If no
+// such boundary exists, the whole remainder is the token. The remainder is never
+// itself tested as an expiry, so a token that merely looks like a timestamp
+// stays a token. Examples:
+//
+//	alice:tok                          -> name=alice token=tok      never expires
+//	alice:tok:en                       -> name=alice token=tok:en   never expires
+//	alice:tok:en:2026-06-01T00:00:00Z  -> name=alice token=tok:en   expires 2026-06-01
+//	alice:2026-06-01T00:00:00Z         -> name=alice token=<that>   never expires (no 3rd field)
+//
+// A two-field "name:token" has a zero Expires and never expires (back-compat).
 func parseAPIClients(raw string) []APIClient {
 	var clients []APIClient
 	for _, entry := range strings.FieldsFunc(raw, func(r rune) bool {
@@ -132,10 +176,24 @@ func parseAPIClients(raw string) []APIClient {
 		if idx <= 0 {
 			continue
 		}
-		clients = append(clients, APIClient{
-			Name:  entry[:idx],
-			Token: entry[idx+1:],
-		})
+		name := entry[:idx]
+		rest := entry[idx+1:] // token, or token:expires
+		token := rest
+		var expires time.Time
+		for i := 0; i < len(rest); i++ {
+			if rest[i] != ':' {
+				continue
+			}
+			if exp, ok := parseExpiry(rest[i+1:]); ok {
+				token = rest[:i]
+				expires = exp
+				break
+			}
+		}
+		if token == "" {
+			continue
+		}
+		clients = append(clients, APIClient{Name: name, Token: token, Expires: expires})
 	}
 	return clients
 }
@@ -146,6 +204,55 @@ func resolveAgentPort() int {
 
 func resolvePublicURL() string {
 	return strings.TrimRight(envWithAlias(envEphemeraPublicURL, envAnvilPublicURL), "/")
+}
+
+// parseExpiry parses a token-expiry field as RFC3339 or as Unix seconds.
+// Unix seconds must be a plausible epoch (>= 2001-09) so a short numeric token
+// segment is not mistaken for an expiry. Returns ok=false when the field is not
+// a recognized timestamp, so the caller treats it as part of the token.
+func parseExpiry(s string) (time.Time, bool) {
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, true
+	}
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil && n >= 1_000_000_000 {
+		return time.Unix(n, 0).UTC(), true
+	}
+	return time.Time{}, false
+}
+
+func apiClientExpired(c APIClient, now time.Time) bool {
+	return !c.Expires.IsZero() && !now.Before(c.Expires)
+}
+
+// firstActiveClient returns the first client whose token has not expired (a zero
+// Expires never expires). The in-VM control-plane forwarder token is selected
+// this way so an expired primary token does not break in-VM callbacks (v0.4.1).
+func firstActiveClient(clients []APIClient) (APIClient, bool) {
+	now := time.Now()
+	for _, c := range clients {
+		if !apiClientExpired(c, now) {
+			return c, true
+		}
+	}
+	return APIClient{}, false
+}
+
+// countTokenExpiry returns how many clients are already expired and how many
+// (still valid) expire within the next 24h. Used for startup/SIGHUP banners.
+func countTokenExpiry(clients []APIClient) (expired, expiringSoon int) {
+	now := time.Now()
+	soon := now.Add(24 * time.Hour)
+	for _, c := range clients {
+		if c.Expires.IsZero() {
+			continue
+		}
+		if apiClientExpired(c, now) {
+			expired++
+		} else if c.Expires.Before(soon) {
+			expiringSoon++
+		}
+	}
+	return expired, expiringSoon
 }
 
 // resolveAPIAddr builds the listen address.
@@ -228,6 +335,27 @@ func envBool(key string, defaultVal bool) bool {
 	return defaultVal
 }
 
+// resolveDiskModeCOW decides the spawn disk strategy once at startup. anvil keeps
+// the plain/full clone default; only EPHEMERA_DISK_MODE=cow opts into COW. When
+// COW is requested but the host lacks dm-snapshot support, it logs a warning and
+// falls back to plain so spawns still succeed. probe is injected so the decision
+// logic is unit-testable without real device-mapper.
+func resolveDiskModeCOW(probe func() error) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("EPHEMERA_DISK_MODE"))) {
+	case "", "plain", "full":
+		return false
+	case "cow":
+		if err := probe(); err != nil {
+			slog.Warn("COW disk mode unavailable; falling back to plain full-clone", "err", err)
+			return false
+		}
+		return true
+	default:
+		slog.Warn("unknown EPHEMERA_DISK_MODE; falling back to plain full-clone", "mode", os.Getenv("EPHEMERA_DISK_MODE"))
+		return false
+	}
+}
+
 // AgentProfile bundles per-role VM sizing and the on-disk profile directory.
 // ProfileDir is resolved relative to {workDir}/configs/profiles/{ProfileDir}.
 // An empty ProfileDir signals "use the daemon's default goose config".
@@ -238,18 +366,13 @@ type AgentProfile struct {
 	ProfileDir string
 }
 
-// agentProfiles maps a profile name to its canonical sizing and profile directory.
-// The empty key "" is the backward-compatible default returned for unset profiles.
-// Unknown names fall back to default sizing with ProfileDir set to the name
-// itself, preserving prior behavior where any directory under configs/profiles
-// could be selected by name.
+// agentProfiles holds only the reserved default. Every other profile is
+// user-defined: created through the Settings UI as a configs/profiles/{name}
+// directory and resolved by name. LookupProfile returns default sizing
+// (1 vCPU / 1024 MiB, the "Standard" preset) with ProfileDir set to the requested
+// name, so any user profile or flock role works without a hardcoded entry here.
 var agentProfiles = map[string]AgentProfile{
-	"":             {Name: "default", VcpuCount: 2, MemSizeMib: 2048, ProfileDir: ""},
-	"researcher":   {Name: "researcher", VcpuCount: 1, MemSizeMib: 512, ProfileDir: "researcher"},
-	"reviewer":     {Name: "reviewer", VcpuCount: 1, MemSizeMib: 512, ProfileDir: "reviewer"},
-	"worker":       {Name: "worker", VcpuCount: 2, MemSizeMib: 2048, ProfileDir: "worker"},
-	"orchestrator": {Name: "orchestrator", VcpuCount: 2, MemSizeMib: 2048, ProfileDir: "orchestrator"},
-	"builder":      {Name: "builder", VcpuCount: 4, MemSizeMib: 4096, ProfileDir: "worker"},
+	"": {Name: "default", VcpuCount: 1, MemSizeMib: 1024, ProfileDir: ""},
 }
 
 // LookupProfile returns the canonical AgentProfile for a known name, or a
@@ -260,5 +383,5 @@ func LookupProfile(name string) AgentProfile {
 	if p, ok := agentProfiles[name]; ok {
 		return p
 	}
-	return AgentProfile{Name: name, VcpuCount: 2, MemSizeMib: 2048, ProfileDir: name}
+	return AgentProfile{Name: name, VcpuCount: 1, MemSizeMib: 1024, ProfileDir: name}
 }

@@ -37,6 +37,27 @@ func TestFlockManager_CreateGetDelete(t *testing.T) {
 	}
 }
 
+func TestFlockManager_NewUnregisteredIsHiddenUntilRegister(t *testing.T) {
+	tmp := t.TempDir()
+	fm := NewFlockManager(tmp)
+
+	f, err := fm.NewUnregistered("flock-hidden", "test task", filepath.Join(tmp, "flock-hidden", "wall.log"))
+	if err != nil {
+		t.Fatalf("NewUnregistered: %v", err)
+	}
+	if _, ok := fm.Get("flock-hidden"); ok {
+		t.Fatal("unregistered flock should not be visible via Get")
+	}
+	if all := fm.List(); len(all) != 0 {
+		t.Fatalf("unregistered flock visible via List: %d", len(all))
+	}
+
+	fm.Register(f)
+	if got, ok := fm.Get("flock-hidden"); !ok || got != f {
+		t.Fatal("registered flock not visible via Get")
+	}
+}
+
 func TestFlockManager_CreateStoresTenantAndEgress(t *testing.T) {
 	tmp := t.TempDir()
 	fm := NewFlockManager(tmp)
@@ -131,5 +152,137 @@ func TestFlock_MarshalJSON(t *testing.T) {
 	}
 	if strings.Contains(s, `"TownWall"`) || strings.Contains(s, `"townwall"`) {
 		t.Errorf("MarshalJSON should not expose TownWall: %s", s)
+	}
+}
+
+func TestFlock_RemoveAgent(t *testing.T) {
+	tmp := t.TempDir()
+	fm := NewFlockManager(tmp)
+	f, err := fm.Create("flock-rm", "task", filepath.Join(tmp, "flock-rm", "wall.log"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	f.AddAgent(&AgentInfo{AgentID: "worker-1", Role: "worker"})
+	f.AddAgent(&AgentInfo{AgentID: "worker-2", Role: "worker"})
+
+	f.RemoveAgent("worker-1")
+	if n := len(f.Snapshot()); n != 1 {
+		t.Errorf("expected 1 agent after remove, got %d", n)
+	}
+	for _, a := range f.Snapshot() {
+		if a.AgentID == "worker-1" {
+			t.Error("worker-1 should be removed")
+		}
+	}
+	f.RemoveAgent("nonexistent") // no-op, must not panic
+}
+
+func TestFlock_ChangeAgentRole(t *testing.T) {
+	tmp := t.TempDir()
+	fm := NewFlockManager(tmp)
+	f, err := fm.Create("flock-role", "task", filepath.Join(tmp, "flock-role", "wall.log"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	f.AddAgent(&AgentInfo{AgentID: "worker-1", Role: "worker"})
+
+	f.ChangeAgentRole("worker-1", "reviewer", "reviewer")
+	role := ""
+	for _, a := range f.Snapshot() {
+		if a.AgentID == "worker-1" {
+			role = a.Role
+		}
+	}
+	if role != "reviewer" {
+		t.Errorf("role not changed: %q", role)
+	}
+	f.ChangeAgentRole("nonexistent", "x", "x") // no-op, must not panic
+}
+
+func TestFlock_PausedAndAgentStatus(t *testing.T) {
+	tmp := t.TempDir()
+	fm := NewFlockManager(tmp)
+	f, err := fm.Create("flock-p", "task", filepath.Join(tmp, "flock-p", "wall.log"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	f.AddAgent(&AgentInfo{AgentID: "worker-1", Role: "worker", Status: AgentStatusReady})
+
+	if f.Paused {
+		t.Error("new flock should not be paused")
+	}
+	f.SetPaused(true)
+	if !f.Paused {
+		t.Error("SetPaused(true) had no effect")
+	}
+	f.MarkAgentPaused("worker-1")
+	if got := f.AgentStatus("worker-1"); got != AgentStatusPaused {
+		t.Errorf("AgentStatus = %q, want %q", got, AgentStatusPaused)
+	}
+	if got := f.AgentStatus("nobody"); got != "" {
+		t.Errorf("AgentStatus(unknown) = %q, want empty", got)
+	}
+	meta := f.ToMetadata()
+	if got := meta.Agents["worker-1"].Status; got != AgentStatusReady {
+		t.Errorf("ToMetadata paused status = %q, want pre-pause ready", got)
+	}
+	f.RestorePausedAgentStatus("worker-1", AgentStatusReady)
+	if got := f.AgentStatus("worker-1"); got != AgentStatusReady {
+		t.Errorf("RestorePausedAgentStatus = %q, want ready", got)
+	}
+	if !f.MarkAgentDeadIfNotPaused("worker-1") {
+		t.Fatal("MarkAgentDeadIfNotPaused returned false for ready agent")
+	}
+	if got := f.AgentStatus("worker-1"); got != AgentStatusDead {
+		t.Errorf("MarkAgentDeadIfNotPaused status = %q, want dead", got)
+	}
+	f.MarkAgentPaused("worker-1")
+	if f.MarkAgentDeadIfNotPaused("worker-1") {
+		t.Fatal("MarkAgentDeadIfNotPaused should reject paused agent")
+	}
+	f.SetPaused(false)
+	if f.Paused {
+		t.Error("SetPaused(false) had no effect")
+	}
+}
+
+func TestFlock_BeginDeleteRejectsFutureMutation(t *testing.T) {
+	tmp := t.TempDir()
+	fm := NewFlockManager(tmp)
+	f, err := fm.Create("flock-delete", "task", filepath.Join(tmp, "flock-delete", "wall.log"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	unlockDelete, ok := f.BeginDelete()
+	if !ok {
+		t.Fatal("BeginDelete unexpectedly failed")
+	}
+	unlockDelete()
+
+	if unlock, ok := f.BeginMutation(); ok {
+		unlock()
+		t.Fatal("BeginMutation succeeded after BeginDelete")
+	}
+	if unlock, ok := f.BeginDelete(); ok {
+		unlock()
+		t.Fatal("second BeginDelete unexpectedly succeeded")
+	}
+}
+
+func TestFlock_ToMetadataOmitsReservedPlaceholder(t *testing.T) {
+	tmp := t.TempDir()
+	fm := NewFlockManager(tmp)
+	f, err := fm.Create("flock-reserve", "task", filepath.Join(tmp, "flock-reserve", "wall.log"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if _, err := f.ReserveAgent("worker", 2); err != nil {
+		t.Fatalf("ReserveAgent: %v", err)
+	}
+	meta := f.ToMetadata()
+	if len(meta.Agents) != 0 {
+		t.Fatalf("reserved placeholder persisted in metadata: %+v", meta.Agents)
 	}
 }
