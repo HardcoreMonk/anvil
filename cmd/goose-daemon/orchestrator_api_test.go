@@ -187,3 +187,42 @@ func TestRegisterDistributedAndRelayFlock(t *testing.T) {
 		t.Fatalf("relay flock not registered")
 	}
 }
+
+// TestRegisterDistributedFlock_ReAdmitsRelayTokenOnReRegister covers the
+// reconcile heal path (Task 7): a re-POST /distributed for an already-registered
+// hub flock must restore the scoped relay-token admission even when it was
+// cleared (e.g. after a SIGHUP ReloadClients) while the hub flock itself
+// survived in flockMgr. Without this, reconcile would re-issue the hub POST but
+// leave the relay hop unauthenticated.
+func TestRegisterDistributedFlock_ReAdmitsRelayTokenOnReRegister(t *testing.T) {
+	cp := newTestCP(t)
+
+	body := `{"roster":[{"agent_id":"researcher-1","host":"hostB"}],"relay_token":"rt-1"}`
+	rr := httptest.NewRecorder()
+	cp.handleFlockItem(rr, httptest.NewRequest(http.MethodPost, "/flocks/routed-1/distributed", strings.NewReader(body)))
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("initial distributed status = %d, want 201 (%s)", rr.Code, rr.Body.String())
+	}
+	if cp.relayTokenFor("routed-1") != "rt-1" {
+		t.Fatalf("relay token not admitted on initial registration")
+	}
+
+	// Simulate the relay-token admission being lost while the hub flock survives.
+	cp.removeRelayToken("routed-1")
+	if cp.relayTokenFor("routed-1") != "" {
+		t.Fatalf("relay token not cleared for test setup")
+	}
+	if _, ok := cp.flockMgr.Get("routed-1"); !ok {
+		t.Fatalf("hub flock should still exist after clearing only the relay token")
+	}
+
+	// Reconcile re-POSTs /distributed for the existing hub flock: admission restored.
+	rr2 := httptest.NewRecorder()
+	cp.handleFlockItem(rr2, httptest.NewRequest(http.MethodPost, "/flocks/routed-1/distributed", strings.NewReader(body)))
+	if rr2.Code != http.StatusCreated {
+		t.Fatalf("re-register distributed status = %d, want 201 (%s)", rr2.Code, rr2.Body.String())
+	}
+	if got := cp.relayTokenFor("routed-1"); got != "rt-1" {
+		t.Fatalf("relay token after re-register = %q, want rt-1 (admission not restored)", got)
+	}
+}

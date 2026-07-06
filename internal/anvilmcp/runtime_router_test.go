@@ -805,6 +805,76 @@ func TestCreateRoutedFlockMembers_WiresSharedTownWall(t *testing.T) {
 	}
 }
 
+func TestReconcile_ReregistersSharedTownWall(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
+	home := &routerFakeDaemon{spawnResponses: []*SpawnVMResponse{{
+		VMID: "vm-coordinator-1", GuestIP: "10.0.1.10", AgentURL: "http://10.0.1.10:8080", TenantID: "tenant-1", EgressPolicy: "profile",
+	}}}
+	member := &routerFakeDaemon{spawnResponses: []*SpawnVMResponse{{
+		VMID: "vm-researcher-1", GuestIP: "10.0.2.10", AgentURL: "http://10.0.2.10:8080", TenantID: "tenant-1", EgressPolicy: "profile",
+	}}}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(
+			[]RuntimeHost{
+				{Name: "hostA", Endpoint: "http://hostA.internal:8080", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+				{Name: "hostB", Endpoint: "http://hostB.internal:8080", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+			},
+			nil,
+			nil,
+		),
+		map[string]Daemon{"hostA": home, "hostB": member},
+		RuntimeRouterOptions{PlacementStore: store},
+	)
+
+	out, err := router.CreateRoutedFlockMembers(context.Background(), FlockCreateRequest{
+		Task:         "smoke",
+		Roles:        []string{"coordinator", "researcher"},
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a daemon restart: the in-memory hub/relay registrations are lost.
+	home.distributedCalls, member.relayCalls = 0, 0
+	home.relayCalls, member.distributedCalls = 0, 0
+
+	if err := router.ReconcilePlacements(context.Background()); err != nil {
+		t.Fatalf("ReconcilePlacements: %v", err)
+	}
+	if home.distributedCalls != 1 {
+		t.Fatalf("home hub re-registrations = %d, want 1", home.distributedCalls)
+	}
+	if member.relayCalls != 1 {
+		t.Fatalf("member relay re-registrations = %d, want 1", member.relayCalls)
+	}
+	if home.relayCalls != 0 {
+		t.Fatalf("home relay re-registrations = %d, want 0 (home owns the hub)", home.relayCalls)
+	}
+	if member.distributedCalls != 0 {
+		t.Fatalf("member hub re-registrations = %d, want 0", member.distributedCalls)
+	}
+
+	// Reconcile re-issues the SAME persisted relay token + full roster daemon-to-daemon.
+	token, ok := store.RoutedFlockRelayToken(out.FlockID)
+	if !ok || token == "" {
+		t.Fatalf("relay token not persisted for flock %q", out.FlockID)
+	}
+	if home.distributedReq.RelayToken != token {
+		t.Fatalf("reconcile hub re-registration relay token = %q, want persisted token", home.distributedReq.RelayToken)
+	}
+	if member.relayReq.RelayToken != token {
+		t.Fatalf("reconcile relay re-registration relay token = %q, want persisted token", member.relayReq.RelayToken)
+	}
+	if member.relayReq.HomeAddr == "" {
+		t.Fatalf("reconcile relay re-registration missing home addr")
+	}
+	if len(home.distributedReq.Roster) != 2 {
+		t.Fatalf("reconcile hub roster len = %d, want 2", len(home.distributedReq.Roster))
+	}
+}
+
 func TestRuntimeRouterCreateRoutedFlockMembersDeniedBeforeDaemonCall(t *testing.T) {
 	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
 	daemon := &routerFakeDaemon{}
