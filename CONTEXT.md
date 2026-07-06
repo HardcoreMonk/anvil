@@ -33,10 +33,13 @@ IronClaw 실행 계층으로 통합하는 downstream product fork다. 이 저장
 통합 릴리즈는 ephemera runtime tag와 충돌하지 않도록 `anvil-v0.1.0`처럼 별도
 prefix를 사용한다. 현재 최신 anvil 공개 integration tag는 `anvil-v0.3.2`이고,
 tag target은 `18b4506204a68a8fd9e3608976727953869f94a6`다. 이와 별개로
-`anvil-v0.4.5-snapshot`(target `8daf6f3`, 2026-07-06)은 **학습·참고 전용
-pre-release** 스냅샷 tag다 — v0.4.x adapted baseline 시점을 보존하며, 해당 시점의
-알려진 결함 2건(restore 500 → `4c1c803`, 크래시 재시작 EBUSY → `38fbedc`)이
-릴리즈 노트에 명시돼 있고 운영 배포용이 아니다(학습 브랜치 `annotate/v0.4.5` 참조). anvil main runtime
+**학습·참고 전용 pre-release** 스냅샷 tag 4종(2026-07-06)이 있다:
+`anvil-v0.4.5-snapshot`(`8daf6f3`), `anvil-v0.5.5-snapshot`(`7f207a0`),
+`anvil-v0.6.4-snapshot`(`04e2a12`), `anvil-v0.7.0-snapshot`(`7b3f009`). 각
+upstream 시리즈의 adapted baseline 시점을 보존하며, 해당 시점의 알려진 결함
+(v0.4.5: restore 500 → `4c1c803`, 크래시 재시작 EBUSY → `38fbedc`; v0.5.5:
+keep-alive 커넥션 재사용 → `64ec57c`)과 이후 hardening 내역이 각 릴리즈 노트에
+명시돼 있다. 운영 배포용이 아니다(학습 브랜치 `annotate/v0.4.5`~`v0.7.0` 참조). anvil main runtime
 baseline은 upstream ephemera `v0.7.0` 병합·적응분을 포함하며, `anvil-v0.3.2`
 이후의 scheduler control loop, scheduler `/metrics`, manual cross-host snapshot
 replication, scheduler-aware single-host flock placement 위에 `v0.4.0`-`v0.7.0`

@@ -1,9 +1,12 @@
 # Unreleased — Scheduler flock placement planner and metrics
 
-> 참고: 2026-07-06에 학습·참고 전용 pre-release `anvil-v0.4.5-snapshot`(target
-> `8daf6f3`)이 게시됐다. v0.4.x adapted baseline 시점 보존용이며 운영 배포용이
-> 아니다 — 해당 시점의 알려진 결함 2건(`4c1c803`, `38fbedc`에서 수정)이 릴리즈
-> 노트에 명시돼 있다. 학습 주석 브랜치: `annotate/v0.4.5`.
+> 참고: 2026-07-06에 학습·참고 전용 pre-release 스냅샷 4종이 게시됐다 —
+> `anvil-v0.4.5-snapshot`(`8daf6f3`), `anvil-v0.5.5-snapshot`(`7f207a0`),
+> `anvil-v0.6.4-snapshot`(`04e2a12`), `anvil-v0.7.0-snapshot`(`7b3f009`).
+> 각 upstream 시리즈의 adapted baseline 시점 보존용이며 운영 배포용이 아니다.
+> 각 시점의 알려진 결함(v0.4.5: `4c1c803`·`38fbedc`에서 수정, v0.5.5: `64ec57c`에서
+> 수정)과 이후 hardening 내역이 각 릴리즈 노트에 명시돼 있다. 학습 주석 브랜치:
+> `annotate/v0.4.5` ~ `annotate/v0.7.0`.
 
 
 ## 추가됨
