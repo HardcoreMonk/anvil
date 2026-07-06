@@ -6,7 +6,8 @@
 - 현재 기준: mainline runtime scheduler/network/observability foundation +
   Goosetown MCP tool surface
 - 구현 범위: MCP adapter boundary, scheduler service foundation, daemon
-  control-plane/observability foundation.
+  control-plane/observability foundation, cross-host shared Town Wall(home-host
+  hub + relay).
   `internal/anvilmcp`는 tenant ID validation, quota decision, scheduler decision,
   host inventory polling, persistent placement/snapshot locality store, runtime
   router retry/failover/reconciliation, quota JSON store, egress policy, runtime
@@ -20,8 +21,9 @@
   `scripts/install-anvil-scheduler-systemd.sh --verify`는 `GET /health`,
   `PUT/GET /hosts`, `POST /schedule/spawn`, `POST /schedule/flock`, `GET /placements`,
   `GET /control-loop/status`, `DELETE /hosts/{name}` cleanup을 제공한다.
-- 비구현 범위: multi-node HA, migration, coordinator Town Wall, cross-host `gtcall`,
-  guest flock context injection, L7 egress proxy, billing, UI.
+- 비구현 범위: multi-node HA, migration, cross-host `gtcall`, cross-host broadcast
+  fan-out, L7 egress proxy, billing, UI. (2026-07-06: cross-host 공유 Town Wall과
+  guest flock context injection은 shared-wall slice로 구현 완료 — 아래 참고.)
 
 이 문서는 anvil이 IronClaw와 ephemera runtime을 multi-tenant 실행 기반으로
 확장할 때 필요한 경계를 정리한다. 현재 ephemera daemon의 단일 호스트 VM
@@ -41,6 +43,21 @@ daemon 계약 확장을 필요로 한다.
   분산 배치할 수 있는지 계산한다.
 - 2026-06-06 members-only routed flock create slice는 quota/capacity 검증 후 role
   VM을 cross-host로 생성하고 registry/rollback/delete를 검증한다.
+- 2026-07-06 cross-host shared Town Wall slice는 routed flock member에 FlockID/
+  AgentID/ControlPlaneToken을 주입해 flock identity를 부여하고(`POST /vms`),
+  `roles[0]` 배치 호스트를 home으로 삼아 home daemon에 hub flock(canonical
+  `TownWall`)을, 나머지 멤버 host daemon에 relay flock(post/wall/history/SSE를
+  home으로 forward·proxy)을 등록한다. guest는 여전히 로컬 daemon(`10.0.1.1`)에만
+  post한다(bridge-only 불변). daemon-to-daemon hop은 flock-scoped `relay_token`으로
+  인증하며, `authMiddleware`는 이 token을 해당 flock의 wall sub-path
+  (`/flocks/{id}/(post|wall|wall/history)`)에만 admit한다(일반 control-plane bearer
+  아님). `relay_token`은 `PlacementStore`에 영속되지만 모든 MCP output/audit/HTTP
+  view에서 redact된다. reconcile은 daemon 재시작 후 hub/relay를 재등록하고,
+  rollback/delete는 hub/relay 등록을 해제하고 token을 revoke한다. cross-host
+  `gtcall`과 cross-host broadcast fan-out은 이 슬라이스 범위 밖이다. 설계:
+  [`docs/superpowers/specs/2026-07-06-cross-host-shared-townwall-design.md`](../superpowers/specs/2026-07-06-cross-host-shared-townwall-design.md),
+  handoff:
+  [`docs/operations/2026-07-06-cross-host-town-wall-handoff.md`](../operations/2026-07-06-cross-host-town-wall-handoff.md).
 - `SelectRuntimeHost`: healthy host, VM capacity, snapshot bytes, egress policy를
   기준으로 첫 eligible host 선택
 - `HostInventory.PollOnce`: daemon `/health` polling으로 scheduler host 상태 갱신
@@ -87,9 +104,10 @@ Multi-tenant runtime의 설계 범위는 다음이다.
 decision helper, host inventory polling, runtime router, scheduler service binary,
 tenant API, `deny_all`/`profile` host enforcement, scheduler smoke harness,
 systemd installer `--verify`, manual cross-host snapshot replication,
-`POST /schedule/flock` dry-run planner, members-only routed flock create/delete까지
-포함한다. multi-node HA, migration, coordinator Town Wall, cross-host `gtcall`, guest
-flock context injection은 포함하지 않는다.
+`POST /schedule/flock` dry-run planner, members-only routed flock create/delete,
+2026-07-06 cross-host shared Town Wall(home-host hub + relay)까지 포함한다.
+multi-node HA, migration, cross-host `gtcall`, cross-host broadcast fan-out은
+포함하지 않는다.
 
 ## Tenant 식별자
 
@@ -150,8 +168,16 @@ placement를 사용하도록 확장됐다. 이 v1은 roles 수 기반 active VM 
 VM을 cross-host로 생성하고 registry/rollback/delete를 검증한다.
 `ANVIL_MCP_CROSS_HOST_FLOCK_CREATE=members_only`와 persistent scheduler state가
 필요하며, daemon `POST /flocks`나 daemon `FlockManager`가 아니라 host daemon
-`POST /vms`와 downstream routed registry를 사용한다. coordinator Town Wall,
-cross-host `gtcall`, guest `/root/.ephemera-flock` injection은 계속 후속 후보로 남는다.
+`POST /vms`와 downstream routed registry를 사용한다.
+
+2026-07-06 cross-host shared Town Wall slice는 이 위에 flock identity와 공유 wall을
+추가한다. `CreateRoutedFlockMembers`는 `SpawnVMRequest`에 `FlockID`/`AgentID`/
+`ControlPlaneToken`을 채워 routed 멤버가 `.ephemera-flock`/`.ephemera-cp-token`을
+받게 하고(`TownWallEnabled=true`), `roles[0]` 배치 호스트를 home으로 선정해 home
+daemon에 hub flock(canonical `TownWall`)을, 나머지 멤버 host daemon에 relay
+flock(post/history/SSE를 home으로 forward/proxy)을 등록한다. guest는 계속 로컬
+daemon(`10.0.1.1`)에만 post한다(bridge-only 불변). cross-host `gtcall`과 cross-host
+broadcast fan-out은 계속 후속 후보로 남는다.
 
 ## Scheduler 책임
 
@@ -266,9 +292,8 @@ restore 경로의 direct token exposure는 제거됐다. 새로운 audit record,
 이 roadmap의 non-goals는 다음이다.
 
 - 완전한 multi-tenant runtime 즉시 구현
-- coordinator Town Wall
 - cross-host `gtcall`
-- guest `/root/.ephemera-flock` injection
+- cross-host broadcast fan-out
 - daemon `FlockManager` registration for routed members-only flock
 - L7 egress proxy 또는 full HTTP CONNECT/SNI gateway
 - billing

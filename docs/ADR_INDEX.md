@@ -1,7 +1,7 @@
 # ADR 적용 상태 인덱스
 
 > **대상:** anvil downstream repository
-> **현행화 기준:** 2026-07-02
+> **현행화 기준:** 2026-07-06
 > **목적:** anvil에서 장기 유지할 설계 결정과 upstream ephemera 변경 채택 상태를 추적한다.
 
 ---
@@ -43,6 +43,7 @@
 | ADR | 상태 | 적용 요약 |
 |---|---|---|
 | [ADR-0001](adr/0001-anvil-public-boundary-and-upstream-adoption.md) | accepted | `PUBLIC_RELEASE_BOUNDARY.md`와 ADR_INDEX를 도입하고, upstream ephemera 변경을 `adopted/adapted/excluded/deferred/historical`로 분류한다. |
+| [Cross-host shared Town Wall](superpowers/specs/2026-07-06-cross-host-shared-townwall-design.md) | accepted | home-host hub 토폴로지: `roles[0]` 배치 호스트가 canonical `TownWall`(hub flock)을 소유하고, 나머지 멤버 host daemon은 relay flock으로 `/flocks/{id}/post`·`/wall`·`/wall/history`·SSE를 home으로 forward/proxy한다. daemon-to-daemon hop은 flock-scoped `relay_token`으로 인증하며, `authMiddleware`는 이 token을 해당 flock의 wall sub-path(`/flocks/{id}/(post\|wall\|wall/history)`)에만 admit한다 — 일반 control-plane bearer로 승격하지 않는다. `relay_token`은 `PlacementStore`에 영속되지만 모든 MCP output/audit/HTTP view에서 redact한다(`State()`가 nil 처리). **전제**: member↔home daemon은 control-plane 포트로 상호 도달 가능한 신뢰(private) 네트워크 위에 있어야 한다 — 외부 노출은 기존 reverse-proxy/TLS 정책 뒤에서만. **진화 경로**: 현재 home 단일 장애점(SPOF)을 1차 수용하고, hub flock 등록을 replica set으로 확장하면 mesh로 승격 가능(비범위). cross-host `gtcall`, cross-host broadcast fan-out은 비목표. `TestIronClawSchemasExcludeCrossHostWallTools`가 새 `anvil_*` MCP tool 미노출을 고정한다. 상세: [design spec](superpowers/specs/2026-07-06-cross-host-shared-townwall-design.md), [handoff](operations/2026-07-06-cross-host-town-wall-handoff.md). 별도 `docs/adr/*.md` 원문은 없음 — 이 row는 design spec을 결정 원문으로 삼는다. |
 
 ---
 

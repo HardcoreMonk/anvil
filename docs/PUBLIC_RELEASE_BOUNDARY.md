@@ -1,7 +1,7 @@
 # anvil 공개 릴리즈 경계
 
 > **대상:** anvil downstream repository
-> **현행화 기준:** 2026-07-02
+> **현행화 기준:** 2026-07-06
 > **목적:** anvil이 공개적으로 책임지는 기능 표면과, upstream ephemera에서 가져오더라도 anvil 정책상 수정하거나 제외해야 하는 표면을 구분한다.
 
 ---
@@ -40,6 +40,7 @@
 | Conversation transcript | daemon proxy `GET /vms/{id}/sessions/{name}/transcript`(bearer)로 대화 transcript 복원. agent export는 read-only(`goose session export`, model call 없음), 응답 schema `{turns:[{role,text}]}`는 auth-free여서 Web UI가 daemon token 없이 렌더한다. payload는 provider key/CP token/`agent_token` sentinel-free(guard) | `cmd/goose-daemon/api.go`, `cmd/goose-agent/main.go` |
 | Workload automation | script-only `POST /vms/{vm_id}/workloads/run` 계약 | `cmd/goose-agent`, `cmd/goose-daemon`, `scripts/vm-workload-e2e.sh` |
 | Goosetown in-VM helpers | `gtwall`, `gtcall`, `webdev_demo.sh` operator demo | upstream ephemera runtime namespace + anvil 보안 경계 문서 |
+| Cross-host shared Town Wall | routed flock의 여러 host member가 하나의 공유 Town Wall에 post/observe. home-host hub(`roles[0]` 배치 호스트가 canonical `TownWall` 소유) + member daemon relay(`/flocks/{id}/post`·`/wall`·`/wall/history`·SSE를 home으로 forward/proxy) 토폴로지. guest는 여전히 로컬 daemon(`10.0.1.1`)에만 post(bridge-only 불변). runtime/operator surface이며 IronClaw 표면으로 새 `anvil_*` MCP tool을 추가하지 않는다(`TestIronClawSchemasExcludeCrossHostWallTools` guard). **전제:** member↔home daemon은 control-plane 포트로 상호 도달 가능한 신뢰(private) 네트워크 위에 있어야 한다. 외부 노출은 기존 reverse-proxy/TLS 정책 뒤에서만. cross-host `gtcall`과 cross-host broadcast fan-out은 이 표면 범위 밖(비목표) | `internal/anvilmcp/routed_flock.go`, `cmd/goose-daemon/orchestrator_api.go`, `internal/orchestrator/townwall.go`, `docs/superpowers/specs/2026-07-06-cross-host-shared-townwall-design.md` |
 | Token policy | daemon token과 guest `agent_token` 분리, MCP output token redaction | `CONTEXT.md`, `README.md`, MCP adapter |
 | IronClaw integration | IronClaw 전용 실행 layer 계약 | `CONTEXT.md`, `README.md` |
 | 문서 계약 | 한국어 운영 문서, 실제 API/env/file 이름 보존 | `AGENTS.md`, `CONTEXT.md` |
