@@ -64,6 +64,7 @@ bash -n e2e_test.sh
 bash -n scripts/anvil-mcp-e2e.sh
 bash -n scripts/anvil-scheduler-smoke.sh
 bash -n scripts/vm-workload-e2e.sh
+bash -n scripts/anvil-cross-host-wall-e2e.sh
 ```
 
 `anvil-v0.1.0` Release 본문은 이미 게시된 첫 통합 release의 historical body다.
@@ -242,9 +243,23 @@ scripts/anvil-mcp-e2e.sh lifecycle
 scripts/anvil-mcp-e2e.sh semantic
 scripts/anvil-mcp-e2e.sh flock
 sudo -n bash scripts/vm-workload-e2e.sh
+sudo bash scripts/anvil-cross-host-wall-e2e.sh       # cross-host town wall relay (real member VM + stub home)
 bash install.sh --help && bash uninstall.sh --help   # installer help, no system mutation (v0.7.0)
 sudo bash scripts/build_release.sh v0.7.0             # FULL+SLIM tarball + .sha256 (dist/ gitignored, v0.7.0)
 ```
+
+Cross-host shared Town Wall를 건드리는 release 후보는 KVM host에서
+`sudo bash scripts/anvil-cross-host-wall-e2e.sh`도 확인한다. 이 검증은 real 멤버
+`anvil-daemon` + 하나의 real flock member VM을 띄우고, guest `gtwall` post가
+guest → in-VM agent → member daemon → relay hop → stub home으로 흐르는지 확인한다.
+home은 loopback 127.0.0.1:3100 python3 stub이 recorder 역할만 하며, relay가 home에
+넘긴 request가 `{"agent_id":"researcher-1","body":"ROUNDTRIP_OK"}` body와
+`Authorization: Bearer rt-e2e` header를 갖고 `agent_token`(필드명·값 모두)을 노출하지
+않는지 assert한다. LLM provider key 없이 통과한다(post에 model call 없음). 멤버
+daemon은 guest가 bridge gateway IP(`http://10.0.1.1:3000`)로 forward하므로
+`EPHEMERA_API_ADDR=0.0.0.0:3000`으로 bind한다(host는 `127.0.0.1:3000`으로 접근).
+**full two-daemon cross-host integration(두 번째 host의 real home daemon)은 단일 host
+bridge/IP 충돌 때문에 MANUAL multi-host 검증**이며 이 single-host gate 범위 밖이다.
 
 Phase 2 결과:
 
