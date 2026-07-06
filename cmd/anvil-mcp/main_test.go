@@ -270,16 +270,21 @@ func TestNewMCPDaemonEnablesMembersOnlyRoutedFlockCreate(t *testing.T) {
 	defer base.Close()
 
 	hostA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/vms" || r.Method != http.MethodPost {
+		switch {
+		case r.URL.Path == "/vms" && r.Method == http.MethodPost:
+			_ = json.NewEncoder(w).Encode(anvilmcp.SpawnVMResponse{
+				VMID:     "vm-planner",
+				GuestIP:  "10.0.1.10",
+				AgentURL: "http://10.0.1.10:3000",
+				Profile:  "planner",
+			})
+		case r.Method == http.MethodPost && (strings.HasSuffix(r.URL.Path, "/distributed") || strings.HasSuffix(r.URL.Path, "/relay")):
+			// Mirrors the real daemon's registerDistributedFlock/registerRelayFlock
+			// (cmd/goose-daemon/orchestrator_api.go): 201 Created, no body.
+			w.WriteHeader(http.StatusCreated)
+		default:
 			http.NotFound(w, r)
-			return
 		}
-		_ = json.NewEncoder(w).Encode(anvilmcp.SpawnVMResponse{
-			VMID:     "vm-planner",
-			GuestIP:  "10.0.1.10",
-			AgentURL: "http://10.0.1.10:3000",
-			Profile:  "planner",
-		})
 	}))
 	defer hostA.Close()
 
@@ -313,8 +318,8 @@ func TestNewMCPDaemonEnablesMembersOnlyRoutedFlockCreate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateRoutedFlockMembers returned error: %v", err)
 	}
-	if out.Mode != anvilmcp.RoutedFlockModeCrossHostMembersOnly || out.TownWallEnabled {
-		t.Fatalf("routed output = %+v, want members-only without Town Wall", out)
+	if out.Mode != anvilmcp.RoutedFlockModeCrossHostMembersOnly || !out.TownWallEnabled {
+		t.Fatalf("routed output = %+v, want members-only WITH shared Town Wall", out)
 	}
 	if len(out.Agents) != 1 || out.Agents[0].VMID != "vm-planner" || out.Agents[0].Host != "host-a" {
 		t.Fatalf("agents = %+v, want vm-planner on host-a", out.Agents)
