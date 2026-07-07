@@ -1542,6 +1542,7 @@ MCP router 관련 설정:
 | `scheduler_hosts_file` / `ANVIL_MCP_SCHEDULER_HOSTS_FILE` | router가 사용할 runtime host inventory JSON path |
 | `scheduler_quota_store_path` / `ANVIL_MCP_SCHEDULER_QUOTA_STORE` | optional tenant quota JSON path |
 | `cross_host_flock_create_mode` / `ANVIL_MCP_CROSS_HOST_FLOCK_CREATE=members_only` | members-only routed flock create opt-in. persistent `scheduler_state_path`가 필요하며 기본 `anvil_spawn_flock`을 대체하지 않는다 |
+| `reconcile_interval` / `ANVIL_MCP_RECONCILE_INTERVAL` | `members_only` 모드에서 `ReconcilePlacements`를 재실행하는 주기(`time.ParseDuration` 형식, 기본 `60s`, `0`=off). daemon 재시작 후 hub/relay wall 등록과 relay-token admission을 자동 복구한다 |
 
 예시:
 

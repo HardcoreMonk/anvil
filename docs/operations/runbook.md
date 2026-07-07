@@ -193,6 +193,11 @@ IP, TAP, MAC, agent token, agent URL을 유지한다. memory state와 진행 중
 보존되지 않는다. COW-mode VM과 snapshot-restored VM은 자동 복구 대상이 아니다.
 agent `status=dead`는 watchdog이 연속 health probe 실패를 감지했을 때 표시된다.
 
+daemon 재시작으로 hub/relay flock 등록과 relay-token admission이 사라진 경우,
+`members_only` 모드 adapter가 `ANVIL_MCP_RECONCILE_INTERVAL`(기본 60s) 주기로
+자동 재등록한다. 수동 개입은 adapter가 꺼져 있거나 `0`으로 비활성화된 경우에만
+필요하다.
+
 ## 일반 검증
 
 문서와 code path가 함께 맞는지 보는 기본 검증:

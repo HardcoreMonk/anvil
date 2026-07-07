@@ -138,15 +138,17 @@ CodeRabbit 리뷰(actionable 7 + nitpick 3)를 전건 코드 대조 triage — 9
 - **SSE relay non-200 content-type**: 기존 local-handler 패턴을 그대로 따라 relay
   경로에서도 non-200 응답에 `text/event-stream`이 남아있다(cosmetic, pre-existing
   패턴 상속).
-- **`ReconcilePlacements`에 production 호출자가 없음** — 현재 유닛 테스트로만
-  exercise되고, 주기적 control loop 배선은 이번 슬라이스 범위 밖이다.
+- ~~**`ReconcilePlacements`에 production 호출자가 없음**~~ — 2026-07-07
+  reconcile-loop slice(`6c1ca87`, `b32cd72`)로 해소: `members_only` 모드 adapter가
+  시작 1회 + `ANVIL_MCP_RECONCILE_INTERVAL`(기본 60s) 주기로 호출한다. `0`으로
+  비활성화한 구성에서만 수동 개입이 필요하다.
 
 ## Next Action
 
 release-gate 관점에서 이 슬라이스는 닫혔다(유닛 green, KVM e2e green, 보안 가드
-green, 2026-07-07 리뷰 대응 batch 반영). 다음으로 이어질 작업은 아래 Follow-Up
-Tasks 중 우선순위가 높은 항목(`ReconcilePlacements` 주기적 control loop 배선)부터
-별도 slice로 계획한다. cross-host `gtcall`을 다음 capability로 검토한다.
+green, 2026-07-07 리뷰 대응 batch 반영). `ReconcilePlacements` 주기적 control loop
+배선은 2026-07-07 reconcile-loop slice로 완료됐다(아래 Follow-Up CLOSED 참조).
+cross-host `gtcall`을 다음 capability로 검토한다.
 
 ## Follow-Up Tasks
 
@@ -163,7 +165,8 @@ Tasks 중 우선순위가 높은 항목(`ReconcilePlacements` 주기적 control 
   member의 relay 등록도 해제한다.
 - ~~**Task-7 comment correction**~~ — **CLOSED** (`931ecc9`): relay-token 소실
   트리거 주석을 "SIGHUP ReloadClients" → "daemon process restart"로 정정 완료.
-- **`ReconcilePlacements` 주기적 control loop 배선**: 현재 유닛 테스트로만
-  exercise되고 production 호출자가 없다(`grep -rn "ReconcilePlacements(" internal
-  cmd`가 정의 외 호출부 없음을 확인). scheduler control loop 또는 daemon health
-  polling 주기에 연결하는 배선이 후속이다.
+- ~~**`ReconcilePlacements` 주기적 control loop 배선**~~ — **CLOSED** (`b32cd72`,
+  `6c1ca87`, 2026-07-07 reconcile-loop slice): `reconcile_interval`/
+  `ANVIL_MCP_RECONCILE_INTERVAL` 설정(기본 60s, `0`=off)과 `StartReconcileLoop`가
+  `members_only` 모드에서 daemon 시작 시 주기적으로 `ReconcilePlacements`를 호출해
+  hub/relay wall 등록과 relay-token admission을 자동 복구한다.
