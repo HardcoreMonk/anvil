@@ -352,6 +352,27 @@ func TestNewMCPDaemonReturnsRouterForMembersOnly(t *testing.T) {
 	}
 }
 
+// TestNewMCPDaemonReturnsNilRouterForPlainConfig is the router-nil counterpart
+// to TestNewMCPDaemonReturnsRouterForMembersOnly above: a plain daemon config
+// (no scheduler_state_path / scheduler_hosts_file) must never wire a router,
+// so shouldStartReconcileLoop's nil check has a stable, asserted precondition.
+func TestNewMCPDaemonReturnsNilRouterForPlainConfig(t *testing.T) {
+	cfg := anvilmcp.Config{
+		DaemonURL:             anvilmcp.DefaultDaemonURL,
+		DefaultTimeoutSeconds: anvilmcp.DefaultTimeoutSeconds,
+	}
+	daemon, router, err := newMCPDaemon(cfg, http.DefaultClient)
+	if err != nil {
+		t.Fatalf("newMCPDaemon: %v", err)
+	}
+	if daemon == nil {
+		t.Fatal("daemon is nil")
+	}
+	if router != nil {
+		t.Fatalf("router = %+v, want nil for plain (no scheduler) config", router)
+	}
+}
+
 func TestShouldStartReconcileLoopGates(t *testing.T) {
 	router := &anvilmcp.RuntimeRouter{} // 게이트 판정에는 nil 여부만 쓰인다
 	cases := []struct {

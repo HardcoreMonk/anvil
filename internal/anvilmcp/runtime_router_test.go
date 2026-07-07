@@ -2285,6 +2285,34 @@ func waitForCalls(t *testing.T, d *countingListDaemon, want int32) {
 	t.Fatalf("ListVMs calls = %d, want >= %d within 3s", d.calls.Load(), want)
 }
 
+// waitForCallsToStabilize polls d.calls every 20ms until it reads the same
+// value on 3 consecutive polls, then returns that settled value. This
+// replaces a fixed-sleep-then-snapshot heuristic: under extreme CI
+// scheduling delay, a run already in flight when cancel() fires could
+// increment the counter just after a single fixed-delay snapshot, causing a
+// rare false failure. Polling for stability avoids that race.
+func waitForCallsToStabilize(t *testing.T, d *countingListDaemon) int32 {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	last := d.calls.Load()
+	stable := 0
+	for time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+		current := d.calls.Load()
+		if current == last {
+			stable++
+			if stable >= 3 {
+				return current
+			}
+			continue
+		}
+		last = current
+		stable = 0
+	}
+	t.Fatalf("ListVMs calls did not stabilize within 3s: last=%d", last)
+	return 0
+}
+
 func TestStartReconcileLoopRunsImmediatelyThenPeriodically(t *testing.T) {
 	daemon := &countingListDaemon{}
 	router := NewRuntimeRouterWithOptions(
@@ -2311,9 +2339,11 @@ func TestStartReconcileLoopStopsOnContextCancel(t *testing.T) {
 	waitForCalls(t, daemon, 2)
 	cancel()
 
-	time.Sleep(30 * time.Millisecond) // 취소 전 시작된 in-flight 실행 소진
-	settled := daemon.calls.Load()
-	time.Sleep(50 * time.Millisecond)
+	// 취소 전 시작된 in-flight 실행이 소진되어 count가 안정될 때까지 폴링한다
+	// (고정 sleep 스냅샷은 극단적 스케줄링 지연에서 in-flight 실행이 스냅샷
+	// 직후 증가하는 드문 false failure를 유발할 수 있었다).
+	settled := waitForCallsToStabilize(t, daemon)
+	time.Sleep(60 * time.Millisecond)
 	if got := daemon.calls.Load(); got != settled {
 		t.Fatalf("ListVMs calls grew after cancel: %d -> %d", settled, got)
 	}
