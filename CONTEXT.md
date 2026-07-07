@@ -188,6 +188,9 @@ backport(atomic temp+rename 무조건 검증 포함, upstream보다 stricter)가
 - MCP adapter token 환경 변수: `ANVIL_API_TOKEN`
 - MCP adapter tenant 기본값 환경 변수: `ANVIL_MCP_TENANT_ID`
 - MCP adapter runtime audit JSONL 환경 변수: `ANVIL_MCP_AUDIT_LOG`
+- MCP adapter reconcile 주기 환경 변수: `ANVIL_MCP_RECONCILE_INTERVAL`
+  (`time.ParseDuration` 형식, 기본 `60s`, `0`=off. `members_only` cross-host
+  모드에서만 루프가 돌며 daemon 재시작 후 hub/relay wall 등록을 자동 복구)
 - scheduler service 환경 변수: `ANVIL_SCHEDULER_ADDR`,
   `ANVIL_SCHEDULER_STATE`, `ANVIL_SCHEDULER_QUOTA_STORE`
 - profile egress policy directory 환경 변수: `EPHEMERA_EGRESS_PROFILE_DIR`,
@@ -327,6 +330,11 @@ daemon으로 보내는 outbound Bearer token이다.
   KVM e2e `scripts/anvil-cross-host-wall-e2e.sh`(real member VM + stub home)로
   검증됐다. home host는 SPOF(1차 수용), cross-host `gtcall`/broadcast fan-out과
   relay retry는 비범위다.
+- `ReconcilePlacements`의 주기적 control loop 배선이 2026-07-07 reconcile-loop
+  slice(`b32cd72`, `6c1ca87`)로 완료됐다. `reconcile_interval`/
+  `ANVIL_MCP_RECONCILE_INTERVAL`(기본 `60s`, `0`=off)과 `StartReconcileLoop`가
+  `members_only` 모드에서 daemon 시작 시 주기적으로 `ReconcilePlacements`를 호출해
+  hub/relay wall 등록과 relay-token admission을 자동 복구한다.
 - `scripts/anvil-mcp-e2e.sh flock`, 전체 KVM `sudo bash e2e_test.sh`, script-only
   workload runner E2E, cross-host wall relay E2E
   (`scripts/anvil-cross-host-wall-e2e.sh`)가 Goosetown MCP surface, daemon flock
@@ -359,8 +367,6 @@ daemon으로 보내는 outbound Bearer token이다.
 - cross-host snapshot replication 자동화(background retry queue·metrics·alert —
   수동 동기 replication과 snapshot locality preference는 baseline 포함)
 - cross-host `gtcall`(공유 Town Wall 다음 capability 후보)
-- `ReconcilePlacements`의 주기적 control loop 배선(현재 production 호출자 없음 —
-  유닛 테스트로만 exercise)
 - Town Wall relay의 bounded retry/buffer, home SPOF 제거(hub replica set 기반
   mesh 진화), SSE relay non-200 content-type polish
 - egress allow host rule의 L7 proxy/SNI 기반 강화

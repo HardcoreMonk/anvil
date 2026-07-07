@@ -164,7 +164,7 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 
-	daemon, err := newMCPDaemon(cfg, http.DefaultClient)
+	daemon, router, err := newMCPDaemon(cfg, http.DefaultClient)
 	if err != nil {
 		log.Fatalf("configure daemon: %v", err)
 	}
@@ -183,42 +183,49 @@ func main() {
 		registration.register(server, &mcp.Tool{Name: registration.name, Description: registration.description}, tools)
 	}
 
-	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if shouldStartReconcileLoop(cfg, router) {
+		router.StartReconcileLoop(ctx, cfg.ReconcileIntervalParsed, log.Printf)
+	}
+
+	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil {
 		log.Fatalf("mcp server: %v", err)
 	}
 }
 
-func newMCPDaemon(cfg anvilmcp.Config, httpClient *http.Client) (anvilmcp.Daemon, error) {
+func newMCPDaemon(cfg anvilmcp.Config, httpClient *http.Client) (anvilmcp.Daemon, *anvilmcp.RuntimeRouter, error) {
 	base := anvilmcp.NewDaemonClient(cfg, httpClient)
 	if cfg.CrossHostFlockCreateMode == "members_only" && strings.TrimSpace(cfg.SchedulerStatePath) == "" {
-		return nil, fmt.Errorf("scheduler_state_path is required when cross_host_flock_create_mode is members_only")
+		return nil, nil, fmt.Errorf("scheduler_state_path is required when cross_host_flock_create_mode is members_only")
 	}
 	if !mcpRouterConfigProvided(cfg) {
-		return base, nil
+		return base, nil, nil
 	}
 
 	store := anvilmcp.NewPlacementStore(cfg.SchedulerStatePath)
 	if err := store.Load(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if cfg.SchedulerHostsFile != "" {
 		hosts, err := anvilmcp.LoadSchedulerHostsFile(cfg.SchedulerHostsFile)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if err := store.ApplyConfiguredHostsAndSave(hosts); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
 	hosts := store.ListHosts()
 	if len(hosts) == 0 {
-		return nil, fmt.Errorf("scheduler router config provided but no runtime hosts are configured")
+		return nil, nil, fmt.Errorf("scheduler router config provided but no runtime hosts are configured")
 	}
 
 	quotaStore := anvilmcp.NewQuotaStore(cfg.SchedulerQuotaStorePath)
 	if err := quotaStore.Load(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	quotas, usage := quotaStore.SchedulerInputs()
 
@@ -236,11 +243,18 @@ func newMCPDaemon(cfg anvilmcp.Config, httpClient *http.Client) (anvilmcp.Daemon
 		anvilmcp.RuntimeRouterOptions{PlacementStore: store},
 	)
 	if cfg.CrossHostFlockCreateMode == "members_only" {
-		return anvilmcp.NewReplicatingDaemonWithOptions(base, router, anvilmcp.ReplicatingDaemonOptions{RoutedFlocks: router}), nil
+		return anvilmcp.NewReplicatingDaemonWithOptions(base, router, anvilmcp.ReplicatingDaemonOptions{RoutedFlocks: router}), router, nil
 	}
-	return anvilmcp.NewReplicatingDaemon(base, router), nil
+	return anvilmcp.NewReplicatingDaemon(base, router), router, nil
 }
 
 func mcpRouterConfigProvided(cfg anvilmcp.Config) bool {
 	return cfg.SchedulerStatePath != "" || cfg.SchedulerHostsFile != ""
+}
+
+// shouldStartReconcileLoop gates the periodic reconcile loop: members_only
+// cross-host mode only (other configurations have no routed flock registry),
+// a router must exist, and interval 0 disables the loop entirely.
+func shouldStartReconcileLoop(cfg anvilmcp.Config, router *anvilmcp.RuntimeRouter) bool {
+	return cfg.CrossHostFlockCreateMode == "members_only" && router != nil && cfg.ReconcileIntervalParsed > 0
 }

@@ -4,10 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 type routerFakeDaemon struct {
@@ -1772,6 +1776,65 @@ func TestRuntimeRouterReconcilePlacementsFromDaemonVMLists(t *testing.T) {
 	}
 }
 
+// blockingListDaemon은 ListVMs 진입을 entered로 알리고 release까지 블록한다.
+// Daemon embed는 nil — ReconcilePlacements는 ListVMs만 type-assert해 호출한다.
+type blockingListDaemon struct {
+	Daemon
+	entered  chan struct{}
+	release  chan struct{}
+	inflight atomic.Int32
+	maxSeen  atomic.Int32
+}
+
+func (d *blockingListDaemon) ListVMs(ctx context.Context) ([]VMInfo, error) {
+	cur := d.inflight.Add(1)
+	for {
+		max := d.maxSeen.Load()
+		if cur <= max || d.maxSeen.CompareAndSwap(max, cur) {
+			break
+		}
+	}
+	d.entered <- struct{}{}
+	<-d.release
+	d.inflight.Add(-1)
+	return nil, nil
+}
+
+func TestReconcilePlacementsSerializesConcurrentCalls(t *testing.T) {
+	daemon := &blockingListDaemon{
+		entered: make(chan struct{}, 2),
+		release: make(chan struct{}),
+	}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(nil, nil, nil),
+		map[string]Daemon{"host-a": daemon},
+		RuntimeRouterOptions{},
+	)
+
+	done := make(chan error, 2)
+	go func() { done <- router.ReconcilePlacements(context.Background()) }()
+	<-daemon.entered // 첫 호출이 ListVMs 안에서 블록 중
+	go func() { done <- router.ReconcilePlacements(context.Background()) }()
+
+	// 직렬화되면 두 번째 호출은 release 전에 ListVMs에 진입하지 못한다.
+	select {
+	case <-daemon.entered:
+		t.Fatal("second ReconcilePlacements entered ListVMs while first still running")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(daemon.release)
+	<-daemon.entered // 두 번째 호출 진입
+	for i := 0; i < 2; i++ {
+		if err := <-done; err != nil {
+			t.Fatalf("ReconcilePlacements: %v", err)
+		}
+	}
+	if got := daemon.maxSeen.Load(); got != 1 {
+		t.Fatalf("max concurrent ListVMs = %d, want 1", got)
+	}
+}
+
 func TestRuntimeRouterReplicateSnapshotRecordsTargetLocation(t *testing.T) {
 	source := &routerFakeDaemon{snapshotList: []SnapshotInfo{{SnapshotID: "snap-1", SnapshotType: "full"}}}
 	target := &routerFakeDaemon{}
@@ -2196,4 +2259,145 @@ func newSnapshotReplicationTestRouter(source, target *routerFakeDaemon, store *P
 		map[string]Daemon{"host-a": source, "host-b": target},
 		RuntimeRouterOptions{PlacementStore: store},
 	)
+}
+
+// countingListDaemon counts ListVMs calls. If err is set, it always returns that error.
+type countingListDaemon struct {
+	Daemon
+	calls atomic.Int32
+	err   error
+}
+
+func (d *countingListDaemon) ListVMs(ctx context.Context) ([]VMInfo, error) {
+	d.calls.Add(1)
+	return nil, d.err
+}
+
+func waitForCalls(t *testing.T, d *countingListDaemon, want int32) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if d.calls.Load() >= want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("ListVMs calls = %d, want >= %d within 3s", d.calls.Load(), want)
+}
+
+// waitForCallsToStabilize polls d.calls every 20ms until it reads the same
+// value on 3 consecutive polls, then returns that settled value. This
+// replaces a fixed-sleep-then-snapshot heuristic: under extreme CI
+// scheduling delay, a run already in flight when cancel() fires could
+// increment the counter just after a single fixed-delay snapshot, causing a
+// rare false failure. Polling for stability avoids that race.
+func waitForCallsToStabilize(t *testing.T, d *countingListDaemon) int32 {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	last := d.calls.Load()
+	stable := 0
+	for time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+		current := d.calls.Load()
+		if current == last {
+			stable++
+			if stable >= 3 {
+				return current
+			}
+			continue
+		}
+		last = current
+		stable = 0
+	}
+	t.Fatalf("ListVMs calls did not stabilize within 3s: last=%d", last)
+	return 0
+}
+
+func TestStartReconcileLoopRunsImmediatelyThenPeriodically(t *testing.T) {
+	daemon := &countingListDaemon{}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(nil, nil, nil),
+		map[string]Daemon{"host-a": daemon},
+		RuntimeRouterOptions{},
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	router.StartReconcileLoop(ctx, 10*time.Millisecond, nil)
+	waitForCalls(t, daemon, 3) // 시작 1회 + 주기 최소 2회
+}
+
+func TestStartReconcileLoopStopsOnContextCancel(t *testing.T) {
+	daemon := &countingListDaemon{}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(nil, nil, nil),
+		map[string]Daemon{"host-a": daemon},
+		RuntimeRouterOptions{},
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	router.StartReconcileLoop(ctx, 10*time.Millisecond, nil)
+	waitForCalls(t, daemon, 2)
+	cancel()
+
+	// 취소 전 시작된 in-flight 실행이 소진되어 count가 안정될 때까지 폴링한다
+	// (고정 sleep 스냅샷은 극단적 스케줄링 지연에서 in-flight 실행이 스냅샷
+	// 직후 증가하는 드문 false failure를 유발할 수 있었다).
+	settled := waitForCallsToStabilize(t, daemon)
+	time.Sleep(60 * time.Millisecond)
+	if got := daemon.calls.Load(); got != settled {
+		t.Fatalf("ListVMs calls grew after cancel: %d -> %d", settled, got)
+	}
+}
+
+func TestStartReconcileLoopContinuesAfterErrorAndLogs(t *testing.T) {
+	daemon := &countingListDaemon{err: errors.New("boom")}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(nil, nil, nil),
+		map[string]Daemon{"host-a": daemon},
+		RuntimeRouterOptions{},
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var mu sync.Mutex
+	var logged []string
+	logf := func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+	router.StartReconcileLoop(ctx, 10*time.Millisecond, logf)
+	waitForCalls(t, daemon, 3) // 에러에도 루프 지속
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(logged) == 0 {
+		t.Fatal("reconcile errors were not logged")
+	}
+	// Redaction guard: the log must carry the host identifier but never the
+	// underlying daemon error ("boom" here stands in for a daemon address /
+	// url.Error that %w would otherwise chain into the log).
+	if !strings.Contains(logged[0], "host-a") {
+		t.Fatalf("logged[0] = %q, want the host-scoped error (contains host-a)", logged[0])
+	}
+	if strings.Contains(logged[0], "boom") {
+		t.Fatalf("logged[0] = %q, must not leak the underlying daemon error (redaction violation)", logged[0])
+	}
+}
+
+func TestStartReconcileLoopNoopWhenDisabled(t *testing.T) {
+	daemon := &countingListDaemon{}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(nil, nil, nil),
+		map[string]Daemon{"host-a": daemon},
+		RuntimeRouterOptions{},
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	router.StartReconcileLoop(ctx, 0, nil)
+	time.Sleep(50 * time.Millisecond)
+	if got := daemon.calls.Load(); got != 0 {
+		t.Fatalf("ListVMs calls = %d, want 0 (interval 0 = off)", got)
+	}
 }

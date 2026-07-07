@@ -28,7 +28,13 @@ type RoutedRestoreSnapshotResponse struct {
 }
 
 type RuntimeRouter struct {
-	mu             sync.RWMutex
+	mu sync.RWMutex
+
+	// reconcileMu serializes ReconcilePlacements end-to-end so the periodic
+	// loop and manual calls never run concurrently (placement replace + wall
+	// re-registration is not safe to interleave with itself).
+	reconcileMu sync.Mutex
+
 	scheduler      *Scheduler
 	daemons        map[string]Daemon
 	placement      map[string]string
@@ -261,6 +267,8 @@ func (r *RuntimeRouter) Delete(ctx context.Context, vmID string) (*RawDaemonResp
 }
 
 func (r *RuntimeRouter) ReconcilePlacements(ctx context.Context) error {
+	r.reconcileMu.Lock()
+	defer r.reconcileMu.Unlock()
 	next := make(map[string]string)
 	for hostName, daemon := range r.daemons {
 		if daemon == nil {
@@ -274,7 +282,7 @@ func (r *RuntimeRouter) ReconcilePlacements(ctx context.Context) error {
 		}
 		vms, err := lister.ListVMs(ctx)
 		if err != nil {
-			return fmt.Errorf("list vms on runtime host %q: %w", hostName, err)
+			return fmt.Errorf("list vms on runtime host %q failed", hostName)
 		}
 		for _, vm := range vms {
 			vmID := strings.TrimSpace(vm.VMID)
@@ -295,6 +303,38 @@ func (r *RuntimeRouter) ReconcilePlacements(ctx context.Context) error {
 		}
 	}
 	return r.reconcileRoutedFlockWalls(ctx)
+}
+
+// StartReconcileLoop runs ReconcilePlacements once immediately and then every
+// interval until ctx is cancelled. interval <= 0 disables the loop entirely
+// (including the immediate run). Failures are logged through logf (flock/host
+// identifiers only — relay tokens and daemon addresses never appear) and the
+// loop keeps running: reconcile must never block or kill the adapter.
+func (r *RuntimeRouter) StartReconcileLoop(ctx context.Context, interval time.Duration, logf func(format string, args ...any)) {
+	if r == nil || interval <= 0 {
+		return
+	}
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	run := func() {
+		if err := r.ReconcilePlacements(ctx); err != nil {
+			logf("anvil-mcp: reconcile placements: %v", err)
+		}
+	}
+	go func() {
+		run()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				run()
+			}
+		}
+	}()
 }
 
 // reconcileRoutedFlockWalls re-registers the shared Town Wall hub and relay

@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadConfigDefaults(t *testing.T) {
@@ -337,6 +338,89 @@ func TestLoadConfigRejectsInvalidTenantID(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "ANVIL_MCP_TENANT_ID") {
 		t.Fatalf("LoadConfig() error = %q, want ANVIL_MCP_TENANT_ID", err)
+	}
+}
+
+func TestLoadConfigReconcileIntervalDefault(t *testing.T) {
+	cfg, err := LoadConfig(ConfigSource{
+		Getenv:   func(string) string { return "" },
+		ReadFile: func(string) ([]byte, error) { return nil, os.ErrNotExist },
+	})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.ReconcileIntervalParsed != 60*time.Second {
+		t.Fatalf("default ReconcileIntervalParsed = %v, want 60s", cfg.ReconcileIntervalParsed)
+	}
+}
+
+func TestLoadConfigReconcileIntervalEnvOverridesYAML(t *testing.T) {
+	cfg, err := LoadConfig(ConfigSource{
+		Getenv: func(key string) string {
+			if key == "ANVIL_MCP_RECONCILE_INTERVAL" {
+				return "5m"
+			}
+			return ""
+		},
+		ReadFile: func(string) ([]byte, error) {
+			return []byte("reconcile_interval: 30s\n"), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.ReconcileIntervalParsed != 5*time.Minute {
+		t.Fatalf("ReconcileIntervalParsed = %v, want 5m (env가 yaml을 override)", cfg.ReconcileIntervalParsed)
+	}
+}
+
+func TestLoadConfigReconcileIntervalYAMLOnly(t *testing.T) {
+	cfg, err := LoadConfig(ConfigSource{
+		Getenv: func(string) string { return "" },
+		ReadFile: func(string) ([]byte, error) {
+			return []byte("reconcile_interval: 45s\n"), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.ReconcileIntervalParsed != 45*time.Second {
+		t.Fatalf("ReconcileIntervalParsed = %v, want 45s (env 미설정, yaml만 적용)", cfg.ReconcileIntervalParsed)
+	}
+}
+
+func TestLoadConfigReconcileIntervalZeroDisables(t *testing.T) {
+	cfg, err := LoadConfig(ConfigSource{
+		Getenv: func(key string) string {
+			if key == "ANVIL_MCP_RECONCILE_INTERVAL" {
+				return "0"
+			}
+			return ""
+		},
+		ReadFile: func(string) ([]byte, error) { return nil, os.ErrNotExist },
+	})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.ReconcileIntervalParsed != 0 {
+		t.Fatalf("ReconcileIntervalParsed = %v, want 0 (off)", cfg.ReconcileIntervalParsed)
+	}
+}
+
+func TestLoadConfigReconcileIntervalRejectsInvalid(t *testing.T) {
+	for _, bad := range []string{"-30s", "banana"} {
+		_, err := LoadConfig(ConfigSource{
+			Getenv: func(key string) string {
+				if key == "ANVIL_MCP_RECONCILE_INTERVAL" {
+					return bad
+				}
+				return ""
+			},
+			ReadFile: func(string) ([]byte, error) { return nil, os.ErrNotExist },
+		})
+		if err == nil {
+			t.Fatalf("LoadConfig(%q): want error, got nil", bad)
+		}
 	}
 }
 
