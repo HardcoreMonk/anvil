@@ -80,6 +80,18 @@ func authMiddleware(getClients func() []APIClient, relayTokenFor func(flockID st
 			if flockID, ok := relayWallPathFlockID(r.URL.Path); ok {
 				if tok := relayTokenFor(flockID); tok != "" &&
 					subtle.ConstantTimeCompare(auth, []byte("Bearer "+tok)) == 1 {
+					// Attribute the relay hop like the normal-token path does, so it is
+					// not anonymous in audit/access logs. The metric label is a fixed
+					// "relay" (never per-flock: unbounded label cardinality), and the
+					// synthetic identity "relay:<flockID>" records which flock's wall the
+					// daemon-to-daemon hop targeted.
+					countAuth("relay")
+					relayName := "relay:" + flockID
+					if h := clientHolderFromContext(r.Context()); h != nil {
+						h.name = relayName
+					}
+					r = r.WithContext(withClientName(r.Context(), relayName))
+					slog.Info("api request", "client", relayName, "method", r.Method, "path", r.URL.Path)
 					next.ServeHTTP(w, r)
 					return
 				}
