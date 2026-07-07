@@ -292,3 +292,260 @@ func TestDeleteRoutedFlock_DeregistersSharedTownWall(t *testing.T) {
 		t.Fatalf("relay token still persisted after delete: %q,%v", token, ok)
 	}
 }
+
+// TestCreate_ReRegistersHubWithVMIDRoster verifies that after all routed-flock
+// members spawn, create re-registers the hub on the home daemon with a
+// VMID/Addr-enriched roster (Task 1's RosterMember fields), that the member's
+// relay flock is likewise re-registered with that host's local agents (the
+// 2026-07-08 amendment's RelayFlockRequest.Agents), and that both the initial
+// pre-spawn hub registration and the post-spawn re-registration carry a
+// non-empty call token distinct from the relay token (Task 2's CallToken). The
+// initial registration cannot know VM ids yet — only the post-spawn
+// re-registration does — so this also proves the re-registration actually
+// happens, not just that a single hub registration occurred.
+func TestCreate_ReRegistersHubWithVMIDRoster(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
+	home := &routerFakeDaemon{spawnResponses: []*SpawnVMResponse{{
+		VMID: "vm-coordinator-1", GuestIP: "10.0.1.10", AgentURL: "http://10.0.1.10:8080", TenantID: "tenant-1", EgressPolicy: "profile",
+	}}}
+	member := &routerFakeDaemon{spawnResponses: []*SpawnVMResponse{{
+		VMID: "vm-researcher-1", GuestIP: "10.0.2.10", AgentURL: "http://10.0.2.10:8080", TenantID: "tenant-1", EgressPolicy: "profile",
+	}}}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(
+			[]RuntimeHost{
+				{Name: "hostA", Endpoint: "http://hostA.internal:8080", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+				{Name: "hostB", Endpoint: "http://hostB.internal:8080", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+			},
+			nil,
+			nil,
+		),
+		map[string]Daemon{"hostA": home, "hostB": member},
+		RuntimeRouterOptions{PlacementStore: store},
+	)
+
+	if _, err := router.CreateRoutedFlockMembers(context.Background(), FlockCreateRequest{
+		Task:         "smoke",
+		Roles:        []string{"coordinator", "researcher"},
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if home.distributedCalls < 2 {
+		t.Fatalf("home distributed (hub) registrations = %d, want >= 2 (initial + post-spawn re-registration)", home.distributedCalls)
+	}
+	if len(home.distributedReqs) < 2 {
+		t.Fatalf("home distributed request history len = %d, want >= 2", len(home.distributedReqs))
+	}
+
+	last := home.distributedReq
+	var gotCoordinator, gotResearcher bool
+	for _, m := range last.Roster {
+		switch m.AgentID {
+		case "coordinator-1":
+			gotCoordinator = true
+			if m.VMID != "vm-coordinator-1" {
+				t.Fatalf("coordinator roster VMID = %q, want vm-coordinator-1", m.VMID)
+			}
+			if m.Addr != "http://hostA.internal:8080" {
+				t.Fatalf("coordinator roster Addr = %q, want http://hostA.internal:8080", m.Addr)
+			}
+		case "researcher-1":
+			gotResearcher = true
+			if m.VMID != "vm-researcher-1" {
+				t.Fatalf("researcher roster VMID = %q, want vm-researcher-1", m.VMID)
+			}
+			if m.Addr != "http://hostB.internal:8080" {
+				t.Fatalf("researcher roster Addr = %q, want http://hostB.internal:8080", m.Addr)
+			}
+		default:
+			t.Fatalf("unexpected roster member agent id %q", m.AgentID)
+		}
+	}
+	if !gotCoordinator || !gotResearcher {
+		t.Fatalf("re-registered roster missing member(s): %+v", last.Roster)
+	}
+
+	first := home.distributedReqs[0]
+	if first.CallToken == "" {
+		t.Fatalf("initial hub registration CallToken empty")
+	}
+	if first.CallToken == first.RelayToken {
+		t.Fatalf("initial hub registration CallToken == RelayToken, want distinct secrets")
+	}
+	if last.CallToken == "" {
+		t.Fatalf("re-registration hub CallToken empty")
+	}
+	if last.CallToken == last.RelayToken {
+		t.Fatalf("re-registration hub CallToken == RelayToken, want distinct secrets")
+	}
+	if first.CallToken != last.CallToken {
+		t.Fatalf("initial CallToken %q != re-registration CallToken %q, want the same per-flock secret", first.CallToken, last.CallToken)
+	}
+
+	// The member's last (post-spawn) relay registration carries only that
+	// host's local agent(s), with VMID filled in.
+	if len(member.relayReq.Agents) != 1 {
+		t.Fatalf("member relay Agents len = %d, want 1: %+v", len(member.relayReq.Agents), member.relayReq.Agents)
+	}
+	if member.relayReq.Agents[0].AgentID != "researcher-1" || member.relayReq.Agents[0].VMID != "vm-researcher-1" {
+		t.Fatalf("member relay Agents[0] = %+v, want researcher-1/vm-researcher-1", member.relayReq.Agents[0])
+	}
+}
+
+// callTokenProbeDaemon mirrors relayTokenProbeDaemon exactly (see above), but
+// for the call token: it proves the call token is durably saved BEFORE the hub
+// is registered — the same crash-recovery guarantee Task 4's store extends to
+// call tokens.
+type callTokenProbeDaemon struct {
+	*routerFakeDaemon
+	store                  *PlacementStore
+	tokenPresentAtRegister bool
+	tokenValueAtRegister   string
+}
+
+func (d *callTokenProbeDaemon) RegisterDistributedFlock(ctx context.Context, flockID string, req DistributedFlockRequest) error {
+	token, ok := d.store.RoutedFlockCallToken(flockID)
+	d.tokenPresentAtRegister = ok && token != ""
+	d.tokenValueAtRegister = token
+	return d.routerFakeDaemon.RegisterDistributedFlock(ctx, flockID, req)
+}
+
+// TestCreate_PersistsCallTokenBeforeHubRegistration mirrors
+// TestCreate_PersistsRelayTokenBeforeHubRegistration for the call token: it
+// proves the call token is persisted on the first placement-store save,
+// before the home daemon's hub is registered.
+func TestCreate_PersistsCallTokenBeforeHubRegistration(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
+	home := &callTokenProbeDaemon{
+		routerFakeDaemon: &routerFakeDaemon{spawnResponses: []*SpawnVMResponse{{
+			VMID: "vm-coordinator-1", GuestIP: "10.0.1.10", AgentURL: "http://10.0.1.10:8080", TenantID: "tenant-1", EgressPolicy: "profile",
+		}}},
+		store: store,
+	}
+	member := &routerFakeDaemon{spawnResponses: []*SpawnVMResponse{{
+		VMID: "vm-researcher-1", GuestIP: "10.0.2.10", AgentURL: "http://10.0.2.10:8080", TenantID: "tenant-1", EgressPolicy: "profile",
+	}}}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(
+			[]RuntimeHost{
+				{Name: "hostA", Endpoint: "http://hostA.internal:8080", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+				{Name: "hostB", Endpoint: "http://hostB.internal:8080", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+			},
+			nil,
+			nil,
+		),
+		map[string]Daemon{"hostA": home, "hostB": member},
+		RuntimeRouterOptions{PlacementStore: store},
+	)
+
+	out, err := router.CreateRoutedFlockMembers(context.Background(), FlockCreateRequest{
+		Task:         "smoke",
+		Roles:        []string{"coordinator", "researcher"},
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+	})
+	if err != nil {
+		t.Fatalf("CreateRoutedFlockMembers: %v", err)
+	}
+	if !home.tokenPresentAtRegister {
+		t.Fatalf("call token not persisted at hub-registration time; reconcile could not recover a crashed create")
+	}
+	if home.tokenValueAtRegister != home.distributedReq.CallToken {
+		t.Fatalf("token at register %q != hub call token %q", home.tokenValueAtRegister, home.distributedReq.CallToken)
+	}
+	if token, ok := store.RoutedFlockCallToken(out.FlockID); !ok || token == "" {
+		t.Fatalf("call token not persisted after successful create")
+	}
+}
+
+// TestRollback_RevokesCallToken mirrors TestRollback_DeregistersSharedTownWall
+// for the call token: rollback must leave no stale call secret persisted.
+func TestRollback_RevokesCallToken(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
+	home := &routerFakeDaemon{spawnResponses: []*SpawnVMResponse{{
+		VMID: "vm-coordinator-1", GuestIP: "10.0.1.10", AgentURL: "http://10.0.1.10:8080", TenantID: "tenant-1", EgressPolicy: "profile",
+	}}}
+	member := &routerFakeDaemon{spawnErr: errors.New("daemon http://hostB.internal/secret-endpoint failed: agent_token=secret-token")}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(
+			[]RuntimeHost{
+				{Name: "hostA", Endpoint: "http://hostA.internal:8080", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+				{Name: "hostB", Endpoint: "http://hostB.internal:8080", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+			},
+			nil,
+			nil,
+		),
+		map[string]Daemon{"hostA": home, "hostB": member},
+		RuntimeRouterOptions{PlacementStore: store},
+	)
+
+	out, err := router.CreateRoutedFlockMembers(context.Background(), FlockCreateRequest{
+		Task:         "smoke",
+		Roles:        []string{"coordinator", "researcher"},
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+	})
+	if err == nil {
+		t.Fatal("CreateRoutedFlockMembers error = nil, want member spawn failure")
+	}
+	if out != nil {
+		t.Fatalf("CreateRoutedFlockMembers output = %+v, want nil on rollback", out)
+	}
+
+	records := store.ListRoutedFlocks()
+	if len(records) != 1 {
+		t.Fatalf("routed records len = %d, want 1", len(records))
+	}
+	flockID := records[0].FlockID
+	if token, ok := store.RoutedFlockCallToken(flockID); ok || token != "" {
+		t.Fatalf("call token still persisted after rollback: %q,%v", token, ok)
+	}
+}
+
+// TestDeleteRoutedFlock_RevokesCallToken mirrors
+// TestDeleteRoutedFlock_DeregistersSharedTownWall for the call token: delete
+// must leave no stale call secret persisted.
+func TestDeleteRoutedFlock_RevokesCallToken(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
+	home := &routerFakeDaemon{spawnResponses: []*SpawnVMResponse{{
+		VMID: "vm-coordinator-1", GuestIP: "10.0.1.10", AgentURL: "http://10.0.1.10:8080", TenantID: "tenant-1", EgressPolicy: "profile",
+	}}}
+	member := &routerFakeDaemon{spawnResponses: []*SpawnVMResponse{{
+		VMID: "vm-researcher-1", GuestIP: "10.0.2.10", AgentURL: "http://10.0.2.10:8080", TenantID: "tenant-1", EgressPolicy: "profile",
+	}}}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(
+			[]RuntimeHost{
+				{Name: "hostA", Endpoint: "http://hostA.internal:8080", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+				{Name: "hostB", Endpoint: "http://hostB.internal:8080", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+			},
+			nil,
+			nil,
+		),
+		map[string]Daemon{"hostA": home, "hostB": member},
+		RuntimeRouterOptions{PlacementStore: store},
+	)
+
+	out, err := router.CreateRoutedFlockMembers(context.Background(), FlockCreateRequest{
+		Task:         "smoke",
+		Roles:        []string{"coordinator", "researcher"},
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+	})
+	if err != nil {
+		t.Fatalf("CreateRoutedFlockMembers: %v", err)
+	}
+	if token, ok := store.RoutedFlockCallToken(out.FlockID); !ok || token == "" {
+		t.Fatalf("call token not persisted on create for flock %q", out.FlockID)
+	}
+
+	if _, err := router.DeleteRoutedFlock(context.Background(), out.FlockID); err != nil {
+		t.Fatalf("DeleteRoutedFlock: %v", err)
+	}
+	if token, ok := store.RoutedFlockCallToken(out.FlockID); ok || token != "" {
+		t.Fatalf("call token still persisted after delete: %q,%v", token, ok)
+	}
+}
