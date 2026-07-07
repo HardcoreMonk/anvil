@@ -481,15 +481,26 @@ func (fm *FlockManager) UpdateHubRoster(flockID string, roster []RosterMember) b
 }
 
 // RegisterRelay registers a relay flock on a member host. It owns no wall;
-// posts and reads are forwarded to homeAddr with relayToken.
-func (fm *FlockManager) RegisterRelay(flockID, homeAddr, relayToken, callToken string) *Flock {
+// posts and reads are forwarded to homeAddr with relayToken. agents is the
+// host-local member list (2026-07-08 design correction): a hopped call
+// landing on this relay flock (the real topology for a member daemon
+// receiving home's 2nd hop) must resolve against THIS host's agents rather
+// than unconditionally 404ing. Only AgentID+VMID are used — Host/Addr (if
+// present) are remote-host fields that do not apply to a relay's own local
+// roster and are ignored. An empty/nil agents leaves Agents an empty map
+// (matches the pre-existing behavior).
+func (fm *FlockManager) RegisterRelay(flockID, homeAddr, relayToken, callToken string, agents []RosterMember) *Flock {
+	agentMap := make(map[string]*AgentInfo, len(agents))
+	for _, a := range agents {
+		agentMap[a.AgentID] = &AgentInfo{AgentID: a.AgentID, VMID: a.VMID}
+	}
 	f := &Flock{
 		ID:         flockID,
 		Kind:       FlockKindRelay,
 		HomeAddr:   homeAddr,
 		RelayToken: relayToken,
 		CallToken:  callToken,
-		Agents:     map[string]*AgentInfo{},
+		Agents:     agentMap,
 		CreatedAt:  time.Now().UTC(),
 	}
 	fm.mu.Lock()

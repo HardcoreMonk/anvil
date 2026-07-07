@@ -89,6 +89,12 @@ type relayFlockRequest struct {
 	// CallToken is the per-flock call-hop secret (admitted for /call only,
 	// never wall paths — see callPathFlockID).
 	CallToken string `json:"call_token"`
+	// Agents is this host's member list (agent_id + vm_id only; Host/Addr are
+	// remote-host fields and are ignored here) — 2026-07-08 design correction:
+	// a hopped call landing on this relay flock (the real topology for a
+	// member daemon receiving home's 2nd hop) resolves locally against this
+	// list instead of unconditionally 404ing. See callFlockAgent.
+	Agents []orchestrator.RosterMember `json:"agents"`
 }
 
 // registerOrchestratorRoutes wires flock endpoints onto the control plane mux.
@@ -1245,12 +1251,25 @@ func (cp *ControlPlane) callFlockAgent(w http.ResponseWriter, r *http.Request, f
 	}
 	hopped := r.Header.Get(callHopHeader) != ""
 
-	// Relay flock: forward to home (never when this request is itself a hop).
-	if f.Kind == orchestrator.FlockKindRelay {
-		if hopped {
-			writeJSONError(w, http.StatusNotFound, fmt.Errorf("agent %q not resolvable on relay host", req.AgentID))
+	// Hopped request (already forwarded once, by home or a hub 2nd hop): never
+	// forward again — loop guard — and this holds regardless of f.Kind. In the
+	// real topology a target member daemon has this flock registered as
+	// "relay" (it forwards its own outbound wall/call traffic to home), so a
+	// hopped call landing here must still resolve against THIS host's local
+	// agents (2026-07-08 design correction: relay+hopped is no longer an
+	// unconditional 404 — see relayFlockRequest.Agents /
+	// FlockManager.RegisterRelay). Local/hub flocks take the identical path.
+	if hopped {
+		if vmID, ok := cp.flockAgentLocalVM(f, req.AgentID); ok {
+			cp.dispatchFlockCall(w, r, vmID, req.Prompt)
 			return
 		}
+		writeJSONError(w, http.StatusNotFound, fmt.Errorf("agent %q not found in flock %q", req.AgentID, flockID))
+		return
+	}
+
+	// Relay flock, non-hopped: forward to home.
+	if f.Kind == orchestrator.FlockKindRelay {
 		ctx, cancel := context.WithTimeout(r.Context(), 290*time.Second)
 		defer cancel()
 		status, body, err := forwardFlockCall(ctx, f.HomeAddr, f.CallToken, flockID, req, r.Header.Get(taskDepthHeader))
@@ -1272,7 +1291,7 @@ func (cp *ControlPlane) callFlockAgent(w http.ResponseWriter, r *http.Request, f
 		return
 	}
 	// Hub: remote member via VMID/Addr roster — one hop only.
-	if f.Kind == orchestrator.FlockKindHub && !hopped {
+	if f.Kind == orchestrator.FlockKindHub {
 		if member, ok := rosterMember(f, req.AgentID); ok && member.Addr != "" {
 			ctx, cancel := context.WithTimeout(r.Context(), 280*time.Second)
 			defer cancel()
@@ -1480,7 +1499,7 @@ func (cp *ControlPlane) registerRelayFlock(w http.ResponseWriter, r *http.Reques
 		writeJSONError(w, http.StatusConflict, fmt.Errorf("flock %q already registered as a non-relay flock", flockID))
 		return
 	}
-	cp.flockMgr.RegisterRelay(flockID, req.HomeAddr, req.RelayToken, req.CallToken)
+	cp.flockMgr.RegisterRelay(flockID, req.HomeAddr, req.RelayToken, req.CallToken, req.Agents)
 	// Admit the guest's relay/call tokens through THIS (member) daemon's
 	// authMiddleware too — mirroring the hub registration above. Without this, a
 	// guest VM's inbound gtwall/gtcall request that lands on the member daemon

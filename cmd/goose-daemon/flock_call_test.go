@@ -149,7 +149,7 @@ func TestCallFlockAgent_RelayForwardsToHome(t *testing.T) {
 	defer home.Close()
 
 	cp := newTestCP(t)
-	cp.flockMgr.RegisterRelay("routed-1", home.URL, "rt-1", "ct-1")
+	cp.flockMgr.RegisterRelay("routed-1", home.URL, "rt-1", "ct-1", nil)
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/flocks/routed-1/call", strings.NewReader(`{"agent_id":"researcher-1","prompt":"ping"}`))
@@ -198,7 +198,7 @@ func TestCallFlockAgent_RelayHonorsCallerContext(t *testing.T) {
 	defer home.Close()
 
 	cp := newTestCP(t)
-	cp.flockMgr.RegisterRelay("routed-1", home.URL, "rt-1", "ct-1")
+	cp.flockMgr.RegisterRelay("routed-1", home.URL, "rt-1", "ct-1", nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled before the relay hop
@@ -287,6 +287,96 @@ func TestCallFlockAgent_HopGuardNeverReforwards(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&calls); got != 0 {
 		t.Fatalf("target called %d times, want 0 (hop guard must never re-forward)", got)
+	}
+}
+
+// TestCallFlockAgent_HoppedResolvesLocallyOnRelay proves the 2026-07-08 design
+// correction (Task 3 review finding): the real cross-host topology has the
+// TARGET member daemon see its own flock as relay-kind (it forwards its own
+// guests' wall/call traffic to home), so a hopped call — home's 2nd hop —
+// landing on this relay flock must resolve against the host-local agent list
+// registered via POST /flocks/{id}/relay's "agents" field, not 404
+// unconditionally. The home stub must see zero calls: a hopped request must
+// never be forwarded again (loop guard holds even though this daemon knows a
+// HomeAddr).
+func TestCallFlockAgent_HoppedResolvesLocallyOnRelay(t *testing.T) {
+	const agentToken = "at-4-DO-NOT-LEAK"
+	var homeCalls int32
+	home := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&homeCalls, 1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"output":"should not be called"}`))
+	}))
+	defer home.Close()
+
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"output":"local-relay-hit"}`))
+	}))
+	defer agent.Close()
+	host, port := splitHostPort(t, agent.URL)
+	oldPort := agentPort
+	agentPort = port
+	defer func() { agentPort = oldPort }()
+
+	cp := newTestCP(t)
+	cp.vms["vm-local"] = &runningVM{VMInfo: VMInfo{VMID: "vm-local", GuestIP: host}, agentToken: agentToken}
+
+	relayBody := `{"home_addr":"` + home.URL + `","relay_token":"rt-1","call_token":"ct-1","agents":[{"agent_id":"local-1","vm_id":"vm-local"}]}`
+	rr := httptest.NewRecorder()
+	cp.handleFlockItem(rr, httptest.NewRequest(http.MethodPost, "/flocks/routed-1/relay", strings.NewReader(relayBody)))
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("relay register status = %d, want 201 (%s)", rr.Code, rr.Body.String())
+	}
+
+	rr2 := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/flocks/routed-1/call", strings.NewReader(`{"agent_id":"local-1","prompt":"ping"}`))
+	req.Header.Set(callHopHeader, "1")
+	cp.handleFlockItem(rr2, req)
+
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("hopped relay-local call status = %d, want 200 (%s)", rr2.Code, rr2.Body.String())
+	}
+	if !strings.Contains(rr2.Body.String(), "local-relay-hit") {
+		t.Fatalf("hopped relay-local call body = %s, want it to contain \"local-relay-hit\"", rr2.Body.String())
+	}
+	if got := atomic.LoadInt32(&homeCalls); got != 0 {
+		t.Fatalf("home called %d times, want 0 (hopped request must never forward)", got)
+	}
+}
+
+// TestCallFlockAgent_HoppedUnknownAgent404NoForward mirrors the previous test
+// with an agent_id absent from the relay's host-local agents list: the local
+// resolution failure is still an immediate 404 (identifiers-only error), and
+// the home stub still sees zero calls — "hopped → local-only" does not
+// degrade into "hopped → forward anyway on miss".
+func TestCallFlockAgent_HoppedUnknownAgent404NoForward(t *testing.T) {
+	var homeCalls int32
+	home := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&homeCalls, 1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"output":"should not be called"}`))
+	}))
+	defer home.Close()
+
+	cp := newTestCP(t)
+	relayBody := `{"home_addr":"` + home.URL + `","relay_token":"rt-1","call_token":"ct-1","agents":[{"agent_id":"local-1","vm_id":"vm-local"}]}`
+	rr := httptest.NewRecorder()
+	cp.handleFlockItem(rr, httptest.NewRequest(http.MethodPost, "/flocks/routed-1/relay", strings.NewReader(relayBody)))
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("relay register status = %d, want 201 (%s)", rr.Code, rr.Body.String())
+	}
+
+	rr2 := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/flocks/routed-1/call", strings.NewReader(`{"agent_id":"ghost","prompt":"ping"}`))
+	req.Header.Set(callHopHeader, "1")
+	cp.handleFlockItem(rr2, req)
+
+	if rr2.Code != http.StatusNotFound {
+		t.Fatalf("hopped unknown-agent status = %d, want 404 (%s)", rr2.Code, rr2.Body.String())
+	}
+	if got := atomic.LoadInt32(&homeCalls); got != 0 {
+		t.Fatalf("home called %d times, want 0 (hopped request must never forward)", got)
 	}
 }
 

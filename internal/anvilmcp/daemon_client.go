@@ -69,6 +69,12 @@ type RelayFlockRequest struct {
 	// CallToken is the per-flock call-hop secret (admitted for /call only, never
 	// wall paths). Filled by the routed-flock registration path (Task 5).
 	CallToken string `json:"call_token"`
+	// Agents is this host's member list (agent_id + vm_id only — Host/Addr are
+	// ignored by the member daemon's own local resolution). Lets a hopped call
+	// landing on this member daemon resolve locally instead of 404ing
+	// (2026-07-08 design correction). Filled by the routed-flock registration
+	// path (Task 5); field only here.
+	Agents []RosterMember `json:"agents"`
 }
 
 // RosterMember is the anvilmcp-side roster entry (distinct from the

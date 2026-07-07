@@ -304,7 +304,7 @@ func TestFlockManager_RegisterHubAndRelay(t *testing.T) {
 
 	tmp2 := t.TempDir()
 	fm2 := NewFlockManager(tmp2)
-	relay := fm2.RegisterRelay("routed-1", "http://hostA:3000", "relay-tok", "call-tok")
+	relay := fm2.RegisterRelay("routed-1", "http://hostA:3000", "relay-tok", "call-tok", nil)
 	if relay.Kind != FlockKindRelay || relay.HomeAddr != "http://hostA:3000" || relay.RelayToken != "relay-tok" {
 		t.Fatalf("relay flock fields wrong: %+v", relay)
 	}

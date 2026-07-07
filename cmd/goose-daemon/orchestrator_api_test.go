@@ -324,6 +324,29 @@ func TestRegisterRelayFlock_AdmitsRelayAndCallTokens(t *testing.T) {
 	}
 }
 
+// TestRegisterRelayFlock_StoresLocalAgents proves the 2026-07-08 design
+// correction: POST /flocks/{id}/relay's "agents" field populates the relay
+// flock's Agents map (AgentID -> VMID) so a later hopped call landing on this
+// member daemon can resolve the target locally instead of unconditionally
+// 404ing (see callFlockAgent's hopped branch).
+func TestRegisterRelayFlock_StoresLocalAgents(t *testing.T) {
+	cp := newTestCP(t)
+	body := `{"home_addr":"http://home:3000","relay_token":"rt-1","call_token":"ct-1","agents":[{"agent_id":"local-1","vm_id":"vm-local"}]}`
+	rr := httptest.NewRecorder()
+	cp.registerRelayFlock(rr, httptest.NewRequest(http.MethodPost, "/flocks/routed-1/relay", strings.NewReader(body)), "routed-1")
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("register relay = %d, want 201", rr.Code)
+	}
+	f, ok := cp.flockMgr.Get("routed-1")
+	if !ok {
+		t.Fatalf("relay flock not registered")
+	}
+	a, ok := f.Agents["local-1"]
+	if !ok || a.VMID != "vm-local" {
+		t.Fatalf("relay Agents[\"local-1\"] = %+v (ok=%v), want VMID \"vm-local\"", a, ok)
+	}
+}
+
 // TestDeleteFlock_RevokesRelayToken covers Task 8 rollback deregistration on the
 // daemon side: deleting a hub flock (DELETE /flocks/{id}) must also strip its
 // scoped relay-token admission, so a stale relay token can no longer authenticate
