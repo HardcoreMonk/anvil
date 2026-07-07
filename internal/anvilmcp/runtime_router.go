@@ -282,7 +282,7 @@ func (r *RuntimeRouter) ReconcilePlacements(ctx context.Context) error {
 		}
 		vms, err := lister.ListVMs(ctx)
 		if err != nil {
-			return fmt.Errorf("list vms on runtime host %q: %w", hostName, err)
+			return fmt.Errorf("list vms on runtime host %q failed", hostName)
 		}
 		for _, vm := range vms {
 			vmID := strings.TrimSpace(vm.VMID)

@@ -374,6 +374,21 @@ func TestLoadConfigReconcileIntervalEnvOverridesYAML(t *testing.T) {
 	}
 }
 
+func TestLoadConfigReconcileIntervalYAMLOnly(t *testing.T) {
+	cfg, err := LoadConfig(ConfigSource{
+		Getenv: func(string) string { return "" },
+		ReadFile: func(string) ([]byte, error) {
+			return []byte("reconcile_interval: 45s\n"), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.ReconcileIntervalParsed != 45*time.Second {
+		t.Fatalf("ReconcileIntervalParsed = %v, want 45s (env 미설정, yaml만 적용)", cfg.ReconcileIntervalParsed)
+	}
+}
+
 func TestLoadConfigReconcileIntervalZeroDisables(t *testing.T) {
 	cfg, err := LoadConfig(ConfigSource{
 		Getenv: func(key string) string {

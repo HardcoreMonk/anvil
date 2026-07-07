@@ -2344,8 +2344,14 @@ func TestStartReconcileLoopContinuesAfterErrorAndLogs(t *testing.T) {
 	if len(logged) == 0 {
 		t.Fatal("reconcile errors were not logged")
 	}
-	if !strings.Contains(logged[0], "boom") || !strings.Contains(logged[0], "host-a") {
-		t.Fatalf("logged[0] = %q, want the host-scoped error (contains boom and host-a)", logged[0])
+	// Redaction guard: the log must carry the host identifier but never the
+	// underlying daemon error ("boom" here stands in for a daemon address /
+	// url.Error that %w would otherwise chain into the log).
+	if !strings.Contains(logged[0], "host-a") {
+		t.Fatalf("logged[0] = %q, want the host-scoped error (contains host-a)", logged[0])
+	}
+	if strings.Contains(logged[0], "boom") {
+		t.Fatalf("logged[0] = %q, must not leak the underlying daemon error (redaction violation)", logged[0])
 	}
 }
 
