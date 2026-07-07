@@ -110,7 +110,7 @@ upstream 제안(기여)은 하지 않는다. 같은 divergence를
 
 ## 5. 다음 upstream sync 후보 예비 분류
 
-`v0.4.0`-`v0.7.0`은 모두 Section 4의 baseline 채택 상태로 이동했다. 2026-07-02 기준
+`v0.4.0`-`v0.7.0`은 모두 Section 4의 baseline 채택 상태로 이동했다. 2026-07-06 기준
 upstream `main`과 최신 upstream tag는 `v0.7.0`이며, anvil은 이 관찰 범위 전체를 병합·
 적응했다 — upstream parity scope 코드 편입이 완료돼 현재 pending sync 후보는 없다.
 

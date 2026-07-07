@@ -131,7 +131,7 @@ upstream ephemera 변경을 병합할 때는 다음 상태 중 하나로 분류�
 | `v0.6.1`, `v0.6.2`, `v0.6.4` | anti-spoof, per-(VM,server) rate limit, resources/prompts policy·rate 공유, stdio backends | `adapted` — `EPHEMERA_NET_ANTISPOOF` 기본 on, `EPHEMERA_MCP_RATE` 기본 `0`=unlimited, `GET /config/mcp/servers`는 transport/command + `has_credential`만(leak guard), stdio child env 재구성 + `credential_env` + `nobody`/scratch + process-group reap. upstream에 `v0.6.3` 없음 |
 | `v0.7.0` | end-user installer, release workflow, conversation transcript restore, upstream hardening reconcile | `adapted` — installer는 runtime/operator surface이고 systemd는 canonical `ephemera`(alias wrapper 없음). transcript는 daemon proxy(bearer), agent export read-only(model call 없음), payload sentinel-free(guard). 사전 backport 3종이 reconcile에서 single definition으로 남고(anvil stricter) 기존 anvil adaptation rollback 없음 |
 
-2026-07-02 기준 upstream `main`과 최신 upstream tag는 `v0.7.0`이다. `v0.4.0`-`v0.7.0`은
+2026-07-06 기준 upstream `main`과 최신 upstream tag는 `v0.7.0`이다. `v0.4.0`-`v0.7.0`은
 anvil main runtime baseline으로 병합·적응되어 full KVM gate로 검증됐으며(위 표), upstream
 parity scope 코드 편입이 완료됐다. anvil runtime/operator baseline supports upstream
 ephemera v0.7.0 with anvil adaptations for token redaction, tenant/egress, scheduler,
