@@ -151,6 +151,10 @@ func (r *RuntimeRouter) CreateRoutedFlockMembers(ctx context.Context, req FlockC
 	homeAddr := r.daemonAddr(homeHost)
 
 	var agentSpawnLatency time.Duration
+	// relayHosts tracks member hosts whose relay flock registered successfully so
+	// rollback can deregister them even when the member's later SpawnVM fails before
+	// the member ever enters record.Agents (which deregisterRoutedFlockWall walks).
+	var relayHosts []string
 	for _, planned := range plan.Agents {
 		hostName := strings.TrimSpace(planned.Host.Name)
 		daemon, ok := r.daemons[hostName]
@@ -162,7 +166,7 @@ func (r *RuntimeRouter) CreateRoutedFlockMembers(ctx context.Context, req FlockC
 				AgentSpawnLatency:   agentSpawnLatency,
 				RegistrySaveLatency: registrySaveLatency,
 				TotalStart:          totalStart,
-			})
+			}, relayHosts...)
 		}
 
 		// Register a relay flock on each member host so its guests' wall traffic
@@ -176,8 +180,9 @@ func (r *RuntimeRouter) CreateRoutedFlockMembers(ctx context.Context, req FlockC
 					AgentSpawnLatency:   agentSpawnLatency,
 					RegistrySaveLatency: registrySaveLatency,
 					TotalStart:          totalStart,
-				})
+				}, relayHosts...)
 			}
+			relayHosts = append(relayHosts, hostName)
 		}
 
 		spawnStart := time.Now()
@@ -201,7 +206,7 @@ func (r *RuntimeRouter) CreateRoutedFlockMembers(ctx context.Context, req FlockC
 				AgentSpawnLatency:   agentSpawnLatency,
 				RegistrySaveLatency: registrySaveLatency,
 				TotalStart:          totalStart,
-			})
+			}, relayHosts...)
 		}
 		if resp == nil {
 			return nil, rollbackRoutedFlockCreate(ctx, r, record, routedFlockCreateFailureMetric{
@@ -211,7 +216,7 @@ func (r *RuntimeRouter) CreateRoutedFlockMembers(ctx context.Context, req FlockC
 				AgentSpawnLatency:   agentSpawnLatency,
 				RegistrySaveLatency: registrySaveLatency,
 				TotalStart:          totalStart,
-			})
+			}, relayHosts...)
 		}
 		vmID := strings.TrimSpace(resp.VMID)
 		if vmID == "" {
@@ -222,7 +227,7 @@ func (r *RuntimeRouter) CreateRoutedFlockMembers(ctx context.Context, req FlockC
 				AgentSpawnLatency:   agentSpawnLatency,
 				RegistrySaveLatency: registrySaveLatency,
 				TotalStart:          totalStart,
-			})
+			}, relayHosts...)
 		}
 
 		record.Agents = append(record.Agents, RoutedFlockAgent{
@@ -245,7 +250,7 @@ func (r *RuntimeRouter) CreateRoutedFlockMembers(ctx context.Context, req FlockC
 				AgentSpawnLatency:   agentSpawnLatency,
 				RegistrySaveLatency: registrySaveLatency,
 				TotalStart:          totalStart,
-			})
+			}, relayHosts...)
 		}
 		registrySaveLatency += time.Since(registrySaveStart)
 		r.recordRoutedFlockAgentPlacement(record.Agents[len(record.Agents)-1])
@@ -266,7 +271,7 @@ func (r *RuntimeRouter) CreateRoutedFlockMembers(ctx context.Context, req FlockC
 			AgentSpawnLatency:   agentSpawnLatency,
 			RegistrySaveLatency: registrySaveLatency,
 			TotalStart:          totalStart,
-		})
+		}, relayHosts...)
 	}
 	registrySaveLatency += time.Since(registrySaveStart)
 
@@ -346,7 +351,7 @@ func scheduleDecisionFromFlockPlan(plan FlockPlacementPlan) ScheduleDecision {
 // hop. The persisted relay token is stripped from the store too, so no stale
 // secret lingers on disk. Every step is best-effort: failures are swallowed so
 // deregistration never masks the original create/delete outcome.
-func (r *RuntimeRouter) deregisterRoutedFlockWall(ctx context.Context, record RoutedFlockRecord) {
+func (r *RuntimeRouter) deregisterRoutedFlockWall(ctx context.Context, record RoutedFlockRecord, extraHosts ...string) {
 	if r == nil {
 		return
 	}
@@ -355,13 +360,23 @@ func (r *RuntimeRouter) deregisterRoutedFlockWall(ctx context.Context, record Ro
 		return
 	}
 	seen := make(map[string]bool)
-	hosts := make([]string, 0, len(record.Agents)+1)
+	hosts := make([]string, 0, len(record.Agents)+len(extraHosts)+1)
 	if home := strings.TrimSpace(record.HomeHost); home != "" {
 		hosts = append(hosts, home)
 		seen[home] = true
 	}
 	for _, agent := range record.Agents {
 		host := strings.TrimSpace(agent.Host)
+		if host == "" || seen[host] {
+			continue
+		}
+		seen[host] = true
+		hosts = append(hosts, host)
+	}
+	// extraHosts covers member hosts whose relay flock registered but whose member
+	// never entered record.Agents (e.g. a spawn-failed member during create rollback).
+	for _, host := range extraHosts {
+		host = strings.TrimSpace(host)
 		if host == "" || seen[host] {
 			continue
 		}
@@ -382,13 +397,15 @@ func (r *RuntimeRouter) deregisterRoutedFlockWall(ctx context.Context, record Ro
 	}
 }
 
-func rollbackRoutedFlockCreate(ctx context.Context, r *RuntimeRouter, record RoutedFlockRecord, metric routedFlockCreateFailureMetric) error {
+func rollbackRoutedFlockCreate(ctx context.Context, r *RuntimeRouter, record RoutedFlockRecord, metric routedFlockCreateFailureMetric, extraHosts ...string) error {
 	reason := sanitizeRoutedFlockErrorReason(metric.Reason)
 	rollbackStart := time.Now()
 	// Best-effort deregistration of the shared Town Wall before VM teardown, so a
 	// retried create starts clean and no stale hub/relay registration or relay
-	// token lingers. Failures here must not change the rollback outcome.
-	r.deregisterRoutedFlockWall(ctx, record)
+	// token lingers. extraHosts carries member hosts whose relay flock registered
+	// but which never made it into record.Agents (spawn-failed members). Failures
+	// here must not change the rollback outcome.
+	r.deregisterRoutedFlockWall(ctx, record, extraHosts...)
 	removeVMIDs, pendingAgents := r.deleteRoutedFlockAgents(ctx, record.Agents)
 	rollbackLatency := time.Since(rollbackStart)
 	r.removeRoutedFlockPlacements(removeVMIDs)

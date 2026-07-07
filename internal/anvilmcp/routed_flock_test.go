@@ -72,6 +72,52 @@ func TestRollback_DeregistersSharedTownWall(t *testing.T) {
 	}
 }
 
+// TestRollback_DeregistersOrphanedMemberRelay proves that when a member's relay
+// flock is registered but that same member's SpawnVM then fails, rollback still
+// deregisters the member's relay flock. Before the fix, deregisterRoutedFlockWall
+// derived hosts only from record.HomeHost + record.Agents, and a spawn-failed
+// member never entered record.Agents, so its relay registration leaked on the
+// member daemon.
+func TestRollback_DeregistersOrphanedMemberRelay(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
+	home := &routerFakeDaemon{spawnResponses: []*SpawnVMResponse{{
+		VMID: "vm-coordinator-1", GuestIP: "10.0.1.10", AgentURL: "http://10.0.1.10:8080", TenantID: "tenant-1", EgressPolicy: "profile",
+	}}}
+	// member: its relay flock registers cleanly, then its SpawnVM fails.
+	member := &routerFakeDaemon{spawnErr: errors.New("daemon http://hostB.internal/secret-endpoint failed")}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(
+			[]RuntimeHost{
+				{Name: "hostA", Endpoint: "http://hostA.internal:8080", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+				{Name: "hostB", Endpoint: "http://hostB.internal:8080", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+			},
+			nil,
+			nil,
+		),
+		map[string]Daemon{"hostA": home, "hostB": member},
+		RuntimeRouterOptions{PlacementStore: store},
+	)
+
+	_, err := router.CreateRoutedFlockMembers(context.Background(), FlockCreateRequest{
+		Task:         "smoke",
+		Roles:        []string{"coordinator", "researcher"},
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+	})
+	if err == nil {
+		t.Fatal("CreateRoutedFlockMembers error = nil, want member spawn failure")
+	}
+	// Precondition: the member's relay flock was actually registered before spawn.
+	if member.relayCalls == 0 {
+		t.Fatalf("member relay flock was never registered; test setup invalid")
+	}
+	// The member's relay flock must be deregistered on rollback even though the
+	// member never entered record.Agents (spawn failed before the append).
+	if member.deregisterCalls == 0 {
+		t.Fatalf("rollback did not deregister the spawn-failed member's relay flock")
+	}
+}
+
 // TestRollback_DeregisterFailureDoesNotMaskOriginalError verifies best-effort
 // semantics: a deregistration (flock-delete) failure during rollback must not
 // change the create outcome — the original create failure is still surfaced and
