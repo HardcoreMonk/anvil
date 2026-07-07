@@ -446,12 +446,17 @@ else
     ok "Relay token is NOT the Authorization header's bearer"
   fi
 
-  # Call-hop + depth headers.
+  # Call-hop + depth headers. This capture is the member->home leg: home is a
+  # RESOLVER, not a terminus, so (2026-07-08 C1 fix) this leg is deliberately
+  # left UNMARKED — home must remain free to take its own 2nd/final hop to a
+  # roster target on another host. Setting the marker here made every home
+  # 2nd hop 404 unconditionally (the target daemon's hopped branch resolves
+  # only locally). Only the hub->roster-target leg carries the marker.
   got_hop="$(printf '%s' "$CAP" | jq -r '.headers["x-ephemera-call-hop"] // ""' 2>/dev/null || true)"
-  if [ "$got_hop" = "1" ]; then
-    ok "X-Ephemera-Call-Hop header is '1'"
+  if [ -z "$got_hop" ]; then
+    ok "X-Ephemera-Call-Hop header is absent (member->home leg is unmarked — home is a resolver, not a terminus)"
   else
-    fail "call_assert_failed: X-Ephemera-Call-Hop was '$got_hop', want '1'"
+    fail "call_assert_failed: X-Ephemera-Call-Hop was '$got_hop', want absent/empty on the member->home leg"
   fi
   got_depth="$(printf '%s' "$CAP" | jq -r '.headers["x-ephemera-task-depth"] // ""' 2>/dev/null || true)"
   if [ -n "$got_depth" ]; then

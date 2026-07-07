@@ -131,9 +131,11 @@ func TestCallFlockAgent_DepthLimit508(t *testing.T) {
 
 // TestCallFlockAgent_RelayForwardsToHome proves a relay flock forwards a call
 // to its home daemon with: the per-flock call token (never the relay token),
-// the hop marker set, the caller's depth propagated verbatim (not
-// accumulated — accumulation happens only at the final local dispatch), and a
-// body containing only {agent_id, prompt}.
+// NO hop marker (2026-07-08 C1 fix — home is a resolver, not a terminus, and
+// must remain free to take its own 2nd hop; setting the marker here made
+// every home 2nd hop 404 unconditionally), the caller's depth propagated
+// verbatim (not accumulated — accumulation happens only at the final local
+// dispatch), and a body containing only {agent_id, prompt}.
 func TestCallFlockAgent_RelayForwardsToHome(t *testing.T) {
 	var gotPath, gotAuth, gotHop, gotDepth, gotBody string
 	home := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -168,8 +170,8 @@ func TestCallFlockAgent_RelayForwardsToHome(t *testing.T) {
 	if gotAuth != "Bearer ct-1" {
 		t.Fatalf("home saw auth %q, want Bearer ct-1 (call token, not relay token)", gotAuth)
 	}
-	if gotHop != "1" {
-		t.Fatalf("home saw hop header %q, want \"1\"", gotHop)
+	if gotHop != "" {
+		t.Fatalf("home saw hop header %q, want \"\" (unmarked — home must remain free to take its own 2nd hop)", gotHop)
 	}
 	if gotDepth != "2" {
 		t.Fatalf("home saw depth %q, want \"2\" (propagated verbatim, not accumulated)", gotDepth)
@@ -420,5 +422,93 @@ func TestCallFlockAgent_HubLocalTargetByVMRegistry(t *testing.T) {
 	}
 	if gotAuth != "Bearer "+agentToken {
 		t.Fatalf("agent saw auth %q, want Bearer %s", gotAuth, agentToken)
+	}
+}
+
+// TestCallFlockAgent_MemberToRemoteMemberFullChain is the synthesis
+// regression test for the 2026-07-08 C1 fix (Task 3 final review): a member
+// daemon (relay flock, non-hopped inbound call) forwards to a REAL hub
+// ControlPlane — full HTTP server, real authMiddleware chain, call_token
+// admission exercised over the wire, not bypassed — which then takes its own
+// 2nd/final hop to a remote roster target. Before the fix, forwardFlockCall
+// unconditionally set the hop marker on the relay->home leg, so the hub
+// received an already-hopped request, resolved only locally, and 404'd
+// instead of reaching the target: this test's target handler firing at all
+// is the load-bearing proof the member->home leg is unmarked (an indirect
+// check — the hub is a real ControlPlane, not a stub, so its internal hop
+// decision isn't directly observable, but a marked inbound request can never
+// produce a call to the target per the `hopped` branch in callFlockAgent).
+func TestCallFlockAgent_MemberToRemoteMemberFullChain(t *testing.T) {
+	const callToken = "ct-chain-1"
+	var targetHop, targetAuth, targetBody string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetHop = r.Header.Get(callHopHeader)
+		targetAuth = r.Header.Get("Authorization")
+		b, _ := io.ReadAll(r.Body)
+		targetBody = string(b)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"output":"chain-ok"}`))
+	}))
+	defer target.Close()
+
+	// Hub: a REAL ControlPlane with its production HTTP handler chain
+	// (audit + authMiddleware + routes), listening on a real httptest server
+	// so the relay's outbound forwardFlockCall is a genuine network hop, not a
+	// direct method call — call_token admission at the hub is exercised via
+	// authMiddleware exactly as it is in production.
+	hubCP := newTestControlPlaneWithHandler(t)
+	hub := httptest.NewServer(hubCP.srv.Handler)
+	defer hub.Close()
+
+	distBody := `{"roster":[{"agent_id":"target-1","host":"host-b","vm_id":"vm-9","addr":"` + target.URL + `"}],"relay_token":"rt-chain-1","call_token":"` + callToken + `"}`
+	distReq, err := http.NewRequest(http.MethodPost, hub.URL+"/flocks/hub-chain/distributed", strings.NewReader(distBody))
+	if err != nil {
+		t.Fatalf("build distributed register request: %v", err)
+	}
+	distReq.Header.Set("Authorization", "Bearer secret-token") // hubCP's operator token (newTestControlPlaneWithHandler)
+	distResp, err := http.DefaultClient.Do(distReq)
+	if err != nil {
+		t.Fatalf("register hub distributed: %v", err)
+	}
+	defer distResp.Body.Close()
+	if distResp.StatusCode != http.StatusCreated {
+		b, _ := io.ReadAll(distResp.Body)
+		t.Fatalf("distributed register status = %d, want 201 (%s)", distResp.StatusCode, b)
+	}
+
+	// Member (relay): a separate daemon, registered as relay-kind pointing
+	// HomeAddr at the hub's real server, sharing the SAME call_token the hub
+	// just registered for "hub-chain" (in production the anvil control plane
+	// issues the same call_token to both the member and the hub).
+	relayCP := newTestCP(t)
+	relayCP.flockMgr.RegisterRelay("hub-chain", hub.URL, "rt-chain-1", callToken, nil)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/flocks/hub-chain/call", strings.NewReader(`{"agent_id":"target-1","prompt":"ping"}`))
+	relayCP.handleFlockItem(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("member->hub->target chain status = %d, want 200 (%s)", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "chain-ok") {
+		t.Fatalf("chain response body = %s, want it to contain \"chain-ok\"", rr.Body.String())
+	}
+	// The target is the FINAL hop: it must see the hop marker set (hub's 2nd
+	// hop is markHop=true) and the call token as bearer.
+	if targetHop != "1" {
+		t.Fatalf("target saw hop header %q, want \"1\" (hub's 2nd/final hop must mark it)", targetHop)
+	}
+	if targetAuth != "Bearer "+callToken {
+		t.Fatalf("target saw auth %q, want Bearer %s", targetAuth, callToken)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(targetBody), &payload); err != nil {
+		t.Fatalf("target body not json: %v (%s)", err, targetBody)
+	}
+	if payload["agent_id"] != "target-1" || payload["prompt"] != "ping" {
+		t.Fatalf("target body = %s, want only agent_id+prompt", targetBody)
+	}
+	if len(payload) != 2 {
+		t.Fatalf("target body has extra fields: %s, want only agent_id+prompt", targetBody)
 	}
 }

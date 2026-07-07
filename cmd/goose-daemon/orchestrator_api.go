@@ -1228,11 +1228,15 @@ func taskDepthFromRequest(r *http.Request) int {
 // callFlockAgent dispatches a prompt to a named flock member. Local/hub
 // flocks resolve locally (hub falls back to its VMID/Addr roster for members
 // on other hosts); relay flocks forward to the home daemon. The per-flock
-// call token authenticates the daemon-to-daemon hops; X-Ephemera-Call-Hop marks a
-// forwarded request so no daemon ever re-forwards (loop guard). Only
-// {agent_id, prompt} plus the depth/hop headers cross the wire — the target
-// VM's agent token is injected by the target host daemon alone. Errors carry
-// flock/host/agent identifiers only.
+// call token authenticates the daemon-to-daemon hops. X-Ephemera-Call-Hop
+// marks ONLY the final hop (hub -> roster-target); the relay -> home leg is
+// deliberately left unmarked because home is a resolver, not a terminus, and
+// must remain free to take its own 2nd hop (2026-07-08 C1 fix — see
+// forwardFlockCall's markHop doc for the full loop-termination argument). Any
+// request that already carries the marker never forwards again (loop guard).
+// Only {agent_id, prompt} plus the depth/hop headers cross the wire — the
+// target VM's agent token is injected by the target host daemon alone.
+// Errors carry flock/host/agent identifiers only.
 func (cp *ControlPlane) callFlockAgent(w http.ResponseWriter, r *http.Request, flockID string) {
 	f, ok := cp.flockMgr.Get(flockID)
 	if !ok {
@@ -1268,11 +1272,14 @@ func (cp *ControlPlane) callFlockAgent(w http.ResponseWriter, r *http.Request, f
 		return
 	}
 
-	// Relay flock, non-hopped: forward to home.
+	// Relay flock, non-hopped: forward to home. markHop=false — home is a
+	// RESOLVER, not a terminus: it must still be free to take its own 2nd hop
+	// (hub -> roster-target) below, which requires an unhopped request. See the
+	// loop-termination note on forwardFlockCall.
 	if f.Kind == orchestrator.FlockKindRelay {
 		ctx, cancel := context.WithTimeout(r.Context(), 290*time.Second)
 		defer cancel()
-		status, body, err := forwardFlockCall(ctx, f.HomeAddr, f.CallToken, flockID, req, r.Header.Get(taskDepthHeader))
+		status, body, err := forwardFlockCall(ctx, f.HomeAddr, f.CallToken, flockID, req, r.Header.Get(taskDepthHeader), false)
 		if err != nil {
 			writeJSONError(w, http.StatusBadGateway, fmt.Errorf("call relay to home failed for flock %q", flockID))
 			return
@@ -1290,12 +1297,14 @@ func (cp *ControlPlane) callFlockAgent(w http.ResponseWriter, r *http.Request, f
 		cp.dispatchFlockCall(w, r, vmID, req.Prompt)
 		return
 	}
-	// Hub: remote member via VMID/Addr roster — one hop only.
+	// Hub: remote member via VMID/Addr roster — one hop only. markHop=true —
+	// this IS the terminal hop: the target daemon must resolve purely locally
+	// (see the `hopped` branch above), never forwarding again.
 	if f.Kind == orchestrator.FlockKindHub {
 		if member, ok := rosterMember(f, req.AgentID); ok && member.Addr != "" {
 			ctx, cancel := context.WithTimeout(r.Context(), 280*time.Second)
 			defer cancel()
-			status, body, err := forwardFlockCall(ctx, member.Addr, f.CallToken, flockID, req, r.Header.Get(taskDepthHeader))
+			status, body, err := forwardFlockCall(ctx, member.Addr, f.CallToken, flockID, req, r.Header.Get(taskDepthHeader), true)
 			if err != nil {
 				writeJSONError(w, http.StatusBadGateway, fmt.Errorf("call hop to member host %q failed", member.Host))
 				return
@@ -1310,10 +1319,24 @@ func (cp *ControlPlane) callFlockAgent(w http.ResponseWriter, r *http.Request, f
 }
 
 // forwardFlockCall sends {agent_id, prompt} to addr's /flocks/{id}/call with
-// the per-flock call token, marking the request as a hop and propagating the
-// caller's task depth verbatim (accumulation happens only at the final local
-// dispatch).
-func forwardFlockCall(ctx context.Context, addr, callToken, flockID string, call FlockCallRequest, depth string) (int, []byte, error) {
+// the per-flock call token and the caller's task depth propagated verbatim
+// (accumulation happens only at the final local dispatch).
+//
+// markHop controls whether the hop marker (X-Ephemera-Call-Hop) is set on the
+// outgoing request, and this is what makes the 2-hop topology terminate
+// instead of looping:
+//   - relay -> home (markHop=false): home is a RESOLVER, not a terminus. It
+//     must receive an unmarked request so it remains free to take its own
+//     2nd hop (hub -> roster-target) if the agent isn't local to home.
+//   - hub -> roster-target (markHop=true): this is always the FINAL hop. The
+//     target daemon's `hopped` branch in callFlockAgent resolves purely
+//     locally and never forwards again, regardless of its own flock kind.
+//
+// Since a request can only ever be unmarked on the first (relay->home) leg
+// and marked on the second (hub->target) leg, and a marked request can never
+// be forwarded again, the chain is capped at exactly two forwards and cannot
+// cycle.
+func forwardFlockCall(ctx context.Context, addr, callToken, flockID string, call FlockCallRequest, depth string, markHop bool) (int, []byte, error) {
 	payload, _ := json.Marshal(call)
 	url := strings.TrimRight(addr, "/") + "/flocks/" + flockID + "/call"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
@@ -1322,7 +1345,9 @@ func forwardFlockCall(ctx context.Context, addr, callToken, flockID string, call
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+callToken)
-	req.Header.Set(callHopHeader, "1")
+	if markHop {
+		req.Header.Set(callHopHeader, "1")
+	}
 	if depth != "" {
 		req.Header.Set(taskDepthHeader, depth)
 	}
