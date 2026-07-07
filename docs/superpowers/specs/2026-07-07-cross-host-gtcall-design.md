@@ -69,7 +69,12 @@ daemon에 **`POST /flocks/{id}/call`** (body `{agent_id, prompt}`)을 신설하�
   **kind와 무관하게 로컬 해석만** 시도하고 실패 시 즉시 에러 (2026-07-08 보정:
   target member daemon에는 flock이 relay kind로 등록돼 있으므로 relay+hopped를
   무조건 404로 끝내면 실토폴로지에서 2번째 hop이 성립하지 않는다 — Task 3
-  리뷰 발견).
+  리뷰 발견). **member→home 구간은 unmarked, home→target 종단 hop만
+  marked**다(2026-07-08 최종 리뷰 C1 수정): home은 target 해석자이지 종단이
+  아니므로 자신의 2번째 hop을 위해 표식 없는 요청을 받아야 한다 —
+  member→home 구간에도 무조건 표식을 붙이면 home이 hopped 요청으로
+  받아 로컬 해석만 시도하고, 대상이 home 자기 host에 없으면 2번째 hop
+  없이 곧장 404한다(worker→worker 타 host 호출 전부 실패).
 - **member의 로컬 해석 데이터** (2026-07-08 보정): relay 등록
   (`POST /flocks/{id}/relay`)에 그 host의 member 목록
   (`agents: [{agent_id, vm_id}]`)을 포함한다. hub 재등록과 같은 시점(spawn

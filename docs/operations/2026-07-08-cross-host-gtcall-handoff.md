@@ -45,7 +45,12 @@ dispatch(local/hub/relay 분기, home 경유 2-hop 포함)를 daemon 쪽으로 �
 - home 수신 call: target이 home 자신의 host면 로컬 dispatch, 아니면 target host
   daemon의 `POST /flocks/{id}/call`로 2번째 hop(`forwardFlockCall`).
 - **루프 방지**: hop 요청에 `X-Ephemera-Call-Hop: 1`을 붙이고, 이 표식이 있는
-  요청은 어느 daemon도 다시 forward하지 않는다.
+  요청은 어느 daemon도 다시 forward하지 않는다. **member→home 구간은
+  unmarked, home→target 종단 hop만 marked**다(2026-07-08 최종 리뷰 C1
+  수정 — home은 target 해석자이지 종단이 아니라 자신의 2번째 hop을 위해
+  표식 없는 요청을 받아야 한다; 이전에는 member→home 구간에도 무조건
+  표식을 붙여 home이 로컬 해석만 시도하다 대상이 자기 host에 없으면
+  worker→worker 타 host 호출이 전부 404였다).
 - **member의 로컬 해석 데이터(2026-07-08 설계 보정, `22b7730`)**: 최초 구현(Task 3,
   `64dde70`)은 hopped 요청을 `f.Kind == FlockKindRelay`일 때 무조건 `404`로
   끝냈는데, 실제 토폴로지에서 target member daemon은 자신의 flock을 relay
