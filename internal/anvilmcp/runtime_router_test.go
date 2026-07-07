@@ -50,9 +50,11 @@ type routerFakeDaemon struct {
 	importStatusForBody    map[string]string
 	distributedCalls       int
 	distributedReq         DistributedFlockRequest
+	distributedReqs        []DistributedFlockRequest
 	registerDistributedErr error
 	relayCalls             int
 	relayReq               RelayFlockRequest
+	relayReqs              []RelayFlockRequest
 	registerRelayErr       error
 	postWallCalls          int
 	postWallFlockID        string
@@ -67,12 +69,14 @@ type routerFakeDaemon struct {
 func (f *routerFakeDaemon) RegisterDistributedFlock(_ context.Context, _ string, req DistributedFlockRequest) error {
 	f.distributedCalls++
 	f.distributedReq = req
+	f.distributedReqs = append(f.distributedReqs, req)
 	return f.registerDistributedErr
 }
 
 func (f *routerFakeDaemon) RegisterRelayFlock(_ context.Context, _ string, req RelayFlockRequest) error {
 	f.relayCalls++
 	f.relayReq = req
+	f.relayReqs = append(f.relayReqs, req)
 	return f.registerRelayErr
 }
 
@@ -754,11 +758,16 @@ func TestCreateRoutedFlockMembers_WiresSharedTownWall(t *testing.T) {
 	if rec.HomeHost != "hostA" {
 		t.Fatalf("HomeHost = %q, want hostA (roles[0] placement)", rec.HomeHost)
 	}
-	if home.distributedCalls != 1 {
-		t.Fatalf("home distributed (hub) registrations = %d, want 1", home.distributedCalls)
+	// Task 5: create issues the hub registration twice — the initial pre-spawn
+	// registration (no VMIDs yet) and the post-spawn re-registration with the
+	// VMID/Addr-enriched roster — and the member relay registration twice — the
+	// initial pre-spawn registration and the post-spawn re-registration carrying
+	// that host's local agents.
+	if home.distributedCalls != 2 {
+		t.Fatalf("home distributed (hub) registrations = %d, want 2 (initial + VMID/Addr re-registration)", home.distributedCalls)
 	}
-	if member.relayCalls != 1 {
-		t.Fatalf("member relay registrations = %d, want 1", member.relayCalls)
+	if member.relayCalls != 2 {
+		t.Fatalf("member relay registrations = %d, want 2 (initial + local-agents re-registration)", member.relayCalls)
 	}
 	if home.relayCalls != 0 {
 		t.Fatalf("home relay registrations = %d, want 0 (home already owns the hub)", home.relayCalls)
@@ -879,6 +888,110 @@ func TestReconcile_ReregistersSharedTownWall(t *testing.T) {
 	}
 	if len(home.distributedReq.Roster) != 2 {
 		t.Fatalf("reconcile hub roster len = %d, want 2", len(home.distributedReq.Roster))
+	}
+}
+
+// TestReconcileReRegistersCallTokenAndVMIDRoster mirrors
+// TestReconcile_ReregistersSharedTownWall (setup copied verbatim: create,
+// simulate a daemon restart, reconcile), but asserts the Task 5 additions the
+// prior test predates: reconcile's hub re-registration carries a
+// VMID/Addr-enriched roster (record.Agents already holds VMIDs from the
+// completed create) and the persisted call token, and each member's relay
+// re-registration also carries that call token plus that host's own
+// local-agents roster (the 2026-07-08 amendment).
+func TestReconcileReRegistersCallTokenAndVMIDRoster(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
+	home := &routerFakeDaemon{spawnResponses: []*SpawnVMResponse{{
+		VMID: "vm-coordinator-1", GuestIP: "10.0.1.10", AgentURL: "http://10.0.1.10:8080", TenantID: "tenant-1", EgressPolicy: "profile",
+	}}}
+	member := &routerFakeDaemon{spawnResponses: []*SpawnVMResponse{{
+		VMID: "vm-researcher-1", GuestIP: "10.0.2.10", AgentURL: "http://10.0.2.10:8080", TenantID: "tenant-1", EgressPolicy: "profile",
+	}}}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(
+			[]RuntimeHost{
+				{Name: "hostA", Endpoint: "http://hostA.internal:8080", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+				{Name: "hostB", Endpoint: "http://hostB.internal:8080", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+			},
+			nil,
+			nil,
+		),
+		map[string]Daemon{"hostA": home, "hostB": member},
+		RuntimeRouterOptions{PlacementStore: store},
+	)
+
+	out, err := router.CreateRoutedFlockMembers(context.Background(), FlockCreateRequest{
+		Task:         "smoke",
+		Roles:        []string{"coordinator", "researcher"},
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	callToken, ok := store.RoutedFlockCallToken(out.FlockID)
+	if !ok || callToken == "" {
+		t.Fatalf("call token not persisted for flock %q", out.FlockID)
+	}
+
+	// Simulate a daemon restart: the in-memory hub/relay registrations are lost.
+	home.distributedCalls, member.relayCalls = 0, 0
+	home.relayCalls, member.distributedCalls = 0, 0
+
+	if err := router.ReconcilePlacements(context.Background()); err != nil {
+		t.Fatalf("ReconcilePlacements: %v", err)
+	}
+	if home.distributedCalls != 1 {
+		t.Fatalf("home hub re-registrations = %d, want 1", home.distributedCalls)
+	}
+	if member.relayCalls != 1 {
+		t.Fatalf("member relay re-registrations = %d, want 1", member.relayCalls)
+	}
+
+	// The hub re-registration's roster carries VMID + Addr for every member.
+	var gotCoordinator, gotResearcher bool
+	for _, m := range home.distributedReq.Roster {
+		switch m.AgentID {
+		case "coordinator-1":
+			gotCoordinator = true
+			if m.VMID != "vm-coordinator-1" {
+				t.Fatalf("coordinator roster VMID = %q, want vm-coordinator-1", m.VMID)
+			}
+			if m.Addr != "http://hostA.internal:8080" {
+				t.Fatalf("coordinator roster Addr = %q, want http://hostA.internal:8080", m.Addr)
+			}
+		case "researcher-1":
+			gotResearcher = true
+			if m.VMID != "vm-researcher-1" {
+				t.Fatalf("researcher roster VMID = %q, want vm-researcher-1", m.VMID)
+			}
+			if m.Addr != "http://hostB.internal:8080" {
+				t.Fatalf("researcher roster Addr = %q, want http://hostB.internal:8080", m.Addr)
+			}
+		default:
+			t.Fatalf("unexpected roster member agent id %q", m.AgentID)
+		}
+	}
+	if !gotCoordinator || !gotResearcher {
+		t.Fatalf("reconcile roster missing member(s): %+v", home.distributedReq.Roster)
+	}
+
+	// The hub and relay re-registrations both carry the persisted call token.
+	if home.distributedReq.CallToken != callToken {
+		t.Fatalf("reconcile hub re-registration CallToken = %q, want persisted %q", home.distributedReq.CallToken, callToken)
+	}
+	if member.relayReq.CallToken != callToken {
+		t.Fatalf("reconcile relay re-registration CallToken = %q, want persisted %q", member.relayReq.CallToken, callToken)
+	}
+
+	// The member's relay re-registration carries only that host's local
+	// agent(s), with VMID filled in (2026-07-08 amendment).
+	if len(member.relayReq.Agents) != 1 {
+		t.Fatalf("member relay Agents len = %d, want 1: %+v", len(member.relayReq.Agents), member.relayReq.Agents)
+	}
+	if member.relayReq.Agents[0].AgentID != "researcher-1" || member.relayReq.Agents[0].VMID != "vm-researcher-1" {
+		t.Fatalf("member relay Agents[0] = %+v, want researcher-1/vm-researcher-1", member.relayReq.Agents[0])
 	}
 }
 

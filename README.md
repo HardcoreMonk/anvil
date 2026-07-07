@@ -308,6 +308,8 @@ ephemera control plane :3000
   POST   /flocks/{id}/distributed
                                 -> home host에 hub flock(공유 Town Wall) 등록
   POST   /flocks/{id}/relay    -> member host에 relay flock 등록(post/wall proxy)
+  POST   /flocks/{id}/call     -> 지정 agent에 프롬프트 호출(2-hop: local/hub 직접,
+                                relay는 home으로 forward)
 
       |
       | Firecracker SDK, KVM, TAP, rootfs, snapshot files
@@ -1528,8 +1530,12 @@ member는 `.ephemera-flock`/`.ephemera-cp-token`이 주입돼(`POST /vms`) guest
 context를 갖추고, `roles[0]` 배치 호스트가 home으로 선정돼 home daemon에 hub
 flock(공유 `TownWall`)을, 나머지 멤버 host daemon에 relay flock(post/wall/history를
 home으로 forward/proxy)을 등록한다(`internal/anvilmcp/routed_flock.go`
-`TownWallEnabled` 설정부). cross-host `gtcall`과 cross-host broadcast fan-out만 이
-slice 범위 밖 비목표로 남는다.
+`TownWallEnabled` 설정부). 2026-07-08 cross-host gtcall slice부터 daemon
+`POST /flocks/{id}/call`로 routed flock의 임의 member가 다른 임의 member를 호출할
+수 있다(member→home→target 2-hop; `relay_token`은 guest 능력 토큰으로 그 flock의
+wall과 `call` 진입을 모두 admit하고, 별도 `call_token`이 daemon-to-daemon call
+hop만 admit한다 — wall 경로는 거부). cross-host broadcast fan-out만 이 표면 범위
+밖 비목표로 남는다.
 `scheduler_quota_store_path` 또는 `ANVIL_MCP_SCHEDULER_QUOTA_STORE`는 scheduler quota
 store를 함께 지정할 때 사용한다. host daemon client 인증에는 `ANVIL_API_TOKEN`을
 사용한다.

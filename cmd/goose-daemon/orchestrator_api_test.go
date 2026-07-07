@@ -122,7 +122,7 @@ func TestRelayToken_AdmitsOnlyWallPaths(t *testing.T) {
 	cp.setRelayToken("routed-1", "rt-1")
 	// Drive the REAL authMiddleware chain (relayTokenFor wired), matching the
 	// production apiChain wrap; a 200 downstream isolates the middleware decision.
-	handler := authMiddleware(cp.getClients, cp.relayTokenFor, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := authMiddleware(cp.getClients, cp.relayTokenFor, nil, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -151,6 +151,46 @@ func TestRelayToken_AdmitsOnlyWallPaths(t *testing.T) {
 	for _, tc := range rejected {
 		if code := do(tc.method, tc.path, "Bearer rt-1"); code != http.StatusUnauthorized {
 			t.Errorf("%s %s with relay token = %d, want 401", tc.method, tc.path, code)
+		}
+	}
+}
+
+// TestCallToken_AdmitsOnlyCallPath proves the per-flock call token authenticates
+// ONLY that flock's /call entry point, and that the relay token (the guest
+// capability token) also admits /call as one of its guest-scoped sub-paths —
+// while the call token is NEVER admitted on wall sub-paths. This is the
+// deliberate exclusivity encoded by 결정 A: relay_token opens wall+call (guest
+// capability), call_token opens ONLY call (narrower, single-purpose secret).
+// Mirrors TestRelayToken_AdmitsOnlyWallPaths above.
+func TestCallToken_AdmitsOnlyCallPath(t *testing.T) {
+	cp := newTestCP(t)
+	cp.setCallToken("routed-1", "ct-1")
+	cp.setRelayToken("routed-1", "rt-1")
+	handler := authMiddleware(func() []APIClient { return []APIClient{{Name: "op", Token: "op-tok"}} },
+		cp.relayTokenFor, cp.callTokenFor, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+
+	cases := []struct {
+		name, path, bearer string
+		want               int
+	}{
+		{"call token admits call path", "/flocks/routed-1/call", "ct-1", http.StatusOK},
+		{"call token rejected on wall post", "/flocks/routed-1/post", "ct-1", http.StatusUnauthorized},
+		{"call token rejected on wall history", "/flocks/routed-1/wall/history", "ct-1", http.StatusUnauthorized},
+		{"call token rejected on other flock", "/flocks/other/call", "ct-1", http.StatusUnauthorized},
+		{"call token rejected on non-flock route", "/vms", "ct-1", http.StatusUnauthorized},
+		{"relay token admits call entry (guest capability)", "/flocks/routed-1/call", "rt-1", http.StatusOK},
+		{"relay token still admits wall post", "/flocks/routed-1/post", "rt-1", http.StatusOK},
+		{"relay token rejected on other flock call", "/flocks/other/call", "rt-1", http.StatusUnauthorized},
+	}
+	for _, tc := range cases {
+		req := httptest.NewRequest(http.MethodPost, tc.path, nil)
+		req.Header.Set("Authorization", "Bearer "+tc.bearer)
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		if rr.Code != tc.want {
+			t.Fatalf("%s: status = %d, want %d", tc.name, rr.Code, tc.want)
 		}
 	}
 }
@@ -257,6 +297,56 @@ func TestRegisterRelayFlock_RejectsDuplicateNonRelayID(t *testing.T) {
 	}
 }
 
+// TestRegisterRelayFlock_AdmitsRelayAndCallTokens proves the wall-slice defect
+// fix: registering a relay flock on a member daemon must also admit BOTH the
+// guest relay token and the call token in that member's inbound scoped stores
+// (mirroring the hub registration path), not just RegisterRelay the in-memory
+// flock struct. Without this, a guest's relay/call token is never admitted by
+// authMiddleware on the member (auth-on) daemon, so a relayed gtwall/gtcall
+// request from a guest VM 401s at the member hop before it can even reach the
+// relay-forward-to-home logic.
+func TestRegisterRelayFlock_AdmitsRelayAndCallTokens(t *testing.T) {
+	cp := newTestCP(t)
+	body := `{"home_addr":"http://home:3000","relay_token":"rt-1","call_token":"ct-1"}`
+	rr := httptest.NewRecorder()
+	cp.registerRelayFlock(rr, httptest.NewRequest(http.MethodPost, "/flocks/routed-1/relay", strings.NewReader(body)), "routed-1")
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("register relay = %d, want 201", rr.Code)
+	}
+	// member daemon also needs to admit the guest's relay token inbound — this
+	// is the missing piece: without it, auth-on member 401s guest gtwall/gtcall
+	// (wall slice potential defect).
+	if got := cp.relayTokenFor("routed-1"); got != "rt-1" {
+		t.Fatalf("relayTokenFor = %q, want rt-1 (member daemon must admit guest token)", got)
+	}
+	if got := cp.callTokenFor("routed-1"); got != "ct-1" {
+		t.Fatalf("callTokenFor = %q, want ct-1", got)
+	}
+}
+
+// TestRegisterRelayFlock_StoresLocalAgents proves the 2026-07-08 design
+// correction: POST /flocks/{id}/relay's "agents" field populates the relay
+// flock's Agents map (AgentID -> VMID) so a later hopped call landing on this
+// member daemon can resolve the target locally instead of unconditionally
+// 404ing (see callFlockAgent's hopped branch).
+func TestRegisterRelayFlock_StoresLocalAgents(t *testing.T) {
+	cp := newTestCP(t)
+	body := `{"home_addr":"http://home:3000","relay_token":"rt-1","call_token":"ct-1","agents":[{"agent_id":"local-1","vm_id":"vm-local"}]}`
+	rr := httptest.NewRecorder()
+	cp.registerRelayFlock(rr, httptest.NewRequest(http.MethodPost, "/flocks/routed-1/relay", strings.NewReader(body)), "routed-1")
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("register relay = %d, want 201", rr.Code)
+	}
+	f, ok := cp.flockMgr.Get("routed-1")
+	if !ok {
+		t.Fatalf("relay flock not registered")
+	}
+	a, ok := f.Agents["local-1"]
+	if !ok || a.VMID != "vm-local" {
+		t.Fatalf("relay Agents[\"local-1\"] = %+v (ok=%v), want VMID \"vm-local\"", a, ok)
+	}
+}
+
 // TestDeleteFlock_RevokesRelayToken covers Task 8 rollback deregistration on the
 // daemon side: deleting a hub flock (DELETE /flocks/{id}) must also strip its
 // scoped relay-token admission, so a stale relay token can no longer authenticate
@@ -281,6 +371,36 @@ func TestDeleteFlock_RevokesRelayToken(t *testing.T) {
 	}
 	if got := cp.relayTokenFor("routed-1"); got != "" {
 		t.Fatalf("relay token after flock delete = %q, want \"\" (token revoked)", got)
+	}
+	if _, ok := cp.flockMgr.Get("routed-1"); ok {
+		t.Fatalf("hub flock still present after delete")
+	}
+}
+
+// TestDeleteFlock_RevokesCallToken mirrors TestDeleteFlock_RevokesRelayToken:
+// deleting a hub flock must also strip its scoped call-token admission, so a
+// stale call token can no longer authenticate a call entry after the routed
+// flock is gone.
+func TestDeleteFlock_RevokesCallToken(t *testing.T) {
+	cp := newTestCP(t)
+
+	body := `{"roster":[{"agent_id":"researcher-1","host":"hostB"}],"relay_token":"rt-1","call_token":"ct-1"}`
+	rr := httptest.NewRecorder()
+	cp.handleFlockItem(rr, httptest.NewRequest(http.MethodPost, "/flocks/routed-1/distributed", strings.NewReader(body)))
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("distributed status = %d, want 201 (%s)", rr.Code, rr.Body.String())
+	}
+	if cp.callTokenFor("routed-1") != "ct-1" {
+		t.Fatalf("call token not admitted on hub registration")
+	}
+
+	rrDel := httptest.NewRecorder()
+	cp.handleFlockItem(rrDel, httptest.NewRequest(http.MethodDelete, "/flocks/routed-1", nil))
+	if rrDel.Code != http.StatusOK {
+		t.Fatalf("delete status = %d, want 200 (%s)", rrDel.Code, rrDel.Body.String())
+	}
+	if got := cp.callTokenFor("routed-1"); got != "" {
+		t.Fatalf("call token after flock delete = %q, want \"\" (token revoked)", got)
 	}
 	if _, ok := cp.flockMgr.Get("routed-1"); ok {
 		t.Fatalf("hub flock still present after delete")
@@ -324,5 +444,36 @@ func TestRegisterDistributedFlock_ReAdmitsRelayTokenOnReRegister(t *testing.T) {
 	}
 	if got := cp.relayTokenFor("routed-1"); got != "rt-1" {
 		t.Fatalf("relay token after re-register = %q, want rt-1 (admission not restored)", got)
+	}
+}
+
+// TestRegisterDistributedFlock_UpdatesRosterOnReRegister covers Task 1: the
+// post-spawn re-registration carries a VMID/Addr-enriched roster the initial
+// pre-spawn registration could not know. The idempotent hub path must adopt
+// that roster (not only refresh the relay-token admission), otherwise later
+// call-target resolution (Task 3) and reconcile re-POSTs (Task 5) would see a
+// stale roster missing VMID/Addr.
+func TestRegisterDistributedFlock_UpdatesRosterOnReRegister(t *testing.T) {
+	cp := newTestCP(t)
+	first := `{"roster":[{"agent_id":"researcher-1","host":"host-a"}],"relay_token":"rt-1"}`
+	rr := httptest.NewRecorder()
+	cp.registerDistributedFlock(rr, httptest.NewRequest(http.MethodPost, "/flocks/routed-1/distributed", strings.NewReader(first)), "routed-1")
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("first register = %d, want 201", rr.Code)
+	}
+
+	second := `{"roster":[{"agent_id":"researcher-1","host":"host-a","vm_id":"vm-11","addr":"http://host-a:3000"}],"relay_token":"rt-1"}`
+	rr = httptest.NewRecorder()
+	cp.registerDistributedFlock(rr, httptest.NewRequest(http.MethodPost, "/flocks/routed-1/distributed", strings.NewReader(second)), "routed-1")
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("re-register = %d, want 201", rr.Code)
+	}
+
+	f, ok := cp.flockMgr.Get("routed-1")
+	if !ok || f.Kind != orchestrator.FlockKindHub {
+		t.Fatalf("hub flock missing after re-register")
+	}
+	if len(f.Roster) != 1 || f.Roster[0].VMID != "vm-11" || f.Roster[0].Addr != "http://host-a:3000" {
+		t.Fatalf("roster not updated on re-register: %+v", f.Roster)
 	}
 }

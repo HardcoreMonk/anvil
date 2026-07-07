@@ -71,6 +71,13 @@ type RoutedFlockRecord struct {
 	// State() redacts from every external view) and then scrubbed from the
 	// record retained in the store.
 	relayToken string
+	// callToken carries the flock's per-flock call secret from create ->
+	// store persistence. It mirrors relayToken exactly: unexported so it is
+	// NEVER JSON-serialized into MCP output, audit, or the scheduler
+	// placements endpoint. On save it is copied into the store's dedicated
+	// RoutedFlockCallTokens map (which State() redacts from every external
+	// view) and then scrubbed from the record retained in the store.
+	callToken string
 }
 
 type RoutedFlockAgent struct {
@@ -110,6 +117,11 @@ type PlacementStoreState struct {
 	// Persisted for reconcile re-registration (Task 7) but REDACTED by State()
 	// so it never reaches the scheduler placements endpoint or any MCP output.
 	RoutedFlockRelayTokens map[string]string `json:"routed_flock_relay_tokens,omitempty"`
+	// RoutedFlockCallTokens holds per-flock call secrets keyed by flock id.
+	// Mirrors RoutedFlockRelayTokens exactly: persisted for reconcile
+	// re-registration but REDACTED by State() so it never reaches the
+	// scheduler placements endpoint or any MCP output.
+	RoutedFlockCallTokens map[string]string `json:"routed_flock_call_tokens,omitempty"`
 }
 
 type PlacementStore struct {
@@ -134,6 +146,7 @@ func NewPlacementStore(path string) *PlacementStore {
 			FlockPlacementMetrics:  newFlockPlacementMetricsState(),
 			RoutedFlocks:           make(map[string]RoutedFlockRecord),
 			RoutedFlockRelayTokens: make(map[string]string),
+			RoutedFlockCallTokens:  make(map[string]string),
 		},
 	}
 }
@@ -197,6 +210,7 @@ func mergePersistedPlacementStoreFields(path string, state *PlacementStoreState,
 		state.FlockPlacementMetrics = cloneFlockPlacementMetricsState(persisted.FlockPlacementMetrics)
 	}
 	mergePersistedRoutedFlocks(persisted.RoutedFlocks, state)
+	mergePersistedRoutedFlockTokens(persisted.RoutedFlockRelayTokens, persisted.RoutedFlockCallTokens, state)
 	return nil
 }
 
@@ -242,6 +256,33 @@ func mergePersistedRoutedFlocks(persisted map[string]RoutedFlockRecord, state *P
 		}
 	}
 	state.RoutedFlocks = next
+}
+
+// mergePersistedRoutedFlockTokens mirrors mergePersistedRoutedFlocks' handling
+// of RoutedFlocks for the two redacted per-flock secret maps: routed flock
+// tokens are only ever mutated through SaveRoutedFlockAndPlacements and
+// removeRoutedFlockRelayToken/removeRoutedFlockCallToken, all three of which
+// read-modify-write the full persisted state directly (base = disk, mutate,
+// write back). That means a generic (non-flock) save never has a staged
+// in-memory token change that isn't already reflected on disk -- so, exactly
+// like RoutedFlocks records, it is both safe and necessary to take the token
+// maps entirely from disk rather than keeping the calling instance's
+// possibly-stale in-memory copy. Safe: a stale instance can never be "ahead"
+// of disk for tokens it already knows about. Necessary: without this, a
+// generic save from an instance that hasn't reloaded since another instance
+// persisted (or removed) a flock's token would silently overwrite that
+// token's disk entry with its own stale (missing, or stale-present) copy --
+// losing a concurrent writer's token, or resurrecting one that removeRouted-
+// Flock*Token already deleted from disk.
+func mergePersistedRoutedFlockTokens(relayTokens, callTokens map[string]string, state *PlacementStoreState) {
+	state.RoutedFlockRelayTokens = make(map[string]string, len(relayTokens))
+	for flockID, token := range relayTokens {
+		state.RoutedFlockRelayTokens[flockID] = token
+	}
+	state.RoutedFlockCallTokens = make(map[string]string, len(callTokens))
+	for flockID, token := range callTokens {
+		state.RoutedFlockCallTokens[flockID] = token
+	}
 }
 
 func writePlacementStoreState(path string, state PlacementStoreState) error {
@@ -694,6 +735,9 @@ func (s *PlacementStore) State() PlacementStoreState {
 	// which feeds the scheduler placements endpoint and other external views.
 	// Disk persistence clones s.state directly, so it retains the tokens.
 	state.RoutedFlockRelayTokens = nil
+	// Call tokens mirror relay tokens: same per-flock secret exposure risk,
+	// same redaction.
+	state.RoutedFlockCallTokens = nil
 	return state
 }
 
@@ -748,6 +792,58 @@ func (s *PlacementStore) removeRoutedFlockRelayToken(flockID string) error {
 	return nil
 }
 
+// RoutedFlockCallToken returns the persisted per-flock call secret. It
+// mirrors RoutedFlockRelayToken exactly: an internal accessor whose token is
+// never surfaced through State() or any MCP-facing projection.
+func (s *PlacementStore) RoutedFlockCallToken(flockID string) (string, bool) {
+	flockID = strings.TrimSpace(flockID)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	token, ok := s.state.RoutedFlockCallTokens[flockID]
+	return token, ok
+}
+
+// removeRoutedFlockCallToken deletes a flock's persisted call secret from the
+// store (and disk) so no stale token lingers after the flock is rolled back or
+// deleted. It mirrors removeRoutedFlockRelayToken's read-modify-write so
+// metrics and other routed-flock records persisted concurrently are
+// preserved. It is idempotent: removing an absent token is a no-op.
+// Best-effort: the caller may ignore the returned error (a persistence
+// failure only leaves a token that a later deregistration or reconcile can
+// still purge).
+func (s *PlacementStore) removeRoutedFlockCallToken(flockID string) error {
+	flockID = strings.TrimSpace(flockID)
+	if flockID == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensureMaps()
+
+	if strings.TrimSpace(s.path) == "" {
+		delete(s.state.RoutedFlockCallTokens, flockID)
+		return nil
+	}
+
+	previous := clonePlacementStoreState(s.state)
+	base := clonePlacementStoreState(s.state)
+	persisted, exists, err := readPlacementStoreState(s.path)
+	if err != nil {
+		return err
+	}
+	if exists {
+		base = persisted
+	}
+	normalizePlacementStoreState(&base)
+	delete(base.RoutedFlockCallTokens, flockID)
+	if err := writePlacementStoreState(s.path, base); err != nil {
+		s.state = previous
+		return err
+	}
+	s.state = clonePlacementStoreState(base)
+	return nil
+}
+
 func (s *PlacementStore) ensureMaps() {
 	normalizePlacementStoreState(&s.state)
 }
@@ -790,6 +886,9 @@ func normalizePlacementStoreState(state *PlacementStoreState) {
 	if state.RoutedFlockRelayTokens == nil {
 		state.RoutedFlockRelayTokens = make(map[string]string)
 	}
+	if state.RoutedFlockCallTokens == nil {
+		state.RoutedFlockCallTokens = make(map[string]string)
+	}
 	if state.RoutedFlocks == nil {
 		state.RoutedFlocks = make(map[string]RoutedFlockRecord)
 	}
@@ -829,6 +928,7 @@ func clonePlacementStoreState(state PlacementStoreState) PlacementStoreState {
 		SuspectVMPlacements:    make(map[string]SuspectVMPlacement, len(state.SuspectVMPlacements)),
 		RoutedFlocks:           make(map[string]RoutedFlockRecord, len(state.RoutedFlocks)),
 		RoutedFlockRelayTokens: make(map[string]string, len(state.RoutedFlockRelayTokens)),
+		RoutedFlockCallTokens:  make(map[string]string, len(state.RoutedFlockCallTokens)),
 	}
 	for name, host := range state.Hosts {
 		out.Hosts[name] = cloneRuntimeHost(host)
@@ -853,6 +953,9 @@ func clonePlacementStoreState(state PlacementStoreState) PlacementStoreState {
 	}
 	for flockID, token := range state.RoutedFlockRelayTokens {
 		out.RoutedFlockRelayTokens[flockID] = token
+	}
+	for flockID, token := range state.RoutedFlockCallTokens {
+		out.RoutedFlockCallTokens[flockID] = token
 	}
 	out.ControlLoopStatus = state.ControlLoopStatus
 	out.ControlLoopStatus.Hosts = make(map[string]HostObservation, len(state.ControlLoopStatus.Hosts))
@@ -910,6 +1013,13 @@ func applyRoutedFlockAndPlacements(state *PlacementStoreState, record RoutedFloc
 		state.RoutedFlockRelayTokens[record.FlockID] = token
 	}
 	record.relayToken = ""
+	// Call tokens mirror relay tokens: persist into the dedicated map (only
+	// when the carrier is set, so token-less re-saves preserve the persisted
+	// value), then scrub from the record retained in the store.
+	if token := strings.TrimSpace(record.callToken); token != "" {
+		state.RoutedFlockCallTokens[record.FlockID] = token
+	}
+	record.callToken = ""
 	state.RoutedFlocks[record.FlockID] = cloneRoutedFlockRecord(record)
 	for _, vmID := range removeVMIDs {
 		delete(state.VMPlacements, strings.TrimSpace(vmID))

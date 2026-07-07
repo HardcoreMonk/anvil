@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -74,6 +75,9 @@ type TownWallPostRequest struct {
 type distributedFlockRequest struct {
 	Roster     []orchestrator.RosterMember `json:"roster"`
 	RelayToken string                      `json:"relay_token"`
+	// CallToken is the per-flock call-hop secret (admitted for /call only,
+	// never wall paths — see callPathFlockID).
+	CallToken string `json:"call_token"`
 }
 
 // relayFlockRequest is the POST /flocks/{id}/relay body: a member daemon uses
@@ -82,6 +86,15 @@ type distributedFlockRequest struct {
 type relayFlockRequest struct {
 	HomeAddr   string `json:"home_addr"`
 	RelayToken string `json:"relay_token"`
+	// CallToken is the per-flock call-hop secret (admitted for /call only,
+	// never wall paths — see callPathFlockID).
+	CallToken string `json:"call_token"`
+	// Agents is this host's member list (agent_id + vm_id only; Host/Addr are
+	// remote-host fields and are ignored here) — 2026-07-08 design correction:
+	// a hopped call landing on this relay flock (the real topology for a
+	// member daemon receiving home's 2nd hop) resolves locally against this
+	// list instead of unconditionally 404ing. See callFlockAgent.
+	Agents []orchestrator.RosterMember `json:"agents"`
 }
 
 // registerOrchestratorRoutes wires flock endpoints onto the control plane mux.
@@ -135,6 +148,8 @@ func (cp *ControlPlane) handleFlockItem(w http.ResponseWriter, r *http.Request) 
 		cp.registerDistributedFlock(w, r, flockID)
 	case sub == "relay" && r.Method == http.MethodPost:
 		cp.registerRelayFlock(w, r, flockID)
+	case sub == "call" && r.Method == http.MethodPost:
+		cp.callFlockAgent(w, r, flockID)
 	case sub == "agents" || strings.HasPrefix(sub, "agents/"):
 		rest := strings.TrimPrefix(strings.TrimPrefix(sub, "agents"), "/")
 		agentID, action, _ := strings.Cut(rest, "/")
@@ -315,6 +330,9 @@ func (cp *ControlPlane) deleteFlock(w http.ResponseWriter, flockID string) {
 	// Revoke the flock's scoped relay-token admission (Task 8): once the flock is
 	// gone, a stale relay token must no longer authenticate a cross-host wall hop.
 	cp.removeRelayToken(flockID)
+	// Revoke the flock's scoped call-token admission too, mirroring the relay
+	// token above: a stale call token must no longer authenticate a call entry.
+	cp.removeCallToken(flockID)
 	agents := f.Snapshot()
 	var wg sync.WaitGroup
 	for _, a := range agents {
@@ -1184,6 +1202,249 @@ func (cp *ControlPlane) dispatchBroadcastTask(ctx context.Context, vmID, prompt 
 	return broadcastResult{Status: "ok", Output: tr.Output, Error: tr.Error}
 }
 
+// FlockCallRequest is the POST /flocks/{id}/call body: dispatch prompt to
+// the named flock member (local, hub-remote, or via relay-to-home).
+type FlockCallRequest struct {
+	AgentID string `json:"agent_id"`
+	Prompt  string `json:"prompt"`
+}
+
+const callHopHeader = "X-Ephemera-Call-Hop"
+const taskDepthHeader = "X-Ephemera-Task-Depth"
+
+// taskDepthFromRequest reads the current nested-invocation depth from
+// X-Ephemera-Task-Depth (absent or non-positive → 0). Shared by
+// proxyAgentEndpoint's /tasks depth guard and dispatchFlockCall's local call
+// dispatch so both hops enforce the identical accumulation rule.
+func taskDepthFromRequest(r *http.Request) int {
+	if h := r.Header.Get(taskDepthHeader); h != "" {
+		if n, err := strconv.Atoi(h); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 0
+}
+
+// callFlockAgent dispatches a prompt to a named flock member. Local/hub
+// flocks resolve locally (hub falls back to its VMID/Addr roster for members
+// on other hosts); relay flocks forward to the home daemon. The per-flock
+// call token authenticates the daemon-to-daemon hops. X-Ephemera-Call-Hop
+// marks ONLY the final hop (hub -> roster-target); the relay -> home leg is
+// deliberately left unmarked because home is a resolver, not a terminus, and
+// must remain free to take its own 2nd hop (2026-07-08 C1 fix — see
+// forwardFlockCall's markHop doc for the full loop-termination argument). Any
+// request that already carries the marker never forwards again (loop guard).
+// Only {agent_id, prompt} plus the depth/hop headers cross the wire — the
+// target VM's agent token is injected by the target host daemon alone.
+// Errors carry flock/host/agent identifiers only.
+func (cp *ControlPlane) callFlockAgent(w http.ResponseWriter, r *http.Request, flockID string) {
+	f, ok := cp.flockMgr.Get(flockID)
+	if !ok {
+		writeJSONError(w, http.StatusNotFound, fmt.Errorf("flock not found"))
+		return
+	}
+	var req FlockCallRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err)
+		return
+	}
+	req.AgentID = strings.TrimSpace(req.AgentID)
+	if req.AgentID == "" || strings.TrimSpace(req.Prompt) == "" {
+		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("agent_id and prompt required"))
+		return
+	}
+	hopped := r.Header.Get(callHopHeader) != ""
+
+	// Hopped request (already forwarded once, by home or a hub 2nd hop): never
+	// forward again — loop guard — and this holds regardless of f.Kind. In the
+	// real topology a target member daemon has this flock registered as
+	// "relay" (it forwards its own outbound wall/call traffic to home), so a
+	// hopped call landing here must still resolve against THIS host's local
+	// agents (2026-07-08 design correction: relay+hopped is no longer an
+	// unconditional 404 — see relayFlockRequest.Agents /
+	// FlockManager.RegisterRelay). Local/hub flocks take the identical path.
+	if hopped {
+		if vmID, ok := cp.flockAgentLocalVM(f, req.AgentID); ok {
+			cp.dispatchFlockCall(w, r, vmID, req.Prompt)
+			return
+		}
+		writeJSONError(w, http.StatusNotFound, fmt.Errorf("agent %q not found in flock %q", req.AgentID, flockID))
+		return
+	}
+
+	// Relay flock, non-hopped: forward to home. markHop=false — home is a
+	// RESOLVER, not a terminus: it must still be free to take its own 2nd hop
+	// (hub -> roster-target) below, which requires an unhopped request. See the
+	// loop-termination note on forwardFlockCall.
+	if f.Kind == orchestrator.FlockKindRelay {
+		ctx, cancel := context.WithTimeout(r.Context(), 290*time.Second)
+		defer cancel()
+		status, body, err := forwardFlockCall(ctx, f.HomeAddr, f.CallToken, flockID, req, r.Header.Get(taskDepthHeader), false)
+		if err != nil {
+			writeJSONError(w, http.StatusBadGateway, fmt.Errorf("call relay to home failed for flock %q", flockID))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write(body)
+		return
+	}
+
+	// Local/hub: local VM registry first (works for local flocks and for hub
+	// members living on the home host — the daemon does not know its own
+	// control-plane host name, so locality == VM presence).
+	if vmID, ok := cp.flockAgentLocalVM(f, req.AgentID); ok {
+		cp.dispatchFlockCall(w, r, vmID, req.Prompt)
+		return
+	}
+	// Hub: remote member via VMID/Addr roster — one hop only. markHop=true —
+	// this IS the terminal hop: the target daemon must resolve purely locally
+	// (see the `hopped` branch above), never forwarding again.
+	if f.Kind == orchestrator.FlockKindHub {
+		if member, ok := rosterMember(f, req.AgentID); ok && member.Addr != "" {
+			ctx, cancel := context.WithTimeout(r.Context(), 280*time.Second)
+			defer cancel()
+			status, body, err := forwardFlockCall(ctx, member.Addr, f.CallToken, flockID, req, r.Header.Get(taskDepthHeader), true)
+			if err != nil {
+				writeJSONError(w, http.StatusBadGateway, fmt.Errorf("call hop to member host %q failed", member.Host))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			_, _ = w.Write(body)
+			return
+		}
+	}
+	writeJSONError(w, http.StatusNotFound, fmt.Errorf("agent %q not found in flock %q", req.AgentID, flockID))
+}
+
+// forwardFlockCall sends {agent_id, prompt} to addr's /flocks/{id}/call with
+// the per-flock call token and the caller's task depth propagated verbatim
+// (accumulation happens only at the final local dispatch).
+//
+// markHop controls whether the hop marker (X-Ephemera-Call-Hop) is set on the
+// outgoing request, and this is what makes the 2-hop topology terminate
+// instead of looping:
+//   - relay -> home (markHop=false): home is a RESOLVER, not a terminus. It
+//     must receive an unmarked request so it remains free to take its own
+//     2nd hop (hub -> roster-target) if the agent isn't local to home.
+//   - hub -> roster-target (markHop=true): this is always the FINAL hop. The
+//     target daemon's `hopped` branch in callFlockAgent resolves purely
+//     locally and never forwards again, regardless of its own flock kind.
+//
+// Since a request can only ever be unmarked on the first (relay->home) leg
+// and marked on the second (hub->target) leg, and a marked request can never
+// be forwarded again, the chain is capped at exactly two forwards and cannot
+// cycle.
+func forwardFlockCall(ctx context.Context, addr, callToken, flockID string, call FlockCallRequest, depth string, markHop bool) (int, []byte, error) {
+	payload, _ := json.Marshal(call)
+	url := strings.TrimRight(addr, "/") + "/flocks/" + flockID + "/call"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+callToken)
+	if markHop {
+		req.Header.Set(callHopHeader, "1")
+	}
+	if depth != "" {
+		req.Header.Set(taskDepthHeader, depth)
+	}
+	resp, err := newAgentHTTPClient().Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, body, nil
+}
+
+// flockAgentLocalVM resolves agentID to a VMID present in THIS daemon's local
+// VM registry (cp.vms) — the same map proxyAgentEndpoint looks up by vmID.
+// Local flocks and hub flocks share the same check: a hub flock's own
+// Agents map is normally empty (it owns no local VMs), so this also checks
+// the hub Roster for a matching agentID whose VMID happens to be a VM this
+// daemon runs — the "hub member lives on the home host" case. A daemon has
+// no way to know its own control-plane host name, so VM-registry presence is
+// the only reliable locality test.
+func (cp *ControlPlane) flockAgentLocalVM(f *orchestrator.Flock, agentID string) (string, bool) {
+	if a, ok := f.Agents[agentID]; ok {
+		cp.mu.RLock()
+		_, present := cp.vms[a.VMID]
+		cp.mu.RUnlock()
+		if present {
+			return a.VMID, true
+		}
+	}
+	for _, m := range f.Roster {
+		if m.AgentID != agentID || m.VMID == "" {
+			continue
+		}
+		cp.mu.RLock()
+		_, present := cp.vms[m.VMID]
+		cp.mu.RUnlock()
+		if present {
+			return m.VMID, true
+		}
+	}
+	return "", false
+}
+
+// rosterMember finds agentID in a hub flock's remote-membership roster.
+func rosterMember(f *orchestrator.Flock, agentID string) (orchestrator.RosterMember, bool) {
+	for _, m := range f.Roster {
+		if m.AgentID == agentID {
+			return m, true
+		}
+	}
+	return orchestrator.RosterMember{}, false
+}
+
+// dispatchFlockCall is the final local hop of a /call dispatch: it enforces
+// the identical nested-invocation depth guard proxyAgentEndpoint applies to
+// direct /tasks proxying (a call-path dispatch must never bypass that cap)
+// before POSTing {"prompt": prompt} to the target VM's goose-agent /tasks
+// endpoint with the per-VM agent token injected. The agent's raw response
+// (status + body) is returned to the caller unmodified.
+func (cp *ControlPlane) dispatchFlockCall(w http.ResponseWriter, r *http.Request, vmID, prompt string) {
+	depth := taskDepthFromRequest(r)
+	if depth >= maxTaskDepth {
+		slog.Warn("call task depth exceeded", "vm_id", vmID, "depth", depth, "max", maxTaskDepth)
+		writeJSONError(w, http.StatusLoopDetected, fmt.Errorf("max task depth %d exceeded", maxTaskDepth))
+		return
+	}
+	cp.mu.RLock()
+	v, ok := cp.vms[vmID]
+	cp.mu.RUnlock()
+	if !ok {
+		writeJSONError(w, http.StatusNotFound, fmt.Errorf("vm not found"))
+		return
+	}
+	body, _ := json.Marshal(map[string]string{"prompt": prompt})
+	url := fmt.Sprintf("http://%s:%d/tasks", v.GuestIP, agentPort)
+	httpReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err)
+		return
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if v.agentToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+v.agentToken)
+	}
+	httpReq.Header.Set(taskDepthHeader, strconv.Itoa(depth+1))
+	resp, err := cp.agentHTTPClient.Do(httpReq)
+	if err != nil {
+		writeJSONError(w, http.StatusBadGateway, fmt.Errorf("agent unreachable"))
+		return
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	_, _ = w.Write(raw)
+}
+
 // registerDistributedFlock (home host) creates the canonical wall for a
 // cross-host routed flock. Idempotent: re-registration reuses the existing wall.
 // POST /flocks/{id}/distributed.
@@ -1220,7 +1481,22 @@ func (cp *ControlPlane) registerDistributedFlock(w http.ResponseWriter, r *http.
 			writeJSONError(w, http.StatusConflict, fmt.Errorf("flock %q already registered as a non-hub flock", flockID))
 			return
 		}
+		// Re-registration refreshes the roster too (not only the token): the
+		// post-spawn re-POST carries the VMID/Addr-enriched roster the initial
+		// pre-spawn registration could not know, and reconcile re-POSTs depend
+		// on the same path after a daemon restart.
+		if len(req.Roster) > 0 {
+			// UpdateHubRoster returns false only if the flock vanished (deleted
+			// by a concurrent request) between the Get above and this call — a
+			// narrow TOCTOU window, not reproducible as a deterministic unit
+			// test. Log and continue: the roster update is best-effort here,
+			// same as the token admission calls below.
+			if !cp.flockMgr.UpdateHubRoster(flockID, req.Roster) {
+				slog.Warn("flock: hub roster update raced with delete", "flock_id", flockID)
+			}
+		}
 		cp.setRelayToken(flockID, req.RelayToken)
+		cp.setCallToken(flockID, req.CallToken)
 		w.WriteHeader(http.StatusCreated)
 		return
 	}
@@ -1230,8 +1506,9 @@ func (cp *ControlPlane) registerDistributedFlock(w http.ResponseWriter, r *http.
 		writeJSONError(w, http.StatusInternalServerError, err)
 		return
 	}
-	cp.flockMgr.RegisterHub(flockID, wall, req.Roster, req.RelayToken)
+	cp.flockMgr.RegisterHub(flockID, wall, req.Roster, req.RelayToken, req.CallToken)
 	cp.setRelayToken(flockID, req.RelayToken)
+	cp.setCallToken(flockID, req.CallToken)
 	w.WriteHeader(http.StatusCreated)
 }
 
@@ -1254,7 +1531,17 @@ func (cp *ControlPlane) registerRelayFlock(w http.ResponseWriter, r *http.Reques
 		writeJSONError(w, http.StatusConflict, fmt.Errorf("flock %q already registered as a non-relay flock", flockID))
 		return
 	}
-	cp.flockMgr.RegisterRelay(flockID, req.HomeAddr, req.RelayToken)
+	cp.flockMgr.RegisterRelay(flockID, req.HomeAddr, req.RelayToken, req.CallToken, req.Agents)
+	// Admit the guest's relay/call tokens through THIS (member) daemon's
+	// authMiddleware too — mirroring the hub registration above. Without this, a
+	// guest VM's inbound gtwall/gtcall request that lands on the member daemon
+	// (auth-on) 401s before it can even reach the relay-forward-to-home logic:
+	// registerRelayFlock previously only called RegisterRelay on the in-memory
+	// flock struct (which the member's own outbound relay hop to home reads from
+	// f.RelayToken), never registering the tokens in cp.relayTokens/cp.callTokens
+	// for INBOUND admission (wall slice potential defect fix).
+	cp.setRelayToken(flockID, req.RelayToken)
+	cp.setCallToken(flockID, req.CallToken)
 	w.WriteHeader(http.StatusCreated)
 }
 

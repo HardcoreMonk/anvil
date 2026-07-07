@@ -22,7 +22,7 @@ func TestPostToTownWall_RelayForwardsToHome(t *testing.T) {
 	defer home.Close()
 
 	cp := newTestCP(t)
-	cp.flockMgr.RegisterRelay("routed-1", home.URL, "rt-1")
+	cp.flockMgr.RegisterRelay("routed-1", home.URL, "rt-1", "", nil)
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/flocks/routed-1/post", strings.NewReader(`{"agent_id":"researcher-1","body":"hi"}`))
@@ -60,7 +60,7 @@ func TestTownWallHistory_RelayProxiesToHome(t *testing.T) {
 	defer home.Close()
 
 	cp := newTestCP(t)
-	cp.flockMgr.RegisterRelay("routed-1", home.URL, "rt-1")
+	cp.flockMgr.RegisterRelay("routed-1", home.URL, "rt-1", "", nil)
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/flocks/routed-1/wall/history?agent_id=researcher-1", nil)
@@ -96,7 +96,7 @@ func TestPostToTownWall_RelayHonorsCallerContext(t *testing.T) {
 	defer home.Close()
 
 	cp := newTestCP(t)
-	cp.flockMgr.RegisterRelay("routed-1", home.URL, "rt-1")
+	cp.flockMgr.RegisterRelay("routed-1", home.URL, "rt-1", "", nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled before the relay hop
@@ -121,7 +121,7 @@ func TestTownWallHistory_RelayHonorsCallerContext(t *testing.T) {
 	defer home.Close()
 
 	cp := newTestCP(t)
-	cp.flockMgr.RegisterRelay("routed-1", home.URL, "rt-1")
+	cp.flockMgr.RegisterRelay("routed-1", home.URL, "rt-1", "", nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -154,7 +154,7 @@ func TestStreamTownWall_RelayDialsHomeWithToken(t *testing.T) {
 	defer home.Close()
 
 	cp := newTestCP(t)
-	cp.flockMgr.RegisterRelay("routed-1", home.URL, "rt-1")
+	cp.flockMgr.RegisterRelay("routed-1", home.URL, "rt-1", "", nil)
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/flocks/routed-1/wall", nil)

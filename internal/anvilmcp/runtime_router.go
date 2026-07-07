@@ -340,16 +340,19 @@ func (r *RuntimeRouter) StartReconcileLoop(ctx context.Context, interval time.Du
 // reconcileRoutedFlockWalls re-registers the shared Town Wall hub and relay
 // flocks for every persisted routed flock, healing the in-memory flock
 // registrations a home/member daemon loses on restart. It re-issues
-// RegisterDistributedFlock to the home daemon (roster from the record's agents,
-// relay token from the persisted store) and RegisterRelayFlock to each member
-// host that is not the home host. Registration endpoints are idempotent
-// (Task 3), so re-issuing when already present is safe.
+// RegisterDistributedFlock to the home daemon (VMID/Addr-enriched roster from
+// the record's agents, relay + call token from the persisted store) and
+// RegisterRelayFlock to each member host that is not the home host (that
+// host's own local agents, so a hopped /call resolves locally). Registration
+// endpoints are idempotent (Task 3), so re-issuing when already present is
+// safe. A record with no persisted call token (pre-existing records) still
+// reconciles with an empty CallToken — backward compatible, not skipped.
 //
 // Flocks that are deleted/deleting or carry no home host are skipped. A single
 // flock's (or member's) failure is collected and reconcile continues so one
 // unreachable daemon cannot block healing the rest. Error strings are bounded to
-// flock/host identifiers only: the relay token and daemon addresses are never
-// surfaced (redaction discipline — the token flows daemon-to-daemon only).
+// flock/host identifiers only: the relay/call tokens and daemon addresses are
+// never surfaced (redaction discipline — the tokens flow daemon-to-daemon only).
 func (r *RuntimeRouter) reconcileRoutedFlockWalls(ctx context.Context) error {
 	if r == nil || r.placementStore == nil {
 		return nil
@@ -375,15 +378,39 @@ func (r *RuntimeRouter) reconcileRoutedFlockWalls(ctx context.Context) error {
 			errs = append(errs, fmt.Errorf("reconcile routed flock %q: home host %q has no daemon client", flockID, homeHost))
 			continue
 		}
+		// Call token is optional for backward compatibility: older records saved
+		// before the call token existed have none persisted. Re-registration
+		// continues with an empty CallToken in that case (relay token alone still
+		// heals the wall); it does not skip the record.
+		callToken, _ := r.placementStore.RoutedFlockCallToken(flockID)
 		roster := make([]RosterMember, 0, len(record.Agents))
 		for _, a := range record.Agents {
-			roster = append(roster, RosterMember{AgentID: strings.TrimSpace(a.AgentID), Host: strings.TrimSpace(a.Host)})
+			roster = append(roster, RosterMember{
+				AgentID: strings.TrimSpace(a.AgentID),
+				Host:    strings.TrimSpace(a.Host),
+				VMID:    strings.TrimSpace(a.VMID),
+				Addr:    r.daemonAddr(strings.TrimSpace(a.Host)),
+			})
 		}
-		if err := homeDaemon.RegisterDistributedFlock(ctx, flockID, DistributedFlockRequest{Roster: roster, RelayToken: relayToken}); err != nil {
+		if err := homeDaemon.RegisterDistributedFlock(ctx, flockID, DistributedFlockRequest{Roster: roster, RelayToken: relayToken, CallToken: callToken}); err != nil {
 			errs = append(errs, fmt.Errorf("reconcile routed flock %q: hub re-registration on home host %q failed", flockID, homeHost))
 			continue
 		}
 		homeAddr := r.daemonAddr(homeHost)
+		// memberAgents groups each non-home member host's own local agents
+		// (agent_id + vm_id) so its relay re-registration lets a hopped /call
+		// landing on that daemon resolve the target locally.
+		memberAgents := make(map[string][]RosterMember)
+		for _, a := range record.Agents {
+			host := strings.TrimSpace(a.Host)
+			if host == "" || host == homeHost {
+				continue
+			}
+			memberAgents[host] = append(memberAgents[host], RosterMember{
+				AgentID: strings.TrimSpace(a.AgentID),
+				VMID:    strings.TrimSpace(a.VMID),
+			})
+		}
 		relayed := map[string]bool{homeHost: true}
 		for _, a := range record.Agents {
 			host := strings.TrimSpace(a.Host)
@@ -396,7 +423,12 @@ func (r *RuntimeRouter) reconcileRoutedFlockWalls(ctx context.Context) error {
 				errs = append(errs, fmt.Errorf("reconcile routed flock %q: member host %q has no daemon client", flockID, host))
 				continue
 			}
-			if err := daemon.RegisterRelayFlock(ctx, flockID, RelayFlockRequest{HomeAddr: homeAddr, RelayToken: relayToken}); err != nil {
+			if err := daemon.RegisterRelayFlock(ctx, flockID, RelayFlockRequest{
+				HomeAddr:   homeAddr,
+				RelayToken: relayToken,
+				CallToken:  callToken,
+				Agents:     memberAgents[host],
+			}); err != nil {
 				errs = append(errs, fmt.Errorf("reconcile routed flock %q: relay re-registration on member host %q failed", flockID, host))
 			}
 		}

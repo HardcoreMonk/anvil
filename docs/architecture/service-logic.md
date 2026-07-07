@@ -46,6 +46,7 @@ control plane daemon은 하나의 HTTP service를 노출한다.
 | `/flocks/{flock_id}/post` | `cmd/goose-daemon/orchestrator_api.go` | Town Wall message append |
 | `/flocks/{flock_id}/wall` | `cmd/goose-daemon/orchestrator_api.go` | Town Wall SSE stream |
 | `/flocks/{flock_id}/wall/history` | `cmd/goose-daemon/orchestrator_api.go` | Town Wall history 조회 |
+| `/flocks/{flock_id}/call` | `cmd/goose-daemon/orchestrator_api.go` | 지정 agent에 프롬프트 dispatch(`{agent_id, prompt}`). local/hub는 로컬 VM registry 또는 hub roster로 직접 처리, relay는 home으로 forward(최대 2-hop, `X-Ephemera-Call-Hop`로 loop guard). guest는 flock의 `relay_token`(wall+call 겸용 guest 능력 토큰)으로, daemon hop은 전용 `call_token`(call만 admit, wall 거부)으로 인증 |
 | `/flocks/{flock_id}/distributed` | `cmd/goose-daemon/orchestrator_api.go` | home host에 hub flock(공유 `TownWall`) 등록. idempotent, 다른 kind가 점유한 id는 `409`. internalMux + `authMiddleware`(control-plane bearer) |
 | `/flocks/{flock_id}/relay` | `cmd/goose-daemon/orchestrator_api.go` | member host에 relay flock(post/wall/history를 home으로 forward/proxy) 등록. idempotent, 다른 kind가 점유한 id는 `409`. internalMux + `authMiddleware`(control-plane bearer) |
 | `/flocks/{flock_id}/broadcast` | `cmd/goose-daemon/orchestrator_api.go` | flock 전 member agent에 prompt scatter-gather. daemon-only endpoint이며 `anvil_*` MCP tool로 노출하지 않는다 |
@@ -149,6 +150,16 @@ relay -> home hub) 전용이며, 요청 path가 그 flock의 Town Wall sub-path
 일치할 때만 admit한다 — 다른 route나 다른 flock으로는 승격되지 않는다. 이 hop은 auth
 metric `outcome="relay"`(`countAuth("relay")`)로 집계되고, synthetic identity
 `relay:<flockID>`로 access log/audit에 기록돼 익명 hop으로 남지 않는다.
+
+2026-07-08 cross-host gtcall slice부터 `relay_token`은 **guest 능력 토큰**으로
+재해석된다 — 위 wall sub-path뿐 아니라 그 flock의 `/flocks/{id}/call`도 함께
+admit한다(guest가 로컬 daemon에서 gtwall/gtcall 모두 이 토큰으로 인증). 같은 자리에서
+per-flock `call_token` admission도 확인하는데, 이 token은 daemon-to-daemon call
+hop(member -> home, home -> target) 전용이며 요청 path가 그 flock의
+`/flocks/{id}/call`일 때만 admit한다 — wall sub-path는 거부해 두 토큰의 blast
+radius를 분리한다(control-plane bearer 승격 금지). call hop은 auth metric
+`outcome="call"`(`countAuth("call")`)과 synthetic identity `call:<flockID>`로
+기록된다.
 
 token 비교는 constant-time comparison을 사용하고 첫 후보에서 멈추지 않는다.
 partial token match가 timing으로 새지 않게 하기 위한 선택이다.

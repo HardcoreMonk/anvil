@@ -113,7 +113,8 @@ backport(atomic temp+rename 무조건 검증 포함, upstream보다 stricter)가
 | anvil scheduler service | host inventory, quota, placement, snapshot locality를 바탕으로 runtime host 선택을 반환하는 얇은 HTTP service | `cmd/anvil-scheduler`, `internal/anvilmcp` |
 | routed flock | scheduler placement planner로 여러 host daemon에 member VM을 배치하는 cross-host flock. control plane(`internal/anvilmcp`)이 registry(`PlacementStore`)를 소유한다 | `internal/anvilmcp` |
 | Town Wall hub/relay | flock 공유 게시판의 cross-host 형태. routed flock의 home host(= `roles[0]` 배치 host) daemon이 canonical wall을 hub flock으로 소유하고, 나머지 member host daemon은 relay flock으로 post를 forward, wall/history/SSE를 proxy한다. 단일 host flock은 계속 local kind다 | `internal/orchestrator`, `cmd/goose-daemon` |
-| relay_token | routed flock의 daemon-to-daemon wall hop 전용 per-flock secret. 해당 flock의 wall sub-path(`post\|wall\|wall/history`)만 admit하고(control-plane bearer 승격 금지) 모든 직렬화 표면에서 redaction된다 | `cmd/goose-daemon`, `internal/anvilmcp` |
+| relay_token | routed flock의 **guest 능력 토큰**(per-flock secret, 2026-07-07 A안 재해석). 해당 flock의 wall sub-path(`post\|wall\|wall/history`) **와 `call` 진입**을 모두 admit한다 — guest가 로컬 daemon에서 gtwall/gtcall 모두 이 토큰으로 인증한다(단일 host flock의 guest CP token→gtcall 개방과 동형). control-plane bearer로 승격하지 않으며 모든 직렬화 표면에서 redaction된다 | `cmd/goose-daemon`, `internal/anvilmcp` |
+| call_token | routed flock의 daemon-to-daemon **call hop 전용** per-flock secret(member→home, home→target). `relay_token`과 나란한 규율이지만 admit 범위는 더 좁다 — **오직 `/flocks/{id}/call` 경로만** admit하고 wall sub-path는 거부한다(control-plane bearer 승격 금지). `PlacementStore`에 영속되고 모든 직렬화 표면에서 redaction된다 | `cmd/goose-daemon`, `internal/anvilmcp` |
 | 공개 릴리즈 경계 | anvil이 공개적으로 책임지는 기능 표면과 제외 표면 | `docs/PUBLIC_RELEASE_BOUNDARY.md` |
 | ADR | 공개 경계, token/auth, MCP tool 계약, runtime lifecycle 같은 장기 결정을 남기는 기록 | `docs/adr/*.md` |
 
@@ -323,7 +324,9 @@ daemon으로 보내는 outbound Bearer token이다.
   `control_plane_token`)를 수용해 routed member VM에서 `gtwall`이 작동하고, daemon
   `POST /flocks/{id}/distributed`·`POST /flocks/{id}/relay`가 hub/relay 등록을
   제공한다(다른 kind가 점유한 id는 `409`). per-flock `relay_token`은 해당 flock의
-  wall sub-path만 admit하며(전 표면 redaction, auth metric `relay` outcome +
+  wall sub-path를 admit하며(도입 당시 wall 전용 — cross-host gtcall부터 guest
+  능력 토큰으로 `call` 진입도 admit, 아래 항목; 전 표면 redaction, auth metric
+  `relay` outcome +
   `relay:<flockID>` identity 기록), rollback/delete는 spawn 실패 member를 포함해
   hub/relay 등록을 해제하고 reconcile이 daemon 재시작 후 재등록한다. guest는
   bridge-only를 유지하고 신규 `anvil_*` MCP tool은 없다(runtime/operator 표면).
@@ -335,10 +338,33 @@ daemon으로 보내는 outbound Bearer token이다.
   `ANVIL_MCP_RECONCILE_INTERVAL`(기본 `60s`, `0`=off)과 `StartReconcileLoop`가
   `members_only` 모드에서 daemon 시작 시 주기적으로 `ReconcilePlacements`를 호출해
   hub/relay wall 등록과 relay-token admission을 자동 복구한다.
+- cross-host gtcall(2026-07-08)이 main에 편입됐다. routed flock의 임의 member가
+  다른 임의 member를 daemon `POST /flocks/{id}/call`(`{agent_id, prompt}`)로
+  호출한다 — member→home→target 2-hop(home이 canonical roster로
+  agent→host,vm_id를 해석). hub 등록 roster가 `{AgentID, Host, VMID, Addr}`로
+  확장되고, home 재등록/reconcile이 spawn 완료 후 VMID 포함 roster로 갱신한다.
+  relay 등록도 host-local `agents: [{agent_id, vm_id}]`를 포함해, hopped call이
+  kind와 무관하게 **로컬 해석 전용**으로 성립한다(2026-07-08 설계 보정 — target
+  member daemon은 relay kind로 등록돼 있으므로 hopped call을 무조건 404로
+  끝내면 실토폴로지에서 2번째 hop이 성립하지 않던 문제를 고쳤다). **토큰 모델
+  (A안)**: `relay_token`은 guest 능력 토큰으로 그 flock의 wall과 `call` 진입을
+  모두 admit하고, 별도 `call_token`은 daemon-to-daemon call hop 전용으로 `call`
+  경로만 admit하며 wall 경로는 거부한다(`call_token`→wall 방향 배타를 테스트로
+  고정). 이 slice가
+  wall slice의 잠재 결함(`registerRelayFlock`이 admit 등록을 하지 않아 auth-on
+  member daemon에서 routed guest의 gtwall이 401되던 문제)도 동반 수정한다.
+  `X-Ephemera-Call-Hop`으로 loop guard, `X-Ephemera-Task-Depth` 전파로
+  cross-host에서도 `EPHEMERA_MAX_TASK_DEPTH`가 성립한다. 기존 2-step
+  `GET /flocks/{id}` + `POST /vms/{vm_id}/tasks` 계약은 하위호환 유지, 신규
+  `anvil_*` MCP tool 없음. KVM e2e `scripts/anvil-cross-host-gtcall-e2e.sh`
+  (real member VM + stub home, **auth-on** member daemon)로 18/18 checks ×2회
+  검증됐다.
 - `scripts/anvil-mcp-e2e.sh flock`, 전체 KVM `sudo bash e2e_test.sh`, script-only
   workload runner E2E, cross-host wall relay E2E
-  (`scripts/anvil-cross-host-wall-e2e.sh`)가 Goosetown MCP surface, daemon flock
-  lifecycle, deterministic workload, cross-host relay 검증 경로에 포함된다.
+  (`scripts/anvil-cross-host-wall-e2e.sh`), cross-host gtcall relay E2E
+  (`scripts/anvil-cross-host-gtcall-e2e.sh`)가 Goosetown MCP surface, daemon
+  flock lifecycle, deterministic workload, cross-host relay/call 검증 경로에
+  포함된다.
 
 남은 후속 후보:
 
@@ -366,7 +392,6 @@ daemon으로 보내는 outbound Bearer token이다.
 - scheduler service의 실제 운영 배포와 host inventory polling daemonization
 - cross-host snapshot replication 자동화(background retry queue·metrics·alert —
   수동 동기 replication과 snapshot locality preference는 baseline 포함)
-- cross-host `gtcall`(공유 Town Wall 다음 capability 후보)
 - Town Wall relay의 bounded retry/buffer, home SPOF 제거(hub replica set 기반
   mesh 진화), SSE relay non-200 content-type polish
 - egress allow host rule의 L7 proxy/SNI 기반 강화

@@ -691,6 +691,82 @@ func TestPlacementStoreRoutedFlockPartialCleanupSurvivesStaleGenericSave(t *test
 	}
 }
 
+// TestPlacementStoreRoutedFlockTokensSurviveStaleGenericSave is the token
+// counterpart to TestPlacementStoreRoutedFlockPartialCleanupSurvivesStale-
+// GenericSave: mergePersistedRoutedFlocks already rebuilds state.RoutedFlocks
+// entirely from disk on every generic (non-flock) save, so a stale in-memory
+// RoutedFlocks copy can never clobber a concurrently-persisted flock record.
+// Before the fix, RoutedFlockRelayTokens/RoutedFlockCallTokens were NOT
+// merged the same way: a stale store's generic save wrote back its own
+// (missing) token-map copy, wiping a concurrent writer's just-persisted
+// flock token even though that flock's RECORD survived untouched.
+func TestPlacementStoreRoutedFlockTokensSurviveStaleGenericSave(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "scheduler.json")
+
+	initial := NewPlacementStore(path)
+	recX := RoutedFlockRecord{
+		FlockID: "routed-flock-x",
+		Mode:    RoutedFlockModeCrossHostMembersOnly,
+		Status:  RoutedFlockStatusReady,
+		Agents:  []RoutedFlockAgent{{AgentID: "worker-x", Role: "worker", VMID: "vm-x", Host: "host-a", Status: "running"}},
+	}
+	recX.relayToken = "relay-x-secret"
+	recX.callToken = "call-x-secret"
+	if err := initial.SaveRoutedFlockAndPlacements(recX, nil); err != nil {
+		t.Fatalf("initial SaveRoutedFlockAndPlacements: %v", err)
+	}
+
+	// stale loads while only flock X (and its tokens) exist on disk.
+	stale := NewPlacementStore(path)
+	if err := stale.Load(); err != nil {
+		t.Fatalf("stale Load: %v", err)
+	}
+
+	// fresh persists flock Y (record + tokens) after stale's load -- stale's
+	// in-memory token maps have no entry for Y.
+	fresh := NewPlacementStore(path)
+	recY := RoutedFlockRecord{
+		FlockID: "routed-flock-y",
+		Mode:    RoutedFlockModeCrossHostMembersOnly,
+		Status:  RoutedFlockStatusReady,
+		Agents:  []RoutedFlockAgent{{AgentID: "worker-y", Role: "worker", VMID: "vm-y", Host: "host-b", Status: "running"}},
+	}
+	recY.relayToken = "relay-y-secret"
+	recY.callToken = "call-y-secret"
+	if err := fresh.SaveRoutedFlockAndPlacements(recY, nil); err != nil {
+		t.Fatalf("fresh SaveRoutedFlockAndPlacements: %v", err)
+	}
+
+	// stale performs an unrelated generic save (host state), never having
+	// reloaded since fresh persisted flock Y.
+	if err := stale.SetHostAndSave(RuntimeHost{Name: "host-c", Endpoint: "http://host-c", Healthy: true, AvailableVMs: 1}); err != nil {
+		t.Fatalf("stale SetHostAndSave: %v", err)
+	}
+
+	reloaded := NewPlacementStore(path)
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("reloaded Load: %v", err)
+	}
+	if _, ok := reloaded.RoutedFlock("routed-flock-x"); !ok {
+		t.Fatal("routed-flock-x record lost after stale generic save")
+	}
+	if _, ok := reloaded.RoutedFlock("routed-flock-y"); !ok {
+		t.Fatal("routed-flock-y record lost after stale generic save")
+	}
+	if tok, ok := reloaded.RoutedFlockRelayToken("routed-flock-x"); !ok || tok != "relay-x-secret" {
+		t.Fatalf("routed-flock-x relay token = %q,%v want relay-x-secret,true", tok, ok)
+	}
+	if tok, ok := reloaded.RoutedFlockCallToken("routed-flock-x"); !ok || tok != "call-x-secret" {
+		t.Fatalf("routed-flock-x call token = %q,%v want call-x-secret,true", tok, ok)
+	}
+	if tok, ok := reloaded.RoutedFlockRelayToken("routed-flock-y"); !ok || tok != "relay-y-secret" {
+		t.Fatalf("routed-flock-y relay token = %q,%v want relay-y-secret,true (lost by stale generic save)", tok, ok)
+	}
+	if tok, ok := reloaded.RoutedFlockCallToken("routed-flock-y"); !ok || tok != "call-y-secret" {
+		t.Fatalf("routed-flock-y call token = %q,%v want call-y-secret,true (lost by stale generic save)", tok, ok)
+	}
+}
+
 func TestPlacementStoreListRoutedFlocksSortsAndClones(t *testing.T) {
 	store := NewPlacementStore("")
 	if err := store.SaveRoutedFlockAndPlacements(RoutedFlockRecord{
@@ -834,5 +910,52 @@ func TestPlacementStoreSaveRoutedFlockAndPlacementsRollsBackOnFailure(t *testing
 	}
 	if host, ok := store.VMHost("vm-old"); !ok || host != "host-old" {
 		t.Fatalf("old VM placement = %q,%v want host-old,true", host, ok)
+	}
+}
+
+// TestPlacementStoreCallTokenLifecycle mirrors the relay-token store plumbing
+// (see TestPlacementStoreRoutedFlockRegistryPersistsAndClones and the
+// RoutedFlockRelayToken accessor tests in routed_flock_test.go /
+// runtime_router_test.go): per-flock call tokens must persist across
+// token-less re-saves and disk reload, stay redacted from State(), and be
+// removable on demand.
+func TestPlacementStoreCallTokenLifecycle(t *testing.T) {
+	dir := t.TempDir()
+	store := NewPlacementStore(filepath.Join(dir, "state.json"))
+	rec := RoutedFlockRecord{FlockID: "routed-1", Status: RoutedFlockStatusCreating}
+	rec.callToken = "ct-secret"
+	if err := store.SaveRoutedFlockAndPlacements(rec, nil); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	// 영속·carrier scrub 후에도 조회 가능
+	if tok, ok := store.RoutedFlockCallToken("routed-1"); !ok || tok != "ct-secret" {
+		t.Fatalf("call token = %q,%v want ct-secret,true", tok, ok)
+	}
+	// State() redaction
+	if store.State().RoutedFlockCallTokens != nil {
+		t.Fatal("State() must redact RoutedFlockCallTokens")
+	}
+	// 빈 carrier 재저장이 기존 entry를 지우지 않음
+	rec2 := RoutedFlockRecord{FlockID: "routed-1", Status: RoutedFlockStatusReady}
+	if err := store.SaveRoutedFlockAndPlacements(rec2, nil); err != nil {
+		t.Fatalf("re-save: %v", err)
+	}
+	if tok, _ := store.RoutedFlockCallToken("routed-1"); tok != "ct-secret" {
+		t.Fatalf("token lost on token-less re-save: %q", tok)
+	}
+	// 디스크 reload 후 생존 (clone/normalize 경로 검증)
+	store2 := NewPlacementStore(filepath.Join(dir, "state.json"))
+	if err := store2.Load(); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if tok, ok := store2.RoutedFlockCallToken("routed-1"); !ok || tok != "ct-secret" {
+		t.Fatalf("reloaded call token = %q,%v", tok, ok)
+	}
+	// revoke
+	if err := store2.removeRoutedFlockCallToken("routed-1"); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if _, ok := store2.RoutedFlockCallToken("routed-1"); ok {
+		t.Fatal("call token survived removal")
 	}
 }

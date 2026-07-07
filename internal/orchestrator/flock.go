@@ -32,6 +32,12 @@ const (
 type RosterMember struct {
 	AgentID string `json:"agent_id"`
 	Host    string `json:"host"`
+	// VMID/Addr let the hub resolve a call target and reach its host daemon.
+	// Both are filled by the post-spawn re-registration (the initial pre-spawn
+	// registration has neither). Addr is daemon-internal: never log it and
+	// never emit it on a serialized surface.
+	VMID string `json:"vm_id,omitempty"`
+	Addr string `json:"addr,omitempty"`
 }
 
 // AgentInfo is the per-agent record exposed via flock APIs.
@@ -73,6 +79,10 @@ type Flock struct {
 	// base URL and the per-flock daemon-to-daemon relay token.
 	HomeAddr   string `json:"-"`
 	RelayToken string `json:"-"`
+	// CallToken is the per-flock call-hop secret (parallel to RelayToken but
+	// scoped ONLY to the call entry point, never Town Wall paths). Set on both
+	// hub and relay flocks.
+	CallToken string `json:"-"`
 	// Roster lists remote members for a hub flock (informational; the hub owns
 	// no local VMs for those agents).
 	Roster []RosterMember `json:"-"`
@@ -437,13 +447,14 @@ func (fm *FlockManager) Register(f *Flock) {
 
 // RegisterHub registers a hub flock that owns the canonical Town Wall on the
 // home host. It has no local member VMs; roster is the remote membership.
-func (fm *FlockManager) RegisterHub(flockID string, wall *TownWall, roster []RosterMember, relayToken string) *Flock {
+func (fm *FlockManager) RegisterHub(flockID string, wall *TownWall, roster []RosterMember, relayToken, callToken string) *Flock {
 	f := &Flock{
 		ID:         flockID,
 		Kind:       FlockKindHub,
 		TownWall:   wall,
 		Roster:     roster,
 		RelayToken: relayToken,
+		CallToken:  callToken,
 		Agents:     map[string]*AgentInfo{},
 		CreatedAt:  time.Now().UTC(),
 	}
@@ -453,15 +464,43 @@ func (fm *FlockManager) RegisterHub(flockID string, wall *TownWall, roster []Ros
 	return f
 }
 
+// UpdateHubRoster replaces an existing hub flock's Roster under fm.mu. Used
+// by the idempotent /distributed re-registration path so a post-spawn re-POST
+// carrying a VMID/Addr-enriched roster can update the hub in place without a
+// raw field assignment racing concurrent readers of the pointer returned by
+// Get. Reports false when flockID is not a registered hub flock.
+func (fm *FlockManager) UpdateHubRoster(flockID string, roster []RosterMember) bool {
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	f, ok := fm.flocks[flockID]
+	if !ok || f.Kind != FlockKindHub {
+		return false
+	}
+	f.Roster = roster
+	return true
+}
+
 // RegisterRelay registers a relay flock on a member host. It owns no wall;
-// posts and reads are forwarded to homeAddr with relayToken.
-func (fm *FlockManager) RegisterRelay(flockID, homeAddr, relayToken string) *Flock {
+// posts and reads are forwarded to homeAddr with relayToken. agents is the
+// host-local member list (2026-07-08 design correction): a hopped call
+// landing on this relay flock (the real topology for a member daemon
+// receiving home's 2nd hop) must resolve against THIS host's agents rather
+// than unconditionally 404ing. Only AgentID+VMID are used — Host/Addr (if
+// present) are remote-host fields that do not apply to a relay's own local
+// roster and are ignored. An empty/nil agents leaves Agents an empty map
+// (matches the pre-existing behavior).
+func (fm *FlockManager) RegisterRelay(flockID, homeAddr, relayToken, callToken string, agents []RosterMember) *Flock {
+	agentMap := make(map[string]*AgentInfo, len(agents))
+	for _, a := range agents {
+		agentMap[a.AgentID] = &AgentInfo{AgentID: a.AgentID, VMID: a.VMID}
+	}
 	f := &Flock{
 		ID:         flockID,
 		Kind:       FlockKindRelay,
 		HomeAddr:   homeAddr,
 		RelayToken: relayToken,
-		Agents:     map[string]*AgentInfo{},
+		CallToken:  callToken,
+		Agents:     agentMap,
 		CreatedAt:  time.Now().UTC(),
 	}
 	fm.mu.Lock()
