@@ -173,7 +173,9 @@ curl -H "Authorization: Bearer $TOKEN" \
   http://127.0.0.1:3000/flocks/$FLOCK_ID/wall/history
 ```
 
-flock 삭제는 daemon이 소유한 member VM teardown 경로를 실행한다.
+flock 삭제는 daemon이 소유한 member VM teardown 경로를 실행한다. cross-host routed
+flock은 home daemon의 hub delete가 relay_token admission도 함께 revoke하므로, hub와
+각 member host의 relay flock을 모두 해제해야 완전히 정리된다.
 
 ```bash
 curl -X DELETE \
@@ -214,6 +216,15 @@ Firecracker/KVM 통합 경로를 확인할 때만 실행한다.
 go build -o anvil-daemon ./cmd/goose-daemon/
 go build -o anvil-scheduler ./cmd/anvil-scheduler
 sudo bash e2e_test.sh
+```
+
+cross-host shared Town Wall 경로는 별도 KVM e2e로 확인한다. 실제 member VM의
+`gtwall` post가 in-VM agent → member daemon(relay flock) → relay hop을 거쳐
+전달되는지 검증하며, home daemon은 두 real daemon이 guest bridge subnet에서
+충돌하는 것을 피하기 위해 stub HTTP recorder로 대체한다.
+
+```bash
+sudo -n bash scripts/anvil-cross-host-wall-e2e.sh
 ```
 
 ### VM workload E2E

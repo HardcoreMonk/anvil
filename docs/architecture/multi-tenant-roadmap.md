@@ -294,7 +294,6 @@ restore 경로의 direct token exposure는 제거됐다. 새로운 audit record,
 - 완전한 multi-tenant runtime 즉시 구현
 - cross-host `gtcall`
 - cross-host broadcast fan-out
-- daemon `FlockManager` registration for routed members-only flock
 - L7 egress proxy 또는 full HTTP CONNECT/SNI gateway
 - billing
 - UI

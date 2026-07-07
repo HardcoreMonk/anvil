@@ -121,6 +121,10 @@ curl -X DELETE \
    `metadata.json`이 있으면 daemon restart 뒤 read-mostly flock registry가 복구될 수
    있다. 장애 분석에는 사용할 수 있지만 secret 포함 여부를 확인한 뒤 공유한다.
 
+5. cross-host routed flock이면 home daemon의 hub delete가 `relay_token` admission을
+   revoke하지만, 나머지 member host의 relay flock 등록은 별도 정리가 필요할 수 있다.
+   각 member host에서 같은 `DELETE /flocks/$FLOCK_ID`를 실행해 relay 등록을 해제한다.
+
 ## restore 실패
 
 1. source VM이 실행 중인지 확인한다. 실행 중인 원본 VM의 snapshot은 restore하지

@@ -305,6 +305,9 @@ ephemera control plane :3000
   GET    /flocks/{id}/wall     -> Town Wall SSE stream
   GET    /flocks/{id}/wall/history
                                 -> active Town Wall history 조회
+  POST   /flocks/{id}/distributed
+                                -> home host에 hub flock(공유 Town Wall) 등록
+  POST   /flocks/{id}/relay    -> member host에 relay flock 등록(post/wall proxy)
 
       |
       | Firecracker SDK, KVM, TAP, rootfs, snapshot files
@@ -1450,12 +1453,17 @@ MCP tool:
   `ANVIL_MCP_CROSS_HOST_FLOCK_CREATE=members_only`와 persistent scheduler state가
   설정된 경우에만 활성화되는 experimental tool이다. scheduler `POST /schedule/flock`
   plan으로 role별 host를 고른 뒤 host daemon `POST /vms`로 member VM만 생성한다.
+  이어서 home host(`roles[0]` 배치 호스트) daemon에 `POST /flocks/{id}/distributed`로
+  hub flock을, 나머지 멤버 host daemon에 `POST /flocks/{id}/relay`로 relay flock을
+  등록해 공유 Town Wall을 구성한다.
 
 - `anvil_list_flocks` / `anvil_get_flock` / `anvil_delete_flock`:
   live flock 목록, 단일 flock metadata와 agent 상태 조회, flock 소속 VM 삭제를 처리한다.
   일반 Goosetown flock은 daemon `GET/DELETE /flocks` 의미를 따른다. members-only
   routed flock은 `scheduler_state_path` registry의 visible record를 list/get에 합치고,
   delete는 registry의 member placement를 따라 host별 daemon `DELETE /vms`로 라우팅한다.
+  delete와 create 실패 rollback은 hub/relay flock 등록도 함께 해제하고
+  (`deregisterRoutedFlockWall`) 해당 flock의 per-flock `relay_token`을 revoke한다.
 
 - `anvil_post_townwall` / `anvil_get_townwall_history`:
   flock Town Wall에 message를 append하고 stdio-compatible history를 조회한다.
@@ -1515,8 +1523,13 @@ capacity/quota를 확인한 뒤 하나의 healthy host를 선택하고, daemon
 `POST /schedule/flock` plan으로 role별 host를 정하고, 각 host daemon의 `POST /vms`를
 호출해 role VM을 생성한 뒤 member placement를 `scheduler_state_path`의 routed flock
 registry에 기록한다. 반환 `mode`는 `cross_host_members_only`,
-`town_wall_enabled=false`이며 `townwall_url`과 `post_url`은 없다. 이 첫 slice는
-Town Wall, cross-host `gtcall`, guest flock context injection을 지원하지 않는다.
+`town_wall_enabled=true`다. 2026-07-06 cross-host shared Town Wall slice부터 routed
+member는 `.ephemera-flock`/`.ephemera-cp-token`이 주입돼(`POST /vms`) guest flock
+context를 갖추고, `roles[0]` 배치 호스트가 home으로 선정돼 home daemon에 hub
+flock(공유 `TownWall`)을, 나머지 멤버 host daemon에 relay flock(post/wall/history를
+home으로 forward/proxy)을 등록한다(`internal/anvilmcp/routed_flock.go`
+`TownWallEnabled` 설정부). cross-host `gtcall`과 cross-host broadcast fan-out만 이
+slice 범위 밖 비목표로 남는다.
 `scheduler_quota_store_path` 또는 `ANVIL_MCP_SCHEDULER_QUOTA_STORE`는 scheduler quota
 store를 함께 지정할 때 사용한다. host daemon client 인증에는 `ANVIL_API_TOKEN`을
 사용한다.

@@ -212,6 +212,8 @@ runtime baseline의 canonical metric namespace는 `ephemera_*`다. anvil 기존 
 - `ephemera_cp_token_propagated_total{outcome="ok|fail"}`
 - `ephemera_cleanup_failure_total`
 - `ephemera_auth_failure_total`
+- `ephemera_auth_total{outcome="ok|denied|expired|relay"}` — `relay`는 cross-host
+  shared Town Wall daemon-to-daemon hop이 per-flock `relay_token`으로 admit된 경우
 - `ephemera_lifecycle_queue_depth`
 - `ephemera_vm_count`
 - `ephemera_flock_count`

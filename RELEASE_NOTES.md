@@ -1,6 +1,7 @@
 # anvil-v0.7.0 — ephemera-aligned current release (post-parity cleanup)
 
-**`anvil-v0.7.0`(tag → main HEAD)은 현행(Latest) 릴리즈다.** anvil 버전은 이제
+**`anvil-v0.7.0`(tag target `2f367dd`)은 현행(Latest) 릴리즈다.** 이후 main은
+cross-host shared Town Wall(2026-07-07, PR #19) 등 untagged 작업을 더 포함한다. anvil 버전은 이제
 upstream ephemera 버전을 따른다. 이 릴리즈는 아래 `anvil-v0.4.0` 절의 parity
 편입(`v0.4.0`-`v0.7.0`)에 더해, `anvil-v0.4.0`(`de82481`) 이후 main에 반영된
 post-release backlog batch(PR #18 merge `726cbdc`)와 open-gate closure(step 59
@@ -70,7 +71,7 @@ keep-alive stale-connection(`64ec57c`). 검증(parity gate): full KVM e2e `334�
 `v0.4.0`-`v0.7.0` phase 편입 기록, release-gate follow-up batch, snapshot 참고를 순서대로
 담는다.
 
-> 참고: 최신(Latest)은 `anvil-v0.7.0`(main HEAD, ephemera-정렬)이다. 아래는 개발
+> 참고: 최신(Latest)은 `anvil-v0.7.0`(tag target `2f367dd`, ephemera-정렬)이다. 아래는 개발
 > 내역으로 보존되는 이전 릴리즈들이다(전부 non-latest):
 > - `anvil-v0.4.0`(`de82481`) — parity 첫 통합 릴리즈.
 > - **게이트 검증 baseline 마일스톤**: `anvil-ephemera-v0.7.0`(`7b3f009`, e2e 334✓ +
