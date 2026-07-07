@@ -72,6 +72,77 @@ func TestRollback_DeregistersSharedTownWall(t *testing.T) {
 	}
 }
 
+// relayTokenProbeDaemon wraps routerFakeDaemon and, at RegisterDistributedFlock
+// time, records whether the flock's relay token is already persisted in the
+// placement store. It proves the token is durably saved BEFORE the hub is
+// registered, so a crash between hub registration and the full-success save
+// leaves the store able to reconcile (a live token on the daemon with none in
+// the store makes ReconcilePlacements skip the record).
+type relayTokenProbeDaemon struct {
+	*routerFakeDaemon
+	store                  *PlacementStore
+	tokenPresentAtRegister bool
+	tokenValueAtRegister   string
+}
+
+func (d *relayTokenProbeDaemon) RegisterDistributedFlock(ctx context.Context, flockID string, req DistributedFlockRequest) error {
+	token, ok := d.store.RoutedFlockRelayToken(flockID)
+	d.tokenPresentAtRegister = ok && token != ""
+	d.tokenValueAtRegister = token
+	return d.routerFakeDaemon.RegisterDistributedFlock(ctx, flockID, req)
+}
+
+// TestCreate_PersistsRelayTokenBeforeHubRegistration proves the relay token is
+// persisted on the first placement-store save (alongside HomeHost), before the
+// home daemon's hub is registered — not only on the final full-success save.
+// Otherwise a crash mid-create would leave a live token registered on the daemon
+// with none in the store, and reconcile would be unable to recover it.
+func TestCreate_PersistsRelayTokenBeforeHubRegistration(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
+	home := &relayTokenProbeDaemon{
+		routerFakeDaemon: &routerFakeDaemon{spawnResponses: []*SpawnVMResponse{{
+			VMID: "vm-coordinator-1", GuestIP: "10.0.1.10", AgentURL: "http://10.0.1.10:8080", TenantID: "tenant-1", EgressPolicy: "profile",
+		}}},
+		store: store,
+	}
+	member := &routerFakeDaemon{spawnResponses: []*SpawnVMResponse{{
+		VMID: "vm-researcher-1", GuestIP: "10.0.2.10", AgentURL: "http://10.0.2.10:8080", TenantID: "tenant-1", EgressPolicy: "profile",
+	}}}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(
+			[]RuntimeHost{
+				{Name: "hostA", Endpoint: "http://hostA.internal:8080", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+				{Name: "hostB", Endpoint: "http://hostB.internal:8080", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+			},
+			nil,
+			nil,
+		),
+		map[string]Daemon{"hostA": home, "hostB": member},
+		RuntimeRouterOptions{PlacementStore: store},
+	)
+
+	out, err := router.CreateRoutedFlockMembers(context.Background(), FlockCreateRequest{
+		Task:         "smoke",
+		Roles:        []string{"coordinator", "researcher"},
+		TenantID:     "tenant-1",
+		EgressPolicy: "profile",
+	})
+	if err != nil {
+		t.Fatalf("CreateRoutedFlockMembers: %v", err)
+	}
+	if !home.tokenPresentAtRegister {
+		t.Fatalf("relay token not persisted at hub-registration time; reconcile could not recover a crashed create")
+	}
+	// The token seen at registration must match the one the hub was registered with.
+	if home.tokenValueAtRegister != home.distributedReq.RelayToken {
+		t.Fatalf("token at register %q != hub relay token %q", home.tokenValueAtRegister, home.distributedReq.RelayToken)
+	}
+	// And it must still be persisted after full success.
+	if token, ok := store.RoutedFlockRelayToken(out.FlockID); !ok || token == "" {
+		t.Fatalf("relay token not persisted after successful create")
+	}
+}
+
 // TestRollback_DeregistersOrphanedMemberRelay proves that when a member's relay
 // flock is registered but that same member's SpawnVM then fails, rollback still
 // deregisters the member's relay flock. Before the fix, deregisterRoutedFlockWall

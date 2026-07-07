@@ -105,6 +105,14 @@ func (r *RuntimeRouter) CreateRoutedFlockMembers(ctx context.Context, req FlockC
 		return nil, fmt.Errorf("routed flock create failed: flock_id=%q reason=%s", record.FlockID, sanitizeRoutedFlockErrorReason(FlockPlacementReasonUnknown))
 	}
 	record.HomeHost = homeHost
+	// Persist the relay secret from this first save (before hub/relay registration
+	// and any spawn) so a crash mid-create leaves the store able to reconcile: a
+	// live token registered on a daemon with none in the store makes
+	// ReconcilePlacements skip the record. The store copies the token into its
+	// redacted RoutedFlockRelayTokens map; we scrub the local carrier right after
+	// the save so later mid-loop/rollback saves carry an empty token, which
+	// preserves the persisted entry instead of re-writing (or re-adding) it.
+	record.relayToken = relayToken
 
 	var registrySaveLatency time.Duration
 	registrySaveStart := time.Now()
@@ -122,6 +130,7 @@ func (r *RuntimeRouter) CreateRoutedFlockMembers(ctx context.Context, req FlockC
 		return nil, err
 	}
 	registrySaveLatency += time.Since(registrySaveStart)
+	record.relayToken = ""
 
 	// Register the shared Town Wall hub on the home daemon: the full roster plus
 	// the per-flock relay secret it will admit for the flock's wall sub-paths.
@@ -257,9 +266,8 @@ func (r *RuntimeRouter) CreateRoutedFlockMembers(ctx context.Context, req FlockC
 	}
 
 	record.Status = RoutedFlockStatusReady
-	// Persist the relay secret only on full success. The store copies it into
-	// the redacted RoutedFlockRelayTokens map and scrubs it from the record.
-	record.relayToken = relayToken
+	// The relay secret was already persisted on the first save (above); the store
+	// preserves it across these token-less saves, so no re-assignment is needed.
 	record.UpdatedAt = time.Now().UTC()
 	registrySaveStart = time.Now()
 	if err := r.placementStore.SaveRoutedFlockAndPlacements(record, nil); err != nil {
