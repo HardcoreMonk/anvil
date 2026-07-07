@@ -347,10 +347,10 @@ func (cp *ControlPlane) deleteFlock(w http.ResponseWriter, flockID string) {
 // relayTownWallPost forwards a member's post to the home daemon that owns the
 // canonical wall. Only {agent_id, body} crosses the wire; the per-flock relay
 // token authenticates the daemon-to-daemon hop. No per-VM credential is sent.
-func relayTownWallPost(homeAddr, relayToken, flockID, agentID, body string) (int, []byte, error) {
+func relayTownWallPost(ctx context.Context, homeAddr, relayToken, flockID, agentID, body string) (int, []byte, error) {
 	payload, _ := json.Marshal(map[string]string{"agent_id": agentID, "body": body})
 	url := strings.TrimRight(homeAddr, "/") + "/flocks/" + flockID + "/post"
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
 		return 0, nil, err
 	}
@@ -387,7 +387,7 @@ func (cp *ControlPlane) postToTownWall(w http.ResponseWriter, r *http.Request, f
 			writeJSONError(w, http.StatusBadRequest, fmt.Errorf("agent_id and body required"))
 			return
 		}
-		status, respBody, err := relayTownWallPost(f.HomeAddr, f.RelayToken, flockID, req.AgentID, req.Body)
+		status, respBody, err := relayTownWallPost(r.Context(), f.HomeAddr, f.RelayToken, flockID, req.AgentID, req.Body)
 		if err != nil {
 			writeJSONError(w, http.StatusBadGateway, fmt.Errorf("town wall relay to home failed: %w", err))
 			return
@@ -428,7 +428,7 @@ func (cp *ControlPlane) townWallHistory(w http.ResponseWriter, r *http.Request, 
 		if raw := r.URL.RawQuery; raw != "" {
 			url += "?" + raw
 		}
-		hreq, err := http.NewRequest(http.MethodGet, url, nil)
+		hreq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, url, nil)
 		if err != nil {
 			writeJSONError(w, http.StatusBadGateway, err)
 			return

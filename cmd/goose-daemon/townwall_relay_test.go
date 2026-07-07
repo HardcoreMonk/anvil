@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -79,6 +80,58 @@ func TestTownWallHistory_RelayProxiesToHome(t *testing.T) {
 	}
 	if strings.TrimSpace(rr.Body.String()) != arr {
 		t.Fatalf("relay returned %q, want %q", rr.Body.String(), arr)
+	}
+}
+
+// TestPostToTownWall_RelayHonorsCallerContext proves the relay post hop rides the
+// caller's request context: once that context is cancelled (client disconnect,
+// deadline) the outbound Do fails immediately and the handler returns 502 rather
+// than reaching a live home. The stub home would answer 200, so a 200 here would
+// mean the relay ignored r.Context() and issued a background request.
+func TestPostToTownWall_RelayHonorsCallerContext(t *testing.T) {
+	home := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"seq":1,"agent_id":"researcher-1","body":"hi"}`))
+	}))
+	defer home.Close()
+
+	cp := newTestCP(t)
+	cp.flockMgr.RegisterRelay("routed-1", home.URL, "rt-1")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled before the relay hop
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/flocks/routed-1/post", strings.NewReader(`{"agent_id":"researcher-1","body":"hi"}`)).WithContext(ctx)
+	cp.handleFlockItem(rr, req)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("relay post with cancelled caller context = %d, want 502 (relay did not honor r.Context())", rr.Code)
+	}
+}
+
+// TestTownWallHistory_RelayHonorsCallerContext is the history-read counterpart:
+// a cancelled caller context must tear down the relayed history read to home too.
+func TestTownWallHistory_RelayHonorsCallerContext(t *testing.T) {
+	home := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer home.Close()
+
+	cp := newTestCP(t)
+	cp.flockMgr.RegisterRelay("routed-1", home.URL, "rt-1")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/flocks/routed-1/wall/history", nil).WithContext(ctx)
+	cp.handleFlockItem(rr, req)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("relay history with cancelled caller context = %d, want 502 (relay did not honor r.Context())", rr.Code)
 	}
 }
 
