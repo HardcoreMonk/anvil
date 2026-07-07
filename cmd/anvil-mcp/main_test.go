@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"ephemera/internal/anvilmcp"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -199,7 +200,7 @@ func TestNewMCPDaemonUsesRuntimeRouterWhenSchedulerConfigIsSet(t *testing.T) {
 	hostsPath := filepath.Join(dir, "hosts.json")
 	writeMainTestFile(t, hostsPath, `{"hosts":[{"name":"host-a","endpoint":"`+source.URL+`","healthy":true,"available_vms":1},{"name":"host-b","endpoint":"`+target.URL+`","healthy":true,"available_vms":1}]}`)
 
-	daemon, err := newMCPDaemon(anvilmcp.Config{
+	daemon, _, err := newMCPDaemon(anvilmcp.Config{
 		DaemonURL:               base.URL,
 		SchedulerStatePath:      filepath.Join(dir, "scheduler.json"),
 		SchedulerHostsFile:      hostsPath,
@@ -242,7 +243,7 @@ func TestNewMCPDaemonRejectsMembersOnlyWithoutSchedulerStatePath(t *testing.T) {
 	hostsPath := filepath.Join(dir, "hosts.json")
 	writeMainTestFile(t, hostsPath, `{"hosts":[{"name":"host-a","endpoint":"http://127.0.0.1:3001","healthy":true,"available_vms":1}]}`)
 
-	_, err := newMCPDaemon(anvilmcp.Config{
+	_, _, err := newMCPDaemon(anvilmcp.Config{
 		DaemonURL:                "http://127.0.0.1:3000",
 		SchedulerHostsFile:       hostsPath,
 		CrossHostFlockCreateMode: "members_only",
@@ -292,7 +293,7 @@ func TestNewMCPDaemonEnablesMembersOnlyRoutedFlockCreate(t *testing.T) {
 	hostsPath := filepath.Join(dir, "hosts.json")
 	writeMainTestFile(t, hostsPath, `{"hosts":[{"name":"host-a","endpoint":"`+hostA.URL+`","healthy":true,"available_vms":2,"egress_policies":["deny_all"]}]}`)
 
-	daemon, err := newMCPDaemon(anvilmcp.Config{
+	daemon, _, err := newMCPDaemon(anvilmcp.Config{
 		DaemonURL:                base.URL,
 		SchedulerStatePath:       filepath.Join(dir, "scheduler.json"),
 		SchedulerHostsFile:       hostsPath,
@@ -323,6 +324,56 @@ func TestNewMCPDaemonEnablesMembersOnlyRoutedFlockCreate(t *testing.T) {
 	}
 	if len(out.Agents) != 1 || out.Agents[0].VMID != "vm-planner" || out.Agents[0].Host != "host-a" {
 		t.Fatalf("agents = %+v, want vm-planner on host-a", out.Agents)
+	}
+}
+
+func TestNewMCPDaemonReturnsRouterForMembersOnly(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "scheduler.json")
+	hostsPath := filepath.Join(dir, "hosts.json")
+	writeMainTestFile(t, hostsPath, `{"hosts":[{"name":"host-a","endpoint":"http://127.0.0.1:3000","healthy":true,"available_vms":4}]}`)
+
+	cfg := anvilmcp.Config{
+		DaemonURL:                anvilmcp.DefaultDaemonURL,
+		DefaultTimeoutSeconds:    anvilmcp.DefaultTimeoutSeconds,
+		SchedulerStatePath:       statePath,
+		SchedulerHostsFile:       hostsPath,
+		CrossHostFlockCreateMode: "members_only",
+	}
+	daemon, router, err := newMCPDaemon(cfg, http.DefaultClient)
+	if err != nil {
+		t.Fatalf("newMCPDaemon: %v", err)
+	}
+	if daemon == nil {
+		t.Fatal("daemon is nil")
+	}
+	if router == nil {
+		t.Fatal("router is nil — reconcile loop wiring needs it in members_only mode")
+	}
+}
+
+func TestShouldStartReconcileLoopGates(t *testing.T) {
+	router := &anvilmcp.RuntimeRouter{} // 게이트 판정에는 nil 여부만 쓰인다
+	cases := []struct {
+		name   string
+		mode   string
+		router *anvilmcp.RuntimeRouter
+		ivl    time.Duration
+		want   bool
+	}{
+		{"members_only on", "members_only", router, 60 * time.Second, true},
+		{"mode empty", "", router, 60 * time.Second, false},
+		{"router nil", "members_only", nil, 60 * time.Second, false},
+		{"interval zero", "members_only", router, 0, false},
+	}
+	for _, tc := range cases {
+		cfg := anvilmcp.Config{
+			CrossHostFlockCreateMode: tc.mode,
+			ReconcileIntervalParsed:  tc.ivl,
+		}
+		if got := shouldStartReconcileLoop(cfg, tc.router); got != tc.want {
+			t.Fatalf("%s: shouldStartReconcileLoop = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
 
