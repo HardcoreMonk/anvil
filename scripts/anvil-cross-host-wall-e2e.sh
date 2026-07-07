@@ -253,7 +253,12 @@ for _ in $(seq 1 60); do
   fi
   sleep 0.5
 done
-$HOME_OK && ok "Stub home ready PID $HOME_PID" || { fail "home_unavailable: not ready"; exit 1; }
+if $HOME_OK; then
+  ok "Stub home ready PID $HOME_PID"
+else
+  fail "home_unavailable: not ready"
+  exit 1
+fi
 
 # ── member daemon ──────────────────────────────────────────────────────────
 step "Start member daemon"
