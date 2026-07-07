@@ -1129,19 +1129,14 @@ func (cp *ControlPlane) proxyAgentEndpoint(w http.ResponseWriter, r *http.Reques
 	// refuse with 508 Loop Detected (distinct from the agent's own 503-busy);
 	// otherwise forward depth+1 so the next hop accumulates.
 	if agentPath == "/tasks" {
-		depth := 0
-		if h := r.Header.Get("X-Ephemera-Task-Depth"); h != "" {
-			if n, err := strconv.Atoi(h); err == nil && n > 0 {
-				depth = n
-			}
-		}
+		depth := taskDepthFromRequest(r)
 		if depth >= maxTaskDepth {
 			slog.Warn("task depth exceeded", "vm_id", vmID, "depth", depth, "max", maxTaskDepth)
 			w.Header().Set("Content-Type", "application/json")
 			http.Error(w, fmt.Sprintf(`{"error":"max task depth %d exceeded"}`, maxTaskDepth), http.StatusLoopDetected)
 			return
 		}
-		proxyReq.Header.Set("X-Ephemera-Task-Depth", strconv.Itoa(depth+1))
+		proxyReq.Header.Set(taskDepthHeader, strconv.Itoa(depth+1))
 	}
 
 	resp, err := cp.agentHTTPClient.Do(proxyReq)
