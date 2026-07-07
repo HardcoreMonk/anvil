@@ -28,7 +28,13 @@ type RoutedRestoreSnapshotResponse struct {
 }
 
 type RuntimeRouter struct {
-	mu             sync.RWMutex
+	mu sync.RWMutex
+
+	// reconcileMu serializes ReconcilePlacements end-to-end so the periodic
+	// loop and manual calls never run concurrently (placement replace + wall
+	// re-registration is not safe to interleave with itself).
+	reconcileMu sync.Mutex
+
 	scheduler      *Scheduler
 	daemons        map[string]Daemon
 	placement      map[string]string
@@ -261,6 +267,8 @@ func (r *RuntimeRouter) Delete(ctx context.Context, vmID string) (*RawDaemonResp
 }
 
 func (r *RuntimeRouter) ReconcilePlacements(ctx context.Context) error {
+	r.reconcileMu.Lock()
+	defer r.reconcileMu.Unlock()
 	next := make(map[string]string)
 	for hostName, daemon := range r.daemons {
 		if daemon == nil {

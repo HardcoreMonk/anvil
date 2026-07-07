@@ -7,7 +7,9 @@ import (
 	"io"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 type routerFakeDaemon struct {
@@ -1769,6 +1771,65 @@ func TestRuntimeRouterReconcilePlacementsFromDaemonVMLists(t *testing.T) {
 	}
 	if host, ok := store.VMHost("vm-b"); !ok || host != "host-b" {
 		t.Fatalf("store vm-b placement = %q,%v want host-b,true", host, ok)
+	}
+}
+
+// blockingListDaemon은 ListVMs 진입을 entered로 알리고 release까지 블록한다.
+// Daemon embed는 nil — ReconcilePlacements는 ListVMs만 type-assert해 호출한다.
+type blockingListDaemon struct {
+	Daemon
+	entered  chan struct{}
+	release  chan struct{}
+	inflight atomic.Int32
+	maxSeen  atomic.Int32
+}
+
+func (d *blockingListDaemon) ListVMs(ctx context.Context) ([]VMInfo, error) {
+	cur := d.inflight.Add(1)
+	for {
+		max := d.maxSeen.Load()
+		if cur <= max || d.maxSeen.CompareAndSwap(max, cur) {
+			break
+		}
+	}
+	d.entered <- struct{}{}
+	<-d.release
+	d.inflight.Add(-1)
+	return nil, nil
+}
+
+func TestReconcilePlacementsSerializesConcurrentCalls(t *testing.T) {
+	daemon := &blockingListDaemon{
+		entered: make(chan struct{}, 2),
+		release: make(chan struct{}),
+	}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(nil, nil, nil),
+		map[string]Daemon{"host-a": daemon},
+		RuntimeRouterOptions{},
+	)
+
+	done := make(chan error, 2)
+	go func() { done <- router.ReconcilePlacements(context.Background()) }()
+	<-daemon.entered // 첫 호출이 ListVMs 안에서 블록 중
+	go func() { done <- router.ReconcilePlacements(context.Background()) }()
+
+	// 직렬화되면 두 번째 호출은 release 전에 ListVMs에 진입하지 못한다.
+	select {
+	case <-daemon.entered:
+		t.Fatal("second ReconcilePlacements entered ListVMs while first still running")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(daemon.release)
+	<-daemon.entered // 두 번째 호출 진입
+	for i := 0; i < 2; i++ {
+		if err := <-done; err != nil {
+			t.Fatalf("ReconcilePlacements: %v", err)
+		}
+	}
+	if got := daemon.maxSeen.Load(); got != 1 {
+		t.Fatalf("max concurrent ListVMs = %d, want 1", got)
 	}
 }
 
