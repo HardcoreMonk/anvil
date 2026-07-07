@@ -571,7 +571,8 @@ git commit -m 'feat(mcp): persist per-flock call tokens (redacted, parallel to r
 
 **Interfaces:**
 - Consumes: Task 1 anvilmcp `RosterMember{VMID,Addr}`, Task 2 요청 타입 `CallToken`, Task 4 store 배관.
-- Produces: create가 relay/hub 등록에 `CallToken` 포함 + spawn 완료 후 `record.Agents` 기반 `{AgentID,Host,VMID,Addr}` roster로 hub **재등록**; reconcile 재등록 roster에 VMID/Addr + CallToken; rollback/delete가 call token revoke.
+- Produces: create가 relay/hub 등록에 `CallToken` 포함 + spawn 완료 후 `record.Agents` 기반 `{AgentID,Host,VMID,Addr}` roster로 hub **재등록**; **같은 시점에 각 member host의 relay flock도 그 host의 local agents(`Agents: [{AgentID, VMID}]` — record.Agents를 host별 필터)로 재등록** (Task 3b가 만든 `RelayFlockRequest.Agents` 사용 — target member가 hopped call을 로컬 해석하는 데 필수); reconcile 재등록도 hub roster와 relay local-agents를 동일하게 재주입; rollback/delete가 call token revoke.
+- 테스트 추가 요구(3b 연동): create 성공 시 각 member fake daemon의 마지막 `relayReq.Agents`가 그 host의 agent만 담고 VMID가 채워졌는지 단언; reconcile 테스트도 동일 단언.
 
 - [ ] **Step 1: 실패 테스트** — `internal/anvilmcp/routed_flock_test.go`에 (기존 fake `routerFakeDaemon`의 `distributedCalls/distributedReq` 카운터 활용):
 

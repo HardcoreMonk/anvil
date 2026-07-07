@@ -65,8 +65,17 @@ daemon에 **`POST /flocks/{id}/call`** (body `{agent_id, prompt}`)을 신설하�
 - home 수신 call: target이 home 자신의 host면 로컬 dispatch, 아니면 target
   host daemon의 `POST /flocks/{id}/call`로 2번째 hop.
 - **루프 방지**: hop 요청에 forward 표식 헤더 `X-Ephemera-Call-Hop: 1`을
-  붙이고, 이 표식이 있는 요청은 어느 daemon에서도 다시 forward하지 않는다
-  (로컬 해석 실패 시 즉시 에러).
+  붙이고, 이 표식이 있는 요청은 어느 daemon에서도 다시 forward하지 않는다 —
+  **kind와 무관하게 로컬 해석만** 시도하고 실패 시 즉시 에러 (2026-07-08 보정:
+  target member daemon에는 flock이 relay kind로 등록돼 있으므로 relay+hopped를
+  무조건 404로 끝내면 실토폴로지에서 2번째 hop이 성립하지 않는다 — Task 3
+  리뷰 발견).
+- **member의 로컬 해석 데이터** (2026-07-08 보정): relay 등록
+  (`POST /flocks/{id}/relay`)에 그 host의 member 목록
+  (`agents: [{agent_id, vm_id}]`)을 포함한다. hub 재등록과 같은 시점(spawn
+  완료 후)에 relay도 host-local agent 목록으로 재등록하고, reconcile이
+  동일하게 재주입한다. 이 목록은 로컬 해석 전용 — 다른 host의 정보는 담지
+  않는다.
 - **depth 가드**: `X-Ephemera-Task-Depth`를 전 hop에서 그대로 전파해 기존
   `EPHEMERA_MAX_TASK_DEPTH`(기본 5, 한계 시 `508`)가 cross-host에서도 성립한다.
 
