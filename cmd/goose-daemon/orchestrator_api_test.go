@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -185,6 +186,74 @@ func TestRegisterDistributedAndRelayFlock(t *testing.T) {
 	rf, ok := cp2.flockMgr.Get("routed-1")
 	if !ok || rf.Kind != orchestrator.FlockKindRelay || rf.HomeAddr != "http://hostA:3000" {
 		t.Fatalf("relay flock not registered")
+	}
+}
+
+// TestRegisterDistributedFlock_RejectsDuplicateNonHubID proves a POST /distributed
+// for a flock id already registered under a non-hub kind (here a local flock) is
+// rejected with 409 Conflict instead of silently overwriting the existing flock
+// via RegisterHub's unconditional fm.flocks[id]=f assignment. The pre-existing
+// local flock (and its wall) must survive untouched.
+func TestRegisterDistributedFlock_RejectsDuplicateNonHubID(t *testing.T) {
+	cp := newTestCP(t)
+	local, err := cp.flockMgr.Create("routed-1", "local-task", filepath.Join(cp.workDir, "flocks", "routed-1", "TOWN_WALL.log"))
+	if err != nil {
+		t.Fatalf("seed local flock: %v", err)
+	}
+
+	rr := httptest.NewRecorder()
+	body := `{"roster":[{"agent_id":"researcher-1","host":"hostB"}],"relay_token":"rt-1"}`
+	cp.handleFlockItem(rr, httptest.NewRequest(http.MethodPost, "/flocks/routed-1/distributed", strings.NewReader(body)))
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("distributed over local flock = %d, want 409 (%s)", rr.Code, rr.Body.String())
+	}
+	f, ok := cp.flockMgr.Get("routed-1")
+	if !ok || f != local || f.Kind != orchestrator.FlockKindLocal || f.Task != "local-task" {
+		t.Fatalf("local flock mutated by rejected distributed register: %+v", f)
+	}
+	if cp.relayTokenFor("routed-1") != "" {
+		t.Fatalf("rejected distributed register admitted relay token %q", cp.relayTokenFor("routed-1"))
+	}
+}
+
+// TestRegisterRelayFlock_RejectsDuplicateNonRelayID proves a POST /relay for a
+// flock id already registered under a non-relay kind (here a local flock) is
+// rejected with 409 Conflict rather than overwriting it, while a relay->relay
+// re-register still succeeds and refreshes HomeAddr/token (reconcile heal).
+func TestRegisterRelayFlock_RejectsDuplicateNonRelayID(t *testing.T) {
+	cp := newTestCP(t)
+	local, err := cp.flockMgr.Create("routed-1", "local-task", filepath.Join(cp.workDir, "flocks", "routed-1", "TOWN_WALL.log"))
+	if err != nil {
+		t.Fatalf("seed local flock: %v", err)
+	}
+
+	rr := httptest.NewRecorder()
+	body := `{"home_addr":"http://hostA:3000","relay_token":"rt-1"}`
+	cp.handleFlockItem(rr, httptest.NewRequest(http.MethodPost, "/flocks/routed-1/relay", strings.NewReader(body)))
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("relay over local flock = %d, want 409 (%s)", rr.Code, rr.Body.String())
+	}
+	f, ok := cp.flockMgr.Get("routed-1")
+	if !ok || f != local || f.Kind != orchestrator.FlockKindLocal {
+		t.Fatalf("local flock mutated by rejected relay register: %+v", f)
+	}
+
+	// relay -> relay re-registration is still allowed: reconcile heal refreshes the
+	// HomeAddr/token on the existing relay stub.
+	cp2 := newTestCP(t)
+	rr2 := httptest.NewRecorder()
+	cp2.handleFlockItem(rr2, httptest.NewRequest(http.MethodPost, "/flocks/routed-2/relay", strings.NewReader(`{"home_addr":"http://hostA:3000","relay_token":"rt-1"}`)))
+	if rr2.Code != http.StatusCreated {
+		t.Fatalf("initial relay register = %d, want 201 (%s)", rr2.Code, rr2.Body.String())
+	}
+	rr3 := httptest.NewRecorder()
+	cp2.handleFlockItem(rr3, httptest.NewRequest(http.MethodPost, "/flocks/routed-2/relay", strings.NewReader(`{"home_addr":"http://hostA:3001","relay_token":"rt-2"}`)))
+	if rr3.Code != http.StatusCreated {
+		t.Fatalf("relay->relay re-register = %d, want 201 (reconcile heal) (%s)", rr3.Code, rr3.Body.String())
+	}
+	rf, ok := cp2.flockMgr.Get("routed-2")
+	if !ok || rf.HomeAddr != "http://hostA:3001" || rf.RelayToken != "rt-2" {
+		t.Fatalf("relay re-register did not refresh HomeAddr/token: %+v", rf)
 	}
 }
 

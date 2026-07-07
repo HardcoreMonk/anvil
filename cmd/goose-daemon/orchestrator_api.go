@@ -1211,7 +1211,15 @@ func (cp *ControlPlane) registerDistributedFlock(w http.ResponseWriter, r *http.
 	// is reconstructed independently (recovery.go); the reconcile re-POST then
 	// restores admission before returning. A SIGHUP token reload does NOT clear
 	// it — ReloadClients only swaps cp.clients, never cp.relayTokens.
-	if existing, ok := cp.flockMgr.Get(flockID); ok && existing.Kind == orchestrator.FlockKindHub {
+	if existing, ok := cp.flockMgr.Get(flockID); ok {
+		// A non-hub flock already owns this id (a local flock, or a relay stub):
+		// RegisterHub below would blindly overwrite it (fm.flocks[id]=f), destroying
+		// the existing flock's wall/state. Refuse instead. Only the hub-kind path is
+		// the idempotent re-admission (fresh registration + reconcile heal).
+		if existing.Kind != orchestrator.FlockKindHub {
+			writeJSONError(w, http.StatusConflict, fmt.Errorf("flock %q already registered as a non-hub flock", flockID))
+			return
+		}
 		cp.setRelayToken(flockID, req.RelayToken)
 		w.WriteHeader(http.StatusCreated)
 		return
@@ -1237,6 +1245,13 @@ func (cp *ControlPlane) registerRelayFlock(w http.ResponseWriter, r *http.Reques
 	}
 	if req.HomeAddr == "" || req.RelayToken == "" {
 		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("home_addr and relay_token required"))
+		return
+	}
+	// A non-relay flock already owns this id (a local flock, or a hub): RegisterRelay
+	// below would blindly overwrite it. Refuse instead. A relay-kind re-register is
+	// left as the current overwrite so reconcile heal can refresh HomeAddr/token.
+	if existing, ok := cp.flockMgr.Get(flockID); ok && existing.Kind != orchestrator.FlockKindRelay {
+		writeJSONError(w, http.StatusConflict, fmt.Errorf("flock %q already registered as a non-relay flock", flockID))
 		return
 	}
 	cp.flockMgr.RegisterRelay(flockID, req.HomeAddr, req.RelayToken)
