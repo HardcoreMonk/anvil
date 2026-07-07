@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v2"
 )
@@ -16,30 +17,36 @@ const (
 	DefaultTimeoutSeconds = 300
 	DefaultConfigPath     = "configs/anvil-mcp.yaml"
 
-	envDaemonURL      = "ANVIL_DAEMON_URL"
-	envAPIToken       = "ANVIL_API_TOKEN"
-	envDefaultTimeout = "ANVIL_MCP_DEFAULT_TIMEOUT"
-	envConfigPath     = "ANVIL_MCP_CONFIG"
-	envSessionStore   = "ANVIL_MCP_SESSION_STORE"
-	envTenantID       = "ANVIL_MCP_TENANT_ID"
-	envAuditLog       = "ANVIL_MCP_AUDIT_LOG"
-	envSchedulerState = "ANVIL_MCP_SCHEDULER_STATE"
-	envSchedulerHosts = "ANVIL_MCP_SCHEDULER_HOSTS_FILE"
-	envSchedulerQuota = "ANVIL_MCP_SCHEDULER_QUOTA_STORE"
-	envCrossHostFlock = "ANVIL_MCP_CROSS_HOST_FLOCK_CREATE"
+	envDaemonURL         = "ANVIL_DAEMON_URL"
+	envAPIToken          = "ANVIL_API_TOKEN"
+	envDefaultTimeout    = "ANVIL_MCP_DEFAULT_TIMEOUT"
+	envConfigPath        = "ANVIL_MCP_CONFIG"
+	envSessionStore      = "ANVIL_MCP_SESSION_STORE"
+	envTenantID          = "ANVIL_MCP_TENANT_ID"
+	envAuditLog          = "ANVIL_MCP_AUDIT_LOG"
+	envSchedulerState    = "ANVIL_MCP_SCHEDULER_STATE"
+	envSchedulerHosts    = "ANVIL_MCP_SCHEDULER_HOSTS_FILE"
+	envSchedulerQuota    = "ANVIL_MCP_SCHEDULER_QUOTA_STORE"
+	envCrossHostFlock    = "ANVIL_MCP_CROSS_HOST_FLOCK_CREATE"
+	envReconcileInterval = "ANVIL_MCP_RECONCILE_INTERVAL"
 )
 
 type Config struct {
-	DaemonURL                string `yaml:"daemon_url"`
-	APIToken                 string `yaml:"api_token"`
-	DefaultTimeoutSeconds    int    `yaml:"default_timeout_seconds"`
-	SessionStorePath         string `yaml:"session_store_path"`
-	DefaultTenantID          string `yaml:"default_tenant_id"`
-	AuditLogPath             string `yaml:"audit_log_path"`
-	SchedulerStatePath       string `yaml:"scheduler_state_path"`
-	SchedulerHostsFile       string `yaml:"scheduler_hosts_file"`
-	SchedulerQuotaStorePath  string `yaml:"scheduler_quota_store_path"`
-	CrossHostFlockCreateMode string `yaml:"cross_host_flock_create_mode"`
+	DaemonURL                string        `yaml:"daemon_url"`
+	APIToken                 string        `yaml:"api_token"`
+	DefaultTimeoutSeconds    int           `yaml:"default_timeout_seconds"`
+	SessionStorePath         string        `yaml:"session_store_path"`
+	DefaultTenantID          string        `yaml:"default_tenant_id"`
+	AuditLogPath             string        `yaml:"audit_log_path"`
+	SchedulerStatePath       string        `yaml:"scheduler_state_path"`
+	SchedulerHostsFile       string        `yaml:"scheduler_hosts_file"`
+	SchedulerQuotaStorePath  string        `yaml:"scheduler_quota_store_path"`
+	CrossHostFlockCreateMode string        `yaml:"cross_host_flock_create_mode"`
+	// ReconcileInterval is the raw reconcile-loop interval (time.ParseDuration
+	// format). ReconcileIntervalParsed is the validated value LoadConfig fills:
+	// 60s default when unset, 0 disables the loop entirely.
+	ReconcileInterval       string        `yaml:"reconcile_interval"`
+	ReconcileIntervalParsed time.Duration `yaml:"-"`
 }
 
 type ConfigSource struct {
@@ -127,6 +134,9 @@ func LoadConfig(src ConfigSource) (Config, error) {
 		v := crossHostFlockEnvValue
 		cfg.CrossHostFlockCreateMode = v
 	}
+	if v := strings.TrimSpace(getenv(envReconcileInterval)); v != "" {
+		cfg.ReconcileInterval = v
+	}
 	if cfg.DefaultTimeoutSeconds <= 0 {
 		return Config{}, fmt.Errorf("default_timeout_seconds must be positive")
 	}
@@ -165,6 +175,20 @@ func LoadConfig(src ConfigSource) (Config, error) {
 		return Config{}, err
 	}
 	cfg.DaemonURL = daemonURL
+
+	cfg.ReconcileInterval = strings.TrimSpace(cfg.ReconcileInterval)
+	if cfg.ReconcileInterval == "" {
+		cfg.ReconcileIntervalParsed = 60 * time.Second
+	} else {
+		d, err := time.ParseDuration(cfg.ReconcileInterval)
+		if err != nil {
+			return Config{}, fmt.Errorf("reconcile_interval must be a duration like 60s (got %q): %w", cfg.ReconcileInterval, err)
+		}
+		if d < 0 {
+			return Config{}, fmt.Errorf("reconcile_interval must not be negative (got %q)", cfg.ReconcileInterval)
+		}
+		cfg.ReconcileIntervalParsed = d
+	}
 
 	return cfg, nil
 }
