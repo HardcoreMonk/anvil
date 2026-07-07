@@ -46,6 +46,8 @@ control plane daemon은 하나의 HTTP service를 노출한다.
 | `/flocks/{flock_id}/post` | `cmd/goose-daemon/orchestrator_api.go` | Town Wall message append |
 | `/flocks/{flock_id}/wall` | `cmd/goose-daemon/orchestrator_api.go` | Town Wall SSE stream |
 | `/flocks/{flock_id}/wall/history` | `cmd/goose-daemon/orchestrator_api.go` | Town Wall history 조회 |
+| `/flocks/{flock_id}/distributed` | `cmd/goose-daemon/orchestrator_api.go` | home host에 hub flock(공유 `TownWall`) 등록. idempotent, 다른 kind가 점유한 id는 `409`. internalMux + `authMiddleware`(control-plane bearer) |
+| `/flocks/{flock_id}/relay` | `cmd/goose-daemon/orchestrator_api.go` | member host에 relay flock(post/wall/history를 home으로 forward/proxy) 등록. idempotent, 다른 kind가 점유한 id는 `409`. internalMux + `authMiddleware`(control-plane bearer) |
 | `/flocks/{flock_id}/broadcast` | `cmd/goose-daemon/orchestrator_api.go` | flock 전 member agent에 prompt scatter-gather. daemon-only endpoint이며 `anvil_*` MCP tool로 노출하지 않는다 |
 | `/ui/` | `cmd/goose-daemon/config_api.go`, `cmd/goose-daemon/uidist/` | embedded operator Svelte SPA(정적 bundle + login page). auth chain 밖에 두는 유일한 surface. runtime/operator surface이며 IronClaw MCP surface가 아니다 |
 | `/config/profiles`, `/config/profiles/{name}` | `cmd/goose-daemon/config_api.go` | profile `GOOSE_PROVIDER`/`GOOSE_MODEL`·sizing·`system.md`(`64 KiB` cap) read/write. `goose-secrets.yaml`은 read/write하지 않음(sentinel test). delete in-use → `409`, default profile 예약, traversal 거부. auth 설정 시 bearer 뒤 |
@@ -139,6 +141,14 @@ incoming request
   -> 인증 실패 시 401 JSON body 반환
   -> matched client name을 log에 남기고 route handler 호출
 ```
+
+`authMiddleware`는 일반 client bearer 비교 전에 per-flock `relay_token` admission을
+먼저 확인한다(`cmd/goose-daemon/api.go`). 이 token은 daemon-to-daemon hop(member
+relay -> home hub) 전용이며, 요청 path가 그 flock의 Town Wall sub-path
+(`/flocks/{id}/(post|wall|wall/history)`)이고 bearer가 그 flock의 `relay_token`과
+일치할 때만 admit한다 — 다른 route나 다른 flock으로는 승격되지 않는다. 이 hop은 auth
+metric `outcome="relay"`(`countAuth("relay")`)로 집계되고, synthetic identity
+`relay:<flockID>`로 access log/audit에 기록돼 익명 hop으로 남지 않는다.
 
 token 비교는 constant-time comparison을 사용하고 첫 후보에서 멈추지 않는다.
 partial token match가 timing으로 새지 않게 하기 위한 선택이다.
@@ -368,6 +378,7 @@ Route: `DELETE /flocks/{flock_id}`
 ```text
 deleteFlock()
   -> FlockManager에서 live flock 제거
+  -> 해당 flock_id의 relay_token admission을 revoke(removeRelayToken, hub가 아니면 no-op)
   -> flock agent VM들을 병렬 destroyVM()으로 teardown
   -> flocks/<flock_id>/metadata.json 삭제
   -> {"status":"deleted","flock_id":"..."} 반환

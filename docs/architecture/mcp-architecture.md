@@ -141,7 +141,7 @@ Validation:
 | `anvil_restore_snapshot` | `POST /snapshots/{snapshot_id}/restore` | snapshot에서 새 VM restore 및 optional alias binding |
 | `anvil_delete_snapshot` | `DELETE /snapshots/{snapshot_id}` | snapshot 삭제 |
 | `anvil_spawn_flock` | `POST /flocks` | 역할 목록으로 Goosetown flock 생성 |
-| `anvil_create_routed_flock_members` | `POST /vms` routed members | experimental members-only routed flock 생성 |
+| `anvil_create_routed_flock_members` | `POST /vms` routed members + `POST /flocks/{id}/distributed`/`relay` | experimental members-only routed flock 생성, home-host hub + member relay 공유 Town Wall 등록 포함 |
 | `anvil_list_flocks` | `GET /flocks` + routed registry | live Goosetown flock과 visible routed flock 목록 조회 |
 | `anvil_get_flock` | `GET /flocks/{flock_id}` 또는 routed registry | Goosetown flock metadata 또는 routed member 상태 조회 |
 | `anvil_delete_flock` | `DELETE /flocks/{flock_id}` 또는 routed member `DELETE /vms` | Goosetown flock 삭제 또는 routed member VM 정리 |
@@ -192,8 +192,13 @@ single-host create path를 유지한다. router config와
 `anvil_create_routed_flock_members`가 cross-host members-only create를 수행한다. 이
 path는 daemon `POST /flocks`가 아니라 scheduler plan에 포함된 host daemon
 `POST /vms`를 role별로 호출한다. routed registry는 delete routing과 inspection을 위한
-downstream `scheduler_state_path` state이며 daemon `FlockManager` 또는 Town Wall
-state가 아니다. tenant와 audit 동작은 기존 MCP runtime audit 정책을 따르며, 별도
+downstream `scheduler_state_path` state다. 2026-07-06 cross-host shared Town Wall
+slice부터는 이 create path가 이어서 home host(`roles[0]` 배치 호스트) daemon에
+`POST /flocks/{id}/distributed`로 hub flock을, 나머지 멤버 host daemon에
+`POST /flocks/{id}/relay`로 relay flock을 등록한다. 즉 routed flock은 daemon
+`FlockManager`에도 등록되고 hub가 소유한 공유 `TownWall` state를 갖는다 — routed
+registry는 여전히 그 daemon-side state의 대체물이 아니라 downstream 위치/rollback
+색인일 뿐이다. tenant와 audit 동작은 기존 MCP runtime audit 정책을 따르며, 별도
 flock 전용 audit 의미를 만들지 않는다.
 
 ### IronClaw schema compatibility
@@ -735,8 +740,7 @@ HTTP MCP transport도 이 작업 범위 밖이다. v2 후보 논의에서는 다
 - runtime MCP Gateway(`EPHEMERA_MCP_*`, `internal/mcpgateway`)의 `anvil_*` MCP tool
   노출 (`v0.6.x` runtime/operator 표면이며 IronClaw adapter tool 아님)
 - flock alias 또는 `session_name` 재사용
-- routed members-only flock의 Town Wall, cross-host `gtcall`, guest flock context
-  injection, daemon `FlockManager` registration
+- routed members-only flock의 cross-host `gtcall`, cross-host broadcast fan-out
 
 위 항목은 v1의 숨은 동작이 아니라 향후 MCP v2 설계 후보로 남긴다.
 

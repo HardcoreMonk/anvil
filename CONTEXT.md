@@ -33,9 +33,10 @@ IronClaw 실행 계층으로 통합하는 downstream product fork다. 이 저장
 통합 릴리즈는 ephemera runtime tag와 충돌하지 않도록 `anvil-v0.1.0`처럼 별도
 prefix를 사용한다. **`anvil-v0.7.0`부터 anvil 공개 릴리즈 버전은 upstream ephemera
 버전과 동일하게 정렬한다.** 현재 최신(Latest) 릴리즈는 `anvil-v0.7.0`이고 tag
-target은 main HEAD(parity + release-gate hardening + post-release backlog +
-open-gate 마감; full KVM e2e 343✓, step 59 실 LLM 포함)이며 설치 아티팩트
-(SLIM/FULL tarball + sha256)를 제공한다.
+target은 `2f367dd`(태그 시점 main; parity + release-gate hardening + post-release
+backlog + open-gate 마감; full KVM e2e 343✓, step 59 실 LLM 포함)이며 설치 아티팩트
+(SLIM/FULL tarball + sha256)를 제공한다. 이후 main은 cross-host shared Town
+Wall(2026-07-07, PR #19) 등 untagged 작업을 더 포함한다.
 
 이전 anvil 통합 번호 계보(`anvil-v0.1.0`→`v0.4.0`)와 upstream 시리즈별 마일스톤은
 **개발 내역으로 보존한다**(전부 non-latest):
@@ -49,7 +50,9 @@ open-gate 마감; full KVM e2e 343✓, step 59 실 LLM 포함)이며 설치 아�
 모든 개발 내역 tag는 학습 브랜치 `annotate/v0.4.5`~`v0.7.0`와 짝을 이룬다. anvil main runtime
 baseline은 upstream ephemera `v0.7.0` 병합·적응분을 포함하며, `anvil-v0.3.2`
 이후의 scheduler control loop, scheduler `/metrics`, manual cross-host snapshot
-replication, scheduler-aware single-host flock placement 위에 `v0.4.0`-`v0.7.0`
+replication, scheduler-aware flock placement(placement planner 기반 routed flock
+member 생성 포함), cross-host shared Town Wall(2026-07-07, home-host hub +
+daemon-to-daemon relay) 위에 `v0.4.0`-`v0.7.0`
 runtime·operator 변경을 더한다. 즉 anvil main runtime baseline은 upstream ephemera
 `v0.7.0` adapted runtime·operator support를 포함하며, anvil을 수정 없는 ephemera
 `v0.7.0`와 동일시하지 않는다. `v0.4.0`-`v0.7.0`은 full KVM gate로 검증한
@@ -70,7 +73,7 @@ Gateway의 IronClaw 표면 승격 금지(비목표 유지)다. release-gate 코�
 (audit-writer sentinel, stdio stderr scrub, `credential_env` reserved names,
 production-mux auth assert)은 2026-07-06 follow-up batch로 닫혔고, 마지막 open gate
 (valid provider key `semantic` run, e2e step 59)도 `18c7559`에서 OpenAI `gpt-4o`로
-닫혔다(full e2e `343✓/0✗`) — 남은 release-gate open 항목은 없다. 2026-07-02 기준
+닫혔다(full e2e `343✓/0✗`) — 남은 release-gate open 항목은 없다. 2026-07-06 기준
 upstream `main`과
 최신 upstream tag는 `v0.7.0`까지 진행되어 있다. `v0.7.0`의 kernel SHA 검증,
 `waitForAgent` per-probe timeout, `EPHEMERA_HOME` work directory 지정은 sync 전 독립
@@ -108,6 +111,9 @@ backport(atomic temp+rename 무조건 검증 포함, upstream보다 stricter)가
 | IronClaw MCP adapter (`ANVIL_MCP_*`) | IronClaw가 ephemera daemon API를 anvil tool로 호출하게 해 주는 stdio bridge. 설정은 `ANVIL_MCP_*` 환경 변수를 사용한다. runtime MCP Gateway와 별개 개념이다. | `cmd/anvil-mcp` |
 | runtime MCP Gateway (`EPHEMERA_MCP_*`) | upstream `v0.6.0` runtime MCP Gateway. VM 내부 agent에 backend MCP server를 policy·rate-limit·audit로 중개하는 daemon-side runtime/operator surface. `EPHEMERA_MCP_*` 환경 변수를 사용하며 IronClaw adapter(`cmd/anvil-mcp`)를 대체하지 않는다. | `internal/mcpgateway`, `cmd/goose-daemon` |
 | anvil scheduler service | host inventory, quota, placement, snapshot locality를 바탕으로 runtime host 선택을 반환하는 얇은 HTTP service | `cmd/anvil-scheduler`, `internal/anvilmcp` |
+| routed flock | scheduler placement planner로 여러 host daemon에 member VM을 배치하는 cross-host flock. control plane(`internal/anvilmcp`)이 registry(`PlacementStore`)를 소유한다 | `internal/anvilmcp` |
+| Town Wall hub/relay | flock 공유 게시판의 cross-host 형태. routed flock의 home host(= `roles[0]` 배치 host) daemon이 canonical wall을 hub flock으로 소유하고, 나머지 member host daemon은 relay flock으로 post를 forward, wall/history/SSE를 proxy한다. 단일 host flock은 계속 local kind다 | `internal/orchestrator`, `cmd/goose-daemon` |
+| relay_token | routed flock의 daemon-to-daemon wall hop 전용 per-flock secret. 해당 flock의 wall sub-path(`post\|wall\|wall/history`)만 admit하고(control-plane bearer 승격 금지) 모든 직렬화 표면에서 redaction된다 | `cmd/goose-daemon`, `internal/anvilmcp` |
 | 공개 릴리즈 경계 | anvil이 공개적으로 책임지는 기능 표면과 제외 표면 | `docs/PUBLIC_RELEASE_BOUNDARY.md` |
 | ADR | 공개 경계, token/auth, MCP tool 계약, runtime lifecycle 같은 장기 결정을 남기는 기록 | `docs/adr/*.md` |
 
@@ -308,9 +314,23 @@ daemon으로 보내는 outbound Bearer token이다.
   `build_release.sh`가 다운로드한 kernel/firecracker를 `main.go`에서 parse한 pin과
   `sha256sum -c`로 검증해, runtime `EnsureKernel`이 기존 파일을 `os.Stat`로 skip하던
   FULL-tarball supply-chain gap을 닫는다.
+- cross-host shared Town Wall(2026-07-07, PR #19)이 main에 편입됐다. routed flock
+  member가 home-host hub + daemon-to-daemon relay로 하나의 공유 Town Wall을
+  사용한다. `POST /vms`가 flock identity(`flock_id`/`agent_id`/
+  `control_plane_token`)를 수용해 routed member VM에서 `gtwall`이 작동하고, daemon
+  `POST /flocks/{id}/distributed`·`POST /flocks/{id}/relay`가 hub/relay 등록을
+  제공한다(다른 kind가 점유한 id는 `409`). per-flock `relay_token`은 해당 flock의
+  wall sub-path만 admit하며(전 표면 redaction, auth metric `relay` outcome +
+  `relay:<flockID>` identity 기록), rollback/delete는 spawn 실패 member를 포함해
+  hub/relay 등록을 해제하고 reconcile이 daemon 재시작 후 재등록한다. guest는
+  bridge-only를 유지하고 신규 `anvil_*` MCP tool은 없다(runtime/operator 표면).
+  KVM e2e `scripts/anvil-cross-host-wall-e2e.sh`(real member VM + stub home)로
+  검증됐다. home host는 SPOF(1차 수용), cross-host `gtcall`/broadcast fan-out과
+  relay retry는 비범위다.
 - `scripts/anvil-mcp-e2e.sh flock`, 전체 KVM `sudo bash e2e_test.sh`, script-only
-  workload runner E2E가 Goosetown MCP surface, daemon flock lifecycle,
-  deterministic workload 검증 경로에 포함된다.
+  workload runner E2E, cross-host wall relay E2E
+  (`scripts/anvil-cross-host-wall-e2e.sh`)가 Goosetown MCP surface, daemon flock
+  lifecycle, deterministic workload, cross-host relay 검증 경로에 포함된다.
 
 남은 후속 후보:
 
@@ -336,7 +356,12 @@ daemon으로 보내는 outbound Bearer token이다.
   (root-gated, prefix-anchored)이며 `/tmp/goose-rootfs`는 현재 source에 producer 없는
   stale no-op이다. 외부 Web UI 노출은 reverse proxy/TLS 또는 private network 뒤에서만 한다
 - scheduler service의 실제 운영 배포와 host inventory polling daemonization
-- snapshot locality의 cross-host snapshot replication
-- scheduler-aware cross-host flock placement
+- cross-host snapshot replication 자동화(background retry queue·metrics·alert —
+  수동 동기 replication과 snapshot locality preference는 baseline 포함)
+- cross-host `gtcall`(공유 Town Wall 다음 capability 후보)
+- `ReconcilePlacements`의 주기적 control loop 배선(현재 production 호출자 없음 —
+  유닛 테스트로만 exercise)
+- Town Wall relay의 bounded retry/buffer, home SPOF 제거(hub replica set 기반
+  mesh 진화), SSE relay non-200 content-type polish
 - egress allow host rule의 L7 proxy/SNI 기반 강화
 - snapshot storage quota dashboard
