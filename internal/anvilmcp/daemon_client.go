@@ -56,6 +56,9 @@ type SpawnVMRequest struct {
 type DistributedFlockRequest struct {
 	Roster     []RosterMember `json:"roster"`
 	RelayToken string         `json:"relay_token"`
+	// CallToken is the per-flock call-hop secret (admitted for /call only, never
+	// wall paths). Filled by the routed-flock registration path (Task 5).
+	CallToken string `json:"call_token"`
 }
 
 // RelayFlockRequest registers a relay flock on a member daemon so its guests'
@@ -63,6 +66,9 @@ type DistributedFlockRequest struct {
 type RelayFlockRequest struct {
 	HomeAddr   string `json:"home_addr"`
 	RelayToken string `json:"relay_token"`
+	// CallToken is the per-flock call-hop secret (admitted for /call only, never
+	// wall paths). Filled by the routed-flock registration path (Task 5).
+	CallToken string `json:"call_token"`
 }
 
 // RosterMember is the anvilmcp-side roster entry (distinct from the

@@ -41,6 +41,7 @@ func newTestCP(t *testing.T) *ControlPlane {
 	cp := &ControlPlane{
 		vms:              make(map[string]*runningVM),
 		relayTokens:      map[string]string{},
+		callTokens:       map[string]string{},
 		snapshots:        make(map[string]storage.SnapshotMetadata),
 		workDir:          tmp,
 		gooseConfigPath:  defaultCfg,
@@ -921,6 +922,7 @@ func TestAuthMiddlewareIncrementsAuthFailure(t *testing.T) {
 		func() []APIClient {
 			return []APIClient{{Name: "operator", Token: "secret-token"}}
 		},
+		nil,
 		nil,
 		cp.metrics.authTotal,
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2822,6 +2824,7 @@ func TestTranscriptEndpointRequiresBearer(t *testing.T) {
 	cp := newTestCP(t)
 	handler := authMiddleware(
 		func() []APIClient { return []APIClient{{Name: "operator", Token: "secret-token"}} },
+		nil,
 		nil,
 		cp.metrics.authTotal,
 		http.HandlerFunc(cp.handleVM),

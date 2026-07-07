@@ -74,6 +74,9 @@ type TownWallPostRequest struct {
 type distributedFlockRequest struct {
 	Roster     []orchestrator.RosterMember `json:"roster"`
 	RelayToken string                      `json:"relay_token"`
+	// CallToken is the per-flock call-hop secret (admitted for /call only,
+	// never wall paths — see callPathFlockID).
+	CallToken string `json:"call_token"`
 }
 
 // relayFlockRequest is the POST /flocks/{id}/relay body: a member daemon uses
@@ -82,6 +85,9 @@ type distributedFlockRequest struct {
 type relayFlockRequest struct {
 	HomeAddr   string `json:"home_addr"`
 	RelayToken string `json:"relay_token"`
+	// CallToken is the per-flock call-hop secret (admitted for /call only,
+	// never wall paths — see callPathFlockID).
+	CallToken string `json:"call_token"`
 }
 
 // registerOrchestratorRoutes wires flock endpoints onto the control plane mux.
@@ -315,6 +321,9 @@ func (cp *ControlPlane) deleteFlock(w http.ResponseWriter, flockID string) {
 	// Revoke the flock's scoped relay-token admission (Task 8): once the flock is
 	// gone, a stale relay token must no longer authenticate a cross-host wall hop.
 	cp.removeRelayToken(flockID)
+	// Revoke the flock's scoped call-token admission too, mirroring the relay
+	// token above: a stale call token must no longer authenticate a call entry.
+	cp.removeCallToken(flockID)
 	agents := f.Snapshot()
 	var wg sync.WaitGroup
 	for _, a := range agents {
@@ -1228,6 +1237,7 @@ func (cp *ControlPlane) registerDistributedFlock(w http.ResponseWriter, r *http.
 			cp.flockMgr.UpdateHubRoster(flockID, req.Roster)
 		}
 		cp.setRelayToken(flockID, req.RelayToken)
+		cp.setCallToken(flockID, req.CallToken)
 		w.WriteHeader(http.StatusCreated)
 		return
 	}
@@ -1237,8 +1247,9 @@ func (cp *ControlPlane) registerDistributedFlock(w http.ResponseWriter, r *http.
 		writeJSONError(w, http.StatusInternalServerError, err)
 		return
 	}
-	cp.flockMgr.RegisterHub(flockID, wall, req.Roster, req.RelayToken)
+	cp.flockMgr.RegisterHub(flockID, wall, req.Roster, req.RelayToken, req.CallToken)
 	cp.setRelayToken(flockID, req.RelayToken)
+	cp.setCallToken(flockID, req.CallToken)
 	w.WriteHeader(http.StatusCreated)
 }
 
@@ -1261,7 +1272,17 @@ func (cp *ControlPlane) registerRelayFlock(w http.ResponseWriter, r *http.Reques
 		writeJSONError(w, http.StatusConflict, fmt.Errorf("flock %q already registered as a non-relay flock", flockID))
 		return
 	}
-	cp.flockMgr.RegisterRelay(flockID, req.HomeAddr, req.RelayToken)
+	cp.flockMgr.RegisterRelay(flockID, req.HomeAddr, req.RelayToken, req.CallToken)
+	// Admit the guest's relay/call tokens through THIS (member) daemon's
+	// authMiddleware too — mirroring the hub registration above. Without this, a
+	// guest VM's inbound gtwall/gtcall request that lands on the member daemon
+	// (auth-on) 401s before it can even reach the relay-forward-to-home logic:
+	// registerRelayFlock previously only called RegisterRelay on the in-memory
+	// flock struct (which the member's own outbound relay hop to home reads from
+	// f.RelayToken), never registering the tokens in cp.relayTokens/cp.callTokens
+	// for INBOUND admission (wall slice potential defect fix).
+	cp.setRelayToken(flockID, req.RelayToken)
+	cp.setCallToken(flockID, req.CallToken)
 	w.WriteHeader(http.StatusCreated)
 }
 

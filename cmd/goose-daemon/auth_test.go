@@ -24,7 +24,7 @@ func TestAuthMiddleware_Outcomes(t *testing.T) {
 		{Name: "bob", Token: "tokB", Expires: time.Now().Add(time.Hour)},    // valid, late index
 		{Name: "carol", Token: "tokC", Expires: time.Now().Add(-time.Hour)}, // expired
 	}
-	h := authMiddleware(func() []APIClient { return clients }, nil, authTotal, next)
+	h := authMiddleware(func() []APIClient { return clients }, nil, nil, authTotal, next)
 
 	// doReq mirrors the audit wrapper: install a clientHolder so we can read the
 	// back-filled client name, like the real outer middleware does.
@@ -89,7 +89,7 @@ func TestAuthMiddleware_RelayTokenRecordsIdentityAndMetric(t *testing.T) {
 		}
 		return ""
 	}
-	h := authMiddleware(func() []APIClient { return clients }, relayTokenFor, authTotal, next)
+	h := authMiddleware(func() []APIClient { return clients }, relayTokenFor, nil, authTotal, next)
 
 	req := httptest.NewRequest(http.MethodPost, "/flocks/routed-1/post", nil)
 	req.Header.Set("Authorization", "Bearer rt-1")
@@ -113,13 +113,58 @@ func TestAuthMiddleware_RelayTokenRecordsIdentityAndMetric(t *testing.T) {
 	}
 }
 
+// TestAuthMiddleware_CallTokenRecordsIdentityAndMetric proves the call-token
+// admission hop is no longer anonymous: it records a fixed-label "call" auth
+// outcome and stamps a synthetic client identity "call:<flockID>" so audit and
+// access logs attribute the daemon-to-daemon call entry instead of dropping it.
+// Mirrors TestAuthMiddleware_RelayTokenRecordsIdentityAndMetric above.
+func TestAuthMiddleware_CallTokenRecordsIdentityAndMetric(t *testing.T) {
+	reg := metrics.NewRegistry()
+	authTotal := reg.NewCounterVec("ephemera_auth_total", "auth decisions", "outcome")
+
+	var ctxClient string
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctxClient = clientNameFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	})
+
+	cp := &ControlPlane{
+		clients:     []APIClient{{Name: "operator", Token: "op-tok"}}, // auth ENABLED
+		relayTokens: map[string]string{},
+		callTokens:  map[string]string{},
+	}
+	cp.setCallToken("routed-1", "ct-1")
+	h := authMiddleware(func() []APIClient { return cp.clients }, cp.relayTokenFor, cp.callTokenFor, authTotal, next)
+
+	req := httptest.NewRequest(http.MethodPost, "/flocks/routed-1/call", nil)
+	req.Header.Set("Authorization", "Bearer ct-1")
+	holder := &clientHolder{}
+	req = req.WithContext(withClientHolder(req.Context(), holder))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("call-token admit code = %d, want 200", rec.Code)
+	}
+	if holder.name != "call:routed-1" || ctxClient != "call:routed-1" {
+		t.Fatalf("call identity holder=%q ctx=%q, want call:routed-1", holder.name, ctxClient)
+	}
+	if g := authTotal.WithLabelValues("call").Get(); g != 1 {
+		t.Fatalf("call metric = %d, want 1", g)
+	}
+	// The call outcome is its own fixed label; it must not be counted as ok.
+	if g := authTotal.WithLabelValues("ok").Get(); g != 0 {
+		t.Fatalf("ok metric = %d, want 0 (call admit must not be labeled ok)", g)
+	}
+}
+
 func TestAuthMiddleware_Disabled(t *testing.T) {
 	called := false
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	})
-	h := authMiddleware(func() []APIClient { return nil }, nil, nil, next) // nil relayTokenFor + nil authTotal tolerated
+	h := authMiddleware(func() []APIClient { return nil }, nil, nil, nil, next) // nil relayTokenFor + nil callTokenFor + nil authTotal tolerated
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/vms", nil))
 	if !called || rec.Code != http.StatusOK {
@@ -137,7 +182,7 @@ func TestAuthMiddleware_DuplicateTokenPrefersActiveWhenExpiredAppearsAfter(t *te
 	}
 
 	var ctxClient string
-	h := authMiddleware(func() []APIClient { return clients }, nil, authTotal, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := authMiddleware(func() []APIClient { return clients }, nil, nil, authTotal, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctxClient = clientNameFromContext(r.Context())
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -173,7 +218,7 @@ func TestAuthMiddleware_DuplicateTokenPrefersActiveWhenActiveAppearsAfter(t *tes
 	}
 
 	var ctxClient string
-	h := authMiddleware(func() []APIClient { return clients }, nil, authTotal, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := authMiddleware(func() []APIClient { return clients }, nil, nil, authTotal, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctxClient = clientNameFromContext(r.Context())
 		w.WriteHeader(http.StatusOK)
 	}))

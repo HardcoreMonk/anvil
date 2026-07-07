@@ -28,7 +28,7 @@ func buildProfileAPIChain(cp *ControlPlane, getClients func() []APIClient) http.
 	internalMux := http.NewServeMux()
 	internalMux.HandleFunc("/config/profiles", cp.handleConfigProfiles)
 	internalMux.HandleFunc("/config/profiles/", cp.handleConfigProfile)
-	return authMiddleware(getClients, nil, nil, internalMux)
+	return authMiddleware(getClients, nil, nil, nil, internalMux)
 }
 
 func TestConfigProfilesRequireAuthWhenConfigured(t *testing.T) {

@@ -294,7 +294,7 @@ func TestFlockManager_RegisterHubAndRelay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hub := fm.RegisterHub("routed-1", wall, []RosterMember{{AgentID: "researcher-1", Host: "hostB"}}, "relay-tok")
+	hub := fm.RegisterHub("routed-1", wall, []RosterMember{{AgentID: "researcher-1", Host: "hostB"}}, "relay-tok", "call-tok")
 	if hub.Kind != FlockKindHub {
 		t.Fatalf("hub.Kind = %q, want %q", hub.Kind, FlockKindHub)
 	}
@@ -304,7 +304,7 @@ func TestFlockManager_RegisterHubAndRelay(t *testing.T) {
 
 	tmp2 := t.TempDir()
 	fm2 := NewFlockManager(tmp2)
-	relay := fm2.RegisterRelay("routed-1", "http://hostA:3000", "relay-tok")
+	relay := fm2.RegisterRelay("routed-1", "http://hostA:3000", "relay-tok", "call-tok")
 	if relay.Kind != FlockKindRelay || relay.HomeAddr != "http://hostA:3000" || relay.RelayToken != "relay-tok" {
 		t.Fatalf("relay flock fields wrong: %+v", relay)
 	}

@@ -54,7 +54,7 @@ type authFailureRecorder interface {
 // request (no early-exit after the first match) to avoid leaking which client
 // index was hit. The expiry decision (v0.4.1) is made AFTER the full compare loop,
 // and an expired match returns the same 401 body as no match.
-func authMiddleware(getClients func() []APIClient, relayTokenFor func(flockID string) string, authTotal *metrics.CounterVec, next http.Handler) http.Handler {
+func authMiddleware(getClients func() []APIClient, relayTokenFor func(flockID string) string, callTokenFor func(flockID string) string, authTotal *metrics.CounterVec, next http.Handler) http.Handler {
 	countAuth := func(outcome string) {
 		if authTotal != nil {
 			authTotal.WithLabelValues(outcome).Inc()
@@ -69,15 +69,17 @@ func authMiddleware(getClients func() []APIClient, relayTokenFor func(flockID st
 
 		auth := []byte(r.Header.Get("Authorization"))
 
-		// Relay-token admission: a per-flock relay token authenticates ONLY that
-		// flock's Town Wall sub-paths (post / wall / wall/history). It is never a
-		// general control-plane bearer, so it is checked here — after the
-		// auth-disabled short-circuit above — and admits ONLY when the request
-		// path is that exact flock's wall sub-path AND the bearer matches THAT
-		// flock's relay token. Any other route falls through to the normal
-		// cp.clients loop below and is rejected unless a real client token matches.
+		// Relay-token admission: a per-flock relay token is the GUEST capability
+		// token — it authenticates ONLY that flock's Town Wall sub-paths (post /
+		// wall / wall/history) AND its call entry point (post / wall / wall/history
+		// / call — see relayGuestPathFlockID). It is never a general control-plane
+		// bearer, so it is checked here — after the auth-disabled short-circuit
+		// above — and admits ONLY when the request path is one of that exact
+		// flock's guest-scoped sub-paths AND the bearer matches THAT flock's relay
+		// token. Any other route falls through to the normal cp.clients loop below
+		// and is rejected unless a real client token matches.
 		if relayTokenFor != nil {
-			if flockID, ok := relayWallPathFlockID(r.URL.Path); ok {
+			if flockID, ok := relayGuestPathFlockID(r.URL.Path); ok {
 				if tok := relayTokenFor(flockID); tok != "" &&
 					subtle.ConstantTimeCompare(auth, []byte("Bearer "+tok)) == 1 {
 					// Attribute the relay hop like the normal-token path does, so it is
@@ -92,6 +94,32 @@ func authMiddleware(getClients func() []APIClient, relayTokenFor func(flockID st
 					}
 					r = r.WithContext(withClientName(r.Context(), relayName))
 					slog.Info("api request", "client", relayName, "method", r.Method, "path", r.URL.Path)
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+		}
+
+		// Call-token admission: mirrors the relay-token block above but scoped ONLY
+		// to this flock's /call entry point (never wall paths — callPathFlockID
+		// enforces that, unlike relayGuestPathFlockID which admits wall+call for
+		// the relay token). A per-flock call token authenticates the daemon-to-
+		// daemon call-hop invocation for EXACTLY that flock, keeping its blast
+		// radius disjoint from the (broader) relay/guest token: relay_token also
+		// opens call (guest capability), but call_token never opens wall.
+		if callTokenFor != nil {
+			if flockID, ok := callPathFlockID(r.URL.Path); ok {
+				if tok := callTokenFor(flockID); tok != "" &&
+					subtle.ConstantTimeCompare(auth, []byte("Bearer "+tok)) == 1 {
+					// Same attribution pattern as the relay block: fixed metric label
+					// "call" (never per-flock) and synthetic identity "call:<flockID>".
+					countAuth("call")
+					callName := "call:" + flockID
+					if h := clientHolderFromContext(r.Context()); h != nil {
+						h.name = callName
+					}
+					r = r.WithContext(withClientName(r.Context(), callName))
+					slog.Info("api request", "client", callName, "method", r.Method, "path", r.URL.Path)
 					next.ServeHTTP(w, r)
 					return
 				}
@@ -148,12 +176,13 @@ func authMiddleware(getClients func() []APIClient, relayTokenFor func(flockID st
 	})
 }
 
-// relayWallPathFlockID reports whether path is /flocks/{id}/post,
-// /flocks/{id}/wall, or /flocks/{id}/wall/history, and returns {id}. Only these
-// three Town Wall sub-paths are eligible for per-flock relay-token admission;
-// every other /flocks/{id}/* route (and all non-flock routes) returns false so a
-// relay token can never authenticate them.
-func relayWallPathFlockID(path string) (string, bool) {
+// relayGuestPathFlockID reports whether path is /flocks/{id}/post,
+// /flocks/{id}/wall, /flocks/{id}/wall/history, or /flocks/{id}/call, and
+// returns {id}. The relay token is the GUEST capability token: these four
+// sub-paths (Town Wall + the call entry point) are the only ones eligible for
+// per-flock relay-token admission; every other /flocks/{id}/* route (and all
+// non-flock routes) returns false so a relay token can never authenticate them.
+func relayGuestPathFlockID(path string) (string, bool) {
 	rest, ok := strings.CutPrefix(path, "/flocks/")
 	if !ok {
 		return "", false
@@ -163,7 +192,27 @@ func relayWallPathFlockID(path string) (string, bool) {
 		return "", false
 	}
 	switch sub {
-	case "post", "wall", "wall/history":
+	case "post", "wall", "wall/history", "call":
+		return id, true
+	}
+	return "", false
+}
+
+// callPathFlockID admits ONLY the call sub-path — the call token must never
+// open wall paths (and relayGuestPathFlockID never returns "call" as an
+// exclusive match; it just admits it as one of the relay token's broader guest
+// paths), keeping the two per-flock secrets' blast radii disjoint: relay_token
+// opens wall+call (guest capability), call_token opens ONLY call.
+func callPathFlockID(path string) (string, bool) {
+	rest, ok := strings.CutPrefix(path, "/flocks/")
+	if !ok {
+		return "", false
+	}
+	id, sub, _ := strings.Cut(rest, "/")
+	if id == "" {
+		return "", false
+	}
+	if sub == "call" {
 		return id, true
 	}
 	return "", false
@@ -358,6 +407,15 @@ type ControlPlane struct {
 	relayTokens   map[string]string
 	relayTokensMu sync.RWMutex
 
+	// callTokens maps a routed flock's id to its per-flock call token. A call
+	// token authenticates the daemon-to-daemon call-hop invocation for EXACTLY
+	// that flock's /call entry point — never any Town Wall sub-path. Kept
+	// separate from cp.clients (never a full control-plane bearer) and separate
+	// from cp.relayTokens (a distinct, narrower-scoped secret; see callPathFlockID
+	// vs relayGuestPathFlockID) so SIGHUP ReloadClients cannot wipe it either.
+	callTokens   map[string]string
+	callTokensMu sync.RWMutex
+
 	snapshotsMu      sync.RWMutex
 	snapshots        map[string]storage.SnapshotMetadata
 	tenantStore      *anvilmcp.QuotaStore
@@ -470,6 +528,7 @@ func NewControlPlane(
 		vms:              make(map[string]*runningVM),
 		clients:          apiClients,
 		relayTokens:      map[string]string{},
+		callTokens:       map[string]string{},
 		snapshots:        make(map[string]storage.SnapshotMetadata),
 		tenantStore:      anvilmcp.NewQuotaStore(filepath.Join(workDir, "tenants", "tenants.json")),
 		egress:           newCommandEgressEnforcer(),
@@ -592,7 +651,7 @@ func NewControlPlane(
 
 	externalMux := http.NewServeMux()
 	if metricsRequireAuth {
-		externalMux.Handle("/metrics", authMiddleware(cp.getClients, nil, cp.metrics.authTotal, http.HandlerFunc(cp.handleMetrics)))
+		externalMux.Handle("/metrics", authMiddleware(cp.getClients, nil, nil, cp.metrics.authTotal, http.HandlerFunc(cp.handleMetrics)))
 	} else {
 		externalMux.HandleFunc("/metrics", cp.handleMetrics)
 	}
@@ -606,7 +665,7 @@ func NewControlPlane(
 	// status, and reads the client name auth back-fills via the request holder.
 	// rootRedirectOr sends the bare "/" to /ui/ while delegating every other path
 	// to the unchanged API chain.
-	apiChain := cp.auditMiddleware(authMiddleware(cp.getClients, cp.relayTokenFor, cp.metrics.authTotal, internalMux))
+	apiChain := cp.auditMiddleware(authMiddleware(cp.getClients, cp.relayTokenFor, cp.callTokenFor, cp.metrics.authTotal, internalMux))
 	externalMux.Handle("/", rootRedirectOr(apiChain))
 
 	cp.srv = &http.Server{Addr: apiAddr, Handler: externalMux}
@@ -648,6 +707,40 @@ func (cp *ControlPlane) removeRelayToken(flockID string) {
 	cp.relayTokensMu.Lock()
 	delete(cp.relayTokens, flockID)
 	cp.relayTokensMu.Unlock()
+}
+
+// setCallToken registers a per-flock call token in the scoped call-token store,
+// so a call-hop request (Task 3+) passes authMiddleware on this daemon — but
+// ONLY for that flock's /call entry point. Kept OUT of cp.clients on purpose: a
+// call token must NEVER be a general control-plane bearer. A no-op when
+// callToken is empty, so callers can pass an absent/optional token unconditionally
+// without accidentally admitting the empty string as a valid bearer match
+// (relayTokenFor/callTokenFor's tok != "" guard already excludes "", but the
+// no-op here also avoids leaving a stale empty entry in the map). Idempotent:
+// re-registering the same flockID replaces its token.
+func (cp *ControlPlane) setCallToken(flockID, callToken string) {
+	if callToken == "" {
+		return
+	}
+	cp.callTokensMu.Lock()
+	cp.callTokens[flockID] = callToken
+	cp.callTokensMu.Unlock()
+}
+
+// callTokenFor returns the call token registered for a flock (or "").
+func (cp *ControlPlane) callTokenFor(flockID string) string {
+	cp.callTokensMu.RLock()
+	defer cp.callTokensMu.RUnlock()
+	return cp.callTokens[flockID]
+}
+
+// removeCallToken strips a flock's call token from the scoped store on flock
+// deregistration so a stale call token cannot authenticate a call entry after
+// the routed flock is gone.
+func (cp *ControlPlane) removeCallToken(flockID string) {
+	cp.callTokensMu.Lock()
+	delete(cp.callTokens, flockID)
+	cp.callTokensMu.Unlock()
 }
 
 // controlPlaneTokenForVM returns the bearer the in-VM /townwall/post forwarder

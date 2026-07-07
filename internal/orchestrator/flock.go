@@ -79,6 +79,10 @@ type Flock struct {
 	// base URL and the per-flock daemon-to-daemon relay token.
 	HomeAddr   string `json:"-"`
 	RelayToken string `json:"-"`
+	// CallToken is the per-flock call-hop secret (parallel to RelayToken but
+	// scoped ONLY to the call entry point, never Town Wall paths). Set on both
+	// hub and relay flocks.
+	CallToken string `json:"-"`
 	// Roster lists remote members for a hub flock (informational; the hub owns
 	// no local VMs for those agents).
 	Roster []RosterMember `json:"-"`
@@ -443,13 +447,14 @@ func (fm *FlockManager) Register(f *Flock) {
 
 // RegisterHub registers a hub flock that owns the canonical Town Wall on the
 // home host. It has no local member VMs; roster is the remote membership.
-func (fm *FlockManager) RegisterHub(flockID string, wall *TownWall, roster []RosterMember, relayToken string) *Flock {
+func (fm *FlockManager) RegisterHub(flockID string, wall *TownWall, roster []RosterMember, relayToken, callToken string) *Flock {
 	f := &Flock{
 		ID:         flockID,
 		Kind:       FlockKindHub,
 		TownWall:   wall,
 		Roster:     roster,
 		RelayToken: relayToken,
+		CallToken:  callToken,
 		Agents:     map[string]*AgentInfo{},
 		CreatedAt:  time.Now().UTC(),
 	}
@@ -477,12 +482,13 @@ func (fm *FlockManager) UpdateHubRoster(flockID string, roster []RosterMember) b
 
 // RegisterRelay registers a relay flock on a member host. It owns no wall;
 // posts and reads are forwarded to homeAddr with relayToken.
-func (fm *FlockManager) RegisterRelay(flockID, homeAddr, relayToken string) *Flock {
+func (fm *FlockManager) RegisterRelay(flockID, homeAddr, relayToken, callToken string) *Flock {
 	f := &Flock{
 		ID:         flockID,
 		Kind:       FlockKindRelay,
 		HomeAddr:   homeAddr,
 		RelayToken: relayToken,
+		CallToken:  callToken,
 		Agents:     map[string]*AgentInfo{},
 		CreatedAt:  time.Now().UTC(),
 	}
