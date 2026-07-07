@@ -25,7 +25,7 @@ func buildTestMux(getClients func() []APIClient) http.Handler {
 
 	mux := http.NewServeMux()
 	mux.Handle("/ui/", cp.uiHandler())
-	apiChain := authMiddleware(getClients, nil, api)
+	apiChain := authMiddleware(getClients, nil, nil, api)
 	mux.Handle("/", rootRedirectOr(apiChain))
 	return mux
 }

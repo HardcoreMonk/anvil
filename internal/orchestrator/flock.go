@@ -21,6 +21,19 @@ const (
 	AgentStatusPaused   = "paused" // runtime-only pause state; scrubbed from metadata persistence (v0.4.3)
 )
 
+// Kind distinguishes single-host flocks from cross-host routed-flock roles.
+const (
+	FlockKindLocal = ""
+	FlockKindHub   = "hub"
+	FlockKindRelay = "relay"
+)
+
+// RosterMember records a remote member of a cross-host (hub) flock.
+type RosterMember struct {
+	AgentID string `json:"agent_id"`
+	Host    string `json:"host"`
+}
+
 // AgentInfo is the per-agent record exposed via flock APIs.
 type AgentInfo struct {
 	AgentID string `json:"agent_id"` // e.g. "researcher-1"
@@ -52,6 +65,17 @@ type Flock struct {
 	Agents       map[string]*AgentInfo `json:"agents"`
 	TownWall     *TownWall             `json:"-"`
 	CreatedAt    time.Time             `json:"created_at"`
+	// Kind distinguishes single-host flocks ("" / local) from cross-host
+	// routed-flock roles: "hub" owns the canonical wall on the home host;
+	// "relay" forwards posts to the home host. Local flocks are unchanged.
+	Kind string `json:"-"`
+	// HomeAddr and RelayToken are set only on relay flocks: the home daemon
+	// base URL and the per-flock daemon-to-daemon relay token.
+	HomeAddr   string `json:"-"`
+	RelayToken string `json:"-"`
+	// Roster lists remote members for a hub flock (informational; the hub owns
+	// no local VMs for those agents).
+	Roster []RosterMember `json:"-"`
 	// Paused is a runtime-only flag set by flock pause/resume (v0.4.3). It is
 	// deliberately NOT persisted (Firecracker pause is a runtime state); a daemon
 	// restart brings members back running. Exposed via MarshalJSON, not ToMetadata.
@@ -409,6 +433,41 @@ func (fm *FlockManager) Register(f *Flock) {
 	fm.mu.Lock()
 	fm.flocks[f.ID] = f
 	fm.mu.Unlock()
+}
+
+// RegisterHub registers a hub flock that owns the canonical Town Wall on the
+// home host. It has no local member VMs; roster is the remote membership.
+func (fm *FlockManager) RegisterHub(flockID string, wall *TownWall, roster []RosterMember, relayToken string) *Flock {
+	f := &Flock{
+		ID:         flockID,
+		Kind:       FlockKindHub,
+		TownWall:   wall,
+		Roster:     roster,
+		RelayToken: relayToken,
+		Agents:     map[string]*AgentInfo{},
+		CreatedAt:  time.Now().UTC(),
+	}
+	fm.mu.Lock()
+	fm.flocks[flockID] = f
+	fm.mu.Unlock()
+	return f
+}
+
+// RegisterRelay registers a relay flock on a member host. It owns no wall;
+// posts and reads are forwarded to homeAddr with relayToken.
+func (fm *FlockManager) RegisterRelay(flockID, homeAddr, relayToken string) *Flock {
+	f := &Flock{
+		ID:         flockID,
+		Kind:       FlockKindRelay,
+		HomeAddr:   homeAddr,
+		RelayToken: relayToken,
+		Agents:     map[string]*AgentInfo{},
+		CreatedAt:  time.Now().UTC(),
+	}
+	fm.mu.Lock()
+	fm.flocks[flockID] = f
+	fm.mu.Unlock()
+	return f
 }
 
 // Create allocates a flock, opens its Town Wall, and registers it.

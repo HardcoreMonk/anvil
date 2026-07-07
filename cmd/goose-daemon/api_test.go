@@ -40,6 +40,7 @@ func newTestCP(t *testing.T) *ControlPlane {
 	os.WriteFile(defaultSec, []byte("DEFAULT_KEY: x\nGOOGLE_API_KEY: \"AIzaSyTestRealKey\"\nANTHROPIC_API_KEY: \"sk-ant-testreal\"\nOPENAI_API_KEY: \"sk-testreal\"\nGROQ_API_KEY: \"gsk_testreal\"\n"), 0644)
 	cp := &ControlPlane{
 		vms:              make(map[string]*runningVM),
+		relayTokens:      map[string]string{},
 		snapshots:        make(map[string]storage.SnapshotMetadata),
 		workDir:          tmp,
 		gooseConfigPath:  defaultCfg,
@@ -364,6 +365,51 @@ func TestCommandEgressEnforcerProfileApplyFailureReportsCleanupFailure(t *testin
 	}
 	if _, ok := enforcer.rules["vm-1"]; ok {
 		t.Fatalf("partial failed apply left egress rule state: %+v", enforcer.rules["vm-1"])
+	}
+}
+
+// TestSpawnVM_AcceptsFlockIdentity locks in the POST /vms wiring that routed
+// flock members (cross-host town wall, Task 1) depend on: flock_id/agent_id/
+// control_plane_token in the request body must reach the same
+// storage.VMPrepareOptions fields the single-host spawnVMForFlock path already
+// populates (orchestrator_api.go's FlockID/AgentID/ControlPlaneToken). The
+// prepareVM hook returns an error after capturing opts so the test doesn't
+// need to stub the Firecracker start / waitForAgent chain past it.
+func TestSpawnVM_AcceptsFlockIdentity(t *testing.T) {
+	cp := newTestCP(t)
+	workspace := t.TempDir()
+	golden := filepath.Join(workspace, "golden.ext4")
+	if err := os.WriteFile(golden, []byte("golden"), 0600); err != nil {
+		t.Fatalf("write golden image: %v", err)
+	}
+	cp.provisioner = &storage.Provisioner{GoldenImagePath: golden, WorkspaceDir: workspace}
+	cp.allocateNetwork = func() (string, string, string, error) {
+		return "tap-test", "10.0.1.77", "AA:FC:00:00:00:4D", nil
+	}
+	cp.releaseVMNetwork = func(tapDevice, guestIP string) error { return nil }
+	cp.cloneDisk = func(vmID string) (string, error) {
+		return filepath.Join(workspace, vmID+".ext4"), nil
+	}
+
+	var captured storage.VMPrepareOptions
+	cp.prepareVM = func(vmID string, opts storage.VMPrepareOptions) error {
+		captured = opts
+		return errors.New("stop before firecracker start")
+	}
+
+	body := `{"profile":"researcher","flock_id":"routed-flock-1","agent_id":"researcher-1","control_plane_token":"cp-tok-xyz"}`
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/vms", strings.NewReader(body))
+	cp.spawnVM(rr, req)
+
+	if captured.FlockID != "routed-flock-1" {
+		t.Fatalf("FlockID = %q, want routed-flock-1", captured.FlockID)
+	}
+	if captured.AgentID != "researcher-1" {
+		t.Fatalf("AgentID = %q, want researcher-1", captured.AgentID)
+	}
+	if captured.ControlPlaneToken != "cp-tok-xyz" {
+		t.Fatalf("ControlPlaneToken not threaded to provisioner")
 	}
 }
 
@@ -875,6 +921,7 @@ func TestAuthMiddlewareIncrementsAuthFailure(t *testing.T) {
 		func() []APIClient {
 			return []APIClient{{Name: "operator", Token: "secret-token"}}
 		},
+		nil,
 		cp.metrics.authTotal,
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			t.Fatal("handler should not run for unauthorized request")
@@ -2775,6 +2822,7 @@ func TestTranscriptEndpointRequiresBearer(t *testing.T) {
 	cp := newTestCP(t)
 	handler := authMiddleware(
 		func() []APIClient { return []APIClient{{Name: "operator", Token: "secret-token"}} },
+		nil,
 		cp.metrics.authTotal,
 		http.HandlerFunc(cp.handleVM),
 	)

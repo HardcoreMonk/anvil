@@ -467,6 +467,14 @@ func (f *fakeDaemon) TownWallHistory(_ context.Context, flockID string) ([]TownW
 	return []TownWallMessage{{Timestamp: time.Date(2026, 5, 12, 1, 0, 0, 0, time.UTC), AgentID: "agent-worker", Body: "hello wall"}}, nil
 }
 
+func (f *fakeDaemon) RegisterDistributedFlock(context.Context, string, DistributedFlockRequest) error {
+	return nil
+}
+
+func (f *fakeDaemon) RegisterRelayFlock(context.Context, string, RelayFlockRequest) error {
+	return nil
+}
+
 func (f *routerFakeDaemon) CreateFlock(context.Context, FlockCreateRequest) (*FlockCreateResponse, error) {
 	return &FlockCreateResponse{FlockID: "flock-1", Agents: []FlockAgentInfo{}}, nil
 }
@@ -479,15 +487,25 @@ func (f *routerFakeDaemon) GetFlock(context.Context, string) (*FlockInfo, error)
 	return &FlockInfo{}, nil
 }
 
-func (f *routerFakeDaemon) DeleteFlock(context.Context, string) (*RawDaemonResponse, error) {
+func (f *routerFakeDaemon) DeleteFlock(_ context.Context, flockID string) (*RawDaemonResponse, error) {
+	f.deregisterCalls++
+	f.deregisterFlockIDs = append(f.deregisterFlockIDs, flockID)
+	if f.deregisterErr != nil {
+		return nil, f.deregisterErr
+	}
 	return &RawDaemonResponse{StatusCode: 200, Body: "{}"}, nil
 }
 
-func (f *routerFakeDaemon) PostTownWall(context.Context, string, TownWallPostRequest) (*TownWallMessage, error) {
+func (f *routerFakeDaemon) PostTownWall(_ context.Context, flockID string, req TownWallPostRequest) (*TownWallMessage, error) {
+	f.postWallCalls++
+	f.postWallFlockID = flockID
+	f.postWallReq = req
 	return &TownWallMessage{}, nil
 }
 
-func (f *routerFakeDaemon) TownWallHistory(context.Context, string) ([]TownWallMessage, error) {
+func (f *routerFakeDaemon) TownWallHistory(_ context.Context, flockID string) ([]TownWallMessage, error) {
+	f.historyCalls++
+	f.historyFlockID = flockID
 	return []TownWallMessage{}, nil
 }
 

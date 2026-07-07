@@ -290,9 +290,78 @@ func (r *RuntimeRouter) ReconcilePlacements(ctx context.Context) error {
 		if err := r.placementStore.ReplaceVMPlacements(next); err != nil {
 			return err
 		}
-		return r.placementStore.Save()
+		if err := r.placementStore.Save(); err != nil {
+			return err
+		}
 	}
-	return nil
+	return r.reconcileRoutedFlockWalls(ctx)
+}
+
+// reconcileRoutedFlockWalls re-registers the shared Town Wall hub and relay
+// flocks for every persisted routed flock, healing the in-memory flock
+// registrations a home/member daemon loses on restart. It re-issues
+// RegisterDistributedFlock to the home daemon (roster from the record's agents,
+// relay token from the persisted store) and RegisterRelayFlock to each member
+// host that is not the home host. Registration endpoints are idempotent
+// (Task 3), so re-issuing when already present is safe.
+//
+// Flocks that are deleted/deleting or carry no home host are skipped. A single
+// flock's (or member's) failure is collected and reconcile continues so one
+// unreachable daemon cannot block healing the rest. Error strings are bounded to
+// flock/host identifiers only: the relay token and daemon addresses are never
+// surfaced (redaction discipline — the token flows daemon-to-daemon only).
+func (r *RuntimeRouter) reconcileRoutedFlockWalls(ctx context.Context) error {
+	if r == nil || r.placementStore == nil {
+		return nil
+	}
+	var errs []error
+	for _, record := range r.placementStore.ListRoutedFlocks() {
+		flockID := strings.TrimSpace(record.FlockID)
+		homeHost := strings.TrimSpace(record.HomeHost)
+		if homeHost == "" {
+			continue
+		}
+		if record.Status == RoutedFlockStatusDeleted || record.Status == RoutedFlockStatusDeleting {
+			continue
+		}
+		relayToken, ok := r.placementStore.RoutedFlockRelayToken(flockID)
+		if !ok || relayToken == "" {
+			// No persisted relay secret (e.g. a record that never reached ready):
+			// re-registering without it would admit an unauthenticated hub, so skip.
+			continue
+		}
+		homeDaemon, ok := r.daemons[homeHost]
+		if !ok || homeDaemon == nil {
+			errs = append(errs, fmt.Errorf("reconcile routed flock %q: home host %q has no daemon client", flockID, homeHost))
+			continue
+		}
+		roster := make([]RosterMember, 0, len(record.Agents))
+		for _, a := range record.Agents {
+			roster = append(roster, RosterMember{AgentID: strings.TrimSpace(a.AgentID), Host: strings.TrimSpace(a.Host)})
+		}
+		if err := homeDaemon.RegisterDistributedFlock(ctx, flockID, DistributedFlockRequest{Roster: roster, RelayToken: relayToken}); err != nil {
+			errs = append(errs, fmt.Errorf("reconcile routed flock %q: hub re-registration on home host %q failed", flockID, homeHost))
+			continue
+		}
+		homeAddr := r.daemonAddr(homeHost)
+		relayed := map[string]bool{homeHost: true}
+		for _, a := range record.Agents {
+			host := strings.TrimSpace(a.Host)
+			if host == "" || relayed[host] {
+				continue
+			}
+			relayed[host] = true
+			daemon, ok := r.daemons[host]
+			if !ok || daemon == nil {
+				errs = append(errs, fmt.Errorf("reconcile routed flock %q: member host %q has no daemon client", flockID, host))
+				continue
+			}
+			if err := daemon.RegisterRelayFlock(ctx, flockID, RelayFlockRequest{HomeAddr: homeAddr, RelayToken: relayToken}); err != nil {
+				errs = append(errs, fmt.Errorf("reconcile routed flock %q: relay re-registration on member host %q failed", flockID, host))
+			}
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (r *RuntimeRouter) scheduleDaemon(req ScheduleRequest, requested TenantUsage) (ScheduleDecision, Daemon, error) {
@@ -338,6 +407,24 @@ func normalizeScheduleDecisionReason(reason string) string {
 	default:
 		return FlockPlacementReasonUnknown
 	}
+}
+
+// daemonAddr returns the reachable base URL of a host's daemon, taken from the
+// scheduler's host inventory (RuntimeHost.Endpoint) — the same source the
+// runtime uses to reach each daemon. It is sent to member daemons as the home
+// daemon address for wall relaying; it is never persisted in the routed-flock
+// record or surfaced in MCP output.
+func (r *RuntimeRouter) daemonAddr(host string) string {
+	host = strings.TrimSpace(host)
+	if host == "" || r == nil || r.scheduler == nil {
+		return ""
+	}
+	for _, h := range r.scheduler.hosts {
+		if strings.TrimSpace(h.Name) == host {
+			return strings.TrimSpace(h.Endpoint)
+		}
+	}
+	return ""
 }
 
 func (r *RuntimeRouter) daemonForVM(vmID string) (Daemon, error) {

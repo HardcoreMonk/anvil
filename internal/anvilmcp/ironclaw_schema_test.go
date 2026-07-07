@@ -37,6 +37,31 @@ func TestCurrentIronClawSchemasExcludeGatewayNamespacedTools(t *testing.T) {
 	}
 }
 
+// TestIronClawSchemasExcludeCrossHostWallTools locks in the Task 6 boundary: the
+// cross-host shared Town Wall is an execution-layer feature (hub/relay flock
+// registration, per-flock relay tokens, in-guest gtwall) and must NOT add any new
+// anvil_* MCP tool. The only routed-flock tool is the pre-existing
+// anvil_create_routed_flock_members. Any tool name mentioning relay/distributed,
+// or a NEW wall tool beyond the pre-existing town-wall pair, fails this guard
+// first. The pre-existing town-wall tools contain "wall", so they are explicitly
+// allow-listed here rather than matched by substring.
+func TestIronClawSchemasExcludeCrossHostWallTools(t *testing.T) {
+	preexistingWallTools := map[string]bool{
+		"anvil_post_townwall":        true,
+		"anvil_get_townwall_history": true,
+	}
+	for _, schema := range CurrentIronClawToolInputSchemas() {
+		name := schema.ToolName
+		lower := strings.ToLower(name)
+		if strings.Contains(lower, "relay") || strings.Contains(lower, "distributed") {
+			t.Fatalf("cross-host wall must not add an anvil_* tool; found forbidden relay/distributed tool %q", name)
+		}
+		if strings.Contains(lower, "wall") && !preexistingWallTools[name] {
+			t.Fatalf("cross-host wall must not add a new wall tool; found %q (only pre-existing town-wall tools are allowed)", name)
+		}
+	}
+}
+
 func TestIronClawSchemaValidationRejectsEmptyGeminiType(t *testing.T) {
 	err := ValidateIronClawToolInputSchemas([]IronClawToolInputSchema{{
 		ToolName: "broken_tool",

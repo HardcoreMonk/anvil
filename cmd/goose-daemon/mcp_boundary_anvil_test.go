@@ -56,7 +56,7 @@ func buildMCPConfigChain(cp *ControlPlane, getClients func() []APIClient) http.H
 	internalMux.HandleFunc("/config/builtins", cp.handleConfigBuiltins)
 	internalMux.HandleFunc("/config/mcp", cp.handleConfigMCP)
 	internalMux.HandleFunc("/config/mcp/servers", cp.handleConfigMCPServers)
-	return authMiddleware(getClients, nil, internalMux)
+	return authMiddleware(getClients, nil, nil, internalMux)
 }
 
 func TestConfigMCPRoutesRequireAuthWhenConfigured(t *testing.T) {
