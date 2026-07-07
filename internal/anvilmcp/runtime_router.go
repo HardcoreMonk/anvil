@@ -305,6 +305,38 @@ func (r *RuntimeRouter) ReconcilePlacements(ctx context.Context) error {
 	return r.reconcileRoutedFlockWalls(ctx)
 }
 
+// StartReconcileLoop runs ReconcilePlacements once immediately and then every
+// interval until ctx is cancelled. interval <= 0 disables the loop entirely
+// (including the immediate run). Failures are logged through logf (flock/host
+// identifiers only — relay tokens and daemon addresses never appear) and the
+// loop keeps running: reconcile must never block or kill the adapter.
+func (r *RuntimeRouter) StartReconcileLoop(ctx context.Context, interval time.Duration, logf func(format string, args ...any)) {
+	if r == nil || interval <= 0 {
+		return
+	}
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	run := func() {
+		if err := r.ReconcilePlacements(ctx); err != nil {
+			logf("anvil-mcp: reconcile placements: %v", err)
+		}
+	}
+	go func() {
+		run()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				run()
+			}
+		}
+	}()
+}
+
 // reconcileRoutedFlockWalls re-registers the shared Town Wall hub and relay
 // flocks for every persisted routed flock, healing the in-memory flock
 // registrations a home/member daemon loses on restart. It re-issues

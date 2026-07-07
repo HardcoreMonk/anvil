@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -2257,4 +2259,109 @@ func newSnapshotReplicationTestRouter(source, target *routerFakeDaemon, store *P
 		map[string]Daemon{"host-a": source, "host-b": target},
 		RuntimeRouterOptions{PlacementStore: store},
 	)
+}
+
+// countingListDaemon counts ListVMs calls. If err is set, it always returns that error.
+type countingListDaemon struct {
+	Daemon
+	calls atomic.Int32
+	err   error
+}
+
+func (d *countingListDaemon) ListVMs(ctx context.Context) ([]VMInfo, error) {
+	d.calls.Add(1)
+	return nil, d.err
+}
+
+func waitForCalls(t *testing.T, d *countingListDaemon, want int32) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if d.calls.Load() >= want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("ListVMs calls = %d, want >= %d within 3s", d.calls.Load(), want)
+}
+
+func TestStartReconcileLoopRunsImmediatelyThenPeriodically(t *testing.T) {
+	daemon := &countingListDaemon{}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(nil, nil, nil),
+		map[string]Daemon{"host-a": daemon},
+		RuntimeRouterOptions{},
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	router.StartReconcileLoop(ctx, 10*time.Millisecond, nil)
+	waitForCalls(t, daemon, 3) // 시작 1회 + 주기 최소 2회
+}
+
+func TestStartReconcileLoopStopsOnContextCancel(t *testing.T) {
+	daemon := &countingListDaemon{}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(nil, nil, nil),
+		map[string]Daemon{"host-a": daemon},
+		RuntimeRouterOptions{},
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	router.StartReconcileLoop(ctx, 10*time.Millisecond, nil)
+	waitForCalls(t, daemon, 2)
+	cancel()
+
+	time.Sleep(30 * time.Millisecond) // 취소 전 시작된 in-flight 실행 소진
+	settled := daemon.calls.Load()
+	time.Sleep(50 * time.Millisecond)
+	if got := daemon.calls.Load(); got != settled {
+		t.Fatalf("ListVMs calls grew after cancel: %d -> %d", settled, got)
+	}
+}
+
+func TestStartReconcileLoopContinuesAfterErrorAndLogs(t *testing.T) {
+	daemon := &countingListDaemon{err: errors.New("boom")}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(nil, nil, nil),
+		map[string]Daemon{"host-a": daemon},
+		RuntimeRouterOptions{},
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var mu sync.Mutex
+	var logged []string
+	logf := func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+	router.StartReconcileLoop(ctx, 10*time.Millisecond, logf)
+	waitForCalls(t, daemon, 3) // 에러에도 루프 지속
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(logged) == 0 {
+		t.Fatal("reconcile errors were not logged")
+	}
+	if !strings.Contains(logged[0], "boom") || !strings.Contains(logged[0], "host-a") {
+		t.Fatalf("logged[0] = %q, want the host-scoped error (contains boom and host-a)", logged[0])
+	}
+}
+
+func TestStartReconcileLoopNoopWhenDisabled(t *testing.T) {
+	daemon := &countingListDaemon{}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(nil, nil, nil),
+		map[string]Daemon{"host-a": daemon},
+		RuntimeRouterOptions{},
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	router.StartReconcileLoop(ctx, 0, nil)
+	time.Sleep(50 * time.Millisecond)
+	if got := daemon.calls.Load(); got != 0 {
+		t.Fatalf("ListVMs calls = %d, want 0 (interval 0 = off)", got)
+	}
 }
