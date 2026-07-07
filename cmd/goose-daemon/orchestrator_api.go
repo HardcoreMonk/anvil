@@ -1486,7 +1486,14 @@ func (cp *ControlPlane) registerDistributedFlock(w http.ResponseWriter, r *http.
 		// pre-spawn registration could not know, and reconcile re-POSTs depend
 		// on the same path after a daemon restart.
 		if len(req.Roster) > 0 {
-			cp.flockMgr.UpdateHubRoster(flockID, req.Roster)
+			// UpdateHubRoster returns false only if the flock vanished (deleted
+			// by a concurrent request) between the Get above and this call — a
+			// narrow TOCTOU window, not reproducible as a deterministic unit
+			// test. Log and continue: the roster update is best-effort here,
+			// same as the token admission calls below.
+			if !cp.flockMgr.UpdateHubRoster(flockID, req.Roster) {
+				slog.Warn("flock: hub roster update raced with delete", "flock_id", flockID)
+			}
 		}
 		cp.setRelayToken(flockID, req.RelayToken)
 		cp.setCallToken(flockID, req.CallToken)
