@@ -836,3 +836,50 @@ func TestPlacementStoreSaveRoutedFlockAndPlacementsRollsBackOnFailure(t *testing
 		t.Fatalf("old VM placement = %q,%v want host-old,true", host, ok)
 	}
 }
+
+// TestPlacementStoreCallTokenLifecycle mirrors the relay-token store plumbing
+// (see TestPlacementStoreRoutedFlockRegistryPersistsAndClones and the
+// RoutedFlockRelayToken accessor tests in routed_flock_test.go /
+// runtime_router_test.go): per-flock call tokens must persist across
+// token-less re-saves and disk reload, stay redacted from State(), and be
+// removable on demand.
+func TestPlacementStoreCallTokenLifecycle(t *testing.T) {
+	dir := t.TempDir()
+	store := NewPlacementStore(filepath.Join(dir, "state.json"))
+	rec := RoutedFlockRecord{FlockID: "routed-1", Status: RoutedFlockStatusCreating}
+	rec.callToken = "ct-secret"
+	if err := store.SaveRoutedFlockAndPlacements(rec, nil); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	// 영속·carrier scrub 후에도 조회 가능
+	if tok, ok := store.RoutedFlockCallToken("routed-1"); !ok || tok != "ct-secret" {
+		t.Fatalf("call token = %q,%v want ct-secret,true", tok, ok)
+	}
+	// State() redaction
+	if store.State().RoutedFlockCallTokens != nil {
+		t.Fatal("State() must redact RoutedFlockCallTokens")
+	}
+	// 빈 carrier 재저장이 기존 entry를 지우지 않음
+	rec2 := RoutedFlockRecord{FlockID: "routed-1", Status: RoutedFlockStatusReady}
+	if err := store.SaveRoutedFlockAndPlacements(rec2, nil); err != nil {
+		t.Fatalf("re-save: %v", err)
+	}
+	if tok, _ := store.RoutedFlockCallToken("routed-1"); tok != "ct-secret" {
+		t.Fatalf("token lost on token-less re-save: %q", tok)
+	}
+	// 디스크 reload 후 생존 (clone/normalize 경로 검증)
+	store2 := NewPlacementStore(filepath.Join(dir, "state.json"))
+	if err := store2.Load(); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if tok, ok := store2.RoutedFlockCallToken("routed-1"); !ok || tok != "ct-secret" {
+		t.Fatalf("reloaded call token = %q,%v", tok, ok)
+	}
+	// revoke
+	if err := store2.removeRoutedFlockCallToken("routed-1"); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if _, ok := store2.RoutedFlockCallToken("routed-1"); ok {
+		t.Fatal("call token survived removal")
+	}
+}
