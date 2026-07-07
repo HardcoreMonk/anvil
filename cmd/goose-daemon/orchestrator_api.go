@@ -368,13 +368,16 @@ func (cp *ControlPlane) deleteFlock(w http.ResponseWriter, flockID string) {
 func relayTownWallPost(ctx context.Context, homeAddr, relayToken, flockID, agentID, body string) (int, []byte, error) {
 	payload, _ := json.Marshal(map[string]string{"agent_id": agentID, "body": body})
 	url := strings.TrimRight(homeAddr, "/") + "/flocks/" + flockID + "/post"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
-	if err != nil {
-		return 0, nil, err
+	build := func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+relayToken)
+		return req, nil
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+relayToken)
-	resp, err := newAgentHTTPClient().Do(req)
+	resp, err := doWithDialRetry(ctx, newAgentHTTPClient(), build)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -446,13 +449,15 @@ func (cp *ControlPlane) townWallHistory(w http.ResponseWriter, r *http.Request, 
 		if raw := r.URL.RawQuery; raw != "" {
 			url += "?" + raw
 		}
-		hreq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, url, nil)
-		if err != nil {
-			writeJSONError(w, http.StatusBadGateway, err)
-			return
+		build := func() (*http.Request, error) {
+			hreq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, url, nil)
+			if err != nil {
+				return nil, err
+			}
+			hreq.Header.Set("Authorization", "Bearer "+f.RelayToken)
+			return hreq, nil
 		}
-		hreq.Header.Set("Authorization", "Bearer "+f.RelayToken)
-		resp, err := newAgentHTTPClient().Do(hreq)
+		resp, err := doWithDialRetry(r.Context(), newAgentHTTPClient(), build)
 		if err != nil {
 			writeJSONError(w, http.StatusBadGateway, err)
 			return
@@ -1339,19 +1344,22 @@ func (cp *ControlPlane) callFlockAgent(w http.ResponseWriter, r *http.Request, f
 func forwardFlockCall(ctx context.Context, addr, callToken, flockID string, call FlockCallRequest, depth string, markHop bool) (int, []byte, error) {
 	payload, _ := json.Marshal(call)
 	url := strings.TrimRight(addr, "/") + "/flocks/" + flockID + "/call"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
-	if err != nil {
-		return 0, nil, err
+	build := func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+callToken)
+		if markHop {
+			req.Header.Set(callHopHeader, "1")
+		}
+		if depth != "" {
+			req.Header.Set(taskDepthHeader, depth)
+		}
+		return req, nil
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+callToken)
-	if markHop {
-		req.Header.Set(callHopHeader, "1")
-	}
-	if depth != "" {
-		req.Header.Set(taskDepthHeader, depth)
-	}
-	resp, err := newAgentHTTPClient().Do(req)
+	resp, err := doWithDialRetry(ctx, newAgentHTTPClient(), build)
 	if err != nil {
 		return 0, nil, err
 	}

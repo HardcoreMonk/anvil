@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"time"
@@ -63,6 +64,12 @@ func doWithDialRetry(ctx context.Context, client *http.Client, build func() (*ht
 		lastErr = err
 		if !isDialError(err) || ctx.Err() != nil {
 			return nil, err
+		}
+		if attempt < relayRetryAttempts-1 {
+			// URL/address/token deliberately omitted — this helper has no flock/host
+			// context; the final failure's error message (built by the caller) carries
+			// identifiers instead. Only the attempt number is safe to log here.
+			slog.Warn("relay hop dial failed, retrying", "attempt", attempt+1)
 		}
 	}
 	return nil, lastErr

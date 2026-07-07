@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"ephemera/internal/orchestrator"
 )
@@ -510,5 +512,60 @@ func TestCallFlockAgent_MemberToRemoteMemberFullChain(t *testing.T) {
 	}
 	if len(payload) != 2 {
 		t.Fatalf("target body has extra fields: %s, want only agent_id+prompt", targetBody)
+	}
+}
+
+// TestCallFlockAgent_RelayRetryExhausted502 proves a relay call to a
+// permanently-unreachable HomeAddr (closed port — dial fails on every
+// attempt) exhausts all bounded retries and still returns 502, with the
+// error body free of the daemon address and both tokens (redaction — an
+// exhausted-retry error must not become a new leak surface), within one
+// wall-clock test run (relayRetrySleep swapped for a no-sleep fake so the
+// real 1s/2s backoff never elapses). A closed port gives client.Do no way to
+// distinguish attempts from the outside, so the sleep-hook's own call count
+// is the attempt-count witness: relayRetryAttempts-1 backoffs between
+// relayRetryAttempts dial attempts.
+func TestCallFlockAgent_RelayRetryExhausted502(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve port: %v", err)
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatalf("close reserved listener (guarantee every attempt dial-fails): %v", err)
+	}
+
+	var sleepCalls int32
+	oldSleep := relayRetrySleep
+	relayRetrySleep = func(ctx context.Context, d time.Duration) error {
+		atomic.AddInt32(&sleepCalls, 1)
+		return noSleep(ctx, d)
+	}
+	defer func() { relayRetrySleep = oldSleep }()
+
+	cp := newTestCP(t)
+	cp.flockMgr.RegisterRelay("routed-1", "http://"+addr, "rt-1", "ct-1", nil)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/flocks/routed-1/call", strings.NewReader(`{"agent_id":"researcher-1","prompt":"ping"}`))
+
+	start := time.Now()
+	cp.handleFlockItem(rr, req)
+	elapsed := time.Since(start)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("relay call to permanently-closed home = %d, want 502 (%s)", rr.Code, rr.Body.String())
+	}
+	if elapsed >= 5*time.Second {
+		t.Fatalf("relay retry exhaustion took %v, want < 5s (relayRetrySleep must be the no-sleep fake)", elapsed)
+	}
+	if got := atomic.LoadInt32(&sleepCalls); got != int32(relayRetryAttempts-1) {
+		t.Fatalf("relayRetrySleep called %d times, want %d (relayRetryAttempts-1 backoffs across relayRetryAttempts dial attempts)", got, relayRetryAttempts-1)
+	}
+	body := rr.Body.String()
+	for _, leak := range []string{addr, "rt-1", "ct-1"} {
+		if strings.Contains(body, leak) {
+			t.Fatalf("502 body leaked %q: %s", leak, body)
+		}
 	}
 }
