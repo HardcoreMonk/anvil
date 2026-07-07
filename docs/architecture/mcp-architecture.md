@@ -740,7 +740,7 @@ HTTP MCP transport도 이 작업 범위 밖이다. v2 후보 논의에서는 다
 - runtime MCP Gateway(`EPHEMERA_MCP_*`, `internal/mcpgateway`)의 `anvil_*` MCP tool
   노출 (`v0.6.x` runtime/operator 표면이며 IronClaw adapter tool 아님)
 - flock alias 또는 `session_name` 재사용
-- routed members-only flock의 cross-host `gtcall`, cross-host broadcast fan-out
+- routed members-only flock의 cross-host broadcast fan-out
 
 위 항목은 v1의 숨은 동작이 아니라 향후 MCP v2 설계 후보로 남긴다.
 

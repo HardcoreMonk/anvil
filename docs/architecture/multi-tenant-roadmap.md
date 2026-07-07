@@ -50,11 +50,13 @@ daemon 계약 확장을 필요로 한다.
   home으로 forward·proxy)을 등록한다. guest는 여전히 로컬 daemon(`10.0.1.1`)에만
   post한다(bridge-only 불변). daemon-to-daemon hop은 flock-scoped `relay_token`으로
   인증하며, `authMiddleware`는 이 token을 해당 flock의 wall sub-path
-  (`/flocks/{id}/(post|wall|wall/history)`)에만 admit한다(일반 control-plane bearer
-  아님). `relay_token`은 `PlacementStore`에 영속되지만 모든 MCP output/audit/HTTP
+  (`/flocks/{id}/(post|wall|wall/history)`)에 admit한다(일반 control-plane bearer
+  아님; cross-host gtcall 편입부터 guest 능력 토큰으로 `call` 진입도 admit).
+  `relay_token`은 `PlacementStore`에 영속되지만 모든 MCP output/audit/HTTP
   view에서 redact된다. reconcile은 daemon 재시작 후 hub/relay를 재등록하고,
   rollback/delete는 hub/relay 등록을 해제하고 token을 revoke한다. cross-host
-  `gtcall`과 cross-host broadcast fan-out은 이 슬라이스 범위 밖이다. 설계:
+  `gtcall`은 2026-07-08 별도 slice로 편입됐고(daemon `POST /flocks/{id}/call` +
+  `call_token`), cross-host broadcast fan-out은 계속 범위 밖이다. 설계:
   [`docs/superpowers/specs/2026-07-06-cross-host-shared-townwall-design.md`](../superpowers/specs/2026-07-06-cross-host-shared-townwall-design.md),
   handoff:
   [`docs/operations/2026-07-06-cross-host-town-wall-handoff.md`](../operations/2026-07-06-cross-host-town-wall-handoff.md).

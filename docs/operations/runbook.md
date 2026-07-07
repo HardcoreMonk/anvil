@@ -232,6 +232,20 @@ cross-host shared Town Wall 경로는 별도 KVM e2e로 확인한다. 실제 mem
 sudo -n bash scripts/anvil-cross-host-wall-e2e.sh
 ```
 
+cross-host gtcall 경로도 별도 KVM e2e로 확인한다. 실제 member VM의 `gtcall`이
+in-VM agent → member daemon(relay flock) → call hop(`call_token`)을 거쳐 home으로
+전달되고 응답이 guest까지 왕복하는지 검증한다. 이 스크립트는 member daemon을
+**auth-on**(`EPHEMERA_API_TOKENS`)으로 띄운다 — guest의 `relay_token` 기반 call
+진입 admission(guest 능력 토큰이 그 flock의 wall과 `call`을 모두 admit)은
+`authMiddleware`가 `cp.clients`를 확인하는 경로이므로, auth-off daemon에서는 그
+확인 자체가 short-circuit되어 실경로 검증이 안 되기 때문이다(wall e2e가 auth-off로
+돌다 놓쳤던 결함 class와 동일 — `docs/operations/2026-07-08-cross-host-gtcall-handoff.md`
+참고). home daemon은 wall e2e와 동일하게 stub HTTP recorder로 대체한다.
+
+```bash
+sudo -n bash scripts/anvil-cross-host-gtcall-e2e.sh
+```
+
 ### VM workload E2E
 
 VM 내부 서비스 설치, 기동, host-to-VM 접근, 기초 성능 artifact를 확인할 때는

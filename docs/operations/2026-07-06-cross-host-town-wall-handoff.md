@@ -148,7 +148,7 @@ CodeRabbit 리뷰(actionable 7 + nitpick 3)를 전건 코드 대조 triage — 9
 release-gate 관점에서 이 슬라이스는 닫혔다(유닛 green, KVM e2e green, 보안 가드
 green, 2026-07-07 리뷰 대응 batch 반영). `ReconcilePlacements` 주기적 control loop
 배선은 2026-07-07 reconcile-loop slice로 완료됐다(아래 Follow-Up CLOSED 참조).
-cross-host `gtcall`을 다음 capability로 검토한다.
+cross-host `gtcall`은 2026-07-08 slice로 완료됐다(아래 Follow-Up CLOSED 참조).
 
 ## Follow-Up Tasks
 
@@ -158,8 +158,13 @@ cross-host `gtcall`을 다음 capability로 검토한다.
   post 실패는 agent 재시도에 의존한다. bounded retry/buffer 설계가 후속이다.
 - **mesh 진화(home SPOF 제거)**: 현재 home 단일 장애점을 1차 수용했다. hub flock
   등록을 replica set으로 확장하면 mesh로 승격 가능(설계 문서의 진화 경로).
-- **cross-host `gtcall`**: 다음 capability 후보. 이 슬라이스는 공유 wall(broadcast/
-  observe)만 다루고 지정 agent 호출은 비범위로 남겼다.
+- ~~**cross-host `gtcall`**~~ — **CLOSED** (`435ec65`..`7957c66`, 2026-07-08
+  cross-host gtcall slice): daemon `POST /flocks/{id}/call`이 routed flock의
+  임의 member→다른 임의 member 호출을 member→home→target 2-hop으로 지원한다.
+  별도 `call_token`(daemon hop 전용, call만 admit)을 신설하고 `relay_token`을
+  guest 능력 토큰(wall+call 진입)으로 재해석했다(A안). KVM e2e
+  `scripts/anvil-cross-host-gtcall-e2e.sh`(auth-on member daemon)로 검증. 상세:
+  [`docs/operations/2026-07-08-cross-host-gtcall-handoff.md`](2026-07-08-cross-host-gtcall-handoff.md).
 - ~~**Task-8 member-deregistration gap**~~ — **CLOSED** (`2514f02`, 2026-07-07
   리뷰 대응 batch): relay 등록 성공 host를 rollback에 스레딩해 spawn 실패
   member의 relay 등록도 해제한다.
