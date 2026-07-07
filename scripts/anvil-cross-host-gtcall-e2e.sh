@@ -474,7 +474,10 @@ else
   else
     ok "No 'agent_token' field in the relayed request"
   fi
-  if [ -n "$AGENT_TOKEN" ] && printf '%s' "$CAP" | grep -qF "$AGENT_TOKEN"; then
+  if [ -z "$AGENT_TOKEN" ]; then
+    fail "agent_token_capture_failed: AGENT_TOKEN was not captured from the VM create response; per-VM token leak sentinel cannot run"
+    exit 1
+  elif printf '%s' "$CAP" | grep -qF "$AGENT_TOKEN"; then
     fail "call_assert_failed: per-VM agent token value leaked into the relayed request"
   else
     ok "Per-VM agent token value absent from the relayed request"
