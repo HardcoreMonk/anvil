@@ -1220,6 +1220,13 @@ func (cp *ControlPlane) registerDistributedFlock(w http.ResponseWriter, r *http.
 			writeJSONError(w, http.StatusConflict, fmt.Errorf("flock %q already registered as a non-hub flock", flockID))
 			return
 		}
+		// Re-registration refreshes the roster too (not only the token): the
+		// post-spawn re-POST carries the VMID/Addr-enriched roster the initial
+		// pre-spawn registration could not know, and reconcile re-POSTs depend
+		// on the same path after a daemon restart.
+		if len(req.Roster) > 0 {
+			cp.flockMgr.UpdateHubRoster(flockID, req.Roster)
+		}
 		cp.setRelayToken(flockID, req.RelayToken)
 		w.WriteHeader(http.StatusCreated)
 		return

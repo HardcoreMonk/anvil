@@ -70,6 +70,12 @@ type RelayFlockRequest struct {
 type RosterMember struct {
 	AgentID string `json:"agent_id"`
 	Host    string `json:"host"`
+	// VMID/Addr let the hub resolve a call target and reach its host daemon.
+	// Both are filled by the post-spawn re-registration (the initial pre-spawn
+	// registration has neither). Addr is daemon-internal: never log it and
+	// never emit it on a serialized surface.
+	VMID string `json:"vm_id,omitempty"`
+	Addr string `json:"addr,omitempty"`
 }
 
 type SnapshotInfo struct {

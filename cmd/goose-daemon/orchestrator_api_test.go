@@ -326,3 +326,34 @@ func TestRegisterDistributedFlock_ReAdmitsRelayTokenOnReRegister(t *testing.T) {
 		t.Fatalf("relay token after re-register = %q, want rt-1 (admission not restored)", got)
 	}
 }
+
+// TestRegisterDistributedFlock_UpdatesRosterOnReRegister covers Task 1: the
+// post-spawn re-registration carries a VMID/Addr-enriched roster the initial
+// pre-spawn registration could not know. The idempotent hub path must adopt
+// that roster (not only refresh the relay-token admission), otherwise later
+// call-target resolution (Task 3) and reconcile re-POSTs (Task 5) would see a
+// stale roster missing VMID/Addr.
+func TestRegisterDistributedFlock_UpdatesRosterOnReRegister(t *testing.T) {
+	cp := newTestCP(t)
+	first := `{"roster":[{"agent_id":"researcher-1","host":"host-a"}],"relay_token":"rt-1"}`
+	rr := httptest.NewRecorder()
+	cp.registerDistributedFlock(rr, httptest.NewRequest(http.MethodPost, "/flocks/routed-1/distributed", strings.NewReader(first)), "routed-1")
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("first register = %d, want 201", rr.Code)
+	}
+
+	second := `{"roster":[{"agent_id":"researcher-1","host":"host-a","vm_id":"vm-11","addr":"http://host-a:3000"}],"relay_token":"rt-1"}`
+	rr = httptest.NewRecorder()
+	cp.registerDistributedFlock(rr, httptest.NewRequest(http.MethodPost, "/flocks/routed-1/distributed", strings.NewReader(second)), "routed-1")
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("re-register = %d, want 201", rr.Code)
+	}
+
+	f, ok := cp.flockMgr.Get("routed-1")
+	if !ok || f.Kind != orchestrator.FlockKindHub {
+		t.Fatalf("hub flock missing after re-register")
+	}
+	if len(f.Roster) != 1 || f.Roster[0].VMID != "vm-11" || f.Roster[0].Addr != "http://host-a:3000" {
+		t.Fatalf("roster not updated on re-register: %+v", f.Roster)
+	}
+}

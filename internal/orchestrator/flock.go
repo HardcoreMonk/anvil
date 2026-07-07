@@ -32,6 +32,12 @@ const (
 type RosterMember struct {
 	AgentID string `json:"agent_id"`
 	Host    string `json:"host"`
+	// VMID/Addr let the hub resolve a call target and reach its host daemon.
+	// Both are filled by the post-spawn re-registration (the initial pre-spawn
+	// registration has neither). Addr is daemon-internal: never log it and
+	// never emit it on a serialized surface.
+	VMID string `json:"vm_id,omitempty"`
+	Addr string `json:"addr,omitempty"`
 }
 
 // AgentInfo is the per-agent record exposed via flock APIs.
@@ -451,6 +457,22 @@ func (fm *FlockManager) RegisterHub(flockID string, wall *TownWall, roster []Ros
 	fm.flocks[flockID] = f
 	fm.mu.Unlock()
 	return f
+}
+
+// UpdateHubRoster replaces an existing hub flock's Roster under fm.mu. Used
+// by the idempotent /distributed re-registration path so a post-spawn re-POST
+// carrying a VMID/Addr-enriched roster can update the hub in place without a
+// raw field assignment racing concurrent readers of the pointer returned by
+// Get. Reports false when flockID is not a registered hub flock.
+func (fm *FlockManager) UpdateHubRoster(flockID string, roster []RosterMember) bool {
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	f, ok := fm.flocks[flockID]
+	if !ok || f.Kind != FlockKindHub {
+		return false
+	}
+	f.Roster = roster
+	return true
 }
 
 // RegisterRelay registers a relay flock on a member host. It owns no wall;
