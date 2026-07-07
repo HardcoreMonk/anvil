@@ -49,8 +49,19 @@ daemon에 **`POST /flocks/{id}/call`** (body `{agent_id, prompt}`)을 신설하�
 ## 해석과 실행 (2-hop)
 
 - hub 등록(`POST /flocks/{id}/distributed`)의 roster member를
-  `{AgentID, Host}` → `{AgentID, Host, VMID}`로 확장한다. home이
-  agent→(host, vm_id)를 canonical하게 해석한다.
+  `{AgentID, Host}` → `{AgentID, Host, VMID, Addr}`로 확장한다. home이
+  agent→(host, vm_id)를 canonical하게 해석한다. `Addr`(해당 host daemon의
+  control-plane 주소)는 home→target 2번째 hop에 필요하다 — home daemon은
+  daemon 주소록을 갖지 않으므로(주소록은 anvilmcp control plane 소유) 등록
+  시점에 배포한다. `Addr`는 daemon 내부 용도이며 로그·에러 문자열·직렬화
+  표면에는 노출하지 않는다(기존 redaction 규율).
+- 최초 hub 등록은 spawn 전이라 VMID가 없다 — spawn 완료 후 `record.Agents`
+  기반의 VMID 포함 roster로 **재등록**하고, daemon의 hub idempotent 경로가
+  재등록 시 Roster를 갱신하도록 수정한다(현행은 token만 재주입하고 roster를
+  버림). reconcile 재등록도 같은 VMID 포함 roster를 보낸다.
+- home의 로컬 대상 판정은 host 이름 비교가 아니라 **roster VMID가 자기 로컬
+  VM registry에 존재하는지**로 한다(daemon은 자기 control-plane host 이름을
+  모른다).
 - home 수신 call: target이 home 자신의 host면 로컬 dispatch, 아니면 target
   host daemon의 `POST /flocks/{id}/call`로 2번째 hop.
 - **루프 방지**: hop 요청에 forward 표식 헤더 `X-Ephemera-Call-Hop: 1`을
