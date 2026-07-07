@@ -1205,8 +1205,12 @@ func (cp *ControlPlane) registerDistributedFlock(w http.ResponseWriter, r *http.
 	// rejected (Task 4). If the daemon runs auth-disabled, only the hub check
 	// applies. This MUST run on BOTH the fresh-registration path and the
 	// already-exists idempotent path: a reconcile re-POST (Task 7) heals a
-	// daemon that kept the hub flock but lost the relay-token admission (e.g.
-	// after a SIGHUP ReloadClients), so admission is restored before returning.
+	// daemon that kept the hub flock but lost the relay-token admission. That
+	// admission lives only in cp.relayTokens (in-memory, never persisted on the
+	// daemon), so a daemon PROCESS RESTART drops it while the hub flock metadata
+	// is reconstructed independently (recovery.go); the reconcile re-POST then
+	// restores admission before returning. A SIGHUP token reload does NOT clear
+	// it — ReloadClients only swaps cp.clients, never cp.relayTokens.
 	if existing, ok := cp.flockMgr.Get(flockID); ok && existing.Kind == orchestrator.FlockKindHub {
 		cp.setRelayToken(flockID, req.RelayToken)
 		w.WriteHeader(http.StatusCreated)

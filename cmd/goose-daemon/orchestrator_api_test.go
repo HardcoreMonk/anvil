@@ -221,9 +221,10 @@ func TestDeleteFlock_RevokesRelayToken(t *testing.T) {
 // TestRegisterDistributedFlock_ReAdmitsRelayTokenOnReRegister covers the
 // reconcile heal path (Task 7): a re-POST /distributed for an already-registered
 // hub flock must restore the scoped relay-token admission even when it was
-// cleared (e.g. after a SIGHUP ReloadClients) while the hub flock itself
-// survived in flockMgr. Without this, reconcile would re-issue the hub POST but
-// leave the relay hop unauthenticated.
+// cleared (e.g. by a daemon process restart, which drops the in-memory
+// cp.relayTokens map) while the hub flock itself survived in flockMgr. Without
+// this, reconcile would re-issue the hub POST but leave the relay hop
+// unauthenticated.
 func TestRegisterDistributedFlock_ReAdmitsRelayTokenOnReRegister(t *testing.T) {
 	cp := newTestCP(t)
 
