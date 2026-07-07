@@ -109,6 +109,27 @@ b58175f feat(runtime): relay town wall post/history/stream to home daemon
 - 기존 단일 호스트 flock e2e(`scripts/anvil-mcp-e2e.sh flock`, `e2e_test.sh`)는
   이번 슬라이스가 건드리지 않는 경로 — 회귀 없음.
 
+## 2026-07-07 리뷰 대응 batch (PR #19 CodeRabbit)
+
+CodeRabbit 리뷰(actionable 7 + nitpick 3)를 전건 코드 대조 triage — 9건 반영,
+1건 기술 반박. 전체 유닛 suite green, 4 빌드 green, KVM e2e 재실행 green으로 검증.
+
+- `3535ae3` — relay post/history hop에 caller `r.Context()` 스레딩
+  (stalled home에서 무기한 블록 방지; cancel-context 테스트 2종).
+- `fd7da7b` — hub/relay 등록 시 다른 kind가 점유한 flock id는 `409 Conflict`
+  (기존 flock silent overwrite 차단; relay→relay 재등록은 reconcile heal용 유지).
+- `2514f02` — **Task-8 member-deregistration gap CLOSED**: relay 등록 성공 host를
+  variadic `extraHosts`로 rollback에 스레딩, spawn 실패 member의 relay 등록도 해제.
+- `d8b15b0` — relay 인증 hop에 `countAuth("relay")` + synthetic identity
+  `relay:<flockID>` 기록 (audit/access log 익명 hop 제거; 메트릭 label은 고정).
+- `dddf216` — relay token을 첫 store save에서 조기 영속 (crash-mid-create 후에도
+  `ReconcilePlacements` 복구 가능; 저장 직후 로컬 carrier scrub으로 rollback
+  token-strip 불변식 유지).
+- `c640b7b` — ADR_INDEX/PUBLIC_RELEASE_BOUNDARY 본문 기준일을 헤더(2026-07-06)와 정합.
+- `6bfe85d` — e2e 스크립트 SC2015 (`A && B || C` → 명시적 if/else).
+- 반박 1건: `townwall_relay_test.go` Fatalf의 "(query not forwarded)"는 기대치가
+  아니라 실패 진단 문구 — 리뷰어 제안대로 바꾸면 실패 시점 사실과 반대가 되어 유지.
+
 ## Known limitations / 운영 주의
 
 - **SPOF**: home host가 다운되면 해당 flock의 wall 전체가 불가하다. 1차 수용된
@@ -117,17 +138,15 @@ b58175f feat(runtime): relay town wall post/history/stream to home daemon
 - **SSE relay non-200 content-type**: 기존 local-handler 패턴을 그대로 따라 relay
   경로에서도 non-200 응답에 `text/event-stream`이 남아있다(cosmetic, pre-existing
   패턴 상속).
-- **member 최초 spawn 실패 시 관련 relay 등록이 rollback에서 누락될 수 있음**
-  (아래 follow-up).
 - **`ReconcilePlacements`에 production 호출자가 없음** — 현재 유닛 테스트로만
   exercise되고, 주기적 control loop 배선은 이번 슬라이스 범위 밖이다.
 
 ## Next Action
 
 release-gate 관점에서 이 슬라이스는 닫혔다(유닛 green, KVM e2e green, 보안 가드
-green). 다음으로 이어질 작업은 아래 Follow-Up Tasks 중 우선순위가 높은 항목
-(member-deregistration gap, 그리고 `ReconcilePlacements` 주기적 control loop 배선)
-부터 별도 slice로 계획한다. cross-host `gtcall`을 다음 capability로 검토한다.
+green, 2026-07-07 리뷰 대응 batch 반영). 다음으로 이어질 작업은 아래 Follow-Up
+Tasks 중 우선순위가 높은 항목(`ReconcilePlacements` 주기적 control loop 배선)부터
+별도 slice로 계획한다. cross-host `gtcall`을 다음 capability로 검토한다.
 
 ## Follow-Up Tasks
 
@@ -139,20 +158,11 @@ green). 다음으로 이어질 작업은 아래 Follow-Up Tasks 중 우선순위
   등록을 replica set으로 확장하면 mesh로 승격 가능(설계 문서의 진화 경로).
 - **cross-host `gtcall`**: 다음 capability 후보. 이 슬라이스는 공유 wall(broadcast/
   observe)만 다루고 지정 agent 호출은 비범위로 남겼다.
-- **Task-8 member-deregistration gap**: 최초 spawn이 실패한 member는
-  `record.Agents`에 들어가지 않아 rollback이 그 member의 relay flock 등록을 해제
-  (`DELETE`)하지 못한다. 실질 위험은 낮다 — flock id가 timestamp 기반이라 충돌이
-  없고 home 쪽 token이 revoke되어 stub이 실제 wall을 인증할 수 없지만, member
-  daemon이 재시작될 때까지 in-memory relay flock stub이 leak된다. 수정 방향:
-  rollback에 registered-hosts set을 스레딩해 spawn 성패와 무관하게 relay 등록을
-  해제하도록 한다.
-- **Task-7 comment correction**: `cmd/goose-daemon/orchestrator_api.go:1209`와
-  `orchestrator_api_test.go:224`의 주석이 relay-token 소실 트리거를 "SIGHUP
-  ReloadClients"로 잘못 지목한다. 실제 트리거는 **daemon process restart**다 —
-  `ReloadClients`는 `cp.clients`만 교체하고 `flockMgr`/relay-token store는 건드리지
-  않는다(recovery.go가 재시작 시 hub flock을 `NewUnregistered(Kind=FlockKindHub)`로
-  재구성하지만 relay token store는 in-memory-only라 비게 된다). 코드 동작 자체는
-  맞고(reconcile이 재등록으로 복구) 주석 문구만 고치면 된다.
+- ~~**Task-8 member-deregistration gap**~~ — **CLOSED** (`2514f02`, 2026-07-07
+  리뷰 대응 batch): relay 등록 성공 host를 rollback에 스레딩해 spawn 실패
+  member의 relay 등록도 해제한다.
+- ~~**Task-7 comment correction**~~ — **CLOSED** (`931ecc9`): relay-token 소실
+  트리거 주석을 "SIGHUP ReloadClients" → "daemon process restart"로 정정 완료.
 - **`ReconcilePlacements` 주기적 control loop 배선**: 현재 유닛 테스트로만
   exercise되고 production 호출자가 없다(`grep -rn "ReconcilePlacements(" internal
   cmd`가 정의 외 호출부 없음을 확인). scheduler control loop 또는 daemon health
