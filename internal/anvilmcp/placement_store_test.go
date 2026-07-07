@@ -691,6 +691,82 @@ func TestPlacementStoreRoutedFlockPartialCleanupSurvivesStaleGenericSave(t *test
 	}
 }
 
+// TestPlacementStoreRoutedFlockTokensSurviveStaleGenericSave is the token
+// counterpart to TestPlacementStoreRoutedFlockPartialCleanupSurvivesStale-
+// GenericSave: mergePersistedRoutedFlocks already rebuilds state.RoutedFlocks
+// entirely from disk on every generic (non-flock) save, so a stale in-memory
+// RoutedFlocks copy can never clobber a concurrently-persisted flock record.
+// Before the fix, RoutedFlockRelayTokens/RoutedFlockCallTokens were NOT
+// merged the same way: a stale store's generic save wrote back its own
+// (missing) token-map copy, wiping a concurrent writer's just-persisted
+// flock token even though that flock's RECORD survived untouched.
+func TestPlacementStoreRoutedFlockTokensSurviveStaleGenericSave(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "scheduler.json")
+
+	initial := NewPlacementStore(path)
+	recX := RoutedFlockRecord{
+		FlockID: "routed-flock-x",
+		Mode:    RoutedFlockModeCrossHostMembersOnly,
+		Status:  RoutedFlockStatusReady,
+		Agents:  []RoutedFlockAgent{{AgentID: "worker-x", Role: "worker", VMID: "vm-x", Host: "host-a", Status: "running"}},
+	}
+	recX.relayToken = "relay-x-secret"
+	recX.callToken = "call-x-secret"
+	if err := initial.SaveRoutedFlockAndPlacements(recX, nil); err != nil {
+		t.Fatalf("initial SaveRoutedFlockAndPlacements: %v", err)
+	}
+
+	// stale loads while only flock X (and its tokens) exist on disk.
+	stale := NewPlacementStore(path)
+	if err := stale.Load(); err != nil {
+		t.Fatalf("stale Load: %v", err)
+	}
+
+	// fresh persists flock Y (record + tokens) after stale's load -- stale's
+	// in-memory token maps have no entry for Y.
+	fresh := NewPlacementStore(path)
+	recY := RoutedFlockRecord{
+		FlockID: "routed-flock-y",
+		Mode:    RoutedFlockModeCrossHostMembersOnly,
+		Status:  RoutedFlockStatusReady,
+		Agents:  []RoutedFlockAgent{{AgentID: "worker-y", Role: "worker", VMID: "vm-y", Host: "host-b", Status: "running"}},
+	}
+	recY.relayToken = "relay-y-secret"
+	recY.callToken = "call-y-secret"
+	if err := fresh.SaveRoutedFlockAndPlacements(recY, nil); err != nil {
+		t.Fatalf("fresh SaveRoutedFlockAndPlacements: %v", err)
+	}
+
+	// stale performs an unrelated generic save (host state), never having
+	// reloaded since fresh persisted flock Y.
+	if err := stale.SetHostAndSave(RuntimeHost{Name: "host-c", Endpoint: "http://host-c", Healthy: true, AvailableVMs: 1}); err != nil {
+		t.Fatalf("stale SetHostAndSave: %v", err)
+	}
+
+	reloaded := NewPlacementStore(path)
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("reloaded Load: %v", err)
+	}
+	if _, ok := reloaded.RoutedFlock("routed-flock-x"); !ok {
+		t.Fatal("routed-flock-x record lost after stale generic save")
+	}
+	if _, ok := reloaded.RoutedFlock("routed-flock-y"); !ok {
+		t.Fatal("routed-flock-y record lost after stale generic save")
+	}
+	if tok, ok := reloaded.RoutedFlockRelayToken("routed-flock-x"); !ok || tok != "relay-x-secret" {
+		t.Fatalf("routed-flock-x relay token = %q,%v want relay-x-secret,true", tok, ok)
+	}
+	if tok, ok := reloaded.RoutedFlockCallToken("routed-flock-x"); !ok || tok != "call-x-secret" {
+		t.Fatalf("routed-flock-x call token = %q,%v want call-x-secret,true", tok, ok)
+	}
+	if tok, ok := reloaded.RoutedFlockRelayToken("routed-flock-y"); !ok || tok != "relay-y-secret" {
+		t.Fatalf("routed-flock-y relay token = %q,%v want relay-y-secret,true (lost by stale generic save)", tok, ok)
+	}
+	if tok, ok := reloaded.RoutedFlockCallToken("routed-flock-y"); !ok || tok != "call-y-secret" {
+		t.Fatalf("routed-flock-y call token = %q,%v want call-y-secret,true (lost by stale generic save)", tok, ok)
+	}
+}
+
 func TestPlacementStoreListRoutedFlocksSortsAndClones(t *testing.T) {
 	store := NewPlacementStore("")
 	if err := store.SaveRoutedFlockAndPlacements(RoutedFlockRecord{

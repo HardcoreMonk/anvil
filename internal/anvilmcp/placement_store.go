@@ -210,6 +210,7 @@ func mergePersistedPlacementStoreFields(path string, state *PlacementStoreState,
 		state.FlockPlacementMetrics = cloneFlockPlacementMetricsState(persisted.FlockPlacementMetrics)
 	}
 	mergePersistedRoutedFlocks(persisted.RoutedFlocks, state)
+	mergePersistedRoutedFlockTokens(persisted.RoutedFlockRelayTokens, persisted.RoutedFlockCallTokens, state)
 	return nil
 }
 
@@ -255,6 +256,33 @@ func mergePersistedRoutedFlocks(persisted map[string]RoutedFlockRecord, state *P
 		}
 	}
 	state.RoutedFlocks = next
+}
+
+// mergePersistedRoutedFlockTokens mirrors mergePersistedRoutedFlocks' handling
+// of RoutedFlocks for the two redacted per-flock secret maps: routed flock
+// tokens are only ever mutated through SaveRoutedFlockAndPlacements and
+// removeRoutedFlockRelayToken/removeRoutedFlockCallToken, all three of which
+// read-modify-write the full persisted state directly (base = disk, mutate,
+// write back). That means a generic (non-flock) save never has a staged
+// in-memory token change that isn't already reflected on disk -- so, exactly
+// like RoutedFlocks records, it is both safe and necessary to take the token
+// maps entirely from disk rather than keeping the calling instance's
+// possibly-stale in-memory copy. Safe: a stale instance can never be "ahead"
+// of disk for tokens it already knows about. Necessary: without this, a
+// generic save from an instance that hasn't reloaded since another instance
+// persisted (or removed) a flock's token would silently overwrite that
+// token's disk entry with its own stale (missing, or stale-present) copy --
+// losing a concurrent writer's token, or resurrecting one that removeRouted-
+// Flock*Token already deleted from disk.
+func mergePersistedRoutedFlockTokens(relayTokens, callTokens map[string]string, state *PlacementStoreState) {
+	state.RoutedFlockRelayTokens = make(map[string]string, len(relayTokens))
+	for flockID, token := range relayTokens {
+		state.RoutedFlockRelayTokens[flockID] = token
+	}
+	state.RoutedFlockCallTokens = make(map[string]string, len(callTokens))
+	for flockID, token := range callTokens {
+		state.RoutedFlockCallTokens[flockID] = token
+	}
 }
 
 func writePlacementStoreState(path string, state PlacementStoreState) error {
