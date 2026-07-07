@@ -72,16 +72,27 @@ daemon에 **`POST /flocks/{id}/call`** (body `{agent_id, prompt}`)을 신설하�
 
 ## 보안
 
-- **`call_token`**: per-flock call 전용 secret. relay_token과 완전히 나란한
-  규율 —
-  - `PlacementStore` 영속(전용 map, `State()` 등 모든 직렬화 표면에서 redaction),
-  - authMiddleware가 **해당 flock의 `/flocks/{id}/call` 경로만** admit
-    (control-plane bearer로 승격 금지, wall 경로 거부),
-  - admit 시 `countAuth("call")` + synthetic identity `call:<flockID>` 기록,
-  - hub/relay 등록 요청에 relay_token과 함께 배포, reconcile이 재주입,
-    rollback/delete가 revoke.
-  - relay_token은 call 경로를 admit하지 않고, call_token은 wall 경로를 admit
-    하지 않는다(상호 배타 — 테스트로 고정).
+- **토큰 모델 (2026-07-07 재확정 — A안)**: routed guest의 주입 토큰
+  (`.ephemera-cp-token`)이 relay_token 자체라는 사실 때문에, relay_token을
+  **guest 능력 토큰**으로 재해석한다:
+  - **relay_token**: 그 flock의 wall sub-path(`post|wall|wall/history`) **와
+    `call` 진입**을 admit한다 — guest가 로컬 daemon에서 gtwall/gtcall 모두 이
+    토큰으로 인증한다(단일 host flock에서 guest CP token이 gtcall을 여는 기존
+    기능과 동형). 유출 blast radius는 "VM 1대 탈취"와 등가(이미 guest가 보유).
+  - **`call_token`**: **daemon 간 call hop 전용**(member→home, home→target).
+    per-flock secret, relay_token과 나란한 규율 — `PlacementStore` 영속(전용
+    map, `State()` 등 모든 직렬화 표면에서 redaction), authMiddleware가 해당
+    flock의 `/flocks/{id}/call` 경로만 admit(control-plane bearer 승격 금지,
+    **wall 경로 거부** — 이 방향의 배타는 유지·테스트 고정), admit 시
+    `countAuth("call")` + synthetic identity `call:<flockID>` 기록, hub/relay
+    등록 요청에 relay_token과 함께 배포, reconcile 재주입, rollback/delete
+    revoke. hop 토큰이므로 독립 revoke가 가능하다.
+- **wall slice 잠재 결함 동반 수정**: `registerRelayFlock`이 admit 등록
+  (`setRelayToken`)을 하지 않아 **auth-on member daemon에서 routed guest의
+  gtwall이 401**이 되는 기존 결함을 이 slice에서 고친다(member 등록도 hub와
+  동일하게 admit 등록). wall e2e가 이를 못 잡은 이유는 member daemon이
+  auth-off였기 때문 — gtcall e2e는 member daemon을 **auth-on**으로 돌려 admit
+  경로를 실경로로 검증한다.
 - 대상 VM의 `agent_token`은 target host daemon 로컬에서만 주입된다. wire를
   건너는 것은 `{agent_id, prompt}` + depth/hop 헤더뿐 — per-VM token, CP
   token, provider key 미노출(sentinel 테스트).
