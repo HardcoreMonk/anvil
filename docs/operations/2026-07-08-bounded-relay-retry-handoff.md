@@ -114,10 +114,10 @@ green, 기존 KVM e2e 회귀 green, `git diff --check` clean). 다음 우선순�
 
 ## Follow-Up Tasks
 
-- **wall 경로 에러 redaction 정합**: `postToTownWall`/`townWallHistory`
-  relay 분기가 call 경로와 동일한 수준으로 daemon 주소를 502 바디에서
-  redact하도록 정합시킨다(위 Known limitations 참고). 기존 성질이라 이번
-  slice 범위에 넣지 않았다.
+- ~~**wall 경로 에러 redaction 정합**~~ — **CLOSED** (PR #24, `be73461`):
+  wall relay hop 4곳(post, history, stream 요청 빌드, stream relay)이 전부
+  call 경로와 동일하게 flock id만 노출하는 opaque 502 에러로 정합됐다 —
+  daemon 주소는 더 이상 어떤 relay hop에서도 노출되지 않는다.
 - **비동기 수락·버퍼·백그라운드 재전송**: home 장기 다운 시나리오는 이
   slice의 비목표로 남았다 — mesh/수동 multi-host 검증 이후 재평가한다(위
   Next Action 참고).

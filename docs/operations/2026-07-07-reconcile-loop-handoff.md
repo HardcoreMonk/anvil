@@ -61,5 +61,11 @@ bound하고, 테스트를 "원인 에러가 로그에 없어야 한다"는 redac
 
 - 직렬화 테스트 negative branch 100ms 휴리스틱은 설계 수용(false-negative
   방향) — 재설계 필요 없음, 기록만 유지.
-- bounded relay retry/buffer, home SPOF mesh 진화, SSE non-200 polish —
-  town wall handoff의 기존 follow-up 유지.
+- ~~bounded relay retry/buffer~~ — **CLOSED** (PR #23, 2026-07-08 bounded
+  relay retry slice; 비동기 buffer는 비목표로 남아 mesh/수동 검증 이후
+  재평가, 상세:
+  [`docs/operations/2026-07-08-bounded-relay-retry-handoff.md`](2026-07-08-bounded-relay-retry-handoff.md)).
+  home SPOF mesh 진화는 재선출 failover로 설계 확정
+  (`docs/superpowers/specs/2026-07-08-home-failover-design.md`, 구현은 수동
+  multi-host 검증 통과 후). SSE non-200 polish는 town wall handoff의 기존
+  follow-up 유지.

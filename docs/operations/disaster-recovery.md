@@ -125,6 +125,41 @@ curl -X DELETE \
    revoke하지만, 나머지 member host의 relay flock 등록은 별도 정리가 필요할 수 있다.
    각 member host에서 같은 `DELETE /flocks/$FLOCK_ID`를 실행해 relay 등록을 해제한다.
 
+## home host 다운(routed flock)
+
+routed flock의 home host(hub)가 다운되면 그 flock의 Town Wall 게시/조회와
+cross-host `gtcall`이 전부 502를 반환한다.
+
+1. 증상을 확인한다. member host에서 wall post/history와 cross-host call이
+   일관되게 502를 반환하면 home host 다운을 의심한다.
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:3000/flocks/$FLOCK_ID/post \
+  -d '{"agent_id":"researcher-1","body":"health check"}'
+```
+
+2. 짧은 네트워크 순단이면 별도 조치가 필요 없다. daemon-to-daemon relay hop은
+   dial-실패에 한정해 동기 bounded retry(총 3시도, backoff 1s/2s)로 순단을
+   자동 흡수한다.
+
+3. home daemon 프로세스만 죽었다면 재기동한다.
+
+```bash
+EPHEMERA_API_TOKENS="operator:$TOKEN" ./anvil-daemon
+```
+
+4. adapter의 reconcile 루프가 기본 `60s`(`ANVIL_MCP_RECONCILE_INTERVAL`) 안에
+   hub/relay 등록과 relay-token/call-token admission을 자동 재주입한다.
+   즉시 반영이 필요하면 운영자가 승인한 수동 재등록 절차를 사용한다.
+
+5. home host 자체가 장기간 복구되지 않으면(프로세스가 아니라 host 다운) 현재는
+   home 부활을 기다리는 것 외에 자동 복구 경로가 없다. home 재선출 failover는
+   설계가 확정됐지만 구현은 수동 multi-host 검증 통과 후로 보류돼 있다
+   (`docs/superpowers/specs/2026-07-08-home-failover-design.md`). 그 spec은
+   failover 구현 후에도 wall 과거 기록 손실을 명시적으로 수용하는 계약임을
+   함께 규정한다.
+
 ## restore 실패
 
 1. source VM이 실행 중인지 확인한다. 실행 중인 원본 VM의 snapshot은 restore하지
