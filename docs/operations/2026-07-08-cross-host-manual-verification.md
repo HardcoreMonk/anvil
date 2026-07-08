@@ -17,6 +17,27 @@
   `configs/goose-secrets.yaml` — gitignored, host별 준비).
 - 워크스테이션(control plane 실행 위치)에서 두 host의 :3000에 도달 가능.
 
+### 호스트 준비 체크리스트 (Ubuntu 26.04 기준 — 타 배포판도 동일 항목)
+
+anvil의 host 의존은 배포판 중립이다(golden image는 host 배포판과 무관하게
+debootstrap으로 Debian Trixie 생성 — `scripts/build_image.sh`). 서버 세팅 시:
+
+1. **Go ≥ 1.25.0** (`go.mod`) — 배포판 repo 버전이 미달이면 공식 tarball.
+   대안: 워크스테이션에서 빌드한 `anvil-daemon`을 두 서버에 복사 — "같은
+   커밋" 요구를 바이너리 배포로 대체(권장: 커밋 hash를 배포 기록에 남길 것).
+2. **패키지**: `apt-get install -y iproute2 dmsetup iptables curl debootstrap
+   util-linux e2fsprogs` (+ anti-spoof를 실제로 켜려면 `ebtables` — 없으면
+   `EPHEMERA_NET_ANTISPOOF`는 best-effort로 조용히 degrade).
+3. **iptables nft 백엔드**(26.04 기본): anvil은 iptables CLI만 호출 — 정상.
+4. **네트워크/방화벽**: 두 서버+워크스테이션 간 :3000 상호 도달, 신뢰
+   (private) 네트워크 전제. ufw 사용 시 private 인터페이스에서 3000 allow.
+5. **아키텍처 x86_64** — 고정 kernel/firecracker 아티팩트가 x86_64.
+6. **KVM**: `/dev/kvm` 존재(물리 서버 또는 nested virt 활성).
+7. **본편 전 단일 host smoke**: 각 서버에서 `sudo bash e2e_test.sh`(또는
+   wall e2e 1회)를 먼저 통과시켜 환경 문제를 검증 본편과 분리한다.
+   host별 `configs/goose.yaml`·`configs/goose-secrets.yaml` 준비 필수 —
+   누락 시 VM 생성이 500으로 조용히 실패한다(2026-07-08 세션에서 실제 발생).
+
 ## 절차
 
 1. **daemon 기동 (양쪽, auth-on)**
