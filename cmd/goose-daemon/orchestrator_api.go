@@ -410,7 +410,7 @@ func (cp *ControlPlane) postToTownWall(w http.ResponseWriter, r *http.Request, f
 		}
 		status, respBody, err := relayTownWallPost(r.Context(), f.HomeAddr, f.RelayToken, flockID, req.AgentID, req.Body)
 		if err != nil {
-			writeJSONError(w, http.StatusBadGateway, fmt.Errorf("town wall relay to home failed: %w", err))
+			writeJSONError(w, http.StatusBadGateway, fmt.Errorf("town wall relay to home failed for flock %q", flockID))
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -459,7 +459,7 @@ func (cp *ControlPlane) townWallHistory(w http.ResponseWriter, r *http.Request, 
 		}
 		resp, err := doWithDialRetry(r.Context(), newAgentHTTPClient(), build)
 		if err != nil {
-			writeJSONError(w, http.StatusBadGateway, err)
+			writeJSONError(w, http.StatusBadGateway, fmt.Errorf("town wall history relay to home failed for flock %q", flockID))
 			return
 		}
 		defer resp.Body.Close()
@@ -603,13 +603,13 @@ func (cp *ControlPlane) streamTownWallRelay(w http.ResponseWriter, r *http.Reque
 	url := strings.TrimRight(f.HomeAddr, "/") + "/flocks/" + flockID + "/wall"
 	hreq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, url, nil)
 	if err != nil {
-		writeJSONError(w, http.StatusBadGateway, err)
+		writeJSONError(w, http.StatusBadGateway, fmt.Errorf("town wall stream relay request build failed for flock %q", flockID))
 		return
 	}
 	hreq.Header.Set("Authorization", "Bearer "+f.RelayToken)
 	resp, err := newAgentHTTPClient().Do(hreq)
 	if err != nil {
-		writeJSONError(w, http.StatusBadGateway, err)
+		writeJSONError(w, http.StatusBadGateway, fmt.Errorf("town wall stream relay to home failed for flock %q", flockID))
 		return
 	}
 	defer resp.Body.Close()
