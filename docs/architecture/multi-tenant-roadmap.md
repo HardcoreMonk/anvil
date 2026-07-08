@@ -21,9 +21,10 @@
   `scripts/install-anvil-scheduler-systemd.sh --verify`는 `GET /health`,
   `PUT/GET /hosts`, `POST /schedule/spawn`, `POST /schedule/flock`, `GET /placements`,
   `GET /control-loop/status`, `DELETE /hosts/{name}` cleanup을 제공한다.
-- 비구현 범위: multi-node HA, migration, cross-host `gtcall`, cross-host broadcast
-  fan-out, L7 egress proxy, billing, UI. (2026-07-06: cross-host 공유 Town Wall과
-  guest flock context injection은 shared-wall slice로 구현 완료 — 아래 참고.)
+- 비구현 범위: multi-node HA, migration, cross-host broadcast fan-out, L7 egress
+  proxy, billing, UI. (2026-07-06: cross-host 공유 Town Wall과 guest flock
+  context injection은 shared-wall slice로, 2026-07-08: cross-host `gtcall`은
+  별도 slice로 구현 완료 — 아래 참고.)
 
 이 문서는 anvil이 IronClaw와 ephemera runtime을 multi-tenant 실행 기반으로
 확장할 때 필요한 경계를 정리한다. 현재 ephemera daemon의 단일 호스트 VM
@@ -107,9 +108,9 @@ decision helper, host inventory polling, runtime router, scheduler service binar
 tenant API, `deny_all`/`profile` host enforcement, scheduler smoke harness,
 systemd installer `--verify`, manual cross-host snapshot replication,
 `POST /schedule/flock` dry-run planner, members-only routed flock create/delete,
-2026-07-06 cross-host shared Town Wall(home-host hub + relay)까지 포함한다.
-multi-node HA, migration, cross-host `gtcall`, cross-host broadcast fan-out은
-포함하지 않는다.
+2026-07-06 cross-host shared Town Wall(home-host hub + relay), 2026-07-08
+cross-host `gtcall`까지 포함한다. multi-node HA, migration, cross-host
+broadcast fan-out은 포함하지 않는다.
 
 ## Tenant 식별자
 
@@ -178,7 +179,8 @@ VM을 cross-host로 생성하고 registry/rollback/delete를 검증한다.
 받게 하고(`TownWallEnabled=true`), `roles[0]` 배치 호스트를 home으로 선정해 home
 daemon에 hub flock(canonical `TownWall`)을, 나머지 멤버 host daemon에 relay
 flock(post/history/SSE를 home으로 forward/proxy)을 등록한다. guest는 계속 로컬
-daemon(`10.0.1.1`)에만 post한다(bridge-only 불변). cross-host `gtcall`과 cross-host
+daemon(`10.0.1.1`)에만 post한다(bridge-only 불변). cross-host `gtcall`은
+2026-07-08 별도 slice로 편입됐고(위 구현된 foundation 참고), cross-host
 broadcast fan-out은 계속 후속 후보로 남는다.
 
 ## Scheduler 책임
@@ -294,7 +296,6 @@ restore 경로의 direct token exposure는 제거됐다. 새로운 audit record,
 이 roadmap의 non-goals는 다음이다.
 
 - 완전한 multi-tenant runtime 즉시 구현
-- cross-host `gtcall`
 - cross-host broadcast fan-out
 - L7 egress proxy 또는 full HTTP CONNECT/SNI gateway
 - billing

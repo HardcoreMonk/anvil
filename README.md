@@ -1535,7 +1535,8 @@ home으로 forward/proxy)을 등록한다(`internal/anvilmcp/routed_flock.go`
 수 있다(member→home→target 2-hop; `relay_token`은 guest 능력 토큰으로 그 flock의
 wall과 `call` 진입을 모두 admit하고, 별도 `call_token`이 daemon-to-daemon call
 hop만 admit한다 — wall 경로는 거부). cross-host broadcast fan-out만 이 표면 범위
-밖 비목표로 남는다.
+밖 비목표로 남는다. daemon-to-daemon relay hop은 dial-실패에 한정해 동기
+bounded retry(총 3시도, 1s/2s)로 짧은 네트워크 순단을 자동 흡수한다.
 `scheduler_quota_store_path` 또는 `ANVIL_MCP_SCHEDULER_QUOTA_STORE`는 scheduler quota
 store를 함께 지정할 때 사용한다. host daemon client 인증에는 `ANVIL_API_TOKEN`을
 사용한다.

@@ -177,11 +177,12 @@ binary 빌드 + `scripts/gtcall`/`scripts/anvil-cross-host-gtcall-e2e.sh` 구문
   갱신 성공 여부를 `bool`로 반환하지만 `registerDistributedFlock` 호출부는 그 값을
   버린다. TOCTOU 창(호출 사이에 flock이 사라지거나 kind가 바뀌는 경우)이 이론상
   존재 — 반환값을 확인해 실패 시 진단하도록 강화하는 것이 후속.
-- **`mergePersistedRoutedFlocks`의 토큰 불참여**(Task 4 Minor, 기존 gap):
-  `internal/anvilmcp/placement_store.go`의 이 merge 경로가 `relay_token`/
-  `call_token` 모두 재구성 대상에서 빠져 있다(wall slice부터 있던 gap, 이
-  slice가 확장하지 않고 그대로 상속). placement store 저장 포맷을 다루는 후속
-  slice에서 함께 정리 권장.
+- ~~**`mergePersistedRoutedFlocks`의 토큰 불참여**~~(Task 4 Minor, 기존 gap) —
+  **CLOSED** (`07c1e17`): `internal/anvilmcp/placement_store.go`에 신설된
+  `mergePersistedRoutedFlockTokens`가 `RoutedFlockRelayTokens`/
+  `RoutedFlockCallTokens`를 `mergePersistedRoutedFlocks`와 동일한 disk-권위
+  full-replace 규율로 병합한다 — stale store의 generic save가 동시 writer의
+  방금 영속된 토큰을 지우는 문제를 닫는다.
 - **e2e 템플릿 하드닝**: `AGENT_TOKEN` sentinel의 `-n` 게이트(Known limitations
   참고)처럼 silent-pass 가능한 assertion 패턴이 `scripts/anvil-cross-host-wall-e2e.sh`와
   `scripts/anvil-cross-host-gtcall-e2e.sh` 양쪽에 공통으로 있다. 두 스크립트를

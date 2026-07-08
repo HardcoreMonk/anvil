@@ -36,7 +36,8 @@ prefix를 사용한다. **`anvil-v0.7.0`부터 anvil 공개 릴리즈 버전은 
 target은 `2f367dd`(태그 시점 main; parity + release-gate hardening + post-release
 backlog + open-gate 마감; full KVM e2e 343✓, step 59 실 LLM 포함)이며 설치 아티팩트
 (SLIM/FULL tarball + sha256)를 제공한다. 이후 main은 cross-host shared Town
-Wall(2026-07-07, PR #19) 등 untagged 작업을 더 포함한다.
+Wall/gtcall, adapter reconcile loop, bounded relay retry 등(PR #19·#21-#24)
+untagged 작업을 더 포함한다.
 
 이전 anvil 통합 번호 계보(`anvil-v0.1.0`→`v0.4.0`)와 upstream 시리즈별 마일스톤은
 **개발 내역으로 보존한다**(전부 non-latest):
@@ -359,6 +360,16 @@ daemon으로 보내는 outbound Bearer token이다.
   `anvil_*` MCP tool 없음. KVM e2e `scripts/anvil-cross-host-gtcall-e2e.sh`
   (real member VM + stub home, **auth-on** member daemon)로 18/18 checks ×2회
   검증됐다.
+- bounded relay retry(PR #23, `e94028b`, `6317a58`)가 main에 편입됐다.
+  daemon-to-daemon relay hop 3곳(wall post relay, call hop 양방향, wall
+  history relay)이 dial-실패로 한정된 transport 에러에만 동기 bounded
+  retry(최대 2회, 총 3시도, backoff 1s→2s)를 적용해 짧은 네트워크 순단을
+  자동 흡수한다. reset/EOF·HTTP 응답·ctx 취소는 재시도 대상에서 제외해
+  전달 semantics는 불변이다. SSE relay 재접속은 비범위.
+- wall relay 에러 redaction 정합(PR #24, `be73461`)이 main에 편입됐다. wall
+  relay 4개 에러 지점(post, history, stream 요청 빌드, stream relay)이 전부
+  call 경로와 동일하게 flock id만 노출하는 opaque 502 에러로 바뀌어, home
+  daemon 주소가 더 이상 어떤 relay hop에서도 노출되지 않는다.
 - `scripts/anvil-mcp-e2e.sh flock`, 전체 KVM `sudo bash e2e_test.sh`, script-only
   workload runner E2E, cross-host wall relay E2E
   (`scripts/anvil-cross-host-wall-e2e.sh`), cross-host gtcall relay E2E
@@ -392,7 +403,8 @@ daemon으로 보내는 outbound Bearer token이다.
 - scheduler service의 실제 운영 배포와 host inventory polling daemonization
 - cross-host snapshot replication 자동화(background retry queue·metrics·alert —
   수동 동기 replication과 snapshot locality preference는 baseline 포함)
-- Town Wall relay의 bounded retry/buffer, home SPOF 제거(hub replica set 기반
-  mesh 진화), SSE relay non-200 content-type polish
+- 비동기 relay buffer(failover/수동 검증 이후 재평가), home SPOF 제거 — 재선출
+  failover 설계 확정(`docs/superpowers/specs/2026-07-08-home-failover-design.md`,
+  구현은 수동 multi-host 검증 통과 후), SSE relay non-200 content-type polish
 - egress allow host rule의 L7 proxy/SNI 기반 강화
 - snapshot storage quota dashboard
