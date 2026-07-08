@@ -187,6 +187,12 @@ binary 빌드 + `scripts/gtcall`/`scripts/anvil-cross-host-gtcall-e2e.sh` 구문
   `scripts/anvil-cross-host-gtcall-e2e.sh` 양쪽에 공통으로 있다. 두 스크립트를
   함께 훑어 "빈 값이면 조용히 통과"하는 assertion을 "빈 값이면 명시적으로
   fail"하는 형태로 교체하는 하드닝 패스가 후속이다.
+- ~~**bounded relay retry/buffer**~~ — **CLOSED** (`e94028b`, `6317a58`,
+  2026-07-08 bounded relay retry slice): call hop(`forwardFlockCall`,
+  relay→home과 hub→target 양쪽)이 dial-계열 transport 실패에 한해 동기 bounded
+  retry(총 3 시도, 1s→2s backoff)로 순단을 흡수한다. 비동기 수락·버퍼·백그라운드
+  재전송은 비범위로 남았다 — mesh/수동 multi-host 검증 이후 재평가. 상세:
+  [`docs/operations/2026-07-08-bounded-relay-retry-handoff.md`](2026-07-08-bounded-relay-retry-handoff.md).
 
 그 밖에 Task 2/3b/5의 cosmetic-level Minor(idempotent 재등록의 call-token 단언
 미러 없음; relay Agents가 `GET /flocks` 직렬화에 노출 — `AgentID`/`VMID`뿐이라

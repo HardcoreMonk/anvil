@@ -154,8 +154,12 @@ cross-host `gtcall`은 2026-07-08 slice로 완료됐다(아래 Follow-Up CLOSED 
 
 - **SSE relay non-200 content-type**: relay 경로가 non-200 응답에도
   `text/event-stream`을 유지하는 기존 local-handler 패턴을 상속했다. polish 필요.
-- **bounded relay retry/buffer**: v1은 relay 네트워크 순단 시 로컬 버퍼링이 없다.
-  post 실패는 agent 재시도에 의존한다. bounded retry/buffer 설계가 후속이다.
+- ~~**bounded relay retry/buffer**~~ — **CLOSED** (`e94028b`, `6317a58`,
+  2026-07-08 bounded relay retry slice): relay hop(wall post/history, call
+  forward)이 dial-계열 transport 실패에 한해 동기 bounded retry(총 3 시도,
+  1s→2s backoff)로 순단을 흡수한다. 비동기 수락·버퍼·백그라운드 재전송은
+  비범위로 남았다 — mesh/수동 multi-host 검증 이후 재평가. 상세:
+  [`docs/operations/2026-07-08-bounded-relay-retry-handoff.md`](2026-07-08-bounded-relay-retry-handoff.md).
 - **mesh 진화(home SPOF 제거)**: 현재 home 단일 장애점을 1차 수용했다. hub flock
   등록을 replica set으로 확장하면 mesh로 승격 가능(설계 문서의 진화 경로).
 - ~~**cross-host `gtcall`**~~ — **CLOSED** (`435ec65`..`7957c66`, 2026-07-08

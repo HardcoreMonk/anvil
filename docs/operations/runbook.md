@@ -198,6 +198,12 @@ daemon 재시작으로 hub/relay flock 등록과 relay-token admission이 사라
 자동 재등록한다. 수동 개입은 adapter가 꺼져 있거나 `0`으로 비활성화된 경우에만
 필요하다.
 
+wall/gtcall relay hop(member→home, home→target)은 dial 단계 실패(connection
+refused/no route 등 — 요청이 상대에 도달하지 않았음이 보장되는 경우)에 한해
+총 3회 시도(1s→2s backoff, 최악 +3s)로 짧은 네트워크 순단을 자동 흡수한다.
+그 외 실패(HTTP 응답, reset/EOF, ctx 만료)는 재시도 없이 즉시 반환하므로
+agent 쪽 재시도에 맡긴다.
+
 ## 일반 검증
 
 문서와 code path가 함께 맞는지 보는 기본 검증:
