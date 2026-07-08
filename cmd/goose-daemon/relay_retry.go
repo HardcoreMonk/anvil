@@ -49,7 +49,8 @@ func doWithDialRetry(ctx context.Context, client *http.Client, build func() (*ht
 	var lastErr error
 	for attempt := 0; attempt < relayRetryAttempts; attempt++ {
 		if attempt > 0 {
-			if err := relayRetrySleep(ctx, relayRetryBackoff[attempt-1]); err != nil {
+			// attempt-1 clamped to the last backoff step — future attempt-count bumps beyond len(relayRetryBackoff) reuse the final delay instead of panicking.
+			if err := relayRetrySleep(ctx, relayRetryBackoff[min(attempt-1, len(relayRetryBackoff)-1)]); err != nil {
 				return nil, lastErr
 			}
 		}

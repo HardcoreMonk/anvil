@@ -249,3 +249,58 @@ func TestPostToTownWall_RelayRetriesDialFailure(t *testing.T) {
 		t.Fatalf("home saw body %q, want it to contain researcher-1", gotBody)
 	}
 }
+
+// TestPostToTownWall_RelayErrorRedactsHomeAddr proves a failed relay post hop
+// reports only the flock id in its 502 body, never the underlying home
+// address. HomeAddr is a custom, unresolvable hostname carrying a unique
+// sentinel token — DNS resolution fails (dial-class), so the raw *url.Error
+// would otherwise embed that hostname (and thus the sentinel) verbatim in
+// its Error() string, as verified against Go's http client behavior.
+func TestPostToTownWall_RelayErrorRedactsHomeAddr(t *testing.T) {
+	old := relayRetrySleep
+	relayRetrySleep = noSleep
+	defer func() { relayRetrySleep = old }()
+
+	cp := newTestCP(t)
+	cp.flockMgr.RegisterRelay("routed-1", "http://home-addr-sentinel-9d2f:39999", "rt-1", "", nil)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/flocks/routed-1/post", strings.NewReader(`{"agent_id":"researcher-1","body":"hi"}`))
+	cp.handleFlockItem(rr, req)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("relay post status = %d, want 502 (%s)", rr.Code, rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), "home-addr-sentinel-9d2f") {
+		t.Fatalf("relay post error body leaked home address: %s", rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "routed-1") {
+		t.Fatalf("relay post error body missing flock id: %s", rr.Body.String())
+	}
+}
+
+// TestTownWallHistory_RelayErrorRedactsHomeAddr is the history-read
+// counterpart: a failed relay history hop must also keep the home address
+// out of the 502 body.
+func TestTownWallHistory_RelayErrorRedactsHomeAddr(t *testing.T) {
+	old := relayRetrySleep
+	relayRetrySleep = noSleep
+	defer func() { relayRetrySleep = old }()
+
+	cp := newTestCP(t)
+	cp.flockMgr.RegisterRelay("routed-1", "http://home-addr-sentinel-9d2f:39999", "rt-1", "", nil)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/flocks/routed-1/wall/history", nil)
+	cp.handleFlockItem(rr, req)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("relay history status = %d, want 502 (%s)", rr.Code, rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), "home-addr-sentinel-9d2f") {
+		t.Fatalf("relay history error body leaked home address: %s", rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "routed-1") {
+		t.Fatalf("relay history error body missing flock id: %s", rr.Body.String())
+	}
+}

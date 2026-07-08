@@ -142,3 +142,41 @@ func TestDoWithDialRetry_CtxCancelAbortsBackoff(t *testing.T) {
 		t.Fatalf("attempts = %d, want 1 (cancelled ctx must abort backoff)", got)
 	}
 }
+
+// TestDoWithDialRetry_SleepAbortReturnsLastDialErr directly exercises the
+// sleep-abort branch in doWithDialRetry (`if err := relayRetrySleep(...); err
+// != nil { return nil, lastErr }`), which TestDoWithDialRetry_CtxCancelAbortsBackoff
+// does NOT reach: that test cancels ctx before the first call, so attempt 0's
+// post-dial `ctx.Err() != nil` check returns first and relayRetrySleep is
+// never invoked. Here ctx starts live; the fake sleep hook cancels ctx itself
+// and returns ctx.Err() when it is called ahead of attempt 1's retry, forcing
+// the sleep-abort path to run for the first time. The retry must surface the
+// ORIGINAL dial error from attempt 0 (lastErr), not the sleep's ctx.Err().
+func TestDoWithDialRetry_SleepAbortReturnsLastDialErr(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	old := relayRetrySleep
+	relayRetrySleep = func(ctx context.Context, _ time.Duration) error {
+		cancel()
+		return ctx.Err()
+	}
+	defer func() { relayRetrySleep = old }()
+
+	rt := &fakeRT{results: []func() (*http.Response, error){dialErr}}
+	client := &http.Client{Transport: rt}
+
+	_, err := doWithDialRetry(ctx, client, buildReq(t, ctx))
+	if err == nil {
+		t.Fatal("want the original dial error surfaced")
+	}
+	if errors.Is(err, context.Canceled) {
+		t.Fatalf("returned err = %v, want the attempt-0 dial error, not ctx.Err() from the aborted sleep", err)
+	}
+	if !strings.Contains(err.Error(), "connection refused") {
+		t.Fatalf("returned err = %v, want the attempt-0 dial error (connection refused)", err)
+	}
+	if got := rt.calls.Load(); got != 1 {
+		t.Fatalf("RoundTrip calls = %d, want 1 (attempt 1 must abort before a second dial)", got)
+	}
+}
