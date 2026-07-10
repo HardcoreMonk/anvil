@@ -899,8 +899,12 @@ func TestReconcile_ReregistersSharedTownWall(t *testing.T) {
 // TestReconcilePlacements_IsolatesUnreachableHost proves one dead daemon no
 // longer aborts the whole reconcile pass: the reachable host's placements are
 // rebuilt, the dead host's existing placements are carried over (not wiped),
-// wall healing still runs for the reachable side, and the pass reports the
-// failure in its joined error instead of returning early.
+// and the pass reports the failure in its joined error instead of returning
+// early. What this test guards is placement isolation and pass continuation
+// (no early return) — NOT wall healing of the down flock. When the home host's
+// ListVMs probe dial-fails, the flock is home-down: Task 4 detection semantics
+// deliberately skip that flock's relay re-registration on this pass (the same
+// contract as the old code's hub-failure `continue`).
 func TestReconcilePlacements_IsolatesUnreachableHost(t *testing.T) {
 	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
 	home := &routerFakeDaemon{spawnResponses: []*SpawnVMResponse{{
@@ -943,12 +947,15 @@ func TestReconcilePlacements_IsolatesUnreachableHost(t *testing.T) {
 	if host, ok := router.Placement("vm-researcher-1"); !ok || host != "hostB" {
 		t.Fatalf("reachable host placement lost: %q %v", host, ok)
 	}
-	// Wall healing still ran for the reachable member. Only hostA's ListVMs
-	// probe dial-fails here — its fake daemon client still accepts the hub
-	// POST, so this test isolates the probe-failure path (a failing hub POST
-	// is Task 4 detection territory).
-	if member.relayCalls != 1 {
-		t.Fatalf("member relay re-registrations = %d, want 1 (healing must survive a dead host)", member.relayCalls)
+	// The home host's ListVMs probe dial-fails, so under Task 4 detection
+	// semantics this flock is home-down and its relay re-registration is
+	// intentionally skipped this pass (same contract as the old code's
+	// hub-failure `continue`; the fake's "probe dead but POST accepted" combo
+	// is a fixture artifact with no real-environment analogue). This test's
+	// job is placement isolation + pass continuation, not healing the down
+	// flock — so no member relay call is expected here.
+	if member.relayCalls != 0 {
+		t.Fatalf("member relay re-registrations = %d, want 0 (home-down pass skips this flock's relay refresh)", member.relayCalls)
 	}
 	// Error strings stay identifier-only: no endpoint/address leak.
 	if strings.Contains(err.Error(), "internal:8080") {

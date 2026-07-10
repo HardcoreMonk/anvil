@@ -40,6 +40,16 @@ type RuntimeRouter struct {
 	placement      map[string]string
 	placementStore *PlacementStore
 	maxAttempts    int
+
+	// homeFailures counts CONSECUTIVE dial-class home failures per routed
+	// flock id for failover detection. Guarded by reconcileMu: it is only
+	// ever touched inside ReconcilePlacements, which reconcileMu serializes.
+	homeFailures map[string]int
+
+	// reconcileLogf reports reconcile/failover events (flock/host identifiers
+	// only — never tokens or daemon addresses). Set by StartReconcileLoop;
+	// nil-safe via logf.
+	reconcileLogf func(format string, args ...any)
 }
 
 type RuntimeRouterOptions struct {
@@ -66,6 +76,7 @@ func NewRuntimeRouterWithOptions(scheduler *Scheduler, daemons map[string]Daemon
 		placement:      initialPlacements(opts.PlacementStore),
 		placementStore: opts.PlacementStore,
 		maxAttempts:    maxAttempts,
+		homeFailures:   make(map[string]int),
 	}
 }
 
@@ -343,6 +354,7 @@ func (r *RuntimeRouter) StartReconcileLoop(ctx context.Context, interval time.Du
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
+	r.reconcileLogf = logf
 	run := func() {
 		if err := r.ReconcilePlacements(ctx); err != nil {
 			logf("anvil-mcp: reconcile placements: %v", err)
@@ -361,6 +373,15 @@ func (r *RuntimeRouter) StartReconcileLoop(ctx context.Context, interval time.Du
 			}
 		}
 	}()
+}
+
+// logf reports a reconcile/failover event through the configured sink, if any.
+// nil-safe: before StartReconcileLoop wires reconcileLogf (and in unit tests
+// that inject it directly) a nil sink simply drops the line.
+func (r *RuntimeRouter) logf(format string, args ...any) {
+	if r.reconcileLogf != nil {
+		r.reconcileLogf(format, args...)
+	}
 }
 
 // reconcileRoutedFlockWalls re-registers the shared Town Wall hub and relay
@@ -384,6 +405,7 @@ func (r *RuntimeRouter) reconcileRoutedFlockWalls(ctx context.Context, probes ma
 		return nil
 	}
 	var errs []error
+	live := make(map[string]bool)
 	for _, record := range r.placementStore.ListRoutedFlocks() {
 		flockID := strings.TrimSpace(record.FlockID)
 		homeHost := strings.TrimSpace(record.HomeHost)
@@ -404,11 +426,55 @@ func (r *RuntimeRouter) reconcileRoutedFlockWalls(ctx context.Context, probes ma
 		// continues with an empty CallToken in that case (relay token alone still
 		// heals the wall); it does not skip the record.
 		callToken, _ := r.placementStore.RoutedFlockCallToken(flockID)
-		if err := r.registerRoutedHub(ctx, record, relayToken, callToken); err != nil {
-			errs = append(errs, fmt.Errorf("reconcile routed flock %q: hub re-registration on home host %q failed", flockID, homeHost))
+		live[flockID] = true
+
+		// ── home failover detection (2026-07-08 spec) ─────────────────────
+		// Only dial-class failures count: the probe's ListVMs dial failure
+		// short-circuits (a doomed hub POST adds nothing but latency), and a
+		// hub POST that fails with a dial error counts the same way. Any
+		// successful hub registration resets the consecutive counter. HTTP
+		// errors mean the host is alive: collected as heal errors, counter
+		// untouched.
+		homeDown := probes[homeHost].dialFailed
+		if !homeDown {
+			hubErr := r.registerRoutedHub(ctx, record, relayToken, callToken)
+			switch {
+			case hubErr == nil:
+				r.homeFailures[flockID] = 0
+			case isDialError(hubErr):
+				homeDown = true
+			default:
+				errs = append(errs, fmt.Errorf("reconcile routed flock %q: hub re-registration on home host %q failed", flockID, homeHost))
+				continue
+			}
+		}
+		if homeDown {
+			r.homeFailures[flockID]++
+			if r.homeFailures[flockID] >= homeFailureThreshold && record.Status == RoutedFlockStatusReady {
+				if newHome, ok := r.electNewHome(record, probes); ok {
+					switched, err := r.failoverRoutedFlock(ctx, record, newHome, relayToken, callToken)
+					if switched {
+						r.homeFailures[flockID] = 0
+					}
+					if err != nil {
+						errs = append(errs, err)
+					}
+					continue
+				}
+				// No reachable candidate: no-op, counter stays saturated so the
+				// next pass with a revived member fires immediately (spec).
+			}
+			errs = append(errs, fmt.Errorf("reconcile routed flock %q: home host %q unreachable", flockID, homeHost))
 			continue
 		}
 		errs = append(errs, r.registerRoutedRelays(ctx, record, relayToken, callToken)...)
+	}
+	// Sweep counters for flocks that no longer exist (deleted/removed) so the
+	// map cannot grow unboundedly across flock lifecycles.
+	for id := range r.homeFailures {
+		if !live[id] {
+			delete(r.homeFailures, id)
+		}
 	}
 	return errors.Join(errs...)
 }
