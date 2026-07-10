@@ -1,10 +1,10 @@
 # Cross-host 실 2-daemon 수동 검증 절차 (wall + gtcall)
 
 - 작성일: 2026-07-08
-- 상태: **2026-07-10 수행 완료 — 부분 통과** (①~⑤·⑦·⑧ PASS / ⑥ 재시작 복구
-  FAIL → 결함 D1 회부). 수행 기록·증거·결함 상세:
-  [2026-07-10-cross-host-verification-run-handoff.md](2026-07-10-cross-host-verification-run-handoff.md).
-  D1 수정 후 ⑥만 재검증하면 된다.
+- 상태: **2026-07-10 수행 완료 — 전 항목 통과** (최초 실행에서 ⑥ 재시작 복구
+  FAIL → D1/D1b fix(PR #30·#31) 당일 머지 후 ⑥ 재검증 PASS — 양 daemon 동시
+  재시작 시나리오 포함). "실 2-daemon 통합 검증 완료". 수행 기록·증거·결함
+  상세: [2026-07-10-cross-host-verification-run-handoff.md](2026-07-10-cross-host-verification-run-handoff.md).
 - 배경: 단일 host CI에서는 두 real daemon이 guest bridge(`goose-br0`,
   `10.0.1.0/24` — `internal/network/manager.go`에 고정)를 공유할 수 없어,
   wall/gtcall e2e는 home을 stub으로 대체한다. member 측 실경로(real VM →

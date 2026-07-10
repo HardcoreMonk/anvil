@@ -30,11 +30,11 @@
 
 갱신된 순서:
 
-1. **D1 fix slice** — daemon 재시작 시 routed flock 분산 상태(hub/relay kind +
-   token admission) 유실 + adapter 재등록 비멱등(409) 수정.
-2. **⑥ 재시작 복구만 재검증** (나머지 절차는 2026-07-10 기록으로 유효).
-3. 통과 시 → **failover 구현 slice 착수 승인 요청** (spec 확정본 기준
-   writing-plans → SDD). D1은 failover의 선행 조건이다.
+1. ~~D1 fix slice~~ — **완료** (PR #30 + 잔여 D1b PR #31, 2026-07-10 당일).
+2. ~~⑥ 재시작 복구 재검증~~ — **PASS** (양 daemon 동시 재시작 포함 전 방향).
+   **검증 전체가 이로써 완전 통과 — "실 2-daemon 통합 검증 완료".**
+3. **failover 구현 slice 착수 승인 요청** (spec 확정본 기준 writing-plans →
+   SDD) — 게이트 충족, 승인 대기.
 
 ## Follow-Up Tasks (전체 큐 — 우선순위순, 2026-07-10 갱신)
 
