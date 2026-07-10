@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -39,6 +40,7 @@ type routerFakeDaemon struct {
 	deleteNilResp          bool
 	afterDelete            func()
 	listVMResp             []VMInfo
+	listVMErr              error
 	snapshotList           []SnapshotInfo
 	listSnapshotErr        error
 	exportCalls            []string
@@ -214,6 +216,9 @@ func (f *routerFakeDaemon) DeleteSnapshot(context.Context, string) (*RawDaemonRe
 }
 
 func (f *routerFakeDaemon) ListVMs(context.Context) ([]VMInfo, error) {
+	if f.listVMErr != nil {
+		return nil, f.listVMErr
+	}
 	return f.listVMResp, nil
 }
 
@@ -888,6 +893,64 @@ func TestReconcile_ReregistersSharedTownWall(t *testing.T) {
 	}
 	if len(home.distributedReq.Roster) != 2 {
 		t.Fatalf("reconcile hub roster len = %d, want 2", len(home.distributedReq.Roster))
+	}
+}
+
+// TestReconcilePlacements_IsolatesUnreachableHost proves one dead daemon no
+// longer aborts the whole reconcile pass: the reachable host's placements are
+// rebuilt, the dead host's existing placements are carried over (not wiped),
+// wall healing still runs for the reachable side, and the pass reports the
+// failure in its joined error instead of returning early.
+func TestReconcilePlacements_IsolatesUnreachableHost(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
+	home := &routerFakeDaemon{spawnResponses: []*SpawnVMResponse{{
+		VMID: "vm-coordinator-1", GuestIP: "10.0.1.10", AgentURL: "http://10.0.1.10:8080", TenantID: "tenant-1", EgressPolicy: "profile",
+	}}}
+	member := &routerFakeDaemon{spawnResponses: []*SpawnVMResponse{{
+		VMID: "vm-researcher-1", GuestIP: "10.0.2.10", AgentURL: "http://10.0.2.10:8080", TenantID: "tenant-1", EgressPolicy: "profile",
+	}}}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(
+			[]RuntimeHost{
+				{Name: "hostA", Endpoint: "http://hostA.internal:8080", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+				{Name: "hostB", Endpoint: "http://hostB.internal:8080", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+			},
+			nil, nil,
+		),
+		map[string]Daemon{"hostA": home, "hostB": member},
+		RuntimeRouterOptions{PlacementStore: store},
+	)
+	if _, err := router.CreateRoutedFlockMembers(context.Background(), FlockCreateRequest{
+		Task: "smoke", Roles: []string{"coordinator", "researcher"},
+		TenantID: "tenant-1", EgressPolicy: "profile",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// hostA dies (dial failure), hostB stays reachable with its VM listed.
+	home.listVMErr = &net.OpError{Op: "dial", Err: errors.New("connection refused")}
+	member.listVMResp = []VMInfo{{VMID: "vm-researcher-1"}}
+	member.relayCalls = 0
+
+	err := router.ReconcilePlacements(context.Background())
+	if err == nil {
+		t.Fatal("reconcile with a dead host must surface the failure in its error")
+	}
+	// Dead host's placement carried over, reachable host's rebuilt.
+	if host, ok := router.Placement("vm-coordinator-1"); !ok || host != "hostA" {
+		t.Fatalf("dead host placement wiped: %q %v", host, ok)
+	}
+	if host, ok := router.Placement("vm-researcher-1"); !ok || host != "hostB" {
+		t.Fatalf("reachable host placement lost: %q %v", host, ok)
+	}
+	// Wall healing still ran for the reachable member (home hub POST fails —
+	// collected, not fatal).
+	if member.relayCalls != 1 {
+		t.Fatalf("member relay re-registrations = %d, want 1 (healing must survive a dead host)", member.relayCalls)
+	}
+	// Error strings stay identifier-only: no endpoint/address leak.
+	if strings.Contains(err.Error(), "internal:8080") {
+		t.Fatalf("reconcile error leaked a daemon address: %v", err)
 	}
 }
 
