@@ -1570,10 +1570,14 @@ func (cp *ControlPlane) registerRelayFlock(w http.ResponseWriter, r *http.Reques
 		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("home_addr and relay_token required"))
 		return
 	}
-	// A non-relay flock already owns this id (a local flock, or a hub): RegisterRelay
-	// below would blindly overwrite it. Refuse instead. A relay-kind re-register is
-	// left as the current overwrite so reconcile heal can refresh HomeAddr/token.
-	if existing, ok := cp.flockMgr.Get(flockID); ok && existing.Kind != orchestrator.FlockKindRelay {
+	// A LOCAL flock owning this id is an id collision — refuse (unchanged). A
+	// hub-kind occupant is the failover demotion path: the control plane's
+	// record now names another host as home, so this (revived old-home) daemon
+	// converts its stale hub into a relay stub. RegisterRelay below overwrites
+	// the registry entry and persists kind=relay; the old TOWN_WALL.log stays
+	// on disk as an audit artifact (spec: wall history is lost, not merged).
+	// Relay->relay re-register remains the reconcile heal overwrite.
+	if existing, ok := cp.flockMgr.Get(flockID); ok && existing.Kind == orchestrator.FlockKindLocal {
 		writeJSONError(w, http.StatusConflict, fmt.Errorf("flock %q already registered as a non-relay flock", flockID))
 		return
 	}

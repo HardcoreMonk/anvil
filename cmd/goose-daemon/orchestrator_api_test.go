@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -307,6 +308,57 @@ func TestRegisterDistributedFlock_RejectsDuplicateNonHubID(t *testing.T) {
 	}
 	if cp.relayTokenFor("routed-1") != "" {
 		t.Fatalf("rejected distributed register admitted relay token %q", cp.relayTokenFor("routed-1"))
+	}
+}
+
+// TestRegisterRelayFlock_DemotesHubToRelay proves the failover demotion path: a
+// revived old home still holding the stale HUB flock (restart recovery restores
+// kind=hub) accepts a relay registration from the control plane — the adapter's
+// record now points at the NEW home — instead of 409ing forever. The wall log
+// file stays on disk (audit artifact, same convention as DeleteFlockMetadata);
+// the demoted flock forwards to the new home and resolves its own local agents.
+func TestRegisterRelayFlock_DemotesHubToRelay(t *testing.T) {
+	cp := newTestCP(t)
+
+	// Seed: this daemon WAS the home — hub flock with a canonical wall.
+	hubBody := `{"roster":[{"agent_id":"coordinator-1","host":"hostA","vm_id":"vm-c1"}],"relay_token":"rt-1","call_token":"ct-1"}`
+	rr := httptest.NewRecorder()
+	cp.handleFlockItem(rr, httptest.NewRequest(http.MethodPost, "/flocks/routed-1/distributed", strings.NewReader(hubBody)))
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("seed hub register = %d, want 201 (%s)", rr.Code, rr.Body.String())
+	}
+	wallPath := filepath.Join(cp.workDir, "flocks", "routed-1", "TOWN_WALL.log")
+
+	// Failover happened elsewhere; reconcile now demotes this host to a member.
+	relayBody := `{"home_addr":"http://new-home:3000","relay_token":"rt-1","call_token":"ct-1","agents":[{"agent_id":"coordinator-1","vm_id":"vm-c1"}]}`
+	rr2 := httptest.NewRecorder()
+	cp.handleFlockItem(rr2, httptest.NewRequest(http.MethodPost, "/flocks/routed-1/relay", strings.NewReader(relayBody)))
+	if rr2.Code != http.StatusCreated {
+		t.Fatalf("demote hub->relay = %d, want 201 (%s)", rr2.Code, rr2.Body.String())
+	}
+
+	f, ok := cp.flockMgr.Get("routed-1")
+	if !ok || f.Kind != orchestrator.FlockKindRelay {
+		t.Fatalf("flock not demoted to relay: %+v", f)
+	}
+	if f.HomeAddr != "http://new-home:3000" {
+		t.Fatalf("demoted relay HomeAddr = %q, want new home", f.HomeAddr)
+	}
+	// Local agents resolvable for hopped calls.
+	if len(f.Snapshot()) != 1 {
+		t.Fatalf("demoted relay Agents = %d, want 1", len(f.Snapshot()))
+	}
+	// Old wall history remains on disk (spec: 이전 기록은 구 home 디스크에 남는다).
+	if _, err := os.Stat(wallPath); err != nil {
+		t.Fatalf("old wall log removed by demotion: %v", err)
+	}
+	// Kind persisted so a restart recovers a relay, not a hub.
+	meta, err := orchestrator.LoadFlockMetadata(cp.workDir, "routed-1")
+	if err != nil {
+		t.Fatalf("load persisted metadata: %v", err)
+	}
+	if meta.Kind != orchestrator.FlockKindRelay || meta.HomeAddr != "http://new-home:3000" {
+		t.Fatalf("persisted kind/home_addr = %q/%q, want relay/new-home", meta.Kind, meta.HomeAddr)
 	}
 }
 
