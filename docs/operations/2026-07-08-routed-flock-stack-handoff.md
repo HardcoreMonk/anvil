@@ -21,24 +21,28 @@
 [`docs/superpowers/specs/2026-07-08-home-failover-design.md`](../superpowers/specs/2026-07-08-home-failover-design.md)
 (복제 없음, 단일 elector, wall 손실 수용 계약).
 
-## Next Action (순서 고정)
+## Next Action (순서 고정 — 2026-07-10 갱신)
 
-1. **Ubuntu 26.04 서버 2대 세팅** — 검증 runbook의
-   "호스트 준비 체크리스트" 절차대로 (Go/패키지/네트워크/KVM + **서버별
-   단일 host smoke 필수**).
-2. **실 2-daemon 수동 검증 수행** — runbook ①~⑧ (wall 양방향, gtcall 4방향,
-   재시작 복구, redaction 스팟). 이것이 home 측 실수신·2번째 hop의 최종
-   증거이자 failover 구현의 게이트다.
-3. 판정에 따라:
-   - **통과** → runbook 상태 갱신 + gtcall handoff MANUAL check CLOSED +
-     **failover 구현 slice 착수 승인 요청** (spec 확정본 기준 writing-plans →
-     SDD).
-   - **실패** → 증상·로그를 runbook에 첨부, slice 결함으로 회부.
+~~1. 서버 2대 세팅~~ / ~~2. 실 2-daemon 수동 검증 수행~~ — **완료 (2026-07-10)**.
+결과: **부분 통과** — wall 양방향·gtcall 4방향·redaction·정리/revoke 전부 PASS,
+**재시작 복구 FAIL** (결함 D1 회부). gtcall handoff MANUAL check는 CLOSED.
+수행 기록: [2026-07-10-cross-host-verification-run-handoff.md](2026-07-10-cross-host-verification-run-handoff.md).
 
-## Follow-Up Tasks (전체 큐 — 우선순위순)
+갱신된 순서:
 
-1. 수동 multi-host 검증 (위 Next Action — 유일한 차단 게이트).
-2. failover 구현 slice (검증 통과 후, 별도 승인).
+1. **D1 fix slice** — daemon 재시작 시 routed flock 분산 상태(hub/relay kind +
+   token admission) 유실 + adapter 재등록 비멱등(409) 수정.
+2. **⑥ 재시작 복구만 재검증** (나머지 절차는 2026-07-10 기록으로 유효).
+3. 통과 시 → **failover 구현 slice 착수 승인 요청** (spec 확정본 기준
+   writing-plans → SDD). D1은 failover의 선행 조건이다.
+
+## Follow-Up Tasks (전체 큐 — 우선순위순, 2026-07-10 갱신)
+
+1. ~~수동 multi-host 검증~~ — **수행 완료** (부분 통과, 위 Next Action).
+   신규 회부: **D1** 재시작 복구 결함 (주요, 새 1순위), **D2** delete
+   cleanup_failed 오보고 (부차), **D3** ZFS diff-snapshot merge 오염 — 코드
+   완화 필요 (부차, 운영 완화는 적용됨). 상세: run handoff.
+2. failover 구현 slice (D1 수정·⑥ 재검증 통과 후, 별도 승인).
 3. ~~SSE relay non-200 content-type polish~~ — **CLOSED** (`b1c8c8c`,
    2026-07-10): wall handoff Follow-Up 참조.
 4. cross-host broadcast fan-out — 계속 비목표 (필요 대두 시 별도 설계).

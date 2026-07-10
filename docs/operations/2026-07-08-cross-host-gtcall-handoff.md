@@ -159,6 +159,15 @@ dispatch(local/hub/relay 분기, home 경유 2-hop 포함)를 daemon 쪽으로 �
   검증이었지만, 구조적으로는 silent-pass 가능성이 있는 잠재 약점이다(아래
   Follow-Up).
 
+## 수동 multi-host 검증 결과 (2026-07-10 추기)
+
+단일 host CI가 증명 못 하던 **home 측 실수신·2번째 hop·양방향 왕복**이 실
+2-daemon 환경(192.168.1.19 home / .20 member)에서 검증됐다 — gtcall 4방향
+(member→home, home→member 2nd hop, member→같은 host member C1 경로, 미존재
+agent 404) **전부 통과**. 이 slice의 MANUAL check는 **CLOSED**. 단, daemon
+재시작 복구는 별도 결함(D1: recovery의 분산 상태 유실 + 재등록 비멱등 409)으로
+회부됐다 — 상세: [2026-07-10-cross-host-verification-run-handoff.md](2026-07-10-cross-host-verification-run-handoff.md).
+
 ## Next Action
 
 release-gate 관점에서 이 slice 자체(유닛·race·gtcall e2e 18/18×2)는 닫혔다. 다만
