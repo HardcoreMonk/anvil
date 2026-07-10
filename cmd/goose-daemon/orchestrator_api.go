@@ -613,10 +613,20 @@ func (cp *ControlPlane) streamTownWallRelay(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	defer resp.Body.Close()
+	// Home refused the stream (auth failure, unknown flock, ...): mirror its
+	// status and JSON error body like the post/history relay handlers instead
+	// of stamping SSE headers on a response that carries no event stream.
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(b)
+		return
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(resp.StatusCode)
+	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 	buf := make([]byte, 4096)
 	for {

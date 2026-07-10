@@ -177,6 +177,38 @@ func TestStreamTownWall_RelayDialsHomeWithToken(t *testing.T) {
 	}
 }
 
+// TestStreamTownWall_RelayNon200MirrorsJSONError proves a home refusal of the
+// SSE stream (auth failure, unknown flock, ...) is mirrored to the caller as a
+// plain JSON error — status and body passed through, Content-Type
+// application/json like the post/history relay handlers — instead of stamping
+// text/event-stream on a response that carries no event stream.
+func TestStreamTownWall_RelayNon200MirrorsJSONError(t *testing.T) {
+	const errBody = `{"error":"invalid relay token"}`
+	home := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(errBody))
+	}))
+	defer home.Close()
+
+	cp := newTestCP(t)
+	cp.flockMgr.RegisterRelay("routed-1", home.URL, "rt-1", "", nil)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/flocks/routed-1/wall", nil)
+	cp.handleFlockItem(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("relay stream status = %d, want 401 mirrored from home (%s)", rr.Code, rr.Body.String())
+	}
+	if ct := rr.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("relay stream error Content-Type = %q, want application/json", ct)
+	}
+	if strings.TrimSpace(rr.Body.String()) != errBody {
+		t.Fatalf("relay stream error body = %q, want %q mirrored from home", rr.Body.String(), errBody)
+	}
+}
+
 // TestPostToTownWall_RelayRetriesDialFailure proves the relay post hop
 // retries a dial-class failure within the same caller request instead of
 // failing on the first attempt (Task 2 of the bounded relay retry slice).
