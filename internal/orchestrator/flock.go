@@ -231,6 +231,50 @@ func (f *Flock) SetRoster(roster []RosterMember) {
 	f.Roster = roster
 }
 
+// SetDistributedTokens re-seats the relay/call admission secrets under the
+// per-flock lock (matching SetRoster's discipline). An empty argument leaves the
+// corresponding field unchanged so a token-less (backward-compat) re-registration
+// cannot blank a live secret. These fields are runtime-only — ToMetadata never
+// serializes them and no Persist follows: admission secrets stay off disk.
+func (f *Flock) SetDistributedTokens(relayToken, callToken string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if relayToken != "" {
+		f.RelayToken = relayToken
+	}
+	if callToken != "" {
+		f.CallToken = callToken
+	}
+}
+
+// DistributedTokens returns the relay/call secret pair under the per-flock
+// lock. Hub tokens are mutable after publish (UpdateHubTokens re-seats them on
+// every reconcile re-POST), so outbound hop builders must read through this
+// getter rather than the raw fields — a raw read races SetDistributedTokens.
+// Relay flocks are unaffected: re-registration swaps the whole struct, so their
+// fields stay immutable after publish and existing raw reads remain safe.
+func (f *Flock) DistributedTokens() (relayToken, callToken string) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.RelayToken, f.CallToken
+}
+
+// RosterSnapshot returns a defensive copy of the hub roster under the per-flock
+// lock. The roster is replaced by every reconcile re-POST (SetRoster), so
+// lookups (rosterMember, local-VM resolution) must iterate a snapshot — ranging
+// the live slice races the replacement. Mirrors Snapshot()'s discipline for
+// agents.
+func (f *Flock) RosterSnapshot() []RosterMember {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if len(f.Roster) == 0 {
+		return nil
+	}
+	out := make([]RosterMember, len(f.Roster))
+	copy(out, f.Roster)
+	return out
+}
+
 // MarkAgentPaused changes an agent to the runtime-only paused state while
 // remembering the pre-pause status for rollback and metadata scrubbing.
 func (f *Flock) MarkAgentPaused(agentID string) {
@@ -546,6 +590,28 @@ func (fm *FlockManager) UpdateHubRoster(flockID string, roster []RosterMember) b
 	if err := f.Persist(fm.workDir); err != nil {
 		slog.Warn("flock: persist hub roster update failed", "flock_id", flockID, "err", err)
 	}
+	return true
+}
+
+// UpdateHubTokens re-seats an existing hub flock's in-memory relay/call
+// admission secrets. A restarted home daemon recovers the hub from disk WITHOUT
+// its tokens (secrets are never persisted — see FlockMetadata), so f.RelayToken/
+// f.CallToken come back empty; the idempotent reconcile re-POST must refill them
+// or the hub's outbound 2nd-hop /call (forwardFlockCall(member.Addr, f.CallToken,
+// ...)) sends an empty bearer and the member daemon 401s (D1b). Mirrors
+// UpdateHubRoster (fm.mu confirms the hub, then the per-flock lock writes) but
+// deliberately does NOT Persist — the whole point is that these secrets stay off
+// disk. Empty incoming tokens are ignored (see SetDistributedTokens). Reports
+// false when flockID is not a registered hub flock.
+func (fm *FlockManager) UpdateHubTokens(flockID, relayToken, callToken string) bool {
+	fm.mu.Lock()
+	f, ok := fm.flocks[flockID]
+	if !ok || f.Kind != FlockKindHub {
+		fm.mu.Unlock()
+		return false
+	}
+	fm.mu.Unlock()
+	f.SetDistributedTokens(relayToken, callToken)
 	return true
 }
 

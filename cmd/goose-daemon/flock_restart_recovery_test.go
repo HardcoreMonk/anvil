@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -193,5 +194,85 @@ func TestRegisterDistributedFlock_StillRefusesGenuineLocalFlock(t *testing.T) {
 	}
 	if cp2.relayTokenFor("local-1") != "" {
 		t.Fatalf("rejected distributed register admitted a relay token")
+	}
+}
+
+// TestRegisterDistributedFlock_RefillsHubTokensAfterRestart covers D1b: after a
+// home daemon restart, LoadFromDisk recovers the hub flock WITHOUT its tokens
+// (admission secrets are never persisted), so f.RelayToken/f.CallToken come back
+// empty. The idempotent reconcile re-POST /distributed refills the INBOUND
+// admission maps (setRelayToken/setCallToken) and roster, but must ALSO re-seat
+// the hub Flock struct's own tokens — those drive the OUTBOUND hops. Without it
+// the hub's 2nd-hop /call to a member sends an empty bearer and the member
+// daemon 401s. Asserts the struct fields, the end-to-end outbound bearer, and
+// re-confirms tokens never touch disk.
+func TestRegisterDistributedFlock_RefillsHubTokensAfterRestart(t *testing.T) {
+	const relayTok = "RT-SENT-d1b-aa11"
+	const callTok = "CT-SENT-d1b-bb22"
+
+	// Stub member daemon: the target of the hub's outbound 2nd hop. It captures
+	// the bearer so we can prove the hub forwarded a non-empty call token.
+	var gotAuth string
+	member := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer member.Close()
+
+	body := `{"roster":[{"agent_id":"target-1","host":"host-b","vm_id":"vm-9","addr":"` + member.URL +
+		`"}],"relay_token":"` + relayTok + `","call_token":"` + callTok + `"}`
+	cp := newTestCP(t)
+	rr := httptest.NewRecorder()
+	cp.handleFlockItem(rr, httptest.NewRequest(http.MethodPost, "/flocks/routed-1/distributed", strings.NewReader(body)))
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("initial distributed register = %d, want 201 (%s)", rr.Code, rr.Body.String())
+	}
+
+	// --- daemon restart --- LoadFromDisk recovers the hub; tokens are gone.
+	cp2 := restartCP(t, cp)
+	if pre, ok := cp2.flockMgr.Get("routed-1"); !ok || pre.RelayToken != "" || pre.CallToken != "" {
+		t.Fatalf("precondition: recovered hub should have empty tokens, got relay=%q call=%q (ok=%v)",
+			pre.RelayToken, pre.CallToken, ok)
+	}
+
+	// Reconcile re-POST /distributed (idempotent heal).
+	rr2 := httptest.NewRecorder()
+	cp2.handleFlockItem(rr2, httptest.NewRequest(http.MethodPost, "/flocks/routed-1/distributed", strings.NewReader(body)))
+	if rr2.Code != http.StatusCreated {
+		t.Fatalf("post-restart distributed re-POST = %d, want 201 (%s)", rr2.Code, rr2.Body.String())
+	}
+
+	// (a) The hub Flock struct's own tokens are re-seated.
+	f2, ok := cp2.flockMgr.Get("routed-1")
+	if !ok {
+		t.Fatal("hub flock missing after re-POST")
+	}
+	if f2.RelayToken != relayTok {
+		t.Fatalf("hub f.RelayToken = %q, want %q (not refilled on idempotent re-POST)", f2.RelayToken, relayTok)
+	}
+	if f2.CallToken != callTok {
+		t.Fatalf("hub f.CallToken = %q, want %q (not refilled → member 401 = D1b)", f2.CallToken, callTok)
+	}
+
+	// (b) Outbound proof: the hub's 2nd-hop /call to the member carries callTok.
+	callRR := httptest.NewRecorder()
+	cp2.handleFlockItem(callRR, httptest.NewRequest(http.MethodPost, "/flocks/routed-1/call",
+		strings.NewReader(`{"agent_id":"target-1","prompt":"ping"}`)))
+	if callRR.Code != http.StatusOK {
+		t.Fatalf("hub 2nd-hop call = %d, want 200 (%s)", callRR.Code, callRR.Body.String())
+	}
+	if gotAuth != "Bearer "+callTok {
+		t.Fatalf("member received auth %q, want %q (empty bearer = D1b)", gotAuth, "Bearer "+callTok)
+	}
+
+	// (c) Tokens still never persisted.
+	raw, err := os.ReadFile(filepath.Join(cp2.workDir, "flocks", "routed-1", "metadata.json"))
+	if err != nil {
+		t.Fatalf("read metadata: %v", err)
+	}
+	if strings.Contains(string(raw), relayTok) || strings.Contains(string(raw), callTok) {
+		t.Fatalf("metadata.json leaked a token:\n%s", raw)
 	}
 }
