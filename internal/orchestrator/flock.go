@@ -247,6 +247,34 @@ func (f *Flock) SetDistributedTokens(relayToken, callToken string) {
 	}
 }
 
+// DistributedTokens returns the relay/call secret pair under the per-flock
+// lock. Hub tokens are mutable after publish (UpdateHubTokens re-seats them on
+// every reconcile re-POST), so outbound hop builders must read through this
+// getter rather than the raw fields — a raw read races SetDistributedTokens.
+// Relay flocks are unaffected: re-registration swaps the whole struct, so their
+// fields stay immutable after publish and existing raw reads remain safe.
+func (f *Flock) DistributedTokens() (relayToken, callToken string) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.RelayToken, f.CallToken
+}
+
+// RosterSnapshot returns a defensive copy of the hub roster under the per-flock
+// lock. The roster is replaced by every reconcile re-POST (SetRoster), so
+// lookups (rosterMember, local-VM resolution) must iterate a snapshot — ranging
+// the live slice races the replacement. Mirrors Snapshot()'s discipline for
+// agents.
+func (f *Flock) RosterSnapshot() []RosterMember {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if len(f.Roster) == 0 {
+		return nil
+	}
+	out := make([]RosterMember, len(f.Roster))
+	copy(out, f.Roster)
+	return out
+}
+
 // MarkAgentPaused changes an agent to the runtime-only paused state while
 // remembering the pre-pause status for rollback and metadata scrubbing.
 func (f *Flock) MarkAgentPaused(agentID string) {

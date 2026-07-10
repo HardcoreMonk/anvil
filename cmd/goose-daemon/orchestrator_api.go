@@ -1322,7 +1322,11 @@ func (cp *ControlPlane) callFlockAgent(w http.ResponseWriter, r *http.Request, f
 		if member, ok := rosterMember(f, req.AgentID); ok && member.Addr != "" {
 			ctx, cancel := context.WithTimeout(r.Context(), 280*time.Second)
 			defer cancel()
-			status, body, err := forwardFlockCall(ctx, member.Addr, f.CallToken, flockID, req, r.Header.Get(taskDepthHeader), true)
+			// Hub tokens are re-seated by every reconcile re-POST (UpdateHubTokens),
+			// so read them through the locked getter — the raw field races the
+			// refill (D1b review).
+			_, callToken := f.DistributedTokens()
+			status, body, err := forwardFlockCall(ctx, member.Addr, callToken, flockID, req, r.Header.Get(taskDepthHeader), true)
 			if err != nil {
 				writeJSONError(w, http.StatusBadGateway, fmt.Errorf("call hop to member host %q failed", member.Host))
 				return
@@ -1398,7 +1402,9 @@ func (cp *ControlPlane) flockAgentLocalVM(f *orchestrator.Flock, agentID string)
 			return a.VMID, true
 		}
 	}
-	for _, m := range f.Roster {
+	// Locked snapshot, not the live slice: the roster is replaced by every
+	// reconcile re-POST (SetRoster) and a raw range races that refresh.
+	for _, m := range f.RosterSnapshot() {
 		if m.AgentID != agentID || m.VMID == "" {
 			continue
 		}
@@ -1412,9 +1418,11 @@ func (cp *ControlPlane) flockAgentLocalVM(f *orchestrator.Flock, agentID string)
 	return "", false
 }
 
-// rosterMember finds agentID in a hub flock's remote-membership roster.
+// rosterMember finds agentID in a hub flock's remote-membership roster. It
+// iterates a locked snapshot: the live f.Roster slice is replaced by every
+// reconcile re-POST (SetRoster), so ranging it directly races the refresh.
 func rosterMember(f *orchestrator.Flock, agentID string) (orchestrator.RosterMember, bool) {
-	for _, m := range f.Roster {
+	for _, m := range f.RosterSnapshot() {
 		if m.AgentID == agentID {
 			return m, true
 		}
