@@ -204,6 +204,57 @@ refused/no route 등 — 요청이 상대에 도달하지 않았음이 보장되
 그 외 실패(HTTP 응답, reset/EOF, ctx 만료)는 재시도 없이 즉시 반환하므로
 agent 쪽 재시도에 맡긴다.
 
+### Home 재선출 failover 관측과 수동 fail-back
+
+routed flock의 home host가 연속 `homeFailureThreshold`회(상수, 기본 3)
+dial-계열로 응답하지 않으면 adapter(`cmd/anvil-mcp`)의 reconcile 루프가 자동
+재선출한다. 새 home은 `record.Agents` 순서상 첫 생존 host(구 home 제외)이고,
+생존 후보가 없으면 no-op으로 다음 reconcile 주기에 재평가한다.
+
+**관측**: adapter stderr 로그에서 다음 형태의 라인을 확인한다(flock/host
+식별자만 남고 daemon 주소·토큰은 노출되지 않는다).
+
+```
+anvil-mcp: routed flock "<flock_id>" home failover "<old_host>" -> "<new_host>" (canonical wall restarts empty on the new home)
+```
+
+adapter가 `members_only` 모드로 쓰는 `scheduler_state_path`(설정
+`scheduler_state_path`, 즉 placements.json)에서 해당 flock의 `home_host`가
+새 host로 바뀌었는지 직접 확인할 수도 있다.
+
+```bash
+jq '.routed_flocks["<flock_id>"].home_host' "$SCHEDULER_STATE_PATH"
+```
+
+**전환 창**: 최대 ~`homeFailureThreshold`(3) × `ANVIL_MCP_RECONCILE_INTERVAL`
+(기본 `60s`) + 전환에 걸리는 시간이다 — 기본 설정 기준 최대 ~3분. 이 창 동안
+wall post/조회와 gtcall은 기존과 동일하게 502 + bounded retry(dial-실패 한정
+총 3회 시도)로 관측된다.
+
+**wall 손실 계약**: 전환 후 새 home은 빈 `TOWN_WALL.log`에서 seq를
+재시작한다. 구 home 디스크의 기록은 지워지지 않지만 새 wall로 병합되지
+않는다 — flock을 운영하는 사람 관점에서는 agent에게 전환 시점 이전 wall
+메시지가 사라진 것으로 보인다. 전환 전후로 wall history를 비교해 달라는
+문의를 받으면 이 계약을 먼저 설명한다.
+
+**자동 fail-back은 없다.** 구 home이 부활해도 adapter는 새 home을 계속
+유지한다(flap 방지) — 구 home은 다음 reconcile에서 relay로 강등돼 자동
+heal된다(stale hub는 어차피 아무도 참조하지 않는다). 원래 host로 되돌리려면
+다음 수동 절차를 따른다.
+
+1. adapter를 중지한다(reconcile 루프가 되돌린 설정을 다시 자동 전환하지
+   않도록).
+2. `scheduler_state_path`(placements.json)에서 해당 flock의 `home_host`를
+   원하는 host로 직접 수정한다.
+3. adapter를 재기동한다.
+4. 다음 reconcile 주기가 hub 승격/relay 강등을 자동 수행한다 — failover와
+   동일한 배관(`RegisterDistributedFlock`/`RegisterRelayFlock`)을 탄다.
+
+경고: 이 수동 fail-back도 재선출과 동일하게 wall 손실 계약을 따른다 —
+되돌아간 host의 wall은 다시 빈 log에서 시작된다. 이전 host로 복귀한다고
+해서 그 host가 과거에 쌓았던 `TOWN_WALL.log` 내용이 자동으로 복원되지
+않는다.
+
 ## 일반 검증
 
 문서와 code path가 함께 맞는지 보는 기본 검증:

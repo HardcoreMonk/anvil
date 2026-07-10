@@ -332,8 +332,9 @@ daemon으로 보내는 outbound Bearer token이다.
   hub/relay 등록을 해제하고 reconcile이 daemon 재시작 후 재등록한다. guest는
   bridge-only를 유지하고 신규 `anvil_*` MCP tool은 없다(runtime/operator 표면).
   KVM e2e `scripts/anvil-cross-host-wall-e2e.sh`(real member VM + stub home)로
-  검증됐다. home host는 SPOF(1차 수용), cross-host `gtcall`/broadcast fan-out과
-  relay retry는 비범위다.
+  검증됐다. home host는 도입 당시 SPOF였으나 재선출 failover(아래 항목)로 해소됐다.
+  cross-host `gtcall`/broadcast fan-out과 relay retry는 비범위였다(각각 별도
+  slice로 편입, broadcast fan-out은 계속 비목표).
 - `ReconcilePlacements`의 주기적 control loop 배선이 2026-07-07 reconcile-loop
   slice(`b32cd72`, `6c1ca87`)로 완료됐다. `reconcile_interval`/
   `ANVIL_MCP_RECONCILE_INTERVAL`(기본 `60s`, `0`=off)과 `StartReconcileLoop`가
@@ -370,12 +371,37 @@ daemon으로 보내는 outbound Bearer token이다.
   relay 4개 에러 지점(post, history, stream 요청 빌드, stream relay)이 전부
   call 경로와 동일하게 flock id만 노출하는 opaque 502 에러로 바뀌어, home
   daemon 주소가 더 이상 어떤 relay hop에서도 노출되지 않는다.
+- home 재선출 failover가 main에 편입돼 routed flock home host(hub) SPOF를
+  해소했다. **kind 전환**: daemon `POST /flocks/{id}/distributed`가 relay
+  점유 id 위에서 hub로 승격(`201`), `POST /flocks/{id}/relay`가 hub 점유 id
+  위에서 relay로 강등(`201`)한다 — 두 endpoint 모두 CP bearer 전용(relay/call
+  token은 admit 대상 아님), local flock은 양쪽 모두 `409` 불변 보호. 이
+  kind 전환은 spec 원안(기존 배관 재사용 가정)의 보정이다 — D1 fix(PR #30)의
+  kind 충돌 `409` 가드 때문에 daemon 쪽 승격/강등이 필수가 됐다. **감지·선출·
+  전환**: adapter reconcile 루프가 flock 단위로 연속 `homeFailureThreshold`회
+  (상수, 기본 3) dial-계열 home 실패를 관측하면, `record.Agents` 순서상 첫
+  생존 host(구 home 제외)로 결정적 재선출한다(후보 0이면 no-op). 전환은
+  `HomeHost` 영속(원자적 전환점) → 새 home hub 승격 등록 → 구 home 포함 전
+  member relay 재등록 → 구 home best-effort `DELETE` 순서이며, 어느 단계가
+  실패해도 다음 reconcile 주기가 idempotent 수렴한다. **wall 손실 명시
+  계약**: 새 home은 빈 log에서 seq를 재시작하고, 구 home 디스크의 이전 기록은
+  병합되지 않는다(agent 관점에서 과거 메시지가 사라진 것으로 보임). relay/call
+  token은 flock 단위 불변 재사용이라 guest는 무중단·무개입이며, 자동
+  fail-back은 없다(구 home 부활 시 다음 reconcile이 relay로 강등해 heal).
+  유닛 8종(`TestFailover_*`, `internal/anvilmcp/home_failover_test.go`) +
+  KVM e2e `scripts/anvil-cross-host-failover-e2e.sh`(stub A→stub B 재선출 +
+  real daemon relay→hub 승격, wall 손실 계약 관측, redaction 검증, 3회
+  연속 green)로 검증됐다. 실 2-daemon 수동 검증(§6 시나리오 확장)은 아직
+  미수행 — 트리거는 다음 서버 세션. 상세:
+  [`docs/superpowers/specs/2026-07-08-home-failover-design.md`](docs/superpowers/specs/2026-07-08-home-failover-design.md),
+  [`docs/operations/2026-07-11-home-failover-handoff.md`](docs/operations/2026-07-11-home-failover-handoff.md).
 - `scripts/anvil-mcp-e2e.sh flock`, 전체 KVM `sudo bash e2e_test.sh`, script-only
   workload runner E2E, cross-host wall relay E2E
   (`scripts/anvil-cross-host-wall-e2e.sh`), cross-host gtcall relay E2E
-  (`scripts/anvil-cross-host-gtcall-e2e.sh`)가 Goosetown MCP surface, daemon
-  flock lifecycle, deterministic workload, cross-host relay/call 검증 경로에
-  포함된다.
+  (`scripts/anvil-cross-host-gtcall-e2e.sh`), cross-host home failover E2E
+  (`scripts/anvil-cross-host-failover-e2e.sh`)가 Goosetown MCP surface, daemon
+  flock lifecycle, deterministic workload, cross-host relay/call/failover 검증
+  경로에 포함된다.
 
 남은 후속 후보:
 
@@ -403,8 +429,10 @@ daemon으로 보내는 outbound Bearer token이다.
 - scheduler service의 실제 운영 배포와 host inventory polling daemonization
 - cross-host snapshot replication 자동화(background retry queue·metrics·alert —
   수동 동기 replication과 snapshot locality preference는 baseline 포함)
-- 비동기 relay buffer(failover/수동 검증 이후 재평가), home SPOF 제거 — 재선출
-  failover 설계 확정(`docs/superpowers/specs/2026-07-08-home-failover-design.md`,
-  구현은 수동 multi-host 검증 통과 후), SSE relay non-200 content-type polish
+- 비동기 relay buffer(home 재선출 failover 구현 완료로 재평가 가능 — 수동
+  multi-host §6 failover 시나리오 수행 후 우선순위 판단), 실 2-daemon 수동
+  검증 §6 home failover 시나리오 수행(트리거: 다음 서버 세션,
+  `docs/operations/2026-07-08-cross-host-manual-verification.md`), SSE relay
+  non-200 content-type polish
 - egress allow host rule의 L7 proxy/SNI 기반 강화
 - snapshot storage quota dashboard
