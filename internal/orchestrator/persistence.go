@@ -13,14 +13,27 @@ import (
 // in-memory state across daemon restarts. It captures the spawn-time snapshot;
 // status updates from the watchdog are not re-persisted in v0.3.1.
 type FlockMetadata struct {
-	FlockID       string                `json:"flock_id"`
-	Task          string                `json:"task"`
-	TenantID      string                `json:"tenant_id,omitempty"`
-	EgressPolicy  string                `json:"egress_policy,omitempty"`
-	MaxAgents     int                   `json:"max_agents"` // per-flock agent cap (v0.4.3); 0 = use default
-	Agents        map[string]*AgentInfo `json:"agents"`
-	CreatedAt     time.Time             `json:"created_at"`
-	SchemaVersion int                   `json:"schema_version"`
+	FlockID      string                `json:"flock_id"`
+	Task         string                `json:"task"`
+	TenantID     string                `json:"tenant_id,omitempty"`
+	EgressPolicy string                `json:"egress_policy,omitempty"`
+	MaxAgents    int                   `json:"max_agents"` // per-flock agent cap (v0.4.3); 0 = use default
+	Agents       map[string]*AgentInfo `json:"agents"`
+	// Kind/HomeAddr/Roster persist a cross-host routed flock's role so a daemon
+	// restart recovers hub/relay state instead of downgrading it to a local flock
+	// (D1). They are additive optional fields: a legacy file without them (or any
+	// local flock) reads back with Kind="" and behaves exactly as before.
+	//
+	// The admission secrets (RelayToken/CallToken) are deliberately NOT persisted
+	// here — they live only in daemon memory and are re-injected by the reconcile
+	// re-POST (registerDistributedFlock/registerRelayFlock). Adding a token field
+	// to this struct would break that security invariant; the never-persists-token
+	// test guards it.
+	Kind          string         `json:"kind,omitempty"`
+	HomeAddr      string         `json:"home_addr,omitempty"`
+	Roster        []RosterMember `json:"roster,omitempty"`
+	CreatedAt     time.Time      `json:"created_at"`
+	SchemaVersion int            `json:"schema_version"`
 }
 
 // currentSchemaVersion is bumped when the on-disk format changes in a way
