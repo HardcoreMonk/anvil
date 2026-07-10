@@ -113,8 +113,9 @@ teardown과 token revoke까지 전부 성공. 보고/멱등성 결함 — 운영
 ## 후속 작업 (우선순위순 — 2026-07-10 갱신)
 
 1. ~~D1 fix slice~~ / ~~⑥ 재검증~~ — **완료** (PR #30·#31, 위 D1 CLOSED 참조).
-2. **failover 구현 slice 착수 승인 요청** — 게이트 충족, 승인 대기 (설계 확정본:
-   `docs/superpowers/specs/2026-07-08-home-failover-design.md`).
+2. ~~failover 구현 slice 착수 승인 요청~~ — **완료**: 승인 → 구현 완료
+   (2026-07-11, `feature/home-failover`). 상세:
+   [2026-07-11-home-failover-handoff.md](2026-07-11-home-failover-handoff.md).
 3. **D3 코드 완화** — granularity 감지 + diff→full 강등/거부.
 4. **D2 fix** — delete cleanup 보고 정합.
 5. fc upstream/OpenZFS 참고 보고 검토 (D3는 fc diff 포맷의 "sparseness=의미"
