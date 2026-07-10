@@ -943,8 +943,10 @@ func TestReconcilePlacements_IsolatesUnreachableHost(t *testing.T) {
 	if host, ok := router.Placement("vm-researcher-1"); !ok || host != "hostB" {
 		t.Fatalf("reachable host placement lost: %q %v", host, ok)
 	}
-	// Wall healing still ran for the reachable member (home hub POST fails —
-	// collected, not fatal).
+	// Wall healing still ran for the reachable member. Only hostA's ListVMs
+	// probe dial-fails here — its fake daemon client still accepts the hub
+	// POST, so this test isolates the probe-failure path (a failing hub POST
+	// is Task 4 detection territory).
 	if member.relayCalls != 1 {
 		t.Fatalf("member relay re-registrations = %d, want 1 (healing must survive a dead host)", member.relayCalls)
 	}
