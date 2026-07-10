@@ -229,6 +229,60 @@ func TestRegisterDistributedAndRelayFlock(t *testing.T) {
 	}
 }
 
+// TestRegisterDistributedFlock_PromotesRelayToHub proves the failover promotion
+// path: a member daemon that holds a RELAY flock for this id accepts a hub
+// registration from the control plane (the adapter re-elected this host as the
+// new home) instead of 409ing. The promoted hub follows RegisterHub semantics:
+// fresh wall, roster from the request, EMPTY Agents map (the deleteFlock
+// VM-safety invariant), kind persisted as hub for restart recovery.
+func TestRegisterDistributedFlock_PromotesRelayToHub(t *testing.T) {
+	cp := newTestCP(t)
+
+	// Seed: this daemon is a member — relay flock with local agents.
+	relayBody := `{"home_addr":"http://old-home:3000","relay_token":"rt-1","call_token":"ct-1","agents":[{"agent_id":"researcher-1","vm_id":"vm-r1"}]}`
+	rr := httptest.NewRecorder()
+	cp.handleFlockItem(rr, httptest.NewRequest(http.MethodPost, "/flocks/routed-1/relay", strings.NewReader(relayBody)))
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("seed relay register = %d, want 201 (%s)", rr.Code, rr.Body.String())
+	}
+
+	// Failover: the adapter promotes this host to home. SAME tokens (guest-transparent).
+	hubBody := `{"roster":[{"agent_id":"coordinator-1","host":"hostA","vm_id":"vm-c1"},{"agent_id":"researcher-1","host":"hostB","vm_id":"vm-r1"}],"relay_token":"rt-1","call_token":"ct-1"}`
+	rr2 := httptest.NewRecorder()
+	cp.handleFlockItem(rr2, httptest.NewRequest(http.MethodPost, "/flocks/routed-1/distributed", strings.NewReader(hubBody)))
+	if rr2.Code != http.StatusCreated {
+		t.Fatalf("promote relay->hub = %d, want 201 (%s)", rr2.Code, rr2.Body.String())
+	}
+
+	f, ok := cp.flockMgr.Get("routed-1")
+	if !ok || f.Kind != orchestrator.FlockKindHub {
+		t.Fatalf("flock not promoted to hub: %+v", f)
+	}
+	if f.TownWall == nil {
+		t.Fatal("promoted hub has no town wall")
+	}
+	if len(f.RosterSnapshot()) != 2 {
+		t.Fatalf("promoted hub roster = %d members, want 2", len(f.RosterSnapshot()))
+	}
+	// deleteFlock VM-safety invariant: hub Agents stays EMPTY (local resolution
+	// uses roster VMID + cp.vms presence, same as a first-generation home).
+	if len(f.Snapshot()) != 0 {
+		t.Fatalf("promoted hub Agents = %d, want 0 (deleteFlock VM-safety invariant)", len(f.Snapshot()))
+	}
+	// Tokens admitted for inbound guest/hop auth.
+	if cp.relayTokenFor("routed-1") != "rt-1" || cp.callTokenFor("routed-1") != "ct-1" {
+		t.Fatalf("promotion did not admit tokens: relay=%q call=%q", cp.relayTokenFor("routed-1"), cp.callTokenFor("routed-1"))
+	}
+	// Kind persisted so a restart recovers a hub, not a relay.
+	meta, err := orchestrator.LoadFlockMetadata(cp.workDir, "routed-1")
+	if err != nil {
+		t.Fatalf("load persisted metadata: %v", err)
+	}
+	if meta.Kind != orchestrator.FlockKindHub {
+		t.Fatalf("persisted kind = %q, want hub", meta.Kind)
+	}
+}
+
 // TestRegisterDistributedFlock_RejectsDuplicateNonHubID proves a POST /distributed
 // for a flock id already registered under a non-hub kind (here a local flock) is
 // rejected with 409 Conflict instead of silently overwriting the existing flock
