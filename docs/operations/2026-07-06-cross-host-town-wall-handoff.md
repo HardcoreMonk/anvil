@@ -135,9 +135,9 @@ CodeRabbit 리뷰(actionable 7 + nitpick 3)를 전건 코드 대조 triage — 9
 - **SPOF**: home host가 다운되면 해당 flock의 wall 전체가 불가하다. 1차 수용된
   설계 결정이며, mesh 진화 경로가 있다(아래 follow-up).
 - **relay retry 없음**: v1은 relay 네트워크 순단 시 로컬 버퍼링/재시도가 없다.
-- **SSE relay non-200 content-type**: 기존 local-handler 패턴을 그대로 따라 relay
-  경로에서도 non-200 응답에 `text/event-stream`이 남아있다(cosmetic, pre-existing
-  패턴 상속).
+- ~~**SSE relay non-200 content-type**~~ — 2026-07-10 `b1c8c8c`로 해소: relay
+  경로가 home의 non-200 응답을 post/history relay와 동일하게 status+body
+  미러링(`application/json`)으로 반환한다.
 - ~~**`ReconcilePlacements`에 production 호출자가 없음**~~ — 2026-07-07
   reconcile-loop slice(`6c1ca87`, `b32cd72`)로 해소: `members_only` 모드 adapter가
   시작 1회 + `ANVIL_MCP_RECONCILE_INTERVAL`(기본 60s) 주기로 호출한다. `0`으로
@@ -152,8 +152,9 @@ cross-host `gtcall`은 2026-07-08 slice로 완료됐다(아래 Follow-Up CLOSED 
 
 ## Follow-Up Tasks
 
-- **SSE relay non-200 content-type**: relay 경로가 non-200 응답에도
-  `text/event-stream`을 유지하는 기존 local-handler 패턴을 상속했다. polish 필요.
+- ~~**SSE relay non-200 content-type**~~ — **CLOSED** (`b1c8c8c`, 2026-07-10):
+  home이 stream을 거부(401/404 등)하면 SSE 헤더 대신 post/history relay와 같은
+  status+body 미러링(`application/json`)으로 응답한다. 200일 때만 SSE 스트리밍.
 - ~~**bounded relay retry/buffer**~~ — **CLOSED** (`e94028b`, `6317a58`,
   2026-07-08 bounded relay retry slice): relay hop(wall post/history, call
   forward)이 dial-계열 transport 실패에 한해 동기 bounded retry(총 3 시도,

@@ -39,8 +39,8 @@
 
 1. 수동 multi-host 검증 (위 Next Action — 유일한 차단 게이트).
 2. failover 구현 slice (검증 통과 후, 별도 승인).
-3. SSE relay non-200 content-type polish (wall handoff Follow-Up 잔존 —
-   cosmetic).
+3. ~~SSE relay non-200 content-type polish~~ — **CLOSED** (`b1c8c8c`,
+   2026-07-10): wall handoff Follow-Up 참조.
 4. cross-host broadcast fan-out — 계속 비목표 (필요 대두 시 별도 설계).
 5. 소소한 잔여 (각 handoff Follow-Up 기록): e2e 포트 공유(wall/gtcall 동시
    실행 불가 — 기존 특성), 비동기 relay buffer 재평가(failover 이후).
