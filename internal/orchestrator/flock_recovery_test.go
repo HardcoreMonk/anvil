@@ -134,3 +134,102 @@ func TestLoadFromDisk_LegacyMetadataLoadsAsLocal(t *testing.T) {
 		t.Fatal("legacy (local) flock must reopen its Town Wall")
 	}
 }
+
+// TestPersist_DoesNotResurrectDeletedFlock covers R1: a Persist that races in
+// after a flock's metadata was deleted (BeginDelete + metadata removal) must NOT
+// rewrite metadata.json, or the next LoadFromDisk would recover a ghost flock.
+func TestPersist_DoesNotResurrectDeletedFlock(t *testing.T) {
+	tmp := t.TempDir()
+	fm := NewFlockManager(tmp)
+	wall, err := NewTownWall("del-1", filepath.Join(tmp, "flocks", "del-1", "TOWN_WALL.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := fm.RegisterHub("del-1", wall, nil, "rt", "ct") // auto-persists metadata.json
+	if _, err := os.Stat(metadataPath(tmp, "del-1")); err != nil {
+		t.Fatalf("precondition: hub metadata should exist after register: %v", err)
+	}
+
+	// deleteFlock's teardown order: mark deleted, then remove metadata.
+	unlock, ok := f.BeginDelete()
+	if !ok {
+		t.Fatal("BeginDelete failed")
+	}
+	defer unlock()
+	if err := DeleteFlockMetadata(tmp, "del-1"); err != nil {
+		t.Fatalf("delete metadata: %v", err)
+	}
+
+	// A late Persist must be a no-op (not resurrect the file).
+	if err := f.Persist(tmp); err != nil {
+		t.Fatalf("Persist after delete returned err: %v", err)
+	}
+	if _, err := os.Stat(metadataPath(tmp, "del-1")); !os.IsNotExist(err) {
+		t.Fatalf("Persist resurrected metadata.json after delete (stat err=%v)", err)
+	}
+}
+
+// TestFlock_DeleteMetadata_RemovesFile covers the R1 delete primitive: the
+// writeMu-serialized DeleteMetadata removes the flock's metadata.json.
+func TestFlock_DeleteMetadata_RemovesFile(t *testing.T) {
+	tmp := t.TempDir()
+	fm := NewFlockManager(tmp)
+	wall, err := NewTownWall("del-2", filepath.Join(tmp, "flocks", "del-2", "TOWN_WALL.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := fm.RegisterHub("del-2", wall, nil, "rt", "ct") // auto-persists
+	if _, err := os.Stat(metadataPath(tmp, "del-2")); err != nil {
+		t.Fatalf("precondition: metadata should exist: %v", err)
+	}
+	if err := f.DeleteMetadata(tmp); err != nil {
+		t.Fatalf("DeleteMetadata: %v", err)
+	}
+	if _, err := os.Stat(metadataPath(tmp, "del-2")); !os.IsNotExist(err) {
+		t.Fatalf("DeleteMetadata did not remove metadata.json (stat err=%v)", err)
+	}
+	// Idempotent: a second delete on an already-absent file is not an error.
+	if err := f.DeleteMetadata(tmp); err != nil {
+		t.Fatalf("DeleteMetadata (second call) returned err: %v", err)
+	}
+}
+
+// TestFlockMetadata_ScrubsRosterAddr covers R2: RosterMember.Addr is
+// daemon-internal and must never reach a serialized surface. RegisterHub persists
+// a hub whose roster carries an Addr; the on-disk metadata must not contain it,
+// and a restored roster must have Addr="" while keeping AgentID/Host/VMID.
+func TestFlockMetadata_ScrubsRosterAddr(t *testing.T) {
+	const addrSentinel = "10.9.8.7:41999"
+	tmp := t.TempDir()
+	fm := NewFlockManager(tmp)
+	wall, err := NewTownWall("routed-hub", filepath.Join(tmp, "flocks", "routed-hub", "TOWN_WALL.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	roster := []RosterMember{{AgentID: "researcher-1", Host: "hostB", VMID: "vm-b-1", Addr: addrSentinel}}
+	fm.RegisterHub("routed-hub", wall, roster, "rt", "ct")
+
+	raw, err := os.ReadFile(metadataPath(tmp, "routed-hub"))
+	if err != nil {
+		t.Fatalf("read metadata: %v", err)
+	}
+	if strings.Contains(string(raw), addrSentinel) {
+		t.Fatalf("metadata.json leaked roster Addr:\n%s", raw)
+	}
+
+	fm2 := NewFlockManager(tmp)
+	if _, _, err := fm2.LoadFromDisk(); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := fm2.Get("routed-hub")
+	if !ok || len(got.Roster) != 1 {
+		t.Fatalf("recovered hub roster = %+v (ok=%v)", got, ok)
+	}
+	m := got.Roster[0]
+	if m.Addr != "" {
+		t.Fatalf("restored roster Addr = %q, want scrubbed", m.Addr)
+	}
+	if m.AgentID != "researcher-1" || m.Host != "hostB" || m.VMID != "vm-b-1" {
+		t.Fatalf("restored roster lost non-Addr fields: %+v", m)
+	}
+}
