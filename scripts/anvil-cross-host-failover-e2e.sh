@@ -139,6 +139,7 @@ ADAPTER_STDERR="$ARTIFACT_DIR/adapter.stderr"
 CREATE_OUT="$ARTIFACT_DIR/create.json"
 STOP_FILE="$ARTIFACT_DIR/driver.stop"
 MCP_BIN="$ARTIFACT_DIR/anvil-mcp"
+DRIVER_BIN="$ARTIFACT_DIR/failover-driver"
 # Driver lives inside the module (needs the mcp SDK) but under a gitignored,
 # dot-prefixed dir: /artifacts/* is gitignored and `go build ./...` skips dot
 # dirs, so it neither dirties git status nor joins any package build.
@@ -575,7 +576,16 @@ func run() error {
 }
 GOEOF
 
-go run "$DRIVER_DIR/main.go" \
+# Build the driver to a real binary and exec it directly (NOT `go run`): with
+# `go run`, DRIVER_PID would be the wrapper and a teardown kill might not reach
+# the compiled child, leaving the anvil-mcp adapter orphaned to createTimeout/
+# maxLife in an early-exit path. A direct binary makes DRIVER_PID the driver
+# itself — signal-addressable — so kill_pid closes its stdio to anvil-mcp (EOF ->
+# adapter exits). The stop-file remains the graceful path; this only guarantees
+# the kill path lands on the real process.
+go build -o "$DRIVER_BIN" "$DRIVER_DIR/main.go"
+
+"$DRIVER_BIN" \
   -command "$MCP_BIN" \
   -out "$CREATE_OUT" \
   -stop-file "$STOP_FILE" \
