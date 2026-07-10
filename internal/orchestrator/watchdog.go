@@ -216,11 +216,16 @@ func (wd *Watchdog) onSuccess(vmID string) {
 	if err := flock.Persist(wd.flockMgr.WorkDir()); err != nil {
 		slog.Warn("watchdog: persist auto-heal failed", "agent_id", agentID, "err", err)
 	}
-	if _, err := flock.TownWall.Post(
-		SystemAuthor,
-		fmt.Sprintf("%s recovered - auto-healed to ready", agentID),
-	); err != nil {
-		slog.Warn("watchdog: post auto-heal notice failed", "agent_id", agentID, "err", err)
+	// Relay flocks own no Town Wall (RegisterRelay leaves it nil); skip the
+	// notice rather than nil-deref and crash the daemon (R3). The status
+	// transition + Persist above already took effect.
+	if flock.TownWall != nil {
+		if _, err := flock.TownWall.Post(
+			SystemAuthor,
+			fmt.Sprintf("%s recovered - auto-healed to ready", agentID),
+		); err != nil {
+			slog.Warn("watchdog: post auto-heal notice failed", "agent_id", agentID, "err", err)
+		}
 	}
 	if wd.OnHeal != nil {
 		wd.OnHeal(flockID, agentID, vmID)
@@ -273,12 +278,17 @@ func (wd *Watchdog) onFailure(v VMRef) {
 		// next probe will re-detect. Logged for operator visibility.
 		slog.Warn("watchdog: persist dead status failed", "agent_id", agentID, "err", err)
 	}
-	if _, err := flock.TownWall.Post(
-		SystemAuthor,
-		fmt.Sprintf("%s unresponsive after %d health probes - marked dead",
-			agentID, wd.dyingThreshold),
-	); err != nil {
-		slog.Warn("watchdog: post dead notice failed", "agent_id", agentID, "err", err)
+	// Relay flocks own no Town Wall (RegisterRelay leaves it nil); skip the
+	// notice rather than nil-deref and crash the daemon (R3). The dead mark +
+	// Persist above already took effect.
+	if flock.TownWall != nil {
+		if _, err := flock.TownWall.Post(
+			SystemAuthor,
+			fmt.Sprintf("%s unresponsive after %d health probes - marked dead",
+				agentID, wd.dyingThreshold),
+		); err != nil {
+			slog.Warn("watchdog: post dead notice failed", "agent_id", agentID, "err", err)
+		}
 	}
 
 	wd.mu.Lock()

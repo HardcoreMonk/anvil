@@ -354,7 +354,10 @@ func (cp *ControlPlane) deleteFlock(w http.ResponseWriter, flockID string) {
 		}(a.VMID)
 	}
 	wg.Wait()
-	if err := orchestrator.DeleteFlockMetadata(cp.workDir, flockID); err != nil {
+	// Delete via the flock (writeMu-serialized) so a late Persist racing this
+	// teardown cannot resurrect metadata.json (R1). f is already marked deleted
+	// by BeginDelete above, so any such Persist skips its write.
+	if err := f.DeleteMetadata(cp.workDir); err != nil {
 		slog.Warn("flock: remove persisted metadata failed", "flock_id", flockID, "err", err)
 	}
 	slog.Warn("flock destroyed", "flock_id", flockID, "agents", len(agents))

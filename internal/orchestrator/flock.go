@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -221,6 +222,15 @@ func (f *Flock) SetPaused(paused bool) {
 	f.Paused = paused
 }
 
+// SetRoster replaces a hub flock's remote-membership roster under the per-flock
+// lock, keeping the write consistent with ToMetadata's f.mu-guarded read so a
+// concurrent Persist can never race the roster field.
+func (f *Flock) SetRoster(roster []RosterMember) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Roster = roster
+}
+
 // MarkAgentPaused changes an agent to the runtime-only paused state while
 // remembering the pre-pause status for rollback and metadata scrubbing.
 func (f *Flock) MarkAgentPaused(agentID string) {
@@ -296,7 +306,32 @@ func (f *Flock) AgentStatus(agentID string) string {
 func (f *Flock) Persist(workDir string) error {
 	f.writeMu.Lock()
 	defer f.writeMu.Unlock()
+	// Skip the write once the flock is being deleted: deleteFlock removes
+	// metadata.json via DeleteMetadata (also under writeMu), and a Persist that
+	// races in after BeginDelete must not resurrect it — a ghost file would make
+	// the next LoadFromDisk recover a deleted flock. Both orderings converge to
+	// "no file": if this Persist wins writeMu it writes and the following
+	// DeleteMetadata removes it; if it loses, it reads deleted=true here and
+	// skips. deleted is read under f.mu.RLock (same lock ToMetadata takes), so
+	// the writeMu->f.mu order is unchanged.
+	f.mu.RLock()
+	deleted := f.deleted
+	f.mu.RUnlock()
+	if deleted {
+		return nil
+	}
 	return SaveFlockMetadata(workDir, f.ToMetadata())
+}
+
+// DeleteMetadata removes the flock's metadata.json under writeMu so it
+// serializes against any concurrent Persist (a metadata writer must never race
+// the tmp+rename). Callers must have marked the flock deleted via BeginDelete
+// first, so a Persist that loses the writeMu race observes deleted and skips its
+// write rather than resurrecting the file.
+func (f *Flock) DeleteMetadata(workDir string) error {
+	f.writeMu.Lock()
+	defer f.writeMu.Unlock()
+	return DeleteFlockMetadata(workDir, f.ID)
 }
 
 // Snapshot returns a defensive copy of the agent map for safe iteration
@@ -333,6 +368,22 @@ func (f *Flock) ToMetadata() FlockMetadata {
 		}
 		agents[k] = &copy
 	}
+	// Defensively copy the roster (as ToMetadata does for agents) so the caller
+	// can mutate the returned metadata without touching live flock state, and
+	// scrub each member's Addr: it is daemon-internal (see RosterMember) and must
+	// never reach a serialized surface such as the 0644 metadata.json (R2). A
+	// recovered hub reloads with Addr="" and cannot resolve a 2nd-hop /call until
+	// the reconcile re-POST (UpdateHubRoster) refills Addr in memory — but that
+	// hop is already gated by CallToken, which is likewise absent until the same
+	// re-POST, so scrubbing costs no additional capability window.
+	var roster []RosterMember
+	if len(f.Roster) > 0 {
+		roster = make([]RosterMember, len(f.Roster))
+		copy(roster, f.Roster)
+		for i := range roster {
+			roster[i].Addr = ""
+		}
+	}
 	return FlockMetadata{
 		FlockID:       f.ID,
 		Task:          f.Task,
@@ -340,6 +391,9 @@ func (f *Flock) ToMetadata() FlockMetadata {
 		EgressPolicy:  f.EgressPolicy,
 		MaxAgents:     f.MaxAgents,
 		Agents:        agents,
+		Kind:          f.Kind,
+		HomeAddr:      f.HomeAddr,
+		Roster:        roster,
 		CreatedAt:     f.CreatedAt,
 		SchemaVersion: currentSchemaVersion,
 	}
@@ -461,6 +515,13 @@ func (fm *FlockManager) RegisterHub(flockID string, wall *TownWall, roster []Ros
 	fm.mu.Lock()
 	fm.flocks[flockID] = f
 	fm.mu.Unlock()
+	// Persist the hub role so a daemon restart recovers it as a hub (D1) rather
+	// than downgrading to a local flock. Persistence failure is logged and the
+	// registration proceeds — the in-memory hub works for this daemon process —
+	// matching createFlock's persist-failure handling.
+	if err := f.Persist(fm.workDir); err != nil {
+		slog.Warn("flock: persist hub metadata failed (still in memory)", "flock_id", flockID, "err", err)
+	}
 	return f
 }
 
@@ -471,12 +532,20 @@ func (fm *FlockManager) RegisterHub(flockID string, wall *TownWall, roster []Ros
 // Get. Reports false when flockID is not a registered hub flock.
 func (fm *FlockManager) UpdateHubRoster(flockID string, roster []RosterMember) bool {
 	fm.mu.Lock()
-	defer fm.mu.Unlock()
 	f, ok := fm.flocks[flockID]
 	if !ok || f.Kind != FlockKindHub {
+		fm.mu.Unlock()
 		return false
 	}
-	f.Roster = roster
+	fm.mu.Unlock()
+	// Write the roster under the per-flock lock (SetRoster), not fm.mu, so it is
+	// consistent with ToMetadata's f.mu-guarded read of Roster — otherwise a
+	// concurrent Persist could race the roster field. Persist outside fm.mu so
+	// the small metadata write never blocks the registry.
+	f.SetRoster(roster)
+	if err := f.Persist(fm.workDir); err != nil {
+		slog.Warn("flock: persist hub roster update failed", "flock_id", flockID, "err", err)
+	}
 	return true
 }
 
@@ -506,6 +575,13 @@ func (fm *FlockManager) RegisterRelay(flockID, homeAddr, relayToken, callToken s
 	fm.mu.Lock()
 	fm.flocks[flockID] = f
 	fm.mu.Unlock()
+	// Persist the relay role (kind + home_addr + local agents) so a daemon
+	// restart recovers it as a relay (D1) instead of downgrading to a local
+	// flock. Persistence failure is logged and registration proceeds, matching
+	// RegisterHub / createFlock. Admission secrets are never written to disk.
+	if err := f.Persist(fm.workDir); err != nil {
+		slog.Warn("flock: persist relay metadata failed (still in memory)", "flock_id", flockID, "err", err)
+	}
 	return f
 }
 
@@ -584,6 +660,17 @@ func (fm *FlockManager) LoadFromDisk() (recovered int, failed []string, err erro
 			Agents:       meta.Agents,
 			TownWall:     tw,
 			CreatedAt:    meta.CreatedAt,
+			// Restore the cross-host role so a recovered hub/relay is not
+			// downgraded to a local flock (D1). Admission secrets stay in memory
+			// and are re-injected by the reconcile re-POST. A relay reopens a
+			// local wall it never serves from (the Kind==relay handlers forward
+			// to home before touching f.TownWall); keeping it non-nil preserves
+			// the pre-existing LoadFromDisk invariant that every recovered flock
+			// has a wall (the watchdog posts member status to it without a nil
+			// guard).
+			Kind:     meta.Kind,
+			HomeAddr: meta.HomeAddr,
+			Roster:   meta.Roster,
 		}
 		fm.mu.Lock()
 		fm.flocks[meta.FlockID] = f
