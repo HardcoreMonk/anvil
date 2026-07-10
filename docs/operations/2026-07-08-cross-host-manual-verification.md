@@ -1,7 +1,10 @@
 # Cross-host 실 2-daemon 수동 검증 절차 (wall + gtcall)
 
 - 작성일: 2026-07-08
-- 상태: **절차 문서 — 미실행** (두 번째 KVM host 확보 시 운영자가 수행)
+- 상태: **2026-07-10 수행 완료 — 부분 통과** (①~⑤·⑦·⑧ PASS / ⑥ 재시작 복구
+  FAIL → 결함 D1 회부). 수행 기록·증거·결함 상세:
+  [2026-07-10-cross-host-verification-run-handoff.md](2026-07-10-cross-host-verification-run-handoff.md).
+  D1 수정 후 ⑥만 재검증하면 된다.
 - 배경: 단일 host CI에서는 두 real daemon이 guest bridge(`goose-br0`,
   `10.0.1.0/24` — `internal/network/manager.go`에 고정)를 공유할 수 없어,
   wall/gtcall e2e는 home을 stub으로 대체한다. member 측 실경로(real VM →
@@ -37,6 +40,12 @@ debootstrap으로 Debian Trixie 생성 — `scripts/build_image.sh`). 서버 세
    wall e2e 1회)를 먼저 통과시켜 환경 문제를 검증 본편과 분리한다.
    host별 `configs/goose.yaml`·`configs/goose-secrets.yaml` 준비 필수 —
    누락 시 VM 생성이 500으로 조용히 실패한다(2026-07-08 세션에서 실제 발생).
+8. **ZFS 루트 host 주의**: snapshot 디렉토리가 ZFS(기본 recordsize 128K) 위에
+   있으면 diff snapshot 복원이 guest triple fault로 전멸한다 —
+   `overlaySparseDiff`의 SEEK_DATA 4K-해상도 가정이 깨지기 때문 (2026-07-10
+   RCA, D3). 해법: `zfs create -o recordsize=4k -o
+   mountpoint=<repo>/snapshots rpool/anvil-snapshots` 후 smoke 실행.
+   상세: [2026-07-10-cross-host-verification-run-handoff.md](2026-07-10-cross-host-verification-run-handoff.md).
 
 ## 절차
 
