@@ -1,6 +1,11 @@
 # Cross-host 실 2-daemon 수동 검증 — 수행 기록 (2026-07-10)
 
-- 상태: **수행 완료 — 부분 통과. ①~⑤·⑦·⑧ PASS / ⑥ 재시작 복구 FAIL (결함 D1 회부)**
+- 상태: **완전 통과 (당일 갱신).** 최초 수행에서 ⑥ 재시작 복구만 FAIL → D1 fix
+  (PR #30) + 재검증 중 발견된 잔여 D1b fix (PR #31) 머지 후 **⑥ 재검증 전 항목
+  PASS** — 그것도 runbook보다 강한 시나리오(양 daemon **동시** 재시작)로:
+  reconcile 무에러, wall 양방향, gtcall 양방향(home→member outbound 포함),
+  히스토리 재시작 넘어 보존. runbook 판정 기준 전체 충족 — **failover 구현
+  게이트 해제.**
 - 절차 원문: [2026-07-08-cross-host-manual-verification.md](2026-07-08-cross-host-manual-verification.md)
 - 작업 묶음 진입점: [2026-07-08-routed-flock-stack-handoff.md](2026-07-08-routed-flock-stack-handoff.md)
 - 대상 커밋: `5d4fac5` (main, 양 host 동일 소스에서 host별 빌드 — sha256 동일 확인)
@@ -36,6 +41,22 @@
 복구가 안 되는 상태에서 재선출은 성립 불가; D1은 failover의 선행 조건).
 
 ## 결함 회부
+
+### ~~D1~~ — **CLOSED** (PR #30 `df667c8` + PR #31 `15bd204`, 2026-07-10 당일)
+
+- **PR #30**: `FlockMetadata`에 kind/home_addr/roster 영속(토큰 비영속 불변식
+  유지, Addr scrub) + LoadFromDisk 복원 → 멱등 재등록 경로 성립. 리뷰 반영:
+  Persist↔delete 직렬화(유령 metadata 방지), watchdog nil-wall 가드.
+- **PR #31 (D1b)**: 재검증에서 발견 — 멱등 재등록이 admission map만 채우고 hub
+  struct 토큰(`f.CallToken`)을 재충전하지 않아 home 재시작 후 **outbound 2nd
+  hop이 빈 bearer 발신 → member 401**. `UpdateHubTokens` 재충전 + 가변화된 hub
+  토큰·roster의 raw read를 locked accessor(`DistributedTokens`/`RosterSnapshot`)
+  로 전환(-race 검증).
+- **재검증 (15bd204 배포, 양 daemon 동시 재시작)**: reconcile 무에러 / wall
+  양방향 PASS / gtcall member→home·home→member PASS / history parity 5msgs
+  (재시작 넘어 보존). ⑥ CLOSED.
+
+원문 (기록 보존):
 
 ### D1 (주요) — daemon 재시작 시 routed flock 분산 상태 유실 + 재등록 비멱등
 
@@ -89,15 +110,18 @@ teardown과 token revoke까지 전부 성공. 보고/멱등성 결함 — 운영
 - 코드 후속: snapshot 디렉토리 hole-granularity probe(4K sparse 테스트 파일)를
   daemon에 추가해 >4K면 diff 생성을 거부하거나 full로 강등 + 문서화.
 
-## 후속 작업 (우선순위순)
+## 후속 작업 (우선순위순 — 2026-07-10 갱신)
 
-1. **D1 fix slice** — 재시작 복구 (recovery 분산 상태 복원 and/or 재등록 멱등화).
-   완료 후 **⑥만 재검증** (①~⑤·⑦·⑧은 본 기록으로 유효).
-2. ⑥ 재검증 통과 시 → **failover 구현 slice 착수 승인 요청** (기존 게이트 규정).
+1. ~~D1 fix slice~~ / ~~⑥ 재검증~~ — **완료** (PR #30·#31, 위 D1 CLOSED 참조).
+2. **failover 구현 slice 착수 승인 요청** — 게이트 충족, 승인 대기 (설계 확정본:
+   `docs/superpowers/specs/2026-07-08-home-failover-design.md`).
 3. **D3 코드 완화** — granularity 감지 + diff→full 강등/거부.
 4. **D2 fix** — delete cleanup 보고 정합.
 5. fc upstream/OpenZFS 참고 보고 검토 (D3는 fc diff 포맷의 "sparseness=의미"
    계약이 coarse-granularity fs에서 깨지는 일반 문제 — fc 문서 개선 제안 후보).
+6. (리뷰 파생, 소소) reconcile 틱마다의 무변경 Persist dirty-check /
+   relay 멤버 상태 이벤트의 로컬(비서빙) wall 기록 설계 재평가 /
+   `flockAgentLocalVM`의 `f.Agents` raw map 읽기 정리 (기존 클래스).
 
 ## zone 연동
 
