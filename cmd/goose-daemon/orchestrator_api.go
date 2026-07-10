@@ -1518,6 +1518,14 @@ func (cp *ControlPlane) registerDistributedFlock(w http.ResponseWriter, r *http.
 		}
 		cp.setRelayToken(flockID, req.RelayToken)
 		cp.setCallToken(flockID, req.CallToken)
+		// Re-seat the hub Flock struct's own relay/call tokens too. setRelayToken/
+		// setCallToken above only refill INBOUND admission maps; the struct fields
+		// drive the hub's OUTBOUND hops. A restarted home recovers the hub without
+		// its tokens (never persisted), so without this its 2nd-hop /call to a
+		// member sends an empty bearer and the member 401s (D1b). Best-effort like
+		// the roster update above; empty tokens are ignored so a token-less re-POST
+		// cannot blank a live secret.
+		cp.flockMgr.UpdateHubTokens(flockID, req.RelayToken, req.CallToken)
 		w.WriteHeader(http.StatusCreated)
 		return
 	}
