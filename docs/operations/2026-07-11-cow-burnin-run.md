@@ -33,10 +33,10 @@
   — **merge 중간산출물(`rootfs-merged.ext4`)이 `~/anvil/tmp`(root pool,
   recordsize 128K)에 놓이고 cow restore는 이를 dm-snapshot base로 사용**한다.
   4K `~/anvil/snapshots` dataset 밖이다.
-- 가설(미확증, n=1): D3 계열의 coarse-hole 상호작용 또는 loop/dm-snapshot ×
-  ZFS 128K 상호작용. plain 경로는 같은 merged 산출물을 직접 복사 사용해 통과했으므로
-  dm-snapshot base 경로 특이성이 유력 후보. **ext4 host에서의 cow gate 재현 여부가
-  1차 분별 실험**(upstream 일반 결함 vs ZFS-조합 결함).
+- 가설(미확증, n=1 — **RCA로 대체됨, 아래 CLOSED 절 참조**): 당시에는 coarse-hole
+  상호작용/“plain은 직접 복사 사용” 등을 후보로 봤으나, RCA 과정에서 plain restore도
+  동일하게 dm-snapshot merged 경로를 쓰는 것으로 정정됐고 recordsize·콘텐츠 가설은
+  반증됐다 — 확정 원인은 fsync 부재 durability race(CLOSED 절).
 - 재현: 위 명령 1회 재실행으로 결정성 확인 필요(현재 n=1).
 
 ## D4 — CLOSED (2026-07-11, `fix/d4-cow-diff-restore`)
@@ -78,9 +78,18 @@
 
 ## 후속
 
-1. **cow burn-in 재실행 = 위 host-a full cow gate 334✓/0✗ 로 충족.** default COW
+1. **cow burn-in 재실행 1차 = 위 host-a full cow gate 334✓/0✗ green** (fix 반영
+   단일 실행 — 반복 soak가 필요하면 flip slice에서 추가 판단). default COW
    flip slice 진행 가능(2026-07-11 결정의 조건부 이행) — 별도 승인 하에.
 2. host-a `~/anvil` 배포본은 **aa2b0b0(main) 로 원복 완료**(fix 는 아직 branch —
    merge+release 시 재배포로 반영). 스케줄러 서비스·snapshots mount 보존됨.
 3. 내구성 결함은 ZFS+부하 종속이라 고전적 실패-우선 유닛테스트가 불가 — 검증은
    재현 게이트로 수행. 병합 *정확성* 회귀는 기존 유닛으로 커버.
+
+## upstream 함의 (기여 후보)
+
+restore가 merged rootfs를 loop/dm-snapshot origin으로 쓰는 구조는 upstream을
+미러링한다(`api.go` restore 경로 주석). merge/D3 배관 자체는 anvil-specific이라
+단정할 수 없으나, upstream ephemera에 동형의 "fsync 없는 merged 산출물 → loop"
+경로가 있으면 같은 잠재 race가 존재한다 — **upstream 확인 후 기여 후보**로 기록
+(keep-alive proxy fix와 같은 계열의 후보 목록).
