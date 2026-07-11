@@ -1,0 +1,65 @@
+anvil cross-host home failover E2E replay
+source run: untagged main (post-anvil-v0.7.0) target commit 9a9af7d
+recorded: 2026-07-12 01:25:38-01:27:12 KST
+source log: sudo bash scripts/anvil-cross-host-failover-e2e.sh
+result: All failover e2e steps passed (32 checks, 0 failures)
+
+== what this proves ==
+A routed flock's Town Wall home (hub) is a single point of failure. The adapter's
+reconcile loop re-elects a new home when the current one stops answering, retargets
+every member's relay to the new hub, and finally promotes the REAL member daemon to
+hub — all while the one real guest's `gtwall` keeps landing on whichever host owns
+the wall. Single physical host: one real daemon (member) + two loopback stubs A/B.
+
+== runtime evidence ==
+stub A (initial home)  = http://127.0.0.1:3100   host-a-home  (coordinator)
+stub B (1st candidate) = http://127.0.0.1:3101   host-b-cand  (helper)
+member daemon (real)   = 0.0.0.0:3000            host-c-member (researcher, auth-on)
+election order = capacity-1 placement order [host-a-home, host-b-cand, host-c-member]
+routed flock: routed-flock-1783787215415905918   researcher VM vm-1783787215419623735
+
+== failover step trace ==
+PASS  Preflight — daemon + anvil-mcp built
+PASS  Start stub A (:3100 home) and stub B (:3101 candidate)
+PASS  Start member daemon (auth-on, bind 0.0.0.0:3000)
+PASS  Write scheduler hosts.json (order = election order, capacity 1 each)
+PASS  Launch MCP driver — routed flock created, adapter reconcile loop held open
+PASS  Routed flock ready — researcher VM on host-c-member
+
+== Phase 0 — home is host-a-home, hub + relay wired ==
+PASS  placements.json home_host == host-a-home
+PASS  Stub A received the hub POST /distributed (roster 3)
+PASS  Member daemon holds the relay flock (GET /flocks/routed-flock-... = 200)
+PASS  Guest gtwall ran (exit 0, marker present)
+PASS  gtwall post landed on stub A {agent_id:researcher-1, body:PHASE0_WALL}
+PASS  Relayed post carried the relay token as bearer
+
+== Phase 1 — kill host-a-home -> re-elect host-b-cand ==
+PASS  Killed stub A
+PASS  placements.json home_host re-elected to host-b-cand
+PASS  Stub B received the hub POST /distributed (roster 3)
+PASS  Stub B hub carries the SAME relay token as the original home
+PASS  Guest gtwall now lands on stub B (member relay retargeted to the new home)
+PASS  Adapter stderr recorded a failover line for the flock
+PASS  Adapter stderr leaks no relay/call token and no stub address
+
+== Phase 2 — kill host-b-cand -> promote host-c-member (real daemon relay->hub) ==
+PASS  Killed stub B
+PASS  placements.json home_host re-elected to host-c-member
+PASS  Real daemon serves the wall locally (GET /wall/history = 200 = promoted to hub)
+PASS  Canonical wall starts EMPTY on the new home (phase 0/1 messages lost, as contracted)
+PASS  Guest gtwall ran against the promoted hub
+PASS  Wall now holds ONLY the phase-2 message (researcher-1: PHASE2_WALL)
+PASS  Daemon stderr leaks no relay/call token and no stub address
+
+== Phase 3 — restart host-b-cand -> receives a relay re-registration ==
+PASS  Stub B restarted (fresh capture)
+PASS  Revived stub B received a relay RE-registration (heals into a relay, no home fail-back)
+
+== cleanup ==
+PASS  Stopped driver/adapter
+PASS  Deleted researcher VM vm-1783787215419623735 (HTTP 200)
+PASS  Stopped stub B and member daemon
+
+== final ==
+All failover e2e steps passed  (32 ✓ · 0 ✗)
