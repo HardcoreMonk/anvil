@@ -5,7 +5,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 )
@@ -673,10 +675,23 @@ func (r *RuntimeRouter) deleteRoutedFlockAgents(ctx context.Context, agents []Ro
 			continue
 		}
 		resp, err := daemon.Delete(ctx, vmID)
-		if err != nil || resp == nil {
+		switch {
+		case err != nil && !routedFlockVMAlreadyGone(err):
+			// A genuine teardown failure (unreachable daemon, 5xx, auth, etc.):
+			// the VM may still be standing, so keep it pending for retry.
+			pendingAgents = append(pendingAgents, cleanupPendingRoutedFlockAgent(agent))
+			continue
+		case err == nil && resp == nil:
+			// Ambiguous success with no response body: treat conservatively as
+			// pending. The real daemon client never returns (nil, nil).
 			pendingAgents = append(pendingAgents, cleanupPendingRoutedFlockAgent(agent))
 			continue
 		}
+		// The delete succeeded, or the VM was already absent (404) — both mean the
+		// VM is torn down, so record it for placement removal instead of misreporting
+		// the already-reached end-state as a pending cleanup (defect D2). Deregistering
+		// the shared wall (DeleteFlock) cascades this teardown on the daemon, which is
+		// why every routed delete otherwise hit an already-gone VM and 404ed.
 		removeVMIDs = append(removeVMIDs, vmID)
 	}
 	return removeVMIDs, pendingAgents
@@ -696,6 +711,20 @@ func preserveRoutedFlockCleanupStateInMemory(store *PlacementStore, record Route
 func cleanupPendingRoutedFlockAgent(agent RoutedFlockAgent) RoutedFlockAgent {
 	agent.Status = routedFlockAgentStatusCleanupPending
 	return agent
+}
+
+// routedFlockVMAlreadyGone reports whether a daemon VM-delete error means the VM
+// is already absent (HTTP 404). DELETE /vms/{id} that 404s is the success
+// end-state of teardown — commonly because deregistering the shared wall
+// (DeleteFlock) already cascaded the VM teardown on the daemon — so it must be
+// treated as a completed teardown, not a pending cleanup (defect D2). Any other
+// error (unreachable daemon, 5xx, auth) is a genuine, retryable failure.
+func routedFlockVMAlreadyGone(err error) bool {
+	var daemonErr *DaemonError
+	if errors.As(err, &daemonErr) {
+		return daemonErr.StatusCode == http.StatusNotFound
+	}
+	return false
 }
 
 func (r *RuntimeRouter) removeRoutedFlockPlacements(vmIDs []string) {
