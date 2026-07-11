@@ -500,6 +500,17 @@ func overlaySparseDiff(diffPath, outputPath string) error {
 		}
 		offset = holeStart
 	}
+	// Durability barrier (defect D4): the merged rootfs this produces immediately backs a
+	// read-only loop device as the dm-snapshot origin on restore. On ZFS the loop device's
+	// buffered reads can diverge from still-uncommitted file data under concurrent I/O load,
+	// so the guest reads a corrupt rootfs block and general-protection-faults shortly after
+	// resume (observed as a kernel network-stack GPF ~5.4 s in). fsync the merged output so
+	// its data is committed and cache-coherent before losetup opens it. On tmpfs (the usual
+	// merged-memory target) this is a cheap near-no-op.
+	if err := out.Sync(); err != nil {
+		os.Remove(outputPath)
+		return fmt.Errorf("fsync merged output: %w", err)
+	}
 	return nil
 }
 
