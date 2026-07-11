@@ -69,6 +69,17 @@ say "Building in-VM binaries (CGO_ENABLED=0 static)"
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$STAGE/artifacts/goose-agent" ./cmd/goose-agent/
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$STAGE/artifacts/micro-init"  ./cmd/micro-init/
 
+# goose-agent currency is source-hash based (unlike mtime-based micro-init), so a
+# source-less release install cannot recompute it. Ship the source-hash stamp beside the
+# binary so EnsureGooseAgent accepts the prebuilt artifact instead of walking an absent
+# source tree, and so build_image.sh / EnsureGoldenImageGooseAgent read a consistent hash.
+# Computed via the daemon's own helper subcommand — the single source of truth for the
+# hash algorithm (no bash reimplementation to drift).
+say "Stamping goose-agent artifact with its source hash"
+SRCHASH=$("$STAGE/ephemera-daemon" print-goose-agent-source-hash "$REPO")
+[ -n "$SRCHASH" ] || die "could not compute goose-agent source hash"
+printf '%s\n' "$SRCHASH" > "$STAGE/artifacts/goose-agent.sha256"
+
 # -------------------------------------------------- kernel + firecracker ----
 say "Downloading pinned kernel + firecracker"
 curl -fL -o "$STAGE/artifacts/vmlinux.bin" "$KURL"
@@ -101,7 +112,7 @@ if [ "$SLIM_ONLY" -eq 0 ]; then
 	# so first boot logs "golden image up to date" instead of rebuilding.
 	touch -d '2020-01-01 00:00:00' \
 		"$STAGE/scripts/build_image.sh" "$STAGE/scripts/gtwall" "$STAGE/scripts/gtcall" \
-		"$STAGE/artifacts/goose-agent" "$STAGE/artifacts/micro-init"
+		"$STAGE/artifacts/goose-agent" "$STAGE/artifacts/goose-agent.sha256" "$STAGE/artifacts/micro-init"
 	touch -d '2020-01-02 00:00:00' \
 		"$STAGE/artifacts/golden-image.ext4" "$STAGE/artifacts/vmlinux.bin" "$STAGE/artifacts/firecracker"
 fi
