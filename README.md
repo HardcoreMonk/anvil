@@ -6,32 +6,10 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Firecracker](https://img.shields.io/badge/Firecracker-v1.15.1-FF4500?logo=amazonaws&logoColor=white)](https://github.com/firecracker-microvm/firecracker)
 
-**IronClaw의 tool call을 격리 MicroVM 실행으로 변환하는 AI agent execution layer**
+**IronClaw의 tool call을 Firecracker MicroVM 격리 실행으로 변환하는 execution layer.**
 
-`anvil`은 IronClaw의 판단과 tool call을 Firecracker MicroVM 안의 실제 agent 실행으로
-변환하는 격리 execution layer다. IronClaw는 상위 orchestration·planner·MCP client를
-맡고, anvil은 그 요청을 VM 생성, 작업 실행, health 확인, graceful stop/delete,
-snapshot/restore lifecycle로 바꾼다.
-
-구조적으로 anvil은 두 경계를 잇는 MCP adapter이자 실행 계약이다 — IronClaw가 호출하는
-`anvil_*` MCP tool surface와, ephemera가 제공하는 KVM 기반 Firecracker MicroVM runtime
-boundary. 덕분에 IronClaw는 VM ID·guest URL·daemon/agent token·snapshot lifecycle·
-cleanup 같은 host 세부사항을 알 필요 없이 격리 agent workspace를 제어한다.
-
-anvil의 상위 통합 대상은 **IronClaw 전용**이다. OpenClaw 연동은 지원 범위가 아니며,
-OpenClaw용 compatibility layer나 운영 계약은 제공하지 않는다.
-
-이 저장소(`https://github.com/HardcoreMonk/anvil/`)는
-`https://github.com/steve-seungeui/ephemera`의 fork로 유지한다. ephemera는 계속
-버전업되는 runtime engine upstream이고, anvil은 그 runtime을 IronClaw 실행 계층으로
-통합하는 downstream product fork다. 따라서 Go 모듈 경로·daemon 이름·HTTP API·일부
-환경 변수에는 `ephemera` 또는 `goose` 이름이 남아 있다. 문서에서는 `anvil`을 IronClaw
-통합 프로젝트로, `ephemera`를 분리된 기반 runtime으로 구분한다.
-
-최신 공개 tag는 `anvil-v0.7.0`이다(upstream ephemera 버전과 정렬 — 계보와 tag별 내용은
-[`CONTEXT.md`](CONTEXT.md)). 이후 main은 cross-host routed flock(공유 Town Wall·gtcall·
-home 재선출 failover), snapshot replication 자동화 등 untagged 작업(PR #19~#47)을 더
-포함한다. 첫 공개 tag는 `anvil-v0.1.0`이다.
+VM 생성, 작업 실행, health 확인, graceful stop/delete, snapshot/restore lifecycle을
+하나의 실행 계약으로 관리한다.
 
 <p align="center">
   <img src="docs/assets/ironclaw-e2e.gif" alt="IronClaw anvil E2E terminal replay" width="900">
@@ -42,95 +20,6 @@ home 재선출 failover), snapshot replication 자동화 등 untagged 작업(PR 
 </p>
 
 ---
-
-## 프로젝트 경계
-
-- **IronClaw**: 상위 orchestration, MCP client, 작업 의사결정을 담당한다.
-  현재 구현은 anvil 밖의 외부 통합 계층이다.
-
-- **anvil**: IronClaw가 사용할 MCP tool surface와 실행 lifecycle 계약을 제공한다.
-  구현 위치는 `cmd/anvil-mcp`, `internal/anvilmcp`다.
-
-- **anvil runtime scheduler**: 여러 ephemera daemon host 후보 중 요청을 실행할
-  host를 고르고 placement/snapshot locality/quota 상태를 보존한다. 구현 위치는
-  `cmd/anvil-scheduler`, `internal/anvilmcp`다.
-
-- **ephemera**: Firecracker MicroVM 생성, agent proxy, snapshot/restore,
-  host resource 정리를 담당한다. 구현 위치는 `cmd/goose-daemon`, `internal/vm`,
-  `internal/storage`, `internal/network`다.
-
-- **guest runtime**: VM 내부 task 실행, health, graceful stop을 담당한다.
-  구현 위치는 `cmd/goose-agent`, `cmd/micro-init`이다.
-
-anvil은 ephemera를 이름만 바꾼 프로젝트가 아니다. anvil은 IronClaw와 ephemera를
-연결하는 통합 실행 layer이고, ephemera는 독립적인 runtime 구현과 API 계약을
-가진다. 따라서 runtime API와 환경 변수는 호환성을 위해 ephemera/goose 이름을
-유지하고, IronClaw가 직접 사용하는 표면은 `anvil_*` MCP tool로 노출한다.
-
-### Runtime Baseline
-
-anvil main runtime baseline은 upstream ephemera `v0.7.0`까지를 병합·적응한 상태를
-포함한다(수정 없는 ephemera가 아니라, anvil adaptation을 얹은 baseline이다). 태그별
-채택/적응/deferred/excluded 분류와 parity 상세는 [`CONTEXT.md`](CONTEXT.md),
-[`docs/PUBLIC_RELEASE_BOUNDARY.md`](docs/PUBLIC_RELEASE_BOUNDARY.md),
-[`docs/guides/runtime-usage.md`](docs/guides/runtime-usage.md)를 참고한다.
-
-| 구분 | 현재 기준 | anvil에서의 의미 |
-|---|---|---|
-| ephemera runtime baseline | `v0.7.0` | Firecracker VM lifecycle, cold-restart, flock recovery, token rotation, `/metrics`, `/stats`, `slog`, in-VM `gtcall`, webdev demo, v0.4.0-v0.4.5 runtime 안정화(auth/audit, COW spawn, dynamic flock lifecycle, streaming task, nested depth guard, watchdog status, snapshot-restore auto-recovery), v0.5.0-v0.5.5 operator support(Web UI `/ui/`, `/config/*`, per-VM sizing `1` vCPU/`1024` MiB default), v0.6.0-v0.6.4 runtime MCP Gateway(`EPHEMERA_MCP_*`, anti-spoof/rate-limit/stdio backends), v0.7.0 end-user installer + conversation transcript restore 기반. upstream parity scope(v0.4.0-v0.7.0) 코드 편입 완료 |
-| upstream latest observed | `v0.7.0` (2026-07-02 확인) | 관찰 범위 전체 병합·적응 완료, pending sync 후보 없음 |
-| anvil product surface | `anvil_*` MCP tool, scheduler, tenant/egress, workload runner | IronClaw가 직접 사용하는 공개 실행 계약 |
-| namespace policy | `EPHEMERA_*`, `goose-*`, `ephemera_*` 유지 | upstream runtime 호환성. anvil 이름으로 일괄 rename하지 않는다. |
-
-## Fork와 upstream 관리
-
-`HardcoreMonk/anvil`은 `steve-seungeui/ephemera`의 fork network를 의도적으로 유지한다.
-ephemera가 runtime engine으로 계속 버전업되므로, anvil은 upstream runtime 변경을 merge로
-받아들이고 IronClaw 통합 계층을 그 위에 적응시킨다. local `origin`은 `HardcoreMonk/anvil`,
-`upstream`은 `steve-seungeui/ephemera`를 가리키며, upstream sync는 `sync/ephemera-*`
-브랜치에서 `--no-ff` merge로 수행한다(rebase/history rewrite 없음). ephemera runtime
-release tag는 `v*`, anvil product release tag는 `anvil-v*` prefix를 쓰고, 기존 `v*`
-tag를 덮어쓰는 `git fetch --tags --force`는 사용하지 않는다.
-
-remote 설정과 upstream sync 절차 전체는
-[`docs/operations/upstream-sync-policy.md`](docs/operations/upstream-sync-policy.md)에 있다.
-
-## 아키텍처 개관
-
-요청은 다음 계층을 통과한다.
-
-**IronClaw**(planner·MCP client) → **anvil MCP adapter**(`cmd/anvil-mcp` — `anvil_*`
-tool을 stdio로 노출) → *(선택)* **anvil runtime scheduler**(`cmd/anvil-scheduler` —
-host inventory·quota·placement·snapshot locality) → **ephemera control plane**(`:3000`
-daemon) → **Firecracker MicroVM** 안의 **goose-agent** task runtime.
-
-adapter는 ephemera의 low-level HTTP API를 재해석하지 않고 얇게 호출하며, session alias·
-token redaction·restore/cleanup 의미만 변환한다. 계층 다이어그램, ephemera runtime HTTP
-API 구조, VM 생성/snapshot/종료 흐름은
-[`docs/guides/runtime-usage.md`](docs/guides/runtime-usage.md)에 있다.
-
-## 핵심 기능
-
-- **VM·snapshot·flock lifecycle** — `anvil_spawn_vm`/`run_task`/`get_vm_health`/
-  `stop_vm`/`delete_vm`, Full/Diff snapshot create/list/restore/delete, 역할별 VM flock
-  생성과 Town Wall append-only coordination log.
-- **Cross-host routed flock** — scheduler placement로 여러 host daemon에 member VM을
-  배치하고, home host hub + daemon-to-daemon relay로 하나의 공유 Town Wall을 쓴다. 임의
-  member 간 cross-host `gtcall`(member→home→target 2-hop), home 불능 시 결정적 **재선출
-  failover**로 hub SPOF를 해소한다.
-- **Snapshot replication 자동화** — adapter reconcile 루프가 desired replica factor
-  (**N=2**, 원본+복제 1) 미달 snapshot을 discover→heal한다(best-effort eventual,
-  dial-cap giving-up). 수동 경로는 `anvil_replicate_snapshot`.
-- **Scheduler service** — `cmd/anvil-scheduler`가 host inventory polling, quota,
-  placement, snapshot locality를 control loop로 유지하고 전용 `/metrics`를 노출한다.
-- **분리된 두 MCP 표면** — IronClaw용 `cmd/anvil-mcp` adapter(`ANVIL_MCP_*`)와, VM 내부
-  agent용 runtime MCP Gateway(`EPHEMERA_MCP_*`, `internal/mcpgateway`)는 별개 개념이다.
-  runtime Gateway는 IronClaw adapter를 대체하지 않는다.
-- **운영 표면** — Operator CLI `ephemera-ctl`, 브라우저 Web UI(`/ui/`, EN/KO),
-  control-plane 인증(named token·per-token TTL·SIGHUP hot rotation), Prometheus
-  `/metrics`, access audit log, end-user installer(`install.sh`/`uninstall.sh`).
-
-기능별 상세와 사용법은 아래 [문서 지도](#문서-지도)의 가이드를 참고한다.
 
 ## 빠른 시작
 
@@ -157,6 +46,135 @@ sudo ./anvil-daemon
 
 사전 요구사항 전체, 빌드 세부, LLM profile·설정 변수, 단위/종단 간 테스트, Operator CLI,
 Web UI 사용법은 [`docs/guides/runtime-usage.md`](docs/guides/runtime-usage.md)에 있다.
+
+## 핵심 기능
+
+- **VM·snapshot·flock lifecycle** — `anvil_spawn_vm`/`run_task`/`get_vm_health`/
+  `stop_vm`/`delete_vm`, Full/Diff snapshot create/list/restore/delete, 역할별 VM flock
+  생성과 Town Wall append-only coordination log.
+- **Cross-host routed flock** — scheduler placement로 여러 host daemon에 member VM을
+  배치하고, home host hub + daemon-to-daemon relay로 하나의 공유 Town Wall을 쓴다. 임의
+  member 간 cross-host `gtcall`(member→home→target 2-hop), home 불능 시 결정적 **재선출
+  failover**로 hub SPOF를 해소한다.
+- **Snapshot replication 자동화** — adapter reconcile 루프가 desired replica factor
+  (**N=2**, 원본+복제 1) 미달 snapshot을 discover→heal한다(best-effort eventual,
+  dial-cap giving-up). 수동 경로는 `anvil_replicate_snapshot`.
+- **Scheduler service** — `cmd/anvil-scheduler`가 host inventory polling, quota,
+  placement, snapshot locality를 control loop로 유지하고 전용 `/metrics`를 노출한다.
+- **분리된 두 MCP 표면** — IronClaw용 `cmd/anvil-mcp` adapter(`ANVIL_MCP_*`)와, VM 내부
+  agent용 runtime MCP Gateway(`EPHEMERA_MCP_*`, `internal/mcpgateway`)는 별개 개념이다.
+  runtime Gateway는 IronClaw adapter를 대체하지 않는다.
+- **운영 표면** — Operator CLI `ephemera-ctl`, 브라우저 Web UI(`/ui/`, EN/KO),
+  control-plane 인증(named token·per-token TTL·SIGHUP hot rotation), Prometheus
+  `/metrics`, access audit log, end-user installer(`install.sh`/`uninstall.sh`).
+
+기능별 상세와 사용법은 아래 [문서 지도](#문서-지도)의 가이드를 참고한다.
+
+## 프로젝트 경계
+
+`anvil`은 IronClaw의 판단과 tool call을 Firecracker MicroVM 안의 실제 agent 실행으로
+변환하는 격리 execution layer다. IronClaw는 상위 orchestration·planner·MCP client를
+맡고, anvil은 그 요청을 VM 생성, 작업 실행, health 확인, graceful stop/delete,
+snapshot/restore lifecycle로 바꾼다.
+
+구조적으로 anvil은 두 경계를 잇는 MCP adapter이자 실행 계약이다 — IronClaw가 호출하는
+`anvil_*` MCP tool surface와, ephemera가 제공하는 KVM 기반 Firecracker MicroVM runtime
+boundary. 덕분에 IronClaw는 VM ID·guest URL·daemon/agent token·snapshot lifecycle·
+cleanup 같은 host 세부사항을 알 필요 없이 격리 agent workspace를 제어한다.
+
+anvil의 상위 통합 대상은 **IronClaw 전용**이다. OpenClaw 연동은 지원 범위가 아니며,
+OpenClaw용 compatibility layer나 운영 계약은 제공하지 않는다.
+
+- **IronClaw**: 상위 orchestration, MCP client, 작업 의사결정을 담당한다.
+  현재 구현은 anvil 밖의 외부 통합 계층이다.
+
+- **anvil**: IronClaw가 사용할 MCP tool surface와 실행 lifecycle 계약을 제공한다.
+  구현 위치는 `cmd/anvil-mcp`, `internal/anvilmcp`다.
+
+- **anvil runtime scheduler**: 여러 ephemera daemon host 후보 중 요청을 실행할
+  host를 고르고 placement/snapshot locality/quota 상태를 보존한다. 구현 위치는
+  `cmd/anvil-scheduler`, `internal/anvilmcp`다.
+
+- **ephemera**: Firecracker MicroVM 생성, agent proxy, snapshot/restore,
+  host resource 정리를 담당한다. 구현 위치는 `cmd/goose-daemon`, `internal/vm`,
+  `internal/storage`, `internal/network`다.
+
+- **guest runtime**: VM 내부 task 실행, health, graceful stop을 담당한다.
+  구현 위치는 `cmd/goose-agent`, `cmd/micro-init`이다.
+
+anvil은 ephemera를 이름만 바꾼 프로젝트가 아니다. anvil은 IronClaw와 ephemera를
+연결하는 통합 실행 layer이고, ephemera는 독립적인 runtime 구현과 API 계약을
+가진다. 따라서 runtime API와 환경 변수는 호환성을 위해 ephemera/goose 이름을
+유지하고, IronClaw가 직접 사용하는 표면은 `anvil_*` MCP tool로 노출한다.
+
+## Fork와 upstream 관리
+
+이 저장소(`HardcoreMonk/anvil`, `https://github.com/HardcoreMonk/anvil/`)는
+`steve-seungeui/ephemera`(`https://github.com/steve-seungeui/ephemera`)의 fork network를
+의도적으로 유지한다. ephemera는 계속 버전업되는 runtime engine upstream이고, anvil은 그
+runtime을 IronClaw 실행 계층으로 통합하는 downstream product fork다. ephemera가 계속
+버전업되므로, anvil은 upstream runtime 변경을 merge로 받아들이고 IronClaw 통합 계층을 그
+위에 적응시킨다. 따라서 Go 모듈 경로·daemon 이름·HTTP API·일부 환경 변수에는 `ephemera`
+또는 `goose` 이름이 남아 있다. 문서에서는 `anvil`을 IronClaw 통합 프로젝트로, `ephemera`를
+분리된 기반 runtime으로 구분한다.
+
+local `origin`은 `HardcoreMonk/anvil`, `upstream`은 `steve-seungeui/ephemera`를 가리키며,
+upstream sync는 `sync/ephemera-*` 브랜치에서 `--no-ff` merge로 수행한다(rebase/history
+rewrite 없음). ephemera runtime release tag는 `v*`, anvil product release tag는
+`anvil-v*` prefix를 쓰고, 기존 `v*` tag를 덮어쓰는 `git fetch --tags --force`는 사용하지
+않는다.
+
+최신 공개 tag는 `anvil-v0.7.0`이다(upstream ephemera 버전과 정렬 — 계보와 tag별 내용은
+[`CONTEXT.md`](CONTEXT.md)). 이후 main은 cross-host routed flock(공유 Town Wall·gtcall·
+home 재선출 failover), snapshot replication 자동화 등 untagged 작업(PR #19~#47)을 더
+포함한다. 첫 공개 tag는 `anvil-v0.1.0`이다.
+
+remote 설정과 upstream sync 절차 전체는
+[`docs/operations/upstream-sync-policy.md`](docs/operations/upstream-sync-policy.md)에 있다.
+
+## Runtime Baseline
+
+anvil main runtime baseline은 upstream ephemera `v0.7.0`까지를 병합·적응한 상태를
+포함한다(수정 없는 ephemera가 아니라, anvil adaptation을 얹은 baseline이다). 태그별
+채택/적응/deferred/excluded 분류와 parity 상세는 [`CONTEXT.md`](CONTEXT.md),
+[`docs/PUBLIC_RELEASE_BOUNDARY.md`](docs/PUBLIC_RELEASE_BOUNDARY.md),
+[`docs/guides/runtime-usage.md`](docs/guides/runtime-usage.md)를 참고한다.
+
+| 구분 | 현재 기준 | anvil에서의 의미 |
+|---|---|---|
+| ephemera runtime baseline | `v0.7.0` | Firecracker VM lifecycle, cold-restart, flock recovery, token rotation, `/metrics`, `/stats`, `slog`, in-VM `gtcall`, webdev demo, v0.4.0-v0.4.5 runtime 안정화(auth/audit, COW spawn, dynamic flock lifecycle, streaming task, nested depth guard, watchdog status, snapshot-restore auto-recovery), v0.5.0-v0.5.5 operator support(Web UI `/ui/`, `/config/*`, per-VM sizing `1` vCPU/`1024` MiB default), v0.6.0-v0.6.4 runtime MCP Gateway(`EPHEMERA_MCP_*`, anti-spoof/rate-limit/stdio backends), v0.7.0 end-user installer + conversation transcript restore 기반. upstream parity scope(v0.4.0-v0.7.0) 코드 편입 완료 |
+| upstream latest observed | `v0.7.0` (2026-07-02 확인) | 관찰 범위 전체 병합·적응 완료, pending sync 후보 없음 |
+| anvil product surface | `anvil_*` MCP tool, scheduler, tenant/egress, workload runner | IronClaw가 직접 사용하는 공개 실행 계약 |
+| namespace policy | `EPHEMERA_*`, `goose-*`, `ephemera_*` 유지 | upstream runtime 호환성. anvil 이름으로 일괄 rename하지 않는다. |
+
+## 설치
+
+소스에서 빌드하려면 위 빠른 시작 절차를 따른다. Go 툴체인 없이 릴리즈 tarball로 daemon을
+systemd 서비스로 설치·업그레이드·제거하려면 [`INSTALL.md`](INSTALL.md)를 따른다.
+
+## 보안
+
+anvil control plane은 named token 인증에 per-token TTL과 SIGHUP hot rotation을 적용하고,
+Prometheus `/metrics`와 access audit log로 운영 가시성을 남긴다. 보안 모델, 알려진 제약,
+Resilience·Observability 전체는
+[`docs/guides/security-and-resilience.md`](docs/guides/security-and-resilience.md)에 있다.
+공개 노출, 제어 평면 token, guest agent token, snapshot metadata 반출 정책은
+[`docs/operations/security-policy.md`](docs/operations/security-policy.md)에 있다.
+
+## 아키텍처 개관
+
+요청은 다음 계층을 통과한다.
+
+**IronClaw**(planner·MCP client) → **anvil MCP adapter**(`cmd/anvil-mcp` — `anvil_*`
+tool을 stdio로 노출) → *(선택)* **anvil runtime scheduler**(`cmd/anvil-scheduler` —
+host inventory·quota·placement·snapshot locality) → **ephemera control plane**(`:3000`
+daemon) → **Firecracker MicroVM** 안의 **goose-agent** task runtime.
+
+adapter는 ephemera의 low-level HTTP API를 재해석하지 않고 얇게 호출하며, session alias·
+token redaction·restore/cleanup 의미만 변환한다. 계층 다이어그램, ephemera runtime HTTP
+API 구조, VM 생성/snapshot/종료 흐름은
+[`docs/guides/runtime-usage.md`](docs/guides/runtime-usage.md)에 있다. 각 계층의 세부
+구조는 아래 [문서 지도](#문서-지도)의 아키텍처 문서(`docs/architecture/`)를 참고한다.
 
 ## 문서 지도
 
