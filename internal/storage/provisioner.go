@@ -687,11 +687,90 @@ func EnsureGoldenImageGooseAgent(goldenImagePath, binaryPath string) error {
 	return nil
 }
 
+// acceptPrebuiltGooseAgent handles the release-install layout, where there is no
+// cmd/goose-agent source checkout to hash or rebuild from — INSTALL.md promises the
+// daemon runs "no Go toolchain or source checkout needed". scripts/build_release.sh
+// ships the prebuilt binary alongside its source-hash stamp; when both are present we
+// trust the shipped artifact as current (no rebuild). A missing binary or stamp means
+// the release tarball was extracted incompletely, so we fail with a diagnostic that
+// points at the broken install rather than the raw "walk goose-agent sources" lstat
+// error, which reads like an INSTALL-contract violation. Requiring the stamp here also
+// keeps the downstream EnsureGoldenImageGooseAgent (which reads it unconditionally)
+// from failing later with a more obscure message.
+func acceptPrebuiltGooseAgent(binaryPath string) error {
+	stampPath := binaryPath + gooseAgentStampSuffix
+	binOK := regularFileExists(binaryPath)
+	stampOK := regularFileExists(stampPath)
+	if !binOK || !stampOK {
+		return corruptGooseAgentInstallErr(fmt.Sprintf(
+			"no usable prebuilt artifact (binary %s present=%t, stamp %s present=%t)",
+			binaryPath, binOK, stampPath, stampOK))
+	}
+
+	// Validate the stamp CONTENT, not just its presence. An empty stamp would otherwise
+	// pass here and only fail later as a fatal in EnsureGoldenImageGooseAgent (:628); a
+	// non-empty garbage stamp would be accepted silently and skew currency decisions
+	// downstream. Fail at accept time, with the same diagnostic shape as a missing
+	// artifact, when the stamp is not the exact hash shape GooseAgentSourceHash produces.
+	stamp, err := os.ReadFile(stampPath)
+	if err != nil {
+		return corruptGooseAgentInstallErr(fmt.Sprintf("read source stamp %s: %v", stampPath, err))
+	}
+	hash := strings.TrimSpace(string(stamp))
+	if !isGooseAgentSourceHash(hash) {
+		return corruptGooseAgentInstallErr(fmt.Sprintf(
+			"source stamp %s does not contain a valid source hash (want %d-char lowercase hex)",
+			stampPath, sha256.Size*2))
+	}
+
+	log.Printf("goose-agent source tree absent; accepting shipped prebuilt %s (source stamp %s).", binaryPath, hash)
+	return nil
+}
+
+// corruptGooseAgentInstallErr wraps a specific reason in the shared diagnostic that
+// points operators at a broken release install rather than a raw walk/stamp error.
+func corruptGooseAgentInstallErr(reason string) error {
+	return fmt.Errorf("goose-agent source tree absent and %s: "+
+		"this release install looks incomplete or corrupt — reinstall from an intact release tarball", reason)
+}
+
+// isGooseAgentSourceHash reports whether s has the exact shape GooseAgentSourceHash
+// produces: a lowercase hex-encoded SHA-256 (sha256.Size*2 chars, each in [0-9a-f]).
+func isGooseAgentSourceHash(s string) bool {
+	if len(s) != sha256.Size*2 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func regularFileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
+}
+
 // EnsureGooseAgent builds the goose-agent binary into binaryPath if it doesn't exist
 // or if the sidecar source-hash stamp no longer matches the current source tree.
 // The binary is compiled from cmd/goose-agent/ in the projectRoot directory using
 // CGO_ENABLED=0 so it is statically linked and portable across the VM's glibc version.
+//
+// In a release install there is no cmd/goose-agent source tree; in that case the shipped
+// prebuilt binary + stamp are accepted as current (see acceptPrebuiltGooseAgent). The
+// development path (source present) is unchanged: hash the source, compare the stamp,
+// rebuild when stale.
 func EnsureGooseAgent(binaryPath, projectRoot string) error {
+	agentDir := filepath.Join(projectRoot, "cmd", "goose-agent")
+	if _, err := os.Stat(agentDir); err != nil {
+		if os.IsNotExist(err) {
+			return acceptPrebuiltGooseAgent(binaryPath)
+		}
+		return fmt.Errorf("stat goose-agent source dir %s: %w", agentDir, err)
+	}
+
 	sourceHash, err := GooseAgentSourceHash(projectRoot)
 	if err != nil {
 		return err

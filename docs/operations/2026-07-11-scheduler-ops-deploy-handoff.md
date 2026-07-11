@@ -69,6 +69,7 @@ mount·goose-br0·purecvisor 전부 불변.
 - 계약 위반: `INSTALL.md`는 release 설치가 "no Go toolchain or source checkout needed"라고 명시하나 `EnsureGooseAgent`가 소스 트리를 하드 요구. `build_release.sh`는 `artifacts/goose-agent`는 담지만 `.sha256` stamp도 소스도 담지 않음.
 - daemon이 step 1에서 죽어 network manager/bridge/VM 셋업에 도달하지 못함 → host-b 부작용 없음(격리가 유지된 이유).
 - **범위 밖**: 이 트랙은 검증 트랙이므로 수정하지 않고 기록만. fix는 별도 사이클 필요(예: `EnsureGooseAgent`가 소스 부재 + shipped `artifacts/goose-agent`(+stamp) 존재 시 prebuilt를 신뢰하도록, 그리고 `build_release.sh`가 stamp를 동봉하도록).
+- **FIX SLICE (branch `fix/release-daemon-goose-agent`, 머지 전)**: `EnsureGooseAgent`가 `cmd/goose-agent` 소스 부재 시 shipped `artifacts/goose-agent`+`.sha256` stamp를 current로 수용(재빌드 skip, INFO 1줄), 부재 시 진단 에러. `build_release.sh`가 daemon 헬퍼 `print-goose-agent-source-hash`로 stamp 동봉. host-b(192.168.1.20) FULL 재검증: daemon 기동 성공 + VM spawn(`{"status":"idle"}`)/rm smoke + `uninstall.sh --purge` 원복(격리 유지). 개발 경로 불변. 상세: `docs/operations/release-checklist.md` "Release-install 기동 게이트".
 
 ## Sub-track (iii) — runtime MCP Gateway 운영 정책 + dry-run: PASS (문서 + dry-run)
 
@@ -79,6 +80,6 @@ mount·goose-br0·purecvisor 전부 불변.
 ## Next Action / Follow-Up Tasks
 
 1. (controller) zone `ops/units.yaml`·`ops/projects.yaml`에 host-a `anvil-scheduler.service` 신규 상주 유닛 반영, `wiki/entities/` 동기화.
-2. (별도 사이클) FULL release daemon 기동 결함 수정: `EnsureGooseAgent` release-layout tolerance + `build_release.sh`의 goose-agent stamp 동봉. 수정 후 host-b installer 재검증(VM 1개 생성/삭제 smoke 포함).
+2. (별도 사이클) FULL release daemon 기동 결함 수정: `EnsureGooseAgent` release-layout tolerance + `build_release.sh`의 goose-agent stamp 동봉. 수정 후 host-b installer 재검증(VM 1개 생성/삭제 smoke 포함). → **완료(branch `fix/release-daemon-goose-agent`, 머지 대기)**: 위 결함 회부 절 FIX SLICE 참조. controller가 diff/gate 검토 후 머지.
 3. (운영 판단) host-a scheduler `/etc/anvil/scheduler-hosts.json`는 현재 host-b만 가리킴(검증 fixture). 실운영 poll 대상 host 인벤토리를 controller가 확정해 갱신.
 4. host-a `~/schedops/`는 설치 소스 스테이징(binary+installer+hosts json). 재현용으로 보존; 불필요 시 controller가 정리.

@@ -11,11 +11,32 @@ snapshot을 공개하는 절차이고, `anvil` integration 릴리즈는 IronClaw
 ephemera를 결합하는 통합 프로젝트 이름이다. 릴리즈 제목, tag prefix, GitHub
 Release 본문에서 두 이름을 섞어 쓰지 않는다.
 
-## 알려진 릴리즈 결함 (2026-07-11 installer 실 systemd 검증)
+## 알려진 릴리즈 결함 (2026-07-11 installer 실 systemd 검증 → fix 브랜치 검증 완료)
 
-- **FULL/SLIM release 설치본으로 `ephemera` daemon이 기동하지 못함** (릴리즈 블로커). `ephemera-daemon`이 startup step 1의 `storage.EnsureGooseAgent`에서 `cmd/goose-agent` **소스 트리를 WalkDir**(`internal/storage/provisioner.go`)하는데, release 설치본(`/opt/ephemera`)에는 소스가 없어 `fatal: ensure goose-agent err="walk goose-agent sources: lstat /opt/ephemera/cmd/goose-agent: no such file or directory"`로 종료. `EnsureMicroInit`(mtime 기반)은 소스 부재를 tolerate하지만 `EnsureGooseAgent`(source-hash 기반)는 그렇지 않다. `INSTALL.md`의 "no Go toolchain or source checkout needed" 계약과 배치되며, `build_release.sh`는 `artifacts/goose-agent`는 담지만 `.sha256` stamp도 소스도 담지 않는다.
-- 영향: FULL variant 실 host 설치 검증에서 `install.sh` 파일 배치/서비스 등록/`uninstall.sh`(default·`--purge`)는 모두 정상이나 VM smoke는 daemon 미기동으로 BLOCKED.
-- 수정 방향(별도 사이클): `EnsureGooseAgent`가 소스 부재 + shipped `artifacts/goose-agent`(+stamp) 존재 시 prebuilt를 신뢰하도록 하고, `build_release.sh`가 goose-agent stamp를 동봉하도록. 수정 후 host-b installer 재검증(VM 1개 생성/삭제 smoke) 필수. 근거·증거: `docs/operations/2026-07-11-scheduler-ops-deploy-handoff.md`.
+- **FULL/SLIM release 설치본으로 `ephemera` daemon이 기동하지 못함** (릴리즈 블로커). `ephemera-daemon`이 startup step 1의 `storage.EnsureGooseAgent`에서 `cmd/goose-agent` **소스 트리를 WalkDir**(`internal/storage/provisioner.go`)하는데, release 설치본(`/opt/ephemera`)에는 소스가 없어 `fatal: ensure goose-agent err="walk goose-agent sources: lstat /opt/ephemera/cmd/goose-agent: no such file or directory"`로 종료. `EnsureMicroInit`(mtime 기반)은 소스 부재를 tolerate하지만 `EnsureGooseAgent`(source-hash 기반)는 그렇지 않다. `INSTALL.md`의 "no Go toolchain or source checkout needed" 계약과 배치되며, `build_release.sh`는 `artifacts/goose-agent`는 담지만 `.sha256` stamp도 소스도 담지 않았다.
+- 영향(수정 전): FULL variant 실 host 설치 검증에서 `install.sh` 파일 배치/서비스 등록/`uninstall.sh`(default·`--purge`)는 모두 정상이나 VM smoke는 daemon 미기동으로 BLOCKED.
+- **수정 (branch `fix/release-daemon-goose-agent`, 머지 전)**: `EnsureGooseAgent`가 `cmd/goose-agent` 소스 부재를 감지하면 shipped `artifacts/goose-agent`+`.sha256` stamp를 current로 수용(재빌드 없음, INFO 로그 1줄), 둘 중 하나라도 없으면 "손상/불완전 설치" 진단 에러(raw walk 에러 대체). 개발 경로(소스 존재)는 불변. `build_release.sh`는 daemon 헬퍼 서브커맨드 `ephemera-daemon print-goose-agent-source-hash`로 `artifacts/goose-agent.sha256` stamp를 동봉하고 mtime normalization에 포함. `build_image.sh`가 이 stamp를 golden image에 복사하므로 downstream `EnsureGoldenImageGooseAgent`(stamp 무조건 read)도 함께 복구.
+- 근거·증거: `docs/operations/2026-07-11-scheduler-ops-deploy-handoff.md`. host-b(192.168.1.20) FULL 재검증: daemon 기동 성공(`accepting shipped prebuilt ... source stamp`, `golden image goose-agent is current`, `control plane api ready`), VM 1개 spawn(guest 10.0.1.10, agent `{"status":"idle"}`)/rm smoke, `uninstall.sh --purge` 원복, `~/anvil`·snapshots ZFS mount·`goose-br0` 불변.
+
+### Release-install 기동 게이트 (필수, 재발 방지)
+
+end-user installer(`install.sh`/`build_release.sh`) 또는 daemon startup provisioning
+(`EnsureGooseAgent`/`EnsureGoldenImageGooseAgent`/`EnsureMicroInit`/`EnsureKernel`)을
+건드리는 release 후보는 **소스 체크아웃 없는 환경**에서 실제 기동을 확인한다. dev-flow
+e2e는 소스가 존재하므로 이 결함 클래스를 잡지 못한다.
+
+```bash
+sudo bash scripts/build_release.sh <ver>            # FULL tarball 생성 (dist/)
+# 소스 없는 systemd host로 옮겨:
+sudo ./install.sh                                    # /opt/ephemera 배치 + 서비스 기동
+systemctl is-active ephemera                          # active (fatal 루프 아님)
+sudo journalctl -u ephemera -o cat | grep -E "goose-agent|golden image|api ready"
+ephemera-ctl vm spawn && ephemera-ctl vm ls && ephemera-ctl vm rm <vm_id>   # VM 생성/삭제 smoke
+sudo ./uninstall.sh --purge                          # 원복
+```
+
+확인: startup 로그에 `walk goose-agent sources` fatal이 **없어야** 하고,
+`/opt/ephemera` 같은 소스 없는 working dir에서 daemon이 API ready에 도달해야 한다.
 
 ## 릴리즈 종류
 
