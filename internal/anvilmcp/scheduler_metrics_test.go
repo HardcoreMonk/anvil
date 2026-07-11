@@ -195,6 +195,62 @@ func TestSchedulerServiceMetricsRejectsNonGET(t *testing.T) {
 	}
 }
 
+func TestRenderSchedulerMetricsIncludesSnapshotReplicationMetrics(t *testing.T) {
+	lastSuccess := time.Date(2026, 7, 11, 1, 2, 3, 0, time.UTC)
+	lastFailure := time.Date(2026, 7, 11, 2, 3, 4, 0, time.UTC)
+	state := PlacementStoreState{
+		SnapshotReplicationMetrics: SnapshotReplicationMetricsState{
+			AttemptsByOutcomeReason: map[string]int64{
+				snapshotReplicationAttemptKey(SnapshotReplicationOutcomeReplicated, SnapshotReplicationReasonScheduled):        3,
+				snapshotReplicationAttemptKey(SnapshotReplicationOutcomeDialFailed, SnapshotReplicationReasonTargetUnreachable): 2,
+				"tenant-1|http://host-a:3000": 5, // junk key must be normalized, not leaked
+			},
+			LatencyByPhase: map[string]LatencyHistogramState{
+				SnapshotReplicationPhaseTotal: {
+					Buckets:    map[string]int64{"0.5": 1, "+Inf": 1, "agent_token": 9},
+					SumSeconds: 0.4,
+					Count:      1,
+				},
+			},
+			QueueDepth:    4,
+			GivingUp:      1,
+			LastSuccessAt: lastSuccess,
+			LastFailureAt: lastFailure,
+		},
+	}
+
+	output := RenderSchedulerMetrics(state)
+	requireMetricLine(t, output, "anvil_scheduler_snapshot_replication_attempts_total{outcome=\"replicated\",reason=\"scheduled\"} 3")
+	requireMetricLine(t, output, "anvil_scheduler_snapshot_replication_attempts_total{outcome=\"dial_failed\",reason=\"target_unreachable\"} 2")
+	requireMetricLine(t, output, "anvil_scheduler_snapshot_replication_latency_seconds_bucket{phase=\"total\",le=\"0.5\"} 1")
+	requireMetricLine(t, output, "anvil_scheduler_snapshot_replication_latency_seconds_bucket{phase=\"total\",le=\"+Inf\"} 1")
+	requireMetricLine(t, output, "anvil_scheduler_snapshot_replication_latency_seconds_count{phase=\"total\"} 1")
+	requireMetricLine(t, output, "anvil_scheduler_snapshot_replication_queue_depth 4")
+	requireMetricLine(t, output, "anvil_scheduler_snapshot_replication_giving_up 1")
+	requireMetricLine(t, output, fmt.Sprintf("anvil_scheduler_snapshot_replication_last_success_timestamp_seconds %d", lastSuccess.Unix()))
+	requireMetricLine(t, output, fmt.Sprintf("anvil_scheduler_snapshot_replication_last_failure_timestamp_seconds %d", lastFailure.Unix()))
+	for _, leaked := range []string{"tenant-1", "http://host-a", "agent_token"} {
+		if strings.Contains(output, leaked) {
+			t.Fatalf("snapshot replication metrics leaked %q:\n%s", leaked, output)
+		}
+	}
+}
+
+func TestSchedulerServiceMetricsEndpointExposesSnapshotReplication(t *testing.T) {
+	store := NewPlacementStore("")
+	if err := store.RecordSnapshotReplicationGauges(2, 0); err != nil {
+		t.Fatalf("RecordSnapshotReplicationGauges: %v", err)
+	}
+	service := NewSchedulerService(SchedulerServiceOptions{PlacementStore: store})
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rr := httptest.NewRecorder()
+	service.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /metrics status = %d body=%s, want 200", rr.Code, rr.Body.String())
+	}
+	requireMetricLine(t, rr.Body.String(), "anvil_scheduler_snapshot_replication_queue_depth 2")
+}
+
 func requireMetricLine(t *testing.T, output string, want string) {
 	t.Helper()
 	for _, line := range strings.Split(output, "\n") {
