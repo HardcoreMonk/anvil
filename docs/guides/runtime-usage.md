@@ -381,18 +381,26 @@ cmd/
   anvil-mcp/          anvil/IronClaw용 stdio MCP adapter entrypoint
   anvil-scheduler/    runtime host/quota/placement scheduler service
   e2e-replay-server/  browser 기반 E2E terminal replay player
+  ephemera-ctl/       dependency-free stdlib operator CLI (v0.4.1)
   goose-agent/        VM 내부 HTTP agent
   micro-init/         VM 내부 PID 1
 
 internal/
   anvilmcp/           MCP config, daemon client, session alias, scheduler/router,
-                      quota, placement, runtime audit helper
+                      quota, placement, runtime audit helper, hub/home failover
+                      re-election, cross-host snapshot replication
   orchestrator/       flock registry, agent 상태, Town Wall append-only log
+  metrics/            Prometheus text exposition registry (daemon `/metrics`)
   vm/machine.go       Firecracker SDK wrapper
   network/manager.go  IP pool, TAP lifecycle, bridge, NAT
   storage/
     provisioner.go    golden image bootstrap, disk clone, config/token injection
     snapshot.go       snapshot metadata, COW restore, diff memory merge
+    hole_granularity.go
+                      filesystem hole granularity probe (sparse diff snapshot
+                      correctness across cross-host filesystems)
+
+web/                  Web UI 소스 — Svelte + Vite SPA (v0.5.0)
 
 configs/
   anvil-mcp.yaml.example
@@ -402,114 +410,9 @@ configs/
     goose.yaml.example
     goose-secrets.yaml.example
     system.md
-  goose-daemon/       Control plane daemon (main binary)
-    main.go           Startup, artifact bootstrap, ControlPlane init,
-                      initSlog (TextHandler/JSONHandler + level gating, v0.3.5)
-    api.go            HTTP API: VM + snapshot CRUD, auth middleware
-                      (timing-safe; per-token TTL + client-identity context, v0.4.1),
-                      two-mux split for unauthenticated /metrics (v0.3.5),
-                      spawnVMInternal (shared by /vms and /flocks paths;
-                      AgentToken / ControlPlaneToken plumb-through),
-                      counter/histogram wiring for spawn/destroy/snapshot/
-                      flock/SIGHUP/CP-token paths (v0.3.5),
-                      controlPlaneTokenForVM (first non-expired client → in-VM bearer, v0.4.1)
-    config.go         Env-var configuration + AgentProfile / LookupProfile
-                      (role → vCPU, memory, profile directory mapping);
-                      EPHEMERA_METRICS_REQUIRE_AUTH (v0.3.5)
-    orchestrator_api.go  /flocks endpoints, SSE Town Wall streaming,
-                      restartAgent (per-agent restart endpoint),
-                      flock_spawn / flock_destroy counter increments (v0.3.5)
-    recovery.go       RecoverVMs (cold-restart) + flock cross-link;
-                      markFlockAgentDead persists dead status;
-                      restores runningVM.spawnedAt from VMState.CreatedAt (v0.3.5)
-    metrics_handler.go   daemonMetrics bundle + handleMetrics (v0.3.5)
-    stats_handler.go     /vms/{vm_id}/stats + ?stats=true branch (v0.3.5)
-    stats_collector.go   Firecracker PID resolution via /proc/net/unix →
-                      /proc/<pid>/fd inode trace, /proc/<pid>/stat CPU sampling,
-                      VmRSS, TAP statistics, agent /health probe (v0.3.5)
-    context.go        client-identity context keys + request-scoped holder (v0.4.1)
-    audit.go          access audit log: rotating jsonl writer, statusRecorder
-                      (Flusher-preserving), GET /audit, auditMiddleware (v0.4.1)
-    ui.go             Serves the embedded Web UI at /ui/ (go:embed uidist) + SPA
-                      fallback + "/" → /ui/ redirect, outside the auth chain (v0.5.0)
-    config_api.go     GET /config/profiles, GET/PUT /config/profiles/{name} —
-                      read/update a profile's GOOSE_PROVIDER/GOOSE_MODEL on disk (v0.5.0)
-    uidist/           Committed Web UI build (go:embed input; rebuilt from web/, v0.5.0)
-  goose-agent/        In-VM HTTP agent (baked into golden image)
-    main.go           /tasks (optional `session` → goose -n/--resume for multi-turn, v0.5.0),
-                      /health, /stop, /townwall/post  (Bearer token auth);
-                      prepends role system prompt to /tasks bodies;
-                      runs `goose run --output-format json` and extracts the
-                      assistant text via extractGooseJSONText (banner-skip) (v0.3.6)
-  micro-init/         PID 1 for each MicroVM (baked into golden image)
-    main.go           Mounts virtual filesystems, manages goose-agent,
-                      calls poweroff(2) on exit
-  ephemera-ctl/       Operator CLI — dependency-free stdlib HTTP wrapper (v0.4.1)
-    main.go           noun/verb dispatch, EPHEMERA_CTL_URL/_TOKEN, --json
-    client.go         HTTP client (Bearer, non-2xx → error) + wire-type mirrors
-    commands.go       vm/flock/snapshot/audit/metrics verbs, tabwriter output
-
-web/                  Web UI source — Svelte 4 + Vite 5 SPA (v0.5.0)
-  src/
-    App.svelte        Shell: bootstrap/auth, nav, EN/KO language toggle, view router
-    components/       Login, VMList, SpawnModal (Create VM), VMDetail,
-                      TaskPanel (multi-turn conversation), Settings, Toasts
-    lib/              api.js (bearer + 401→login), store.js, stream.js (NDJSON),
-                      i18n.js (svelte-i18n: EN/KO, browser-detect, persist)
-    locales/          en.json, ko.json (all UI strings)
-  README.md           UI terminology glossary + i18n / rebuild docs
-  package.json        svelte-i18n dep; `npm run build` → ../cmd/goose-daemon/uidist/
-
-internal/
-  vm/machine.go       Firecracker SDK wrapper — StartMachine, RestoreMachine
-                      (VcpuCount / MemSizeMib are per-call; zero falls back to 2 / 2048)
-  network/manager.go  IP pool, TAP device lifecycle, AllocateForRestore,
-                      ReclaimAllocation (cold-restart reuse), bridge, NAT
-  storage/
-    provisioner.go    Golden image bootstrap, disk clone, config/token/flock injection
-                      (incl. /root/.ephemera-cp-token via injectVMFiles),
-                      CloneDiskCOW (dm-snapshot-backed spawn), artifact download + SHA256
-    snapshot.go       Snapshot metadata (read/write), disk copy helpers,
-                      SetupDMSnapshot/TeardownDMSnapshot (COW restore via dm-snapshot),
-                      MergeMemoryDiff (SEEK_DATA/SEEK_HOLE sparse merge)
-    vm_state.go       Per-VM state.json — Save/Load/Delete/List (cold-restart input)
-    orphan.go         KillStaleFirecracker + RemoveStaleVMArtifacts (cold-restart cleanup)
-  orchestrator/
-    townwall.go       Per-flock append-only log + subscriber fan-out
-    flock.go          Flock + FlockManager (lock-safe JSON via MarshalJSON);
-                      Persist (writeMu-serialized metadata write),
-                      UpdateAgentVM (per-agent restart swap)
-    persistence.go    FlockMetadata Save/Load/Delete/List (raw API;
-                      always go through Flock.Persist for live flocks)
-    watchdog.go       Per-VM health probing + dead marking;
-                      onFailure persists status, ForgetVM clears restart caches;
-                      OnDead/OnHeal/OnProbeDuration metric callbacks (v0.3.5)
-    handoff.go        Structured JSON handoff between agents
-  metrics/            Self-implemented Prometheus exposition formatter (v0.3.5)
-    registry.go       Registry + Counter/CounterVec/Gauge/GaugeFunc/Histogram
-                      types (atomic, race-safe; zero external dependency)
-    exposition.go     Text format 0.0.4 writer — HELP/TYPE/value lines,
-                      label-value escaping, histogram bucket + _count + _sum
-
-configs/
-  goose.yaml.example             Default provider/model template
-  goose-secrets.yaml.example     API key template
-  profiles/                      Per-VM LLM profiles (optional)
-    <profile-name>/
-      goose.yaml                 (gitignored; copied from .example)
-      goose-secrets.yaml         (gitignored; copied from .example)
-      system.md                  Role system prompt prepended to /tasks (optional)
-      system.webdev.md           webdev_demo.sh override prompt, swapped over system.md at demo time (v0.3.6)
-      goose.webdev.yaml          webdev_demo.sh override config (Gemini model per role), swapped over goose.yaml (v0.3.6)
-    researcher/  worker/  reviewer/  orchestrator/    ← built-in role profiles
-  webdev-demo/                   Host-side vite-template overlaid onto worker output by webdev_demo.sh (v0.3.6)
-    vite-template/               package.json, vite.config.js, index.html, src/* placeholders
-  observability/                 Provisioning bundle for observability_demo.sh (v0.3.5)
-    prometheus.yml               Prometheus scrape config (localhost:3000, 5s)
-    grafana-datasource.yml       Prometheus datasource provisioning
-    grafana-dashboards.yml       Grafana dashboards-provider provisioning
-    dashboards/
-      ephemera-overview.json     Pre-built Grafana 10.x dashboard (8 panels)
+  webdev-demo/        webdev_demo.sh용 vite-template overlay (v0.3.6)
+  observability/       observability_demo.sh용 Prometheus/Grafana provisioning
+                      bundle (v0.3.5)
 
 docs/
   PUBLIC_RELEASE_BOUNDARY.md
@@ -518,6 +421,7 @@ docs/
   adr/                 공개 경계, token/auth, runtime lifecycle 장기 결정
   architecture/        ephemera 런타임, 서비스 로직, anvil MCP 아키텍처
   analysis/            ephemera 버전 비교와 소스 분석
+  guides/              런타임 사용, API 참조, MCP 어댑터, 보안/복원력, 데모 가이드
   lifecycle/runs/      계산된 lifecycle 상태 snapshot
   operations/          보안 정책, runbook, DR, 관측성, release/operate 기록
   replays/             browser replay player용 sanitized E2E recording
@@ -525,43 +429,17 @@ docs/
 
 snapshots/             snapshot 저장 디렉터리, gitignore
 artifacts/             runtime artifact 디렉터리, gitignore
-e2e_test.sh            58단계 통합 테스트
+flocks/                per-flock Town Wall log/metadata 저장 디렉터리, gitignore
+vms/                   per-VM cold-restart state 저장 디렉터리, gitignore
+e2e_test.sh            89단계 통합 테스트 (resilience + v0.3.x–v0.7.0 sub-step 포함)
+observability_demo.sh  daemon + Prometheus + Grafana 원샷 데모 (v0.3.5)
+webdev_demo.sh         orchestrator+worker+reviewer flock React+Vite 데모 (v0.3.6)
 scripts/build_image.sh golden image build script
 scripts/anvil-mcp-e2e.sh daemon 기반 MCP smoke wrapper
-scripts/gtwall         VM 내부 Town Wall post helper
-snapshots/            Stored snapshot directories (auto-created, gitignored)
-  <snapshot-id>/
-    memory.bin        Guest RAM dump — 2 GB (Full) or sparse/small (Diff)
-    state.bin         Firecracker hardware state
-    rootfs.ext4       Disk copy (always full, ~700 MB)
-    metadata.json     Restore params (IP, TAP, MAC, token, type, base_snapshot_id)
-
-e2e_test.sh           End-to-end integration test (89 numbered steps incl. resilience + v0.3.x–v0.7.0 sub-steps; requires /dev/kvm + root)
-observability_demo.sh One-shot live demo: daemon + Prometheus + Grafana, auto workload, browser-driven exploration until Ctrl-C (v0.3.5)
-webdev_demo.sh        One-shot live demo: orchestrator+worker+reviewer flock builds a React+Vite site, harvested from the Town Wall and served via vite preview until Ctrl-C (v0.3.6; manual gate, needs a Gemini key + /dev/kvm)
-
-scripts/
-  build_image.sh      Builds golden image (Debian Trixie + curl + jq + Goose + goose-agent + micro-init + gtwall + gtcall)
-  gtwall              In-VM CLI: post a message to the flock's Town Wall (jq-built JSON body; installed into the golden image)
-  gtcall              In-VM CLI: dispatch a prompt to a peer agent via the control-plane proxy (v0.3.6; installed into the golden image)
-
-flocks/               Per-flock workspace (auto-created at first flock spawn, gitignored)
-  <flock-id>/
-    TOWN_WALL.log     Append-only log of agent messages
-    metadata.json     Flock recovery state (atomic tmp+rename; schema_version: 1)
-
-vms/                  Per-VM cold-restart state (auto-created on first spawn, gitignored)
-  <vm-id>/
-    state.json        Network identity, agent token, disk path, profile, flock link
-
-artifacts/            Auto-populated at runtime (gitignored)
-  golden-image.ext4   Golden VM disk image
-  vmlinux.bin         Firecracker-compatible Linux 6.1 kernel
-  firecracker         Firecracker VMM binary (SHA256-verified)
-  goose-agent         In-VM HTTP agent binary (compiled from source)
-  micro-init          PID 1 init binary (compiled from source)
-  prometheus-X.Y.Z.linux-amd64/   Prometheus binary (downloaded by observability_demo.sh, SHA256-pinned, v0.3.5)
-  grafana-vX.Y.Z/                 Grafana OSS binary (downloaded by observability_demo.sh, SHA256-pinned, v0.3.5)
+scripts/anvil-cross-host-*-e2e.sh
+                        cross-host failover/gtcall/wall e2e 스크립트
+scripts/gtwall          VM 내부 Town Wall post helper
+scripts/gtcall           VM 내부 peer agent 호출 helper (v0.3.6)
 ```
 
 ---
@@ -668,26 +546,10 @@ go build -o anvil-scheduler ./cmd/anvil-scheduler
 sudo bash e2e_test.sh
 ```
 
-`e2e_test.sh`는 실제 Firecracker MicroVM을 부팅하는 58단계 통합 테스트다.
+`e2e_test.sh`는 실제 Firecracker MicroVM을 부팅하는 89단계 통합 테스트다.
 호스트에 `/dev/kvm`, root 권한, 로컬 LLM API key가 필요하다. 환경과 API
 rate limit에 따라 보통 15-30분 이상 걸릴 수 있다.
 
-검증 범위:
-
-| 단계 | 시나리오 |
-|---|---|
-| 1-5 | daemon startup, 단일 VM create/task/stop/delete |
-| 6-9 | VM 두 개의 병렬 task 실행 |
-| 11-17 | Full snapshot create/list/restore/delete |
-| 19-24 | 서로 다른 snapshot의 concurrent restore |
-| 26-29 | Diff snapshot 자동 선택과 sparse size 검증 |
-| 30-34 | Diff restore와 full/diff dependency protection |
-| 36-43 | COW rootfs restore와 kernel resource cleanup |
-| 45-47 | control-plane agent proxy endpoint |
-| 48-49 | `EPHEMERA_PUBLIC_URL` 기반 proxy `agent_url` |
-| 51-57 | Goosetown flock 생성, `/vms` 반영, Town Wall post/history/list/delete, token redaction |
-| 57a-57f | Town Wall seq, flock metadata persistence, daemon restart recovery, watchdog log |
-| 58 | daemon graceful shutdown |
 **What it tests (steps 1–89 incl. lettered sub-steps):**
 
 | Steps | Scenario |
@@ -753,39 +615,9 @@ rate limit에 따라 보통 15-30분 이상 걸릴 수 있다.
 | 82 | **`ephemera-ctl` drives the daemon** (v0.4.1) — `ephemera-ctl vm spawn` / `ls` / `rm` against the live daemon (spawned VM appears then disappears); a bogus `--token` exits non-zero. |
 | 83 | **`ephemera-ctl audit`** (v0.4.1) — `ephemera-ctl audit --method GET` returns the access-log entries for the calls just made. |
 
-**Example output (passing, flock steps 51–60):**
+**Example output (passing run excerpt, steps 54b–83):**
 
-### E2E replay player
-
-`cmd/e2e-replay-server`는 full KVM E2E와 IronClaw E2E terminal recording을
-브라우저에서 line-by-line replay하는 작은 web player다. Recording은 서버에서
-ANSI 제어 문자와 token/API key를 제거한 뒤 `/api/recording`으로 제공한다.
-
-기본 playlist는 다음 두 항목이다.
-
-| Replay | Source | 설명 |
-|---|---|---|
-| `full-kvm-e2e` | `docs/replays/full-kvm-e2e.txt` | `anvil-v0.2.0` full KVM 58단계 replay |
-| `ironclaw-e2e` | `/tmp/anvil-real-e2e-recording.typescript` | 로컬에 recording이 있을 때만 사용 가능한 IronClaw MCP replay |
-
-```bash
-go run ./cmd/e2e-replay-server
-```
-
-기본 주소는 `http://192.168.3.73:8787`이다. 다른 recording을 지정하려면:
-
-```bash
-go run ./cmd/e2e-replay-server \
-  -addr 127.0.0.1:8788 \
-  -full-kvm-recording docs/replays/full-kvm-e2e.txt \
-  -recording /tmp/anvil-real-e2e-recording.typescript
-```
-
-API:
-
-```bash
-curl http://192.168.3.73:8787/api/playlist
-curl 'http://192.168.3.73:8787/api/recording?id=full-kvm-e2e'
+```text
 ━━━ 54b. Post via agent /townwall/post (in-VM forwarding path) ━━━
   ✓ Got agent_token for researcher-1 (64 chars)
   ✓ Resolved private IP for researcher-1: 10.0.1.3
@@ -960,6 +792,39 @@ curl 'http://192.168.3.73:8787/api/recording?id=full-kvm-e2e'
 ══════════════════════════════════
   All test steps passed ✓
 ══════════════════════════════════
+```
+
+### E2E replay player
+
+`cmd/e2e-replay-server`는 full KVM E2E와 IronClaw E2E terminal recording을
+브라우저에서 line-by-line replay하는 작은 web player다. Recording은 서버에서
+ANSI 제어 문자와 token/API key를 제거한 뒤 `/api/recording`으로 제공한다.
+
+기본 playlist는 다음 두 항목이다.
+
+| Replay | Source | 설명 |
+|---|---|---|
+| `full-kvm-e2e` | `docs/replays/full-kvm-e2e.txt` | `anvil-v0.2.0` full KVM 58단계 replay |
+| `ironclaw-e2e` | `/tmp/anvil-real-e2e-recording.typescript` | 로컬에 recording이 있을 때만 사용 가능한 IronClaw MCP replay |
+
+```bash
+go run ./cmd/e2e-replay-server
+```
+
+기본 주소는 `http://192.168.3.73:8787`이다. 다른 recording을 지정하려면:
+
+```bash
+go run ./cmd/e2e-replay-server \
+  -addr 127.0.0.1:8788 \
+  -full-kvm-recording docs/replays/full-kvm-e2e.txt \
+  -recording /tmp/anvil-real-e2e-recording.typescript
+```
+
+API:
+
+```bash
+curl http://192.168.3.73:8787/api/playlist
+curl 'http://192.168.3.73:8787/api/recording?id=full-kvm-e2e'
 ```
 
 ---
