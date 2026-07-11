@@ -20,6 +20,16 @@ const (
 	SnapshotReplicationReasonRejected          = "rejected"
 	SnapshotReplicationReasonTransferError     = "transfer_error"
 	SnapshotReplicationReasonNoEligibleHost    = "no_eligible_host"
+	// SnapshotReplicationReasonExportFailed/ImportFailed (Follow-Up 0,
+	// transfer-failure classification refinement) split the retryable
+	// "error" outcome by which side of a non-"replicated" ReplicateSnapshot
+	// response failed — see classifySnapshotReplication. Only an explicit
+	// target refusal uses SnapshotReplicationReasonRejected (terminal); a
+	// source-side, ambiguous target-side, or internal bookkeeping failure
+	// uses one of these two (or, for the internal case, the pre-existing
+	// SnapshotReplicationReasonTransferError).
+	SnapshotReplicationReasonExportFailed = "export_failed"
+	SnapshotReplicationReasonImportFailed = "import_failed"
 
 	// The adapter reuses ReplicateSnapshot as one atomic transfer, so only the
 	// end-to-end "total" latency is observable here (export/import sub-timings
@@ -157,7 +167,9 @@ func normalizeSnapshotReplicationReason(value string) string {
 		SnapshotReplicationReasonTargetUnreachable,
 		SnapshotReplicationReasonRejected,
 		SnapshotReplicationReasonTransferError,
-		SnapshotReplicationReasonNoEligibleHost:
+		SnapshotReplicationReasonNoEligibleHost,
+		SnapshotReplicationReasonExportFailed,
+		SnapshotReplicationReasonImportFailed:
 		return strings.TrimSpace(value)
 	default:
 		return SnapshotReplicationReasonTransferError

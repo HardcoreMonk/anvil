@@ -134,17 +134,53 @@ alerting은 zone `project-dashboard`가 scrape/발화한다(YAGNI + thin-adapter
 
 1. **latency phase = `total`만.** 위 "metric family" 절 참고 — export/import
    sub-timing은 D-3 재사용 원칙상 관측 불가.
-2. **터미널 오분류 창.** probe reachable 직후 대상이 죽어 `ReplicateSnapshot`이
-   `(nil,error)`(list dial)로 실패하면 재시도 대상인 `error`로 가지만,
-   `(resp,nil)` non-success면 `terminal`(exclude)로 간다 — 순수 일시적
-   import 실패가 terminal로 프로세스 수명 동안 제외될 수 있다(adapter
-   재시작이 re-arm하므로 영구는 아님). **최종 리뷰 보강(범위 명확화)**:
-   `ReplicateSnapshot`은 source-측 export 실패도 `(resp, non-success)`로
-   반환하므로 **source 문제가 무고한 target을 terminal로 오염**시킬 수
-   있고, pass마다 다음 후보가 차례로 오염되면 그 스냅샷은 no_candidate로
-   정체된다(원인 해소 후에도 adapter 재시작 전까지). metric reason도
+2. ~~**터미널 오분류 창.**~~ **해소 (Follow-Up 0, `fix/replication-failure-classes`
+   branch — 2026-07-11, PR 대기 · main 미병합).** 과거 서술: probe
+   reachable 직후 대상이 죽어 `ReplicateSnapshot`이 `(nil,error)`(list
+   dial)로 실패하면 재시도 대상인 `error`로 가지만, `(resp,nil)`
+   non-success면 전부 `terminal`(exclude)로 갔다 — `ReplicateSnapshot`은
+   source-측 export 실패도 같은 `(resp, non-success)` 모양으로 반환하므로
+   **source 문제가 무고한 target을 terminal로 오염**시킬 수 있었고,
+   pass마다 다음 후보가 차례로 오염되면 그 스냅샷은 no_candidate로
+   정체됐다(원인 해소 후에도 adapter 재시작 전까지). metric reason도
    `terminal_rejected`로 일괄 귀속돼 source/일시 장애가 target 거부로
-   오표기된다 — Follow-Up 4 참조.
+   오표기됐다.
+
+   수정: `ReplicateSnapshot`이 `SnapshotReplicationResponse`에
+   `FailureStage`(`source`/`target`/`internal`)·`FailureRejected`(bool)
+   필드를 추가해(하위호환 — 기존 `Status`/`Errors` 의미 불변) 각 실패
+   지점에서 어느 쪽 책임인지 타입으로 표시한다: export 실패·export
+   stream close 실패·source 카탈로그의 diff base 누락은 항상
+   `FailureStage=source`; router-local `record_location_failed`은
+   `FailureStage=internal`; target-측(import 실패, target 카탈로그의
+   diff base 누락)만 `FailureStage=target`이고, 그 중에서도 target의
+   명시적 거부(`POST /snapshots/import`의 HTTP 4xx —
+   `invalid_snapshot_bundle`/`diff_base_missing`/`snapshot_conflict`,
+   `cmd/goose-daemon/api.go` `handleSnapshotImport`)만
+   `FailureRejected=true`. `classifySnapshotReplication`은 이제
+   `FailureStage==target && FailureRejected`일 때만 terminal 처리하고,
+   나머지(source/internal/target-측 5xx·network·decode 등 불명확한
+   실패)는 전부 재시도 가능한 `error`로 분류한다(target-측 5xx도
+   보수적으로 재시도 — terminal은 확실한 거부만). 이는 원래 설계(D-2:
+   "HTTP 4xx/검증 실패... terminal", D-6: D3/tenant/검증 거부만
+   terminal-fail)와 정합이다 — 구현이 그 경계를 `(resp,nil)` 전체로
+   과확장했던 것이 버그였다.
+
+   metric reason도 분리했다: `error` outcome은 이제 `export_failed`
+   (source-측)/`import_failed`(target-측 비확정 실패)/기존
+   `transfer_error`(internal, 또는 repErr!=nil의 사전-전송 실패)로
+   나뉘고, `terminal_rejected` outcome은 기존 `rejected` reason 그대로
+   명시적 거부에만 붙는다(`normalizeSnapshotReplicationReason` 화이트
+   리스트 갱신). 유닛 3종 신규/갱신
+   (`TestSnapshotReplication_ExportFailureDoesNotTerminalTarget`,
+   `...AmbiguousImportFailureIsNotTerminal`, 기존
+   `...TerminalRejectionIsNotRetried`을 실제 데몬 거부 형태
+   (`*DaemonError` 4xx)로 갱신) — `go test -race ./internal/anvilmcp/`
+   green, 전체 `go test -race ./internal/... ./cmd/...` 회귀도 green
+   (KVM e2e는 이 follow-up 범위 밖 — 로컬 KVM을 다른 슬라이스가 점유해
+   controller가 KVM 확보 후 별도 재확인). 상세:
+   `internal/anvilmcp/snapshot_replication.go`,
+   `snapshot_replication_metrics.go`, `runtime_router.go`.
 3. **uniform N=2 discovery.** discovery가 모든 reachable host의 모든
    스냅샷을 add-only 수집하므로 base/throwaway 스냅샷도 N=2로 수렴한다 —
    첫 sweep 트래픽이 클 수 있으나 bounded/idempotent.
@@ -178,11 +214,13 @@ alerting은 zone `project-dashboard`가 scrape/발화한다(YAGNI + thin-adapter
 
 ## Follow-Up Tasks
 
-0. **(최종 whole-branch 리뷰 파생) transfer 실패 분류 정밀화** — export/일시
-   전송 실패를 재시도 가능한 `error`로, 진짜 target 거부만 terminal로
-   라우팅(ReplicateSnapshot의 typed 분류 또는 resp.Status/Errors 검사),
-   또는 terminal 마크의 대상-복귀/유계-시간 만료. 최소안: metric reason
-   분리. 별도 승인 후 착수.
+0. ~~**(최종 whole-branch 리뷰 파생) transfer 실패 분류 정밀화**~~ **완료
+   (PR #44 머지, 2026-07-11).** export/일시 전송 실패를 재시도 가능한
+   `error`로, 진짜 target 거부(content-rejection {400,409})만 terminal로
+   라우팅: `ReplicateSnapshot`이 typed `FailureStage`/`FailureRejected`를
+   `SnapshotReplicationResponse`에 추가(하위호환)해 분류하고, metric
+   reason도 `export_failed`/`import_failed`/`rejected`로 분리. 상세는
+   Known limitations #2(해소로 갱신) 참고.
 1. ~~**실 multi-host 수동 검증 수행**~~ — **완료 (2026-07-11, PASS)**: 두 실
    daemon(192.168.1.19/.20) 사이 자동 복제·down/복귀·`queue_depth`/`giving_up`
    전이 전부 관측, 신규 결함 없음. §6b-동형 절차 신설·수행:
