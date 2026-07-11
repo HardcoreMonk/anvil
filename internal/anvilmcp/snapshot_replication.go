@@ -174,7 +174,11 @@ func (r *RuntimeRouter) ReplicateSnapshot(ctx context.Context, req SnapshotRepli
 				// base — an observed target-side precondition failure, not a
 				// source problem. Deterministic for this request shape
 				// (IncludeDependencies=false won't resolve it on retry), so
-				// terminal like an explicit import rejection.
+				// terminal like an explicit import rejection — but note this
+				// terminal call rests on a locally-observed fact, not on an
+				// HTTP status code (isExplicitImportRejection/
+				// snapshotImportRejectionStatusCodes do not apply here: no
+				// ImportSnapshot call is made on this branch at all).
 				resp.Status = "failed"
 				resp.Errors = append(resp.Errors, "diff_base_missing")
 				resp.FailureStage = SnapshotReplicationFailureTarget
@@ -293,23 +297,40 @@ func safeReplicationError(operation, snapshotID, hostRole, hostName string, err 
 	return strings.Join(parts, " ")
 }
 
+// snapshotImportRejectionStatusCodes are the exact HTTP status codes
+// cmd/goose-daemon/api.go:handleSnapshotImport uses for a genuine
+// content-rejection of a POST /snapshots/import body: 400 for
+// storage.ErrSnapshotBundleInvalid, 409 for
+// storage.ErrDiffBaseMissing/ErrSnapshotBundleConflict. Every other 4xx that
+// can reach this call is NOT a content rejection and must stay retryable
+// (review fix, reviewer verdict on Follow-Up 0's initial `4xx-급` framing):
+//   - 401: /snapshots/import sits behind authMiddleware — a token
+//     expiring/rotating (SIGHUP) mid-pass, after ListSnapshots already
+//     passed auth but before ImportSnapshot fires, can surface a transient
+//     401 that has nothing to do with the content.
+//   - 404: an older target daemon (version skew) predating this route —
+//     recoverable once the target upgrades, but sticks around in-process
+//     until the adapter restarts if treated as terminal.
+//
+// Any 4xx outside this set is unknown/unmodeled and, per the same
+// conservative-default reasoning, is NOT treated as a rejection either.
+var snapshotImportRejectionStatusCodes = map[int]bool{400: true, 409: true}
+
 // isExplicitImportRejection reports whether importErr represents the target
-// daemon explicitly refusing the snapshot content over HTTP — a 4xx status
-// from POST /snapshots/import (invalid bundle, diff base missing on the
-// target, or a conflicting existing snapshot; see
-// cmd/goose-daemon/api.go:handleSnapshotImport, which maps
-// storage.ErrSnapshotBundleInvalid/ErrDiffBaseMissing/ErrSnapshotBundleConflict
-// to 400/409 and anything else — including the D3 overlay guard, which is a
-// restore-time not import-time check — to 500). A 5xx status or a
+// daemon explicitly refusing the snapshot content over HTTP — one of
+// snapshotImportRejectionStatusCodes from POST /snapshots/import (invalid
+// bundle, diff base missing on the target, or a conflicting existing
+// snapshot). Any other status (5xx, or a 4xx outside that set — see the var
+// doc for concrete 401/404 cases that are NOT rejections) or a
 // non-DaemonError (network drop mid-stream, response decode failure) is NOT
 // an explicit rejection: Follow-Up 0 requires terminal exclusion to rest on
-// a confirmed refusal, never an ambiguous target-side failure.
+// a confirmed content refusal, never an ambiguous target-side failure.
 func isExplicitImportRejection(err error) bool {
 	var daemonErr *DaemonError
 	if !errors.As(err, &daemonErr) {
 		return false
 	}
-	return daemonErr.StatusCode >= 400 && daemonErr.StatusCode < 500
+	return snapshotImportRejectionStatusCodes[daemonErr.StatusCode]
 }
 
 func snapshotInfoByID(snapshots []SnapshotInfo, snapshotID string) (SnapshotInfo, bool) {
