@@ -160,6 +160,34 @@ func TestFailover_NonDialErrorsDoNotCount(t *testing.T) {
 	}
 }
 
+// TestFailover_ReachableNonDialPassResetsCounter: a reconcile pass where the
+// home probe is reachable but the hub POST fails with a non-dial error (e.g.
+// HTTP 500) must reset the consecutive dial-failure counter, the same as a
+// fully successful pass — the host answered, so the failure streak is broken.
+// Sequence: dial, dial, (reachable+500), dial, dial, dial. Only the last
+// three are CONSECUTIVE dial failures, so failover must fire on the sixth
+// pass, never before.
+func TestFailover_ReachableNonDialPassResetsCounter(t *testing.T) {
+	router, store, flockID, daemons := newFailoverHarness(t)
+	killHost(daemons["hostA"])
+	reconcileN(t, router, 2)
+
+	reviveHost(daemons["hostA"])
+	daemons["hostA"].registerDistributedErr = fmt.Errorf("500 internal")
+	reconcileN(t, router, 1) // reachable, non-dial hub error: must reset the counter
+
+	killHost(daemons["hostA"])
+	reconcileN(t, router, 2)
+	if rec, _ := store.RoutedFlock(flockID); rec.HomeHost != "hostA" {
+		t.Fatalf("HomeHost switched before 3 CONSECUTIVE dial failures: %q", rec.HomeHost)
+	}
+
+	reconcileN(t, router, 1)
+	if rec, _ := store.RoutedFlock(flockID); rec.HomeHost != "hostB" {
+		t.Fatalf("HomeHost = %q, want hostB after 3 consecutive dial failures", rec.HomeHost)
+	}
+}
+
 // TestFailover_NoCandidateIsNoop: with every member host down too (or a
 // single-host flock), election finds no candidate and the pass is a no-op —
 // re-evaluated next cycle (spec: 현행 502 지속). When a member later revives,
