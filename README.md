@@ -72,10 +72,11 @@ upstream `v0.7.0`의 kernel SHA 검증, `waitForAgent` per-probe timeout,
 `EPHEMERA_HOME` hardening은 선별 backport됐지만 baseline sync 완료를 의미하지
 않는다.
 
-IronClaw 통합 프로젝트 anvil의 최신 공개 tag는 `anvil-v0.3.2`이다. 이 release는
-ephemera `v0.3.2`-`v0.3.6` runtime baseline 위에 scheduler metrics, manual
-cross-host snapshot replication, scheduler-aware single-host flock placement를
-기록한다. 첫 공개 tag는 `anvil-v0.1.0`이다.
+IronClaw 통합 프로젝트 anvil의 최신 공개 tag는 `anvil-v0.7.0`이다 (upstream
+ephemera 버전과 정렬 — 계보와 tag별 내용은 `CONTEXT.md` 참조). 이후 main은
+cross-host Town Wall/gtcall, home 재선출 failover, snapshot replication
+자동화 등 untagged 작업(PR #19~#46)을 더 포함한다. 첫 공개 tag는
+`anvil-v0.1.0`이다.
 
 <p align="center">
   <img src="docs/assets/ironclaw-e2e.gif" alt="IronClaw anvil E2E terminal replay" width="900">
