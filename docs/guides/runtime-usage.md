@@ -798,6 +798,14 @@ rate limit에 따라 보통 15-30분 이상 걸릴 수 있다.
 
 최근 `main`(post-`anvil-v0.7.0`, commit `9a9af7d`) 실 run에서 큐레이션·녹화한 데모 replay다.
 
+**IronClaw + anvil MCP tool surface** (README 상단 GIF, `docs/assets/ironclaw-e2e.gif`) — 두
+장면으로 나뉘고 주체가 다르다. 장면 1은 IronClaw 본체가 `ironclaw mcp test anvil`로 anvil-mcp에
+stdio 연결해 19개 anvil tool을 발견한다. 장면 2는 동일한 anvil MCP tool surface를 smoke
+하네스(`anvil-mcp-smoke`)로 구동해 실제 Firecracker VM lifecycle
+(spawn→copy→task→health→stop→delete)을 녹화한다. IronClaw agent가 LLM으로 anvil tool을
+직접 호출하는 full 세션은 별도 검증 항목이며, Gemini 스키마 호환 이슈·재검증 이력은
+[`docs/operations/2026-05-12-ironclaw-integration-check.md`](../operations/2026-05-12-ironclaw-integration-check.md)에 있다.
+
 **Full KVM gate** — `sudo bash e2e_test.sh` (89 steps · 334 ✓ · 0 ✗):
 
 <p align="center">

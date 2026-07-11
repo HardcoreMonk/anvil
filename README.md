@@ -16,8 +16,10 @@ VM 생성, 작업 실행, health 확인, graceful stop/delete, snapshot/restore 
 </p>
 
 <p align="center">
-  <sub>IronClaw가 anvil-mcp에 연결해 19개 anvil tool을 발견하고, anvil MCP tool surface로
-  실제 Firecracker VM lifecycle을 실행한 E2E replay</sub>
+  <sub>장면 1 — IronClaw 본체가 anvil-mcp에 stdio로 연결해 19개 anvil tool을 발견
+  (<code>ironclaw mcp test anvil</code>). 장면 2 — 동일한 anvil MCP tool surface를 smoke
+  하네스(<code>anvil-mcp-smoke</code>)로 구동해 실제 Firecracker VM lifecycle
+  (spawn→copy→task→health→stop→delete)을 녹화. 두 장면은 각각 다른 주체가 구동한다.</sub>
 </p>
 
 ---
