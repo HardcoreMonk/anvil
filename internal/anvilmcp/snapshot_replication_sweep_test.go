@@ -196,13 +196,18 @@ func TestSnapshotReplication_RespectsHostEligibility(t *testing.T) {
 }
 
 // TestSnapshotReplication_TerminalRejectionIsNotRetried: a reachable target that
-// refuses the import (D3 coarse-fs / tenant / validation surface as a failed
-// transfer status) is terminal — recorded once, excluded from re-selection, never
-// retried against the same target, and never counted toward the dial cap.
+// EXPLICITLY refuses the import — an HTTP 4xx DaemonError from
+// POST /snapshots/import, the shape ImportSnapshot always returns for a real
+// daemon-side rejection (invalid bundle / diff base missing on the target /
+// conflicting snapshot / D3-equivalent validation) — is terminal: recorded
+// once, excluded from re-selection, never retried against the same target,
+// and never counted toward the dial cap (Follow-Up 0: only this explicit-4xx
+// signal is terminal-worthy; see TestSnapshotReplication_AmbiguousImportFailureIsNotTerminal
+// for the conservative non-terminal counterpart).
 func TestSnapshotReplication_TerminalRejectionIsNotRetried(t *testing.T) {
 	hostA := &routerFakeDaemon{snapshotList: []SnapshotInfo{snapInfo("snap-1")}}
 	hostB := &routerFakeDaemon{importErrForBody: map[string]error{
-		"bundle:snap-1": errors.New("refusing overlay to avoid guest memory corruption (see D3)"),
+		"bundle:snap-1": &DaemonError{StatusCode: 409, Body: "diff_base_missing"},
 	}}
 	router, store := newReplicationRouter(t, replicationHosts("hostA", "hostB"),
 		map[string]*routerFakeDaemon{"hostA": hostA, "hostB": hostB})
@@ -223,6 +228,86 @@ func TestSnapshotReplication_TerminalRejectionIsNotRetried(t *testing.T) {
 	_ = router.reconcileSnapshotReplication(context.Background(), probes) // second pass → excluded, not retried
 	if len(hostB.importCalls) != 1 {
 		t.Fatalf("terminal target retried: import calls = %d, want still 1", len(hostB.importCalls))
+	}
+}
+
+// TestSnapshotReplication_ExportFailureDoesNotTerminalTarget pins Follow-Up
+// 0's core bug fix: ReplicateSnapshot returns the SAME (resp, nil)
+// non-"replicated" shape for a SOURCE-side export failure as for a genuine
+// target refusal. The old classifier treated every such response as a target
+// rejection, so a transient source problem could terminal-mark an innocent
+// target for the process lifetime — and, swept pass after pass, poison every
+// candidate target in turn until the snapshot stalled at no_candidate. The
+// target must stay eligible and, once the source recovers, receive the very
+// same replica on the next pass.
+func TestSnapshotReplication_ExportFailureDoesNotTerminalTarget(t *testing.T) {
+	hostA := &routerFakeDaemon{
+		snapshotList: []SnapshotInfo{snapInfo("snap-1")},
+		exportErr:    errors.New("simulated source export failure"),
+	}
+	hostB := &routerFakeDaemon{}
+	router, store := newReplicationRouter(t, replicationHosts("hostA", "hostB"),
+		map[string]*routerFakeDaemon{"hostA": hostA, "hostB": hostB})
+	probes := allReachable("hostA", "hostB")
+
+	_ = router.reconcileSnapshotReplication(context.Background(), probes) // pass 1: export fails
+	if len(hostB.importCalls) != 0 {
+		t.Fatalf("import attempted toward target despite a source export failure: %d", len(hostB.importCalls))
+	}
+	key := snapshotTargetKey("snap-1", "hostB")
+	if router.replicationTerminal[key] {
+		t.Fatal("source-side export failure wrongly terminal-marked the target")
+	}
+	m := store.State().SnapshotReplicationMetrics
+	if m.AttemptsByOutcomeReason[snapshotReplicationAttemptKey(SnapshotReplicationOutcomeError, SnapshotReplicationReasonExportFailed)] != 1 {
+		t.Fatalf("export_failed not recorded: %+v", m.AttemptsByOutcomeReason)
+	}
+	if got := m.AttemptsByOutcomeReason[snapshotReplicationAttemptKey(SnapshotReplicationOutcomeTerminalRejected, SnapshotReplicationReasonRejected)]; got != 0 {
+		t.Fatalf("source export failure wrongly counted as terminal_rejected: %d", got)
+	}
+
+	hostA.exportErr = nil                                                 // source problem resolved
+	_ = router.reconcileSnapshotReplication(context.Background(), probes) // pass 2: same target reselected
+	if len(hostB.importCalls) != 1 {
+		t.Fatalf("previously-poisoned target was not reselected/retried after the source recovered: imports=%d", len(hostB.importCalls))
+	}
+	if hosts := store.SnapshotHosts("snap-1"); !slices.Contains(hosts, "hostB") {
+		t.Fatalf("SnapshotHosts(snap-1) = %v, want hostB present after the retry succeeded", hosts)
+	}
+}
+
+// TestSnapshotReplication_AmbiguousImportFailureIsNotTerminal: a target-side
+// import failure that is NOT an explicit HTTP 4xx rejection (a 5xx here — the
+// target daemon's own internal error, not a content refusal) is
+// conservatively retryable, never terminal ("import-측 5xx/불명도 retryable
+// error로 — terminal은 확실한 거부만", Follow-Up 0). The same target is
+// retried and succeeds once its failure clears.
+func TestSnapshotReplication_AmbiguousImportFailureIsNotTerminal(t *testing.T) {
+	hostA := &routerFakeDaemon{snapshotList: []SnapshotInfo{snapInfo("snap-1")}}
+	hostB := &routerFakeDaemon{importErrForBody: map[string]error{
+		"bundle:snap-1": &DaemonError{StatusCode: 500, Body: "snapshot_import_failed"},
+	}}
+	router, store := newReplicationRouter(t, replicationHosts("hostA", "hostB"),
+		map[string]*routerFakeDaemon{"hostA": hostA, "hostB": hostB})
+	probes := allReachable("hostA", "hostB")
+
+	_ = router.reconcileSnapshotReplication(context.Background(), probes) // pass 1: import 500s
+	key := snapshotTargetKey("snap-1", "hostB")
+	if router.replicationTerminal[key] {
+		t.Fatal("ambiguous (5xx) import failure wrongly terminal-marked the target")
+	}
+	m := store.State().SnapshotReplicationMetrics
+	if m.AttemptsByOutcomeReason[snapshotReplicationAttemptKey(SnapshotReplicationOutcomeError, SnapshotReplicationReasonImportFailed)] != 1 {
+		t.Fatalf("import_failed not recorded: %+v", m.AttemptsByOutcomeReason)
+	}
+
+	hostB.importErrForBody = nil                                          // target-side failure resolved
+	_ = router.reconcileSnapshotReplication(context.Background(), probes) // pass 2: same target retried
+	if len(hostB.importCalls) != 2 {                                      // 1 failed attempt + 1 successful retry
+		t.Fatalf("target was not retried after its 5xx cleared: import calls = %d, want 2", len(hostB.importCalls))
+	}
+	if hosts := store.SnapshotHosts("snap-1"); !slices.Contains(hosts, "hostB") {
+		t.Fatalf("SnapshotHosts(snap-1) = %v, want hostB present after the retry succeeded", hosts)
 	}
 }
 

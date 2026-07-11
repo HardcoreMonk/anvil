@@ -45,7 +45,46 @@ type SnapshotReplicationResponse struct {
 	Replicated []string `json:"replicated"`
 	Skipped    []string `json:"skipped"`
 	Errors     []string `json:"errors"`
+
+	// FailureStage classifies which side produced the failure recorded in
+	// Errors when Status != "replicated" (Follow-Up 0, transfer-failure
+	// classification refinement) — one of SnapshotReplicationFailureSource/
+	// Target/Internal below. Callers (the reconcile sweep's
+	// classifySnapshotReplication) use it to avoid blaming a reachable
+	// target for a source-side or purely-local problem. Additive field:
+	// Status and Errors keep their pre-existing meaning unchanged. Empty
+	// when Status == "replicated". Never carries a host address or token
+	// (redaction unchanged — see safeReplicationError).
+	FailureStage string `json:"failure_stage,omitempty"`
+	// FailureRejected is true only when FailureStage ==
+	// SnapshotReplicationFailureTarget AND the target explicitly refused the
+	// content: an HTTP 4xx from POST /snapshots/import (invalid bundle, diff
+	// base missing on the target, or a conflicting existing snapshot — see
+	// cmd/goose-daemon/api.go handleSnapshotImport, which maps
+	// storage.ErrSnapshotBundleInvalid/ErrDiffBaseMissing/
+	// ErrSnapshotBundleConflict to 400/409 and anything else to 500), or the
+	// pre-transfer target-catalog diff-base precondition failing locally.
+	// False for every other target-side failure (5xx, network drop, decode
+	// failure) — those are conservatively retried, never marked terminal.
+	FailureRejected bool `json:"failure_rejected,omitempty"`
 }
+
+// SnapshotReplicationFailureSource/Target/Internal are the SnapshotReplicationResponse.FailureStage
+// values (Follow-Up 0):
+//   - Source: ExportSnapshot error/nil stream, closing the source export
+//     stream, or the source's own snapshot catalog missing a diff base.
+//     Never implicates the target — always retryable.
+//   - Target: ImportSnapshot error, or the target's snapshot catalog missing
+//     a diff base. See FailureRejected for whether this was an explicit
+//     refusal (terminal) or an ambiguous target-side failure (retryable).
+//   - Internal: a router-local bookkeeping failure after the transfer itself
+//     already succeeded (recording the replica location) — not a fault of
+//     either daemon. Always retryable.
+const (
+	SnapshotReplicationFailureSource   = "source"
+	SnapshotReplicationFailureTarget   = "target"
+	SnapshotReplicationFailureInternal = "internal"
+)
 
 type snapshotTransferDaemon interface {
 	ListSnapshots(context.Context) ([]SnapshotInfo, error)
@@ -131,15 +170,25 @@ func (r *RuntimeRouter) ReplicateSnapshot(ctx context.Context, req SnapshotRepli
 		baseSnapshotID := strings.TrimSpace(requested.BaseSnapshotID)
 		if !req.IncludeDependencies {
 			if baseSnapshotID == "" || !targetSnapshotIDs[baseSnapshotID] {
+				// The target's own (already-fetched) catalog is missing the
+				// base — an observed target-side precondition failure, not a
+				// source problem. Deterministic for this request shape
+				// (IncludeDependencies=false won't resolve it on retry), so
+				// terminal like an explicit import rejection.
 				resp.Status = "failed"
 				resp.Errors = append(resp.Errors, "diff_base_missing")
+				resp.FailureStage = SnapshotReplicationFailureTarget
+				resp.FailureRejected = true
 				return resp, nil
 			}
 		} else {
 			base, ok := snapshotInfoByID(sourceSnapshots, baseSnapshotID)
 			if baseSnapshotID == "" || !ok {
+				// The source's own catalog is missing the base — a
+				// source-side data gap, never the target's fault.
 				resp.Status = "failed"
 				resp.Errors = append(resp.Errors, "diff_base_missing")
+				resp.FailureStage = SnapshotReplicationFailureSource
 				return resp, nil
 			}
 			transferOrder = append(transferOrder, base)
@@ -157,11 +206,13 @@ func (r *RuntimeRouter) ReplicateSnapshot(ctx context.Context, req SnapshotRepli
 		if err != nil {
 			resp.Status = statusForFailure(resp)
 			resp.Errors = append(resp.Errors, safeReplicationError("export_failed", id, "source", sourceHostName, err))
+			resp.FailureStage = SnapshotReplicationFailureSource
 			return resp, nil
 		}
 		if stream == nil || stream.Body == nil {
 			resp.Status = statusForFailure(resp)
 			resp.Errors = append(resp.Errors, safeReplicationError("export_failed", id, "source", sourceHostName, nil))
+			resp.FailureStage = SnapshotReplicationFailureSource
 			return resp, nil
 		}
 
@@ -170,11 +221,17 @@ func (r *RuntimeRouter) ReplicateSnapshot(ctx context.Context, req SnapshotRepli
 		if importErr != nil {
 			resp.Status = statusForFailure(resp)
 			resp.Errors = append(resp.Errors, safeReplicationError("import_failed", id, "target", targetHostName, importErr))
+			resp.FailureStage = SnapshotReplicationFailureTarget
+			resp.FailureRejected = isExplicitImportRejection(importErr)
 			return resp, nil
 		}
 		if closeErr != nil {
+			// Closing the SOURCE's export stream, after the target already
+			// accepted the content — a source-side artifact, not a target
+			// problem.
 			resp.Status = statusForFailure(resp)
 			resp.Errors = append(resp.Errors, safeReplicationError("close_export_stream_failed", id, "source", sourceHostName, closeErr))
+			resp.FailureStage = SnapshotReplicationFailureSource
 			return resp, nil
 		}
 
@@ -185,8 +242,11 @@ func (r *RuntimeRouter) ReplicateSnapshot(ctx context.Context, req SnapshotRepli
 			resp.Replicated = append(resp.Replicated, id)
 		}
 		if err := r.recordSnapshotLocation(id, targetHostName); err != nil {
+			// The transfer itself succeeded; this is a router-local
+			// placementStore write failure, not a daemon fault.
 			resp.Status = statusForFailure(resp)
 			resp.Errors = append(resp.Errors, safeReplicationError("record_location_failed", id, "target", targetHostName, err))
+			resp.FailureStage = SnapshotReplicationFailureInternal
 			return resp, nil
 		}
 	}
@@ -233,6 +293,25 @@ func safeReplicationError(operation, snapshotID, hostRole, hostName string, err 
 	return strings.Join(parts, " ")
 }
 
+// isExplicitImportRejection reports whether importErr represents the target
+// daemon explicitly refusing the snapshot content over HTTP — a 4xx status
+// from POST /snapshots/import (invalid bundle, diff base missing on the
+// target, or a conflicting existing snapshot; see
+// cmd/goose-daemon/api.go:handleSnapshotImport, which maps
+// storage.ErrSnapshotBundleInvalid/ErrDiffBaseMissing/ErrSnapshotBundleConflict
+// to 400/409 and anything else — including the D3 overlay guard, which is a
+// restore-time not import-time check — to 500). A 5xx status or a
+// non-DaemonError (network drop mid-stream, response decode failure) is NOT
+// an explicit rejection: Follow-Up 0 requires terminal exclusion to rest on
+// a confirmed refusal, never an ambiguous target-side failure.
+func isExplicitImportRejection(err error) bool {
+	var daemonErr *DaemonError
+	if !errors.As(err, &daemonErr) {
+		return false
+	}
+	return daemonErr.StatusCode >= 400 && daemonErr.StatusCode < 500
+}
+
 func snapshotInfoByID(snapshots []SnapshotInfo, snapshotID string) (SnapshotInfo, bool) {
 	snapshotID = strings.TrimSpace(snapshotID)
 	if snapshotID == "" {
@@ -262,7 +341,11 @@ func isDiffSnapshot(snapshot SnapshotInfo) bool {
 //  3. For each snapshot below the replica factor with a reachable source: selects
 //     an eligible target (SelectRuntimeHost, tenant/egress carried), and either
 //     counts a dial failure (target unreachable at probe — short-circuit, no doomed
-//     transfer) or fires one ReplicateSnapshot and classifies the outcome.
+//     transfer) or fires one ReplicateSnapshot and classifies the outcome
+//     (classifySnapshotReplication, Follow-Up 0: only an explicit target
+//     rejection — resp.FailureStage == target and resp.FailureRejected —
+//     is terminal; a source-side or internal failure never excludes the
+//     target, it is a retryable error like a dial failure would be).
 //  4. Republishes the queue_depth / giving_up gauges.
 //  5. Sweeps the dial-failure, giving-up, and terminal counters using a
 //     positive-evidence deletion rule: a (snapshot,target) pair's counters are
@@ -475,8 +558,12 @@ func (r *RuntimeRouter) excludedReplicationTargets(snapshotID string) []string {
 
 // classifySnapshotReplication records the metric outcome for one replication
 // attempt and updates the dial counter. Success clears the dial/giving-up
-// counters for the pair. Reachable-target non-success splits into two cases —
-// see the inline comment below.
+// counters for the pair. Reachable-target non-success splits into three cases
+// — see the inline comments below (Follow-Up 0, transfer-failure
+// classification refinement: ReplicateSnapshot used to return the same
+// (resp, non-"replicated") shape for a source-side export failure as for a
+// genuine target refusal, so a transient source problem could terminal-mark
+// an innocent target — resp.FailureStage/FailureRejected now disambiguate).
 func (r *RuntimeRouter) classifySnapshotReplication(id, target, key string, resp *SnapshotReplicationResponse, repErr error, total time.Duration, at time.Time, errs []error) []error {
 	if resp != nil && repErr == nil && resp.Status == "replicated" {
 		delete(r.replicationDialFailures, key)
@@ -494,16 +581,26 @@ func (r *RuntimeRouter) classifySnapshotReplication(id, target, key string, resp
 		r.logf("anvil-mcp: snapshot %q replicated to host %q (%d desired replicas)", id, target, snapshotReplicaFactor)
 		return errs
 	}
-	// Reachable target, transfer did not succeed. Two cases:
-	//  - repErr != nil: ReplicateSnapshot failed BEFORE the transfer completed
-	//    (source/target ListSnapshots, transient). The target answered the probe,
-	//    so this is not a dial failure; surface it and retry next pass. Do NOT
-	//    exclude the target — it may well succeed next time.
-	//  - (resp, nil) with a non-"replicated" status: the reachable target refused
-	//    the content — D3 coarse-fs overlay refusal, tenant/validation mismatch, or
-	//    a missing diff base. TERMINAL (spec D-6): retrying the same target is
-	//    futile, so exclude it in-memory (reset only on restart), record a terminal
-	//    reason, and never count it toward the dial cap.
+	// Reachable target, transfer did not succeed. Three cases:
+	//  - repErr != nil: ReplicateSnapshot failed BEFORE any per-item transfer
+	//    attempt (source/target lookup or ListSnapshots, transient). The
+	//    target answered the probe, so this is not a dial failure; surface it
+	//    and retry next pass. Do NOT exclude the target — it may well succeed
+	//    next time.
+	//  - (resp, nil) with a non-"replicated" status AND an explicit target
+	//    rejection (resp.FailureStage == SnapshotReplicationFailureTarget &&
+	//    resp.FailureRejected): the reachable target refused the content over
+	//    HTTP 4xx (invalid bundle / diff base missing on the target /
+	//    conflicting snapshot) or the equivalent local precondition check.
+	//    TERMINAL (spec D-6):
+	//    retrying the same target is futile, so exclude it in-memory (reset
+	//    only on restart), record a terminal reason, and never count it
+	//    toward the dial cap.
+	//  - (resp, nil) with any other non-"replicated" status: a source-side
+	//    export/catalog failure, a router-local bookkeeping failure, or an
+	//    AMBIGUOUS target-side failure (5xx, network drop, decode failure —
+	//    conservative per Follow-Up 0: only a confirmed refusal is
+	//    terminal). Retryable, and never blames the target.
 	if repErr != nil {
 		r.recordSnapshotReplicationMetric(SnapshotReplicationMetricObservation{
 			Outcome:   SnapshotReplicationOutcomeError,
@@ -513,14 +610,30 @@ func (r *RuntimeRouter) classifySnapshotReplication(id, target, key string, resp
 		})
 		return append(errs, fmt.Errorf("reconcile snapshot replication for %q on target host %q failed", id, target))
 	}
-	r.replicationTerminal[key] = true
+	if resp.FailureStage == SnapshotReplicationFailureTarget && resp.FailureRejected {
+		r.replicationTerminal[key] = true
+		r.recordSnapshotReplicationMetric(SnapshotReplicationMetricObservation{
+			Outcome:   SnapshotReplicationOutcomeTerminalRejected,
+			Reason:    SnapshotReplicationReasonRejected,
+			Latencies: map[string]time.Duration{SnapshotReplicationPhaseTotal: total},
+			At:        at,
+		})
+		return append(errs, fmt.Errorf("reconcile snapshot replication for %q on target host %q rejected (terminal)", id, target))
+	}
+	reason := SnapshotReplicationReasonTransferError // FailureStage == internal, or unset (defensive default)
+	switch resp.FailureStage {
+	case SnapshotReplicationFailureSource:
+		reason = SnapshotReplicationReasonExportFailed
+	case SnapshotReplicationFailureTarget:
+		reason = SnapshotReplicationReasonImportFailed
+	}
 	r.recordSnapshotReplicationMetric(SnapshotReplicationMetricObservation{
-		Outcome:   SnapshotReplicationOutcomeTerminalRejected,
-		Reason:    SnapshotReplicationReasonRejected,
+		Outcome:   SnapshotReplicationOutcomeError,
+		Reason:    reason,
 		Latencies: map[string]time.Duration{SnapshotReplicationPhaseTotal: total},
 		At:        at,
 	})
-	return append(errs, fmt.Errorf("reconcile snapshot replication for %q on target host %q rejected (terminal)", id, target))
+	return append(errs, fmt.Errorf("reconcile snapshot replication for %q on target host %q failed", id, target))
 }
 
 func (r *RuntimeRouter) recordSnapshotReplicationMetric(obs SnapshotReplicationMetricObservation) {

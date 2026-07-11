@@ -62,9 +62,14 @@ type RuntimeRouter struct {
 	replicationGivingUp map[string]bool
 
 	// replicationTerminal marks "<snapshot>\x1f<target>" pairs a reachable target
-	// refused (D3 coarse-fs / tenant / validation). Excluded from re-selection for
-	// this process lifetime; reset only on restart (in-memory, like the dial
-	// counter). reconcileMu.
+	// EXPLICITLY refused (HTTP 4xx from /snapshots/import — invalid bundle /
+	// diff base missing on the target / conflicting snapshot / D3-equivalent
+	// validation — or the matching local precondition check; see
+	// SnapshotReplicationResponse.FailureRejected). A source-side or
+	// ambiguous target-side failure never lands here (Follow-Up 0 — it used
+	// to, which let a transient source problem terminal-mark an innocent
+	// target). Excluded from re-selection for this process lifetime; reset
+	// only on restart (in-memory, like the dial counter). reconcileMu.
 	replicationTerminal map[string]bool
 }
 
