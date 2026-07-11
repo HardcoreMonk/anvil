@@ -91,6 +91,13 @@ reason=cleanup_failed"` (isError)를 반환했으나, 실제로는 양 daemon의
 teardown과 token revoke까지 전부 성공. 보고/멱등성 결함 — 운영자가 성공한
 삭제를 실패로 오인하게 만든다.
 
+> RCA/fix slice (`fix/d2-delete-cleanup-misreport`, 머지 전): delete가 shared
+> wall 을 먼저 deregister(`DeleteFlock`)하는데 daemon `deleteFlock`이 그 flock의
+> 멤버 VM 까지 cascade teardown 하므로, 뒤이은 per-VM `DELETE /vms/{id}`가
+> 항상 404 를 받고 `deleteRoutedFlockAgents`가 이를 실패로 오분류 → 3회 모두
+> 결정적으로 재현. fix: 404(=이미 소멸=teardown 성공)를 pending 이 아닌 완료로
+> 취급, 진짜 실패(비-404)는 계속 cleanup_failed 유지.
+
 ### D3 (부차·플랫폼) — diff snapshot merge가 ZFS에서 guest 메모리 오염
 
 - 증상: diff snapshot 복원 시 fc가 resume 직후 사망

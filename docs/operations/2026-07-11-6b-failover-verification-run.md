@@ -99,6 +99,11 @@
   반환했으나 **실제 teardown은 전부 성공**(양 host flock 404 + VM 0 + token
   revoke 401 확인). 보고/멱등성 결함, ⑥b와 무관. fix는 stack Follow-Up 큐에
   잔존(우선순위 유지).
+- RCA/fix slice (`fix/d2-delete-cleanup-misreport`, 머지 전): shared wall
+  deregister(`DeleteFlock`)가 daemon 측에서 멤버 VM 을 cascade teardown 하므로
+  뒤이은 per-VM `DELETE /vms/{id}`가 404 → `deleteRoutedFlockAgents`가 오분류.
+  결정적 경로라 3회 + ⑥b 모두 재현. fix: 404 를 teardown 완료로 취급, 진짜
+  실패(비-404)는 계속 cleanup_failed.
 
 ## 후속 작업
 
