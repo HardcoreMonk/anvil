@@ -11,6 +11,12 @@ snapshot을 공개하는 절차이고, `anvil` integration 릴리즈는 IronClaw
 ephemera를 결합하는 통합 프로젝트 이름이다. 릴리즈 제목, tag prefix, GitHub
 Release 본문에서 두 이름을 섞어 쓰지 않는다.
 
+## 알려진 릴리즈 결함 (2026-07-11 installer 실 systemd 검증)
+
+- **FULL/SLIM release 설치본으로 `ephemera` daemon이 기동하지 못함** (릴리즈 블로커). `ephemera-daemon`이 startup step 1의 `storage.EnsureGooseAgent`에서 `cmd/goose-agent` **소스 트리를 WalkDir**(`internal/storage/provisioner.go`)하는데, release 설치본(`/opt/ephemera`)에는 소스가 없어 `fatal: ensure goose-agent err="walk goose-agent sources: lstat /opt/ephemera/cmd/goose-agent: no such file or directory"`로 종료. `EnsureMicroInit`(mtime 기반)은 소스 부재를 tolerate하지만 `EnsureGooseAgent`(source-hash 기반)는 그렇지 않다. `INSTALL.md`의 "no Go toolchain or source checkout needed" 계약과 배치되며, `build_release.sh`는 `artifacts/goose-agent`는 담지만 `.sha256` stamp도 소스도 담지 않는다.
+- 영향: FULL variant 실 host 설치 검증에서 `install.sh` 파일 배치/서비스 등록/`uninstall.sh`(default·`--purge`)는 모두 정상이나 VM smoke는 daemon 미기동으로 BLOCKED.
+- 수정 방향(별도 사이클): `EnsureGooseAgent`가 소스 부재 + shipped `artifacts/goose-agent`(+stamp) 존재 시 prebuilt를 신뢰하도록 하고, `build_release.sh`가 goose-agent stamp를 동봉하도록. 수정 후 host-b installer 재검증(VM 1개 생성/삭제 smoke) 필수. 근거·증거: `docs/operations/2026-07-11-scheduler-ops-deploy-handoff.md`.
+
 ## 릴리즈 종류
 
 | 종류 | Tag 예시 | 공개 대상 | 기준 내용 |

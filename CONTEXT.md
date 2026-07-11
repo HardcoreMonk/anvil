@@ -195,6 +195,15 @@ backport(atomic temp+rename 무조건 검증 포함, upstream보다 stricter)가
   모드에서만 루프가 돌며 daemon 재시작 후 hub/relay wall 등록을 자동 복구)
 - scheduler service 환경 변수: `ANVIL_SCHEDULER_ADDR`,
   `ANVIL_SCHEDULER_STATE`, `ANVIL_SCHEDULER_QUOTA_STORE`
+- scheduler resident host-inventory polling 환경 변수: `ANVIL_SCHEDULER_HOSTS_FILE`
+  (control loop가 poll할 host 인벤토리 JSON; unset이면 persistent state의 host만
+  poll), `ANVIL_SCHEDULER_POLL_INTERVAL`(기본 `10s`), `ANVIL_SCHEDULER_RECONCILE_INTERVAL`
+  (기본 `30s`), `ANVIL_SCHEDULER_HOST_TIMEOUT`(기본 `3s`), `ANVIL_SCHEDULER_FAILURE_THRESHOLD`
+  (기본 `3`, `>=1`), `ANVIL_SCHEDULER_API_TOKEN`(daemon `/health`,`/vms` poll에 실을 bearer,
+  unset이면 미인증 poll), `ANVIL_SCHEDULER_REQUIRE_PERSISTENCE`(`true`면 state 저장 저하 시
+  scheduling `503`). 모두 `cmd/anvil-scheduler`가 이미 읽으며 ANVIL alias 없음. 설치
+  스크립트는 operator가 설정한 값만 systemd env 파일에 기록한다(`ANVIL_SCHEDULER_HOSTS_SRC`는
+  hosts JSON을 `ANVIL_SCHEDULER_HOSTS_FILE`로 설치하는 설치 스크립트 전용 knob)
 - profile egress policy directory 환경 변수: `EPHEMERA_EGRESS_PROFILE_DIR`,
   `ANVIL_EGRESS_PROFILE_DIR`
 - optional trace export 환경 변수: `ANVIL_OTEL_EXPORTER_OTLP_ENDPOINT`,
