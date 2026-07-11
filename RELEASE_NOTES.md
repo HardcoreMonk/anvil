@@ -1402,7 +1402,7 @@ Firecracker MicroVM을 만들고, 그 안에서 Goose task를 실행하는 기�
 - A one-shot operator demo (manual gate, like `observability_demo.sh`): preflight → swap per-role `*.webdev.{md,yaml}` overrides → spawn an `orchestrator + worker + reviewer` flock → background SSE harvester on the Town Wall → one `POST /vms/{orchestrator}/tasks` that drives the whole job → `npm install` + `vite build` → `vite preview` on `:5173` until `Ctrl-C`.
 - The orchestrator drives a single Goose session through ~13 tool calls: for each of `src/App.jsx`, `src/main.jsx`, `src/index.css`, `index.html` it calls `gtcall worker-1` to generate the file, `gtwall` to publish it to the Town Wall, and a best-effort `gtcall reviewer-1` review note — then posts `<<<DONE>>>`. All four `<<<FILE:>>>` posts are authored by `orchestrator-1`; there is no host authorship.
 - Per-role models: orchestrator `gemini-2.5-flash` (must drive the loop without stalling), worker + reviewer `gemini-2.5-flash-lite` (single-shot). Assumes a paid-tier Gemini key — the free tier's shared 20 RPM cap across all models cannot sustain multi-turn orchestration.
-- See [Multi-Agent Webdev Demo](README.md#multi-agent-webdev-demo-v036) in the README.
+- See [Multi-Agent Webdev Demo](docs/guides/demos.md#multi-agent-webdev-demo-v036) in the demos guide.
 
 ### In-VM agent-to-agent dispatch — `gtcall`
 

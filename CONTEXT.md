@@ -92,7 +92,7 @@ backport(atomic temp+rename 무조건 검증 포함, upstream보다 stricter)가
 1. `CONTEXT.md`: anvil/ephemera/IronClaw 경계, 변경 불가 계약
 2. `docs/PUBLIC_RELEASE_BOUNDARY.md`: anvil 공개 포함/조건부 포함/제외 표면
 3. `docs/ADR_INDEX.md`: 장기 설계 결정과 upstream ephemera 채택 상태
-4. `README.md`: anvil 결합 프로젝트 개요와 현재 구현 사용법
+4. `README.md`: anvil 결합 프로젝트 개요·경계·빠른 시작 진입점 (상세 사용법은 `docs/guides/`)
 5. `RELEASE_NOTES.md`: ephemera 릴리즈와 anvil 통합 작업 변화
 6. `docs/architecture/*.md`: ephemera runtime, service logic, anvil MCP 설계
 7. `docs/analysis/*.md`: ephemera 0.1.0/0.2.0 분석과 보조 설명
@@ -127,8 +127,9 @@ backport(atomic temp+rename 무조건 검증 포함, upstream보다 stricter)가
 
 - `docs/analysis/`는 ephemera 0.1.0/0.2.0 분석 근거 자료다. 제목과 설명은
   ephemera 릴리즈 분석임을 명확히 해야 한다.
-- `README.md`는 anvil 결합 프로젝트의 현재 진입점이다. ephemera runtime
-  사용법은 anvil의 기반 runtime 설명으로 포함한다.
+- `README.md`는 anvil 결합 프로젝트의 현재 진입점이며 개요·경계·빠른 시작·문서
+  지도를 요약·링크한다. ephemera runtime 사용법 상세(실행 모델, 설정, API, 보안,
+  MCP 어댑터 등)는 anvil의 기반 runtime 설명으로 `docs/guides/`에 분리해 둔다.
 - 코드 식별자, API 경로, 환경 변수, 파일 경로는 실제 구현과 호환성이
   더 중요하므로 임의로 한국어화하지 않는다.
 - `ephemera`라는 이름이 남아 있는 API/환경 변수는 기반 runtime 계약으로

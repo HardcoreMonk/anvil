@@ -80,7 +80,7 @@ ephemera-ctl vm spawn
 model) and add the matching key to `goose-secrets.yaml`, then create per-profile
 configs from the **Settings** screen in the Web UI. **MCP tool gateway** — set
 `EPHEMERA_MCP_ENABLED=1` in `ephemera.env` and add `configs/mcp/servers.yaml`
-(see `README.md` → MCP gateway), then `systemctl restart ephemera`.
+(see `docs/guides/runtime-usage.md` → MCP Gateway), then `systemctl restart ephemera`.
 
 ## Exposing the API beyond localhost
 
