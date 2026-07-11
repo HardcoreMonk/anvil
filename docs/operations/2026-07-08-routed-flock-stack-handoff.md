@@ -62,8 +62,7 @@ PASS(기록: [2026-07-11-6b-failover-verification-run.md](2026-07-11-6b-failover
    2026-07-10): wall handoff Follow-Up 참조.
 4. cross-host broadcast fan-out — 계속 비목표 (필요 대두 시 별도 설계).
 5. 소소한 잔여 (각 handoff Follow-Up 기록): e2e 포트 공유(wall/gtcall/failover
-   동시 실행 불가 — 기존 특성), 비동기 relay buffer 재평가(failover 구현
-   완료로 재평가 가능 — §6b 수동 검증 통과 후 우선순위 판단), cross-flock
+   동시 실행 불가 — 기존 특성), ~~비동기 relay buffer 재평가~~(2026-07-11 재평가 결과 **기각 확정** — home failover handoff Follow-Up 5번 참고), cross-flock
    isolation 커버리지 테스트(Option B, home failover handoff Follow-Up 4번
    참고).
 

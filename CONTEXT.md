@@ -432,10 +432,11 @@ daemon으로 보내는 outbound Bearer token이다.
 - scheduler service의 실제 운영 배포와 host inventory polling daemonization
 - cross-host snapshot replication 자동화(background retry queue·metrics·alert —
   수동 동기 replication과 snapshot locality preference는 baseline 포함)
-- 비동기 relay buffer(home 재선출 failover 구현 완료로 재평가 가능 — 수동
-  multi-host §6 failover 시나리오 수행 후 우선순위 판단), 실 2-daemon 수동
-  검증 §6 home failover 시나리오 수행(트리거: 다음 서버 세션,
-  `docs/operations/2026-07-08-cross-host-manual-verification.md`), SSE relay
-  non-200 content-type polish
+- ~~비동기 relay buffer~~ — **기각 확정 (2026-07-11 사용자 결정)**: failover가
+  home 불능 창을 유계화(~3×reconcile interval; §6b 실측 ~27s@10s)해 명분이
+  소멸했고, buffer는 wall 손실 계약과 충돌하는 부분-부활 semantics·전달 보장
+  약화·seq/중복 복잡성을 재도입한다. 필요 대두 시 대안은 guest-side `gtwall`
+  지수 backoff 재시도(미등재). §6b 실 2-daemon failover 검증은 2026-07-11
+  수행 완료(PASS — `docs/operations/2026-07-11-6b-failover-verification-run.md`)
 - egress allow host rule의 L7 proxy/SNI 기반 강화
 - snapshot storage quota dashboard
