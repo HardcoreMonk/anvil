@@ -67,6 +67,8 @@ bound하고, 테스트를 "원인 에러가 로그에 없어야 한다"는 redac
   [`docs/operations/2026-07-08-bounded-relay-retry-handoff.md`](2026-07-08-bounded-relay-retry-handoff.md)).
   home SPOF mesh 진화는 재선출 failover로 설계 확정 후 ~~구현은 수동
   multi-host 검증 통과 후로 보류~~ — **구현 완료** (2026-07-11,
-  `feature/home-failover`). 실 2-daemon 수동 검증(§6b)은 아직 미수행. 상세:
-  [2026-07-11-home-failover-handoff.md](2026-07-11-home-failover-handoff.md).
+  `feature/home-failover`, PR #33 → main `0feb9fb`). 실 2-daemon 수동
+  검증(§6b)은 2026-07-11 수행 완료 — 전 세부 단계 PASS. 상세:
+  [2026-07-11-home-failover-handoff.md](2026-07-11-home-failover-handoff.md),
+  [2026-07-11-6b-failover-verification-run.md](2026-07-11-6b-failover-verification-run.md).
   SSE non-200 polish는 town wall handoff의 기존 follow-up 유지.

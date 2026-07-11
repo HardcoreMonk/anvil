@@ -391,10 +391,13 @@ daemon으로 보내는 outbound Bearer token이다.
   유닛 8종(`TestFailover_*`, `internal/anvilmcp/home_failover_test.go`) +
   KVM e2e `scripts/anvil-cross-host-failover-e2e.sh`(stub A→stub B 재선출 +
   real daemon relay→hub 승격, wall 손실 계약 관측, redaction 검증, 3회
-  연속 green)로 검증됐다. 실 2-daemon 수동 검증(§6 시나리오 확장)은 아직
-  미수행 — 트리거는 다음 서버 세션. 상세:
+  연속 green)로 검증됐다. 실 2-daemon 수동 검증(§6b)은 2026-07-11 수행 완료
+  — 전 세부 단계 PASS(전환 창 실측 ~27s @`reconcile 10s`, hub→relay 강등·wall
+  손실 계약·양방향 wall/gtcall 재확인·redaction·정리+revoke; 신규 결함 없음).
+  상세:
   [`docs/superpowers/specs/2026-07-08-home-failover-design.md`](docs/superpowers/specs/2026-07-08-home-failover-design.md),
-  [`docs/operations/2026-07-11-home-failover-handoff.md`](docs/operations/2026-07-11-home-failover-handoff.md).
+  [`docs/operations/2026-07-11-home-failover-handoff.md`](docs/operations/2026-07-11-home-failover-handoff.md),
+  [`docs/operations/2026-07-11-6b-failover-verification-run.md`](docs/operations/2026-07-11-6b-failover-verification-run.md).
 - `scripts/anvil-mcp-e2e.sh flock`, 전체 KVM `sudo bash e2e_test.sh`, script-only
   workload runner E2E, cross-host wall relay E2E
   (`scripts/anvil-cross-host-wall-e2e.sh`), cross-host gtcall relay E2E
