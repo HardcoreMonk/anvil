@@ -177,9 +177,11 @@ failover 후 새 home은 빈 `TOWN_WALL.log`에서 seq를 재시작한다. **이
    healing은 계속 동작)으로 재구성한 진짜 cross-**flock** isolation 테스트가
    필요하다 — product 코드 변경 없이 `runtime_router_test.go` 단일 파일
    추가로 가능. 별도 승인 후 착수.
-5. **비동기 relay buffer 재평가** — home failover 구현 완료로 이제 재평가
-   가능해졌다. §6b 수동 검증 통과 후 우선순위 판단(stack handoff
-   Follow-Up 5번 참고).
+5. ~~비동기 relay buffer 재평가~~ — **기각 확정 (2026-07-11 사용자 결정)**:
+   failover의 불능 창 유계화(§6b 실측 ~27s@10s interval)로 명분 소멸 + wall
+   손실 계약과 충돌하는 부분-부활 semantics·전달 보장 약화·seq/중복 복잡성
+   재도입. 대안(guest-side `gtwall` 지수 backoff 재시도)은 필요 대두 시 별도
+   등재.
 6. **(최종 whole-branch 리뷰 파생, minor)** 감지 카운터의 "연속" 정밀화 —
    home이 probe에는 도달 가능하나 hub 재등록이 비-dial 에러로 실패하는
    pass는 카운터를 리셋하지 않아, flapping home이 이론상 최대 2 pass 이르게

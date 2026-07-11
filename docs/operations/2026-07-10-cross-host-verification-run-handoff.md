@@ -84,7 +84,7 @@
 검증이었다 — **정확히 이 수동 검증이 잡도록 설계된 부류의 결함**이며, 이번
 검증의 핵심 수확.
 
-### D2 (부차) — routed flock delete의 cleanup_failed 오보고
+### ~~D2~~ — **CLOSED** (PR #37 `80a55a1`, 2026-07-11) — routed flock delete의 cleanup_failed 오보고
 
 `anvil_delete_flock`이 3회 모두 `"routed flock delete cleanup pending:
 reason=cleanup_failed"` (isError)를 반환했으나, 실제로는 양 daemon의 flock/VM
@@ -136,7 +136,7 @@ teardown과 token revoke까지 전부 성공. 보고/멱등성 결함 — 운영
    [2026-07-11-home-failover-handoff.md](2026-07-11-home-failover-handoff.md).
 3. ~~D3 코드 완화~~ — **완료** (`fix/d3-zfs-diff-guard`): hole-granularity probe +
    창설측 diff→full 강등 + 판독측 overlay 거부. 위 D3 "코드 후속" 참조.
-4. **D2 fix** — delete cleanup 보고 정합.
+4. ~~D2 fix~~ — **완료** (PR #37): VM DELETE 404를 "이미 소멸"로 분류, 진짜 실패는 계속 cleanup_failed(경계 테스트 고정).
 5. fc upstream/OpenZFS 참고 보고 검토 (D3는 fc diff 포맷의 "sparseness=의미"
    계약이 coarse-granularity fs에서 깨지는 일반 문제 — fc 문서 개선 제안 후보).
 6. (리뷰 파생, 소소) reconcile 틱마다의 무변경 Persist dirty-check /

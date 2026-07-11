@@ -113,9 +113,13 @@
 1. **(문서, 소소)** 절차 ⑥b 문언의 "`GET /flocks/{id}` kind" 관측을 on-disk
    metadata + 행위(forward) + audit 3중 관측으로 보정 — 이번 갱신에 note로
    반영, 정식 문언 정리는 별도.
-2. **D2 fix** — delete cleanup 보고 정합(기존 Follow-Up 유지, ⑥b로 재확인됨).
-3. **비동기 relay buffer 재평가** — home failover 실검증 완료로 이제 우선순위
-   판단 가능(stack/handoff Follow-Up 참고).
+2. ~~D2 fix~~ — **완료 (PR #37, 2026-07-11)**: VM DELETE 404를 "이미 소멸"로
+   분류(RCA: member relay flock의 cascade teardown 후 404 오분류). 진짜 실패는
+   계속 `cleanup_failed`(dial/5xx 경계 테스트 고정).
+3. ~~비동기 relay buffer 재평가~~ — **기각 확정 (2026-07-11 사용자 결정)**:
+   failover의 불능 창 유계화로 명분 소멸 + wall 손실 계약 충돌·전달 보장
+   약화·seq/중복 복잡성 재도입. 대안(guest-side `gtwall` 재시도)은 필요 대두
+   시 별도 등재.
 4. **zone `~/projects/claude-zone/docs/FOLLOWUP.md` P3-09** — ⑥b 수행·PASS로
    갱신(zone repo는 이 branch 밖 — 트리거만 기록).
 
