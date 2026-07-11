@@ -426,7 +426,19 @@ func MergeRootfsDiff(baseRootfsPath, diffPath, outputPath string) error {
 // outputPath, which must already contain the base image. It walks the diff with
 // SEEK_DATA/SEEK_HOLE so only written regions are touched, avoiding a full read/write of
 // the base. On error outputPath is removed.
+//
+// Read-side D3 guard: SEEK_DATA/SEEK_HOLE only recovers the true written extent when the
+// diff's filesystem reports holes at 4KiB granularity. On a coarse fs (ZFS recordsize>4K)
+// the reported data extent balloons to whole records, so unwritten zero padding would be
+// splatted over live base memory and triple-fault the guest. Refuse rather than corrupt —
+// this also catches coarse diffs that arrived via replication/import, not just local ones.
 func overlaySparseDiff(diffPath, outputPath string) error {
+	dir := filepath.Dir(diffPath)
+	if g, perr := holeGranularityFn(dir); perr != nil || g > holeGranularityFine {
+		os.Remove(outputPath)
+		return fmt.Errorf("sparse diff hole granularity %d > %d on %s: refusing overlay to avoid guest memory corruption (see D3)", g, holeGranularityFine, dir)
+	}
+
 	diff, err := os.Open(diffPath)
 	if err != nil {
 		os.Remove(outputPath)
