@@ -272,3 +272,48 @@ anvil surface는 정상 커버된다. IronClaw 내장 tool의 Gemini 스키마 �
 
 이번 세션의 `~/.ironclaw` 변경(tool_permissions 31개 `disabled`, `mcp-servers.json` repoint)은
 검증 종료 후 원값으로 **전부 원복**했다(원복 후 per-key diff 일치 확인).
+
+### 갱신된 credential 재검증 (2026-07-12 후속)
+
+만료 key를 **갱신된 credential**로 교체(값은 `~/.ironclaw`에만 보관, 문서·repo·report 어디에도
+미기록)한 뒤 anvil 전용 profile로 재시도했다. 이때 위 "잔여 후속 1"의 낙관적 서술
+("스키마 통과는 이번에 확인됨")이 **부정확**했음이 드러났다 — 정정한다.
+
+- credential 갱신으로 `API_KEY_INVALID`는 해소됐다(Gemini auth 통과).
+- 그러나 valid key 상태에서 **새 스키마 오류**가 표면화됐다. 이번에는 IronClaw 내장 tool이
+  아니라 **anvil 자신의 flock-create tool 2종**(`anvil_spawn_flock`,
+  `anvil_create_routed_flock_members`)에서 발생한다:
+  `GenerateContentRequest.tools[0].function_declarations[..].parameters.properties[roles].items:
+  field predicate failed: $type == Type.ARRAY`. 두 tool의 `roles []string` 필드가 만든 MCP
+  wire schema를 Gemini function declaration 검증이 거부한다. round-2의 `API_KEY_INVALID`가
+  이 오류를 **가려서**, "anvil-only profile이 스키마를 완전히 해소했다"는 판단은 절반만
+  맞았다(내장 tool 오류는 해소, anvil flock tool 오류는 미해소).
+- 원인 상세: `TestCurrentAnvilToolInputsAreGeminiCompatible`는 **이상화된**
+  `CurrentIronClawToolInputSchemas()`(roles=ARRAY / items=STRING)만 검증하며 이는 통과한다.
+  실제 wire schema는 go-sdk `mcp.AddTool`이 `SpawnFlockInput{}`를 reflection해 생성하는데, 그
+  형태가 Gemini에 거부된다. 즉 테스트의 이상화 표현과 실제 wire schema가 flock `roles`에서
+  괴리된다 — 테스트가 실제 wire schema를 커버하지 않는다.
+- **실증(PoC)**: 위 2개 flock-create tool만 제외한 로컬 임시 빌드(커밋/기록 안 함, 검증 후 폐기)
+  로는 IronClaw agent-driven **full VM lifecycle이 실제로 성공**한다. gemini-2.5-flash가 자기
+  판단으로 tool을 순차 호출: `anvil_spawn_vm` → `anvil_run_task`(출력 `anvil-smoke-ok`) →
+  `anvil_create_snapshot` → (restore가 `409 source_vm_running`을 반환하자 agent가 스스로
+  `anvil_stop_vm`→`anvil_delete_vm`로 원본을 제거) → `anvil_restore_snapshot` →
+  `anvil_get_vm_health`(idle) → `anvil_delete_vm`(복원본) → `anvil_delete_snapshot` →
+  `LIFECYCLE OK`. VM lifecycle tool 자체는 Gemini 호환이며 agent가 자율 구동한다.
+- **데모 격상 blocker**: 배포되는 `anvil-mcp`는 broken flock tool 2종을 항상 노출하고, IronClaw는
+  MCP tool 전체를 LLM에 전달한다(`tool_permissions=disabled`는 실행 gate일 뿐 LLM 노출을
+  제거하지 않음 — 확인함). 따라서 재현 가능한 정직한 real-agent GIF는 anvil-mcp 수정
+  (flock `roles` wire schema를 Gemini-safe하게 고치거나, 2개 flock-create tool을 opt-in gate)
+  이 선행돼야 한다. 이는 anvil behavior/스키마 변경으로 데모 asset 범위를 벗어나므로 여기서는
+  **수정하지 않고 보고만** 한다.
+- 이번 후속의 `~/.ironclaw` 변경도 전부 원복했다(tool_permissions 31 built-in per-key diff 일치
+  + `config set`이 만든 flock MCP-tool 2행을 DB `settings`에서 삭제, `mcp-servers.json` 원복).
+  **단, 갱신된 credential은 사용자 의도대로 `~/.ironclaw/.env`에 유지**한다.
+
+#### 잔여 후속 (갱신)
+
+1. anvil-mcp의 `anvil_spawn_flock` / `anvil_create_routed_flock_members` `roles` wire schema를
+   Gemini function declaration 호환으로 수정(또는 2 tool을 gate)한다. 완료되면 배포 adapter로
+   IronClaw agent-driven full lifecycle을 재녹화해 `docs/assets/ironclaw-e2e.gif`를 교체한다.
+2. `TestCurrentAnvilToolInputsAreGeminiCompatible`가 이상화 표현이 아닌 **실제 MCP wire schema**
+   (SDK reflection 산출물)를 검증하도록 보강해 이 괴리를 회귀 방지한다.
