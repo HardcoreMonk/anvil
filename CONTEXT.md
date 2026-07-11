@@ -36,8 +36,10 @@ prefix를 사용한다. **`anvil-v0.7.0`부터 anvil 공개 릴리즈 버전은 
 target은 `2f367dd`(태그 시점 main; parity + release-gate hardening + post-release
 backlog + open-gate 마감; full KVM e2e 343✓, step 59 실 LLM 포함)이며 설치 아티팩트
 (SLIM/FULL tarball + sha256)를 제공한다. 이후 main은 cross-host shared Town
-Wall/gtcall, adapter reconcile loop, bounded relay retry 등(PR #19·#21-#24)
-untagged 작업을 더 포함한다.
+Wall/gtcall/home 재선출 failover, adapter reconcile loop, bounded relay retry,
+cross-host snapshot replication 자동화에 더해 routed flock 스택 결함 D1~D4 종결,
+web major(vite8/svelte5), scheduler 실배포+installer 검증(PR #19~#46) 등 untagged
+작업을 더 포함한다(요지는 아래 "후속 완료 상태", 상세는 dated handoff).
 
 이전 anvil 통합 번호 계보(`anvil-v0.1.0`→`v0.4.0`)와 upstream 시리즈별 마일스톤은
 **개발 내역으로 보존한다**(전부 non-latest):
@@ -250,90 +252,28 @@ daemon으로 보내는 outbound Bearer token이다.
   노출된 상태이며, 기존 VM/snapshot tool 계약을 대체하지 않는다.
 - daemon direct `POST /flocks`와 MCP `anvil_spawn_flock`은 blank `task`, empty role,
   path separator가 포함된 role을 VM spawn 전에 거부한다.
-- ephemera upstream `v0.3.1`-`v0.3.6` runtime 변경은 anvil branch에 병합됐다.
-  `v0.3.1` Goosetown watchdog, flock metadata persistence, Town Wall monotonic
-  `seq`, fatal bind startup hardening은 채택하되 upstream의 `POST /flocks`
-  `agent_tokens` 응답 노출은 anvil 보안 불변 조건에 맞춰 채택하지 않는다.
-- upstream `v0.3.2`-`v0.3.5`의 live VM cold-restart, watchdog dead persistence,
-  per-agent restart, in-VM CP token injection/rotation, `/metrics`,
-  `/vms/{vm_id}/stats`, `log/slog`, observability demo는 `adapted` runtime
-  baseline으로 채택됐다.
-- upstream `v0.3.6`의 autonomous webdev demo, in-VM `gtcall`, multi-line-safe
-  `gtwall`, Goose JSON output parsing은 `adapted` runtime baseline으로 채택한다.
-  `gtcall`은 peer agent credential을 노출하지 않고 control-plane proxy token
-  injection 경계를 유지한다.
-- upstream `v0.4.0`-`v0.4.5` runtime 안정화 변경은 anvil main runtime baseline으로
-  채택됐고 full KVM gate로 검증됐다. storage/recovery, auth/audit, COW,
-  single-host flock lifecycle, streaming task, nested task depth guard, watchdog
-  status, snapshot-restore auto-recovery는 anvil 보안/운영 계약에 맞춰 `adapted`
-  상태다. `v0.4.2` default COW 전환은 KVM burn-in 후 flip 결정으로 deferred, auto-snapshot
-  public support는 env-only 확정(2026-07-11: config API/UI/MCP 공개 표면 미노출, opt-in
-  `EPHEMERA_AUTOSNAPSHOT` 운영법은 runbook), `v0.4.4` flock broadcast의 MCP tool 노출은
-  기각 확정(2026-07-11: daemon-only ephemera-ctl 유지)이다.
-- upstream `v0.4.5` snapshot-restore auto-recovery에서 anvil은 live·persisted
-  restored VM이 참조하는 source snapshot의 `DELETE`를 `409`로 계속 보호한다.
-  upstream e2e 46c의 `200` orphan 동작과 의도적으로 다르며, 이 divergence는
-  `docs/ADR_INDEX.md`와 `docs/operations/upstream-sync-policy.md`에 `adapted`로
-  기록한다.
-- upstream `v0.5.0`-`v0.5.5` operator support 변경은 anvil main runtime baseline으로
-  채택됐고 full KVM gate(4개 스크립트)로 검증됐다. `v0.5.0` operator Web UI(Svelte SPA,
-  EN/KO, `cmd/goose-daemon/uidist/` embedded)와 `/config/*` surface는 runtime/operator
-  표면으로만 채택하고 IronClaw `anvil_*` MCP surface로 노출하지 않는다. `/ui/`(정적
-  bundle + login)만 auth 밖에 두고 모든 data API는 bearer 뒤에 둔다. `/config/profiles`·
-  `/config/providers`·`/config/clients`는 `goose-secrets.yaml` 값을 읽거나 노출하지
-  않는다(sentinel/guard test). buffered `/tasks` 기본 계약과 `cmd/anvil-mcp` tool
-  surface는 그대로다.
-- `v0.5.3`부터 anvil은 upstream default VM sizing `1` vCPU / `1024` MiB를 채택한다
-  (v0.5.3 이전 2/2048에서 변경, KVM 근거로 승인). snapshot metadata가 per-VM sizing을
-  기록하고 legacy snapshot은 2/2048로 fallback한다. flock member spawn(createFlock·
-  add-agent)이 per-profile `EPHEMERA_VCPU_COUNT`/`EPHEMERA_MEM_SIZE_MIB` override를
-  무시하고 `LookupProfile` default로만 sizing하던 upstream-inherited gap은 `POST /vms`
-  경로와 동일한 override 블록을 미러링해 닫혔다(2026-07-11). 기존 flock에 add-agent 시
-  신규 멤버만 profile sizing이 걸린다(의도된 동작).
-- Phase 2 KVM gate 중, `v0.5.x` `gracefulAgentStop`이 v0.2.0부터 잠재해 있던 upstream
-  pooled-client 결함을 드러냈다. shared keep-alive agent proxy client가 guest IP
-  재활용 사이에 stale pooled connection을 재사용해 restored VM `/tasks`가 hang/`502`로
-  실패했다. `64ec57c`가 request마다 fresh dial(`DisableKeepAlives`)하도록 고치고
-  connection-reuse guard test를 추가했다. upstream connection pooling과의 divergence이며
-  upstream 기여 후보다.
-- upstream `v0.6.0`-`v0.6.4` MCP Gateway 변경은 anvil main runtime baseline으로
-  채택됐고 full KVM gate로 검증됐다(e2e `334✓/0✗`, gateway step 84-89 최초 실행 green).
-  runtime MCP Gateway(`internal/mcpgateway`, `EPHEMERA_MCP_*`, `configs/mcp/*`)는
-  daemon-side runtime/operator surface이고 IronClaw `anvil_*` MCP surface가 아니며
-  `cmd/anvil-mcp` adapter를 대체하지 않는다. anvil 경계는 구조적으로 강제된다: caller
-  profile은 source IP↔VM registry로 server-side 판정(unknown → `403`), backend
-  credential은 host-side(`configs/mcp/secrets.yaml`, gitignored)에만 있고 VM에는
-  gateway URL만 주입되며(`VMPrepareOptions`에 credential 필드 없음), `audit/mcp.jsonl`은
-  metadata-only(고정 key set, `Err`도 제외), profile policy는 `servers.yaml`을 좁히기만
-  하고 넓힐 수 없다. IronClaw schema와 adapter tool 목록은 gateway tool을 제외한다(guard).
-- upstream `v0.6.1`/`v0.6.2`/`v0.6.4`(upstream에 `v0.6.3` 없음): `EPHEMERA_NET_ANTISPOOF`
-  기본 on(ebtables best-effort), per-(VM,server) token-bucket rate limit
-  (`EPHEMERA_MCP_RATE` 기본 `0`=unlimited), resources/prompts가 tools와 policy·rate
-  bucket을 공유(guard), stdio backend는 child env를 `[PATH,HOME,LANG]`+`spec.Env`로
-  재구성(`EPHEMERA_*` canary가 child에 새지 않음)하고 credential은 `credential_env`로만
-  주입(argv 아님), root일 때 `nobody`로 실행하고 `/var/lib/ephemera/mcp-stdio` scratch를
-  cwd·HOME으로 쓰며, shutdown이 stdio process group을 reap한다(pgid recycling-safe).
-  `GET /config/mcp/servers`는 transport/command와 `has_credential`만 노출한다(leak guard).
-- upstream `v0.7.0` 변경은 anvil main runtime baseline으로 채택됐고 full KVM/installer
-  gate로 검증됐다(e2e `334✓/0✗`). 이로써 upstream parity scope(`v0.4.0`-`v0.7.0`) 코드
-  편입이 완료됐다. end-user installer(`install.sh`/`uninstall.sh`/`INSTALL.md`/
-  `ephemera.service.in`)와 release workflow(`scripts/build_release.sh`)는 runtime/operator
-  installer surface로 채택하며 systemd service는 canonical `ephemera` 이름을 유지한다
-  (rule-permitted, anvil alias wrapper 없음). conversation transcript restore는 daemon
-  proxy `GET /vms/{id}/sessions/{name}/transcript`(bearer)로 노출하고, agent export는
-  read-only `goose session export`(model call 없음)이며 응답 schema `{turns:[{role,text}]}`는
-  auth-free여서 Web UI가 daemon token 없이 렌더한다. 4개 transcript-safety guard(bearer
-  없으면 `401`, payload는 provider key/CP token/`agent_token` sentinel-free, cache-hit는
-  agent spawn 없이 serve, export argv는 `session export -n {name} --format json`이며
-  run-token 거부)로 고정한다.
-- v0.7.0 병합 시 sync 전 독립 backport 3종(kernel SHA atomic temp+rename 무조건 검증,
-  `resolveWorkDir`/`EPHEMERA_HOME`, `waitForAgent` per-probe timeout)이 upstream 버전을
-  이기고 single definition으로 남았다(anvil 쪽이 stricter, net Go diff는 doc-comment-only).
-  기존 anvil adaptation(agent-stamp mount skip, restore-over-`meta.DiskPath`,
-  proxy `DisableKeepAlives`)은 하나도 rollback되지 않았다. release build integrity:
-  `build_release.sh`가 다운로드한 kernel/firecracker를 `main.go`에서 parse한 pin과
-  `sha256sum -c`로 검증해, runtime `EnsureKernel`이 기존 파일을 `os.Stat`로 skip하던
-  FULL-tarball supply-chain gap을 닫는다.
+- upstream `v0.3.1`-`v0.7.0` runtime/operator 변경은 전부 anvil main runtime
+  baseline으로 병합·적응됐고 full KVM gate로 검증됐다(upstream parity scope 코드
+  편입 완료). 태그별 adopted/adapted/deferred/excluded 분류와 보안 경계 원문은
+  [`docs/ADR_INDEX.md`](docs/ADR_INDEX.md) §4(+ §3의 sizing/keep-alive 절),
+  [`docs/analysis/10-v0.4.0-v0.4.5-runtime-stabilization-adoption.md`](docs/analysis/10-v0.4.0-v0.4.5-runtime-stabilization-adoption.md),
+  [`docs/analysis/11-v0.5.0-v0.7.0-core-service-parity-review.md`](docs/analysis/11-v0.5.0-v0.7.0-core-service-parity-review.md)에
+  있고 이 목록은 그 요지만 둔다: `v0.3.x` Goosetown/watchdog/cold-restart/CP token
+  injection/gtcall·gtwall(단 `POST /flocks` `agent_tokens` 응답 노출은 anvil 보안
+  불변으로 미채택), `v0.4.x` storage/COW/nested depth guard/snapshot-restore
+  auto-recovery(v0.4.5 restore가 참조하는 source snapshot의 `DELETE`를 `409`로 보호 —
+  upstream e2e 46c `200` orphan과 의도적 divergent), `v0.5.x` operator Web UI/`/config/*`
+  (`goose-secrets.yaml` 미노출 sentinel)·default sizing 1vCPU/1024MiB, `v0.6.x` runtime
+  MCP Gateway(caller profile server-side 판정·credential host-side·audit metadata-only·
+  policy widen 불가로 경계 구조적 강제), `v0.7.0` installer/transcript restore + release
+  build integrity(kernel/fc `sha256sum -c`). 전부 runtime/operator surface로만 채택 —
+  IronClaw `anvil_*` MCP surface 미노출, `cmd/anvil-mcp` adapter 불대체, systemd는
+  canonical `ephemera` 이름 유지.
+- keep-alive divergence(upstream 기여 후보): `v0.5.x` `gracefulAgentStop`이 v0.2.0부터
+  잠재하던 upstream shared pooled agent proxy client 결함(guest IP 재활용 시 stale
+  connection → restored VM `/tasks` hang/`502`)을 `64ec57c`가 request마다 fresh
+  dial(`DisableKeepAlives`)로 고쳤다(connection-reuse guard test). upstream connection
+  pooling과 의도적 divergence. 상세 [`docs/ADR_INDEX.md`](docs/ADR_INDEX.md) §4 keep-alive 절.
 - cross-host shared Town Wall(2026-07-07, PR #19)이 main에 편입됐다. routed flock
   member가 home-host hub + daemon-to-daemon relay로 하나의 공유 Town Wall을
   사용한다. `POST /vms`가 flock identity(`flock_id`/`agent_id`/
@@ -440,39 +380,78 @@ daemon으로 보내는 outbound Bearer token이다.
   runbook 권장 alert 식까지이며 실 alerting은 zone 대시보드 몫이다. 유닛
   (`-race`) + KVM e2e `scripts/anvil-snapshot-replication-e2e.sh`(대상
   down→dial 실패→복귀→자동 복제→metrics 전이 관측, 2연속 green)로
-  검증됐다. 상세:
+  검증됐다. 실 2-daemon(비-stub) 수동 검증(PR #45)도 2026-07-11 수행 완료 —
+  host-b가 실 daemon으로 import bundle을 수신·저장·재서빙하는 조건에서 자동
+  복제·dial-cap giving-up·복귀 reset·수렴·metric 전이·redaction 전부 PASS
+  (신규 결함 없음). 상세:
   [`docs/superpowers/specs/2026-07-11-snapshot-replication-automation-design.md`](docs/superpowers/specs/2026-07-11-snapshot-replication-automation-design.md),
-  [`docs/operations/2026-07-11-snapshot-replication-automation-handoff.md`](docs/operations/2026-07-11-snapshot-replication-automation-handoff.md).
+  [`docs/operations/2026-07-11-snapshot-replication-automation-handoff.md`](docs/operations/2026-07-11-snapshot-replication-automation-handoff.md),
+  [`docs/operations/2026-07-11-replication-multihost-verification-run.md`](docs/operations/2026-07-11-replication-multihost-verification-run.md).
+- routed flock 스택 결함 D1~D4가 전부 종결됐다(2026-07-10~11). D1: daemon 재시작
+  시 routed flock 분산 상태 유실 + 재등록 비멱등 `409`(PR #30·#31, hub/relay 토큰
+  refill 포함). D2: routed flock delete가 이미 소멸한 VM의 `DELETE` `404`를
+  cleanup 실패로 오보고하던 것을 "이미 소멸"로 분류(진짜 실패는 계속
+  `cleanup_failed`, 경계 테스트 고정, PR #37). D3: ZFS 등 coarse-hole(recordsize
+  >4K) 파일시스템에서 sparse diff snapshot의 hole이 record 단위로만 보고돼 guest
+  메모리를 오염시키던 것을 `ProbeHoleGranularity`(fine=`HoleGranularityFine` 4096B)
+  기반 창설측 diff→full 강등 + 판독측 overlay 거부(`refusing overlay ... (see D3)`)
+  로 방어(PR #36). D4: cow-스폰 VM의 diff-restore가 ZFS+전체 게이트 부하에서만
+  guest kernel panic(GPF)하던 fsync 부재 durability race를 `overlaySparseDiff`가
+  loop attach 전 `out.Sync()`로 커밋하도록 수정(PR #46, 재-burn-in host-a full cow
+  gate `334✓/0✗` green). D1~D3 상세:
+  [`docs/operations/2026-07-10-cross-host-verification-run-handoff.md`](docs/operations/2026-07-10-cross-host-verification-run-handoff.md),
+  D4 상세:
+  [`docs/operations/2026-07-11-cow-burnin-run.md`](docs/operations/2026-07-11-cow-burnin-run.md).
+- `v0.4.2` default COW 전환 KVM burn-in 1차가 수행됐다(PR #41 트랙 B). run 1은
+  host-a full cow gate에서 FAIL(step 31 diff-restore `500`) → D4 회부 → D4 fix
+  (PR #46) 후 재-burn-in `334✓/0✗` green. 2026-07-11 "burn-in 후 전환" 결정의
+  조건("D4 해소·재-burn-in 통과")이 충족됐고, 실제 default flip은 별도 승인
+  slice로 남는다(아래 "남은 후속 후보").
+- web frontend가 vite 8 + svelte 5 major로 업그레이드됐다(legacy-compat 마이그레이션,
+  PR #39). `web/package.json`은 `svelte ^5.56`/`vite ^8.1`/`@sveltejs/vite-plugin-svelte
+  ^7.2`, embedded `cmd/goose-daemon/uidist/` 번들도 재생성됐다. svelte 5 runes 전환은
+  선택적 후속(미착수).
+- anvil-scheduler 실운영 systemd 배포 + host inventory polling 상주화가 완료됐다
+  (PR #40 트랙 A). host-a에 `anvil-scheduler.service`가 상주(active+enabled, control
+  loop running, host-b healthy 관측·toggle·restart 지속성·redaction 검증). 설치
+  스크립트(`scripts/install-anvil-scheduler-systemd.sh`)가 operator 지정 polling
+  knob(`HOSTS_FILE`/`POLL_INTERVAL`/`RECONCILE_INTERVAL`/`HOST_TIMEOUT`/
+  `FAILURE_THRESHOLD`/`API_TOKEN`/`REQUIRE_PERSISTENCE`)만 env 파일에 기록하고
+  API token은 dry-run에서 `<redacted>`. installer 실 systemd host 검증(FULL variant,
+  PR #40 트랙 B) 중 release 설치본 daemon 기동 결함을 발견했다 —
+  `storage.EnsureGooseAgent`가 `cmd/goose-agent` 소스 트리를 WalkDir 하드 요구해
+  소스 없는 `/opt/ephemera` 설치본에서 `walk goose-agent sources ... fatal`. fix
+  (PR #42)로 소스 부재 시 shipped `artifacts/goose-agent`+`.sha256` stamp를
+  current로 수용(재빌드 없음, 둘 중 하나라도 없으면 진단 에러)하고 `build_release.sh`
+  가 `print-goose-agent-source-hash`로 stamp를 동봉하도록 고쳐, host-b FULL
+  재검증에서 daemon 기동 성공 + VM spawn(`{"status":"idle"}`)/rm smoke +
+  `uninstall.sh --purge` 원복(격리 유지)까지 통과. runtime MCP Gateway 운영 정책은
+  `runbook.md` 문서화 + live dry-run(credential 0회 노출)까지 검증됐다(PR #40 트랙 C,
+  실 backend operator 배포 검증은 잔여). 상세:
+  [`docs/operations/2026-07-11-scheduler-ops-deploy-handoff.md`](docs/operations/2026-07-11-scheduler-ops-deploy-handoff.md).
+- ~~비동기 relay buffer~~는 **기각 확정(2026-07-11)**이다. failover가 home 불능
+  창을 유계화(~3×reconcile interval; §6b 실측 ~27s@10s)해 명분이 소멸했고, buffer는
+  wall 손실 계약과 충돌하는 부분-부활 semantics·전달 보장 약화·seq/중복 복잡성을
+  재도입한다. 필요 대두 시 대안은 guest-side `gtwall` 지수 backoff 재시도(미등재).
+  상세: [`docs/operations/2026-07-11-6b-failover-verification-run.md`](docs/operations/2026-07-11-6b-failover-verification-run.md).
 
 남은 후속 후보:
 
-- `v0.4.2` default COW 전환의 KVM burn-in 후 flip 결정(1차 burn-in은 2026-07-11 slice에서
-  수행, flip은 별도 slice). auto-snapshot public support(env-only 확정)와 `v0.4.4` flock
-  broadcast MCP tool 노출(기각 확정), flock member spawn per-profile sizing 존중(완료)은
-  2026-07-11 결정으로 종결 — 후속 후보 아님.
-- proxy agent client keep-alive 비활성화(`64ec57c`)의 upstream 기여 검토
-- runtime MCP Gateway backend 운영 정책(어떤 backend server를 profile에 바인딩할지,
-  rate-limit·credential 운영)과 실제 operator 배포 검증
-- release-gate: 코드 항목 4종(audit-writer sentinel `de5a7aa`, stdio stderr scrub
-  `4a802f5`, `credential_env` reserved names `0376afa`, production-mux auth sentinel
-  `de5a7aa`)은 2026-07-06 batch로 닫힘. 마지막 open gate(valid provider key `semantic`
-  run, e2e step 59)도 `18c7559`에서 OpenAI `gpt-4o`로 닫힘(full e2e `343✓/0✗`) —
-  남은 release-gate open 항목 없음
-- post-v0.4.0 backlog(PR #18 `726cbdc`) 처리 결과: GC-abort `Protected` 보존(#37,
-  `9e2a33d`)·MCP `initialize`-error genericization(#36, `ae96c34`)·`config_api.go`
-  surface별 분할(#19, `a01d8da`)·web npm audit 정리(`a0fc935`, breaking major는 defer)는
-  완료. reRestore/restore 공유 helper 추출(#7)은 독립 검토 결과 기각. 남은 backlog는
-  web breaking major 업그레이드(vite5→8, svelte4→5)뿐
-- installer 운영 검증: 실제 systemd host에 `install.sh` 배포와 release build(FULL
-  variant) 검증. `uninstall.sh`의 ephemera-scoped `/tmp` scratch 정리는 의도된 cleanup
-  (root-gated, prefix-anchored)이며 `/tmp/goose-rootfs`는 현재 source에 producer 없는
-  stale no-op이다. 외부 Web UI 노출은 reverse proxy/TLS 또는 private network 뒤에서만 한다
-- scheduler service의 실제 운영 배포와 host inventory polling daemonization
-- ~~비동기 relay buffer~~ — **기각 확정 (2026-07-11 사용자 결정)**: failover가
-  home 불능 창을 유계화(~3×reconcile interval; §6b 실측 ~27s@10s)해 명분이
-  소멸했고, buffer는 wall 손실 계약과 충돌하는 부분-부활 semantics·전달 보장
-  약화·seq/중복 복잡성을 재도입한다. 필요 대두 시 대안은 guest-side `gtwall`
-  지수 backoff 재시도(미등재). §6b 실 2-daemon failover 검증은 2026-07-11
-  수행 완료(PASS — `docs/operations/2026-07-11-6b-failover-verification-run.md`)
+- `v0.4.2` default COW default flip — burn-in 조건이 충족됐다(D4 해소·재-burn-in
+  host-a full cow gate `334✓/0✗` green, 위 완료 항목). flip 가능 상태이나 **실제
+  전환은 별도 승인 slice로 대기**. (auto-snapshot env-only 확정·`v0.4.4` broadcast
+  MCP 노출 기각 확정·flock member per-profile sizing 존중 완료는 2026-07-11 종결 —
+  후보 아님.)
+- upstream 기여 후보 2건: proxy agent client keep-alive 비활성화(`64ec57c`, guest IP
+  재활용 시 stale pooled connection), diff-restore fsync(`overlaySparseDiff`
+  `out.Sync()`, D4). 둘 다 upstream ephemera에 동형 경로가 있으면 같은 잠재 결함이라
+  upstream 확인 후 기여 검토.
+- runtime MCP Gateway backend 실 operator 배포 검증. 운영 정책(backend→profile
+  바인딩, rate-limit/burst, `secrets.yaml` 규율)은 `runbook.md` 문서화 + live
+  dry-run까지 완료(PR #40 트랙 C) — 실 backend server를 붙인 operator 배포 검증만 잔여.
 - egress allow host rule의 L7 proxy/SNI 기반 강화
 - snapshot storage quota dashboard
+- web svelte 5 runes 전환(선택) — PR #39는 legacy-compat 유지, runes 마이그레이션 미착수
+- fc upstream/OpenZFS 참고 보고 검토(D3의 fc diff "sparseness=의미" 상호작용)
+- e2e 포트 공유 특성 — cross-host wall/gtcall/failover e2e 스크립트가 기본 포트를
+  공유해 동시 실행 불가(각 handoff Follow-Up 기록, 소소한 잔여)

@@ -64,17 +64,19 @@ tenant/egress, scheduler, audit, and IronClaw MCP surface separation. 전 태그
 UI(`/ui/`, `/config/*`), `v0.6.0` runtime MCP Gateway(`EPHEMERA_MCP_*`), `v0.7.0`
 installer/transcript는 runtime/operator surface로만 채택하며(IronClaw MCP surface 아님,
 `cmd/anvil-mcp` adapter를 대체하지 않음, systemd는 canonical `ephemera` 이름 유지),
-`v0.4.4` flock broadcast의 MCP tool 노출과 `v0.4.2` default COW 전환만 deferred다.
+`v0.4.4` flock broadcast의 MCP tool 노출은 기각 확정(daemon-only 유지), `v0.4.2`
+default COW 전환은 burn-in 조건 충족(D4 fix 후 재-burn-in green) 후 실제 flip만 승인 대기다.
 2026-07-02 기준 upstream `main`과 최신 upstream tag는 `v0.7.0`이며, anvil은 이 관찰
 범위 전체를 병합했다.
 upstream `v0.7.0`의 kernel SHA 검증, `waitForAgent` per-probe timeout,
 `EPHEMERA_HOME` hardening은 선별 backport됐지만 baseline sync 완료를 의미하지
 않는다.
 
-IronClaw 통합 프로젝트 anvil의 최신 공개 tag는 `anvil-v0.3.2`이다. 이 release는
-ephemera `v0.3.2`-`v0.3.6` runtime baseline 위에 scheduler metrics, manual
-cross-host snapshot replication, scheduler-aware single-host flock placement를
-기록한다. 첫 공개 tag는 `anvil-v0.1.0`이다.
+IronClaw 통합 프로젝트 anvil의 최신 공개 tag는 `anvil-v0.7.0`이다 (upstream
+ephemera 버전과 정렬 — 계보와 tag별 내용은 `CONTEXT.md` 참조). 이후 main은
+cross-host Town Wall/gtcall, home 재선출 failover, snapshot replication
+자동화 등 untagged 작업(PR #19~#46)을 더 포함한다. 첫 공개 tag는
+`anvil-v0.1.0`이다.
 
 <p align="center">
   <img src="docs/assets/ironclaw-e2e.gif" alt="IronClaw anvil E2E terminal replay" width="900">
@@ -2645,7 +2647,7 @@ Requirements: a Google Gemini API key in `configs/goose-secrets.yaml`, `/dev/kvm
 
 | Limitation | Detail |
 |------------|--------|
-| **Single-host VM runtime** | VM 실행 자체는 host-local daemon이 소유한다. Cross-host snapshot replication은 MCP router와 scheduler state를 통해 수동 운영 workflow로 지원한다. |
+| **Single-host VM runtime** | VM 실행 자체는 host-local daemon이 소유한다. Cross-host snapshot replication은 MCP router와 scheduler state를 통해 지원한다 — 수동 경로(`anvil_replicate_snapshot`)에 더해 선언적 자동 복제 sweep(adapter reconcile, replica factor N=2, best-effort eventual). |
 | **Same-snapshot concurrent restores not supported** | The guest IP is reconfigured via vsock after restore, so different-snapshot concurrent restores each get a fresh IP. However, two VMs from the *same* snapshot would still collide on the Firecracker vsock UDS path (which is fixed in `state.bin`), so same-snapshot concurrent restores are not supported. |
 | **Cross-machine restore** | `anvil_replicate_snapshot`으로 target host에 snapshot bundle을 import한 뒤 `POST /snapshots/{id}/restore`를 호출한다. diff snapshot은 target에 base full snapshot이 필요하며 `include_dependencies=true`가 base를 먼저 복제한다. |
 | **Cold-restart loses in-VM memory by default** (v0.3.2; mitigated v0.4.0) | Live VM auto-restart re-boots each VM from its rootfs clone — the guest kernel and `goose-agent` start fresh, and any `/tasks` request in flight at the moment of daemon shutdown is dropped. Set `EPHEMERA_AUTOSNAPSHOT=true` to warm-restore in-VM memory across a *graceful* shutdown (v0.4.0). A SIGKILL/crash still cold-boots, so callers should still idempotency-key tasks or re-poll for completion across an ungraceful restart. |

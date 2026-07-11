@@ -82,9 +82,10 @@
 - `POST /vms` 응답 외부의 `agent_token` 노출
 - upstream ephemera의 flock `agent_tokens` 응답을 anvil public API로 그대로 노출
 - flock broadcast(`POST /flocks/{id}/broadcast`, `ephemera-ctl flock broadcast`)를
-  `anvil_*` MCP tool로 노출하는 것. 이 phase에서 broadcast는 daemon-only runtime
-  operator 표면으로만 두며, MCP tool 노출은 tenant/rate/audit 설계 전까지
-  deferred다(`TestToolRegistrationsExcludeBroadcast`,
+  `anvil_*` MCP tool로 노출하는 것. broadcast는 daemon-only runtime operator 표면으로만
+  두며, MCP tool 노출은 2026-07-11 기각 확정이다(로컬 host scope 전용이라 routed flock
+  원격 멤버 미도달·audit 1:1 불변식·adapter rate limit 부재가 근거;
+  `TestToolRegistrationsExcludeBroadcast`,
   `TestCurrentIronClawSchemasExcludeBroadcastTool`로 고정).
 - 실제 구현 계약 없이 `EPHEMERA_*`, `goose-*` API/env/path를 anvil 이름으로
   일괄 rename하는 변경
@@ -124,9 +125,9 @@ upstream ephemera 변경을 병합할 때는 다음 상태 중 하나로 분류�
 | `v0.3.6` | autonomous webdev demo, in-VM `gtcall`, multi-line-safe `gtwall`, Goose JSON output parsing | `adapted` — demo/helper는 runtime operator 표면으로 채택, peer `agent_token`은 계속 control-plane proxy가 주입하며 직접 노출하지 않음 |
 | `v0.4.0` | memory auto-snapshot, diff/COW rootfs, spawn-path cold-restart | `adapted` — storage/recovery 채택, `EPHEMERA_AUTOSNAPSHOT=true`는 opt-in·disk-expensive로 두고 public support로 승격하지 않음 |
 | `v0.4.1` | client identity, `GET /audit`, per-token TTL, `ephemera-ctl` | `adapted` — daemon access audit/CLI 채택, `ephemera-ctl`은 runtime operator CLI(IronClaw MCP 대체 아님) |
-| `v0.4.2` | COW spawn probe/fallback, COW+Diff snapshot | `adapted`, default cow deferred — `EPHEMERA_DISK_MODE=cow`는 명시적 opt-in, default 전환은 KVM burn-in 뒤 |
+| `v0.4.2` | COW spawn probe/fallback, COW+Diff snapshot | `adapted`, default cow deferred(flip 승인 대기) — `EPHEMERA_DISK_MODE=cow`는 명시적 opt-in. burn-in 조건 충족(run 1 FAIL→D4 fix PR #46 후 재-burn-in `334✓/0✗` green), 실제 default flip만 별도 승인 대기 |
 | `v0.4.3` | dynamic flock membership, pause/resume, `max_agents`, Town Wall filter/rotation | `adapted` — single-host flock lifecycle 채택, routed cross-host flock에는 미적용 |
-| `v0.4.4` | streaming `/tasks`, depth guard, `/watchdog/status`, flock broadcast, slog | `adapted`, broadcast MCP exposure deferred — streaming은 buffered 기본 계약 유지, `GET /watchdog/status`는 read-only 공개 표면, flock broadcast는 daemon-only(MCP tool 노출 deferred) |
+| `v0.4.4` | streaming `/tasks`, depth guard, `/watchdog/status`, flock broadcast, slog | `adapted`, broadcast MCP exposure 기각 확정 — streaming은 buffered 기본 계약 유지, `GET /watchdog/status`는 read-only 공개 표면, flock broadcast는 daemon-only(MCP tool 노출 2026-07-11 기각 확정) |
 | `v0.4.5` | snapshot-restore auto-recovery | `adapted` — restore state persist + token redaction 유지. live·persisted restored VM이 참조하는 source snapshot `DELETE`는 `409`로 보호(upstream e2e 46c의 `200` orphan과 의도적 divergent) |
 | `v0.5.0` | operator Web UI `/ui/`, `/config/profiles`, multi-turn session, graceful delete | `adapted` — Web UI/`/config/*`는 runtime/operator 표면으로 채택(IronClaw MCP surface 아님). `/ui/`(정적 bundle + login)만 auth 밖, data API는 bearer 뒤(guard). `/config/profiles`는 `goose-secrets.yaml` 비노출(sentinel). `cmd/anvil-mcp` 불변, `VMInfo` provider/model additive |
 | `v0.5.1`-`v0.5.5` | `/config/providers`·`/config/clients`, `system.md` 편집, profile guard, sizing preset + per-VM `VcpuCount`/`MemSizeMib`, `SystemAuthor`, restore wait 60s | `adapted` — provider/client surface는 secret 비노출(sentinel), default sizing `1` vCPU/`1024` MiB 채택(이전 2/2048). keep-alive divergence(`64ec57c`)는 ADR_INDEX/upstream-sync-policy 참조 |

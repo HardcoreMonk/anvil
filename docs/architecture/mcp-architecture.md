@@ -735,7 +735,7 @@ HTTP MCP transport도 이 작업 범위 밖이다. v2 후보 논의에서는 다
 - daemon API 의미 재해석
 - Town Wall SSE stream의 MCP tool 노출
 - flock snapshot/restore
-- flock broadcast의 MCP tool 노출 (daemon-only, 이 phase deferred)
+- flock broadcast의 MCP tool 노출 (daemon-only, MCP 노출 기각 확정 2026-07-11)
 - operator Web UI(`/ui/`)와 `/config/*`(profile/provider/client/system-prompt)
   surface의 MCP tool 노출 (`v0.5.0`-`v0.5.5` runtime/operator 표면, MCP 아님)
 - runtime MCP Gateway(`EPHEMERA_MCP_*`, `internal/mcpgateway`)의 `anvil_*` MCP tool
