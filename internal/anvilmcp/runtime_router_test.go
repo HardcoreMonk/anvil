@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -53,10 +54,12 @@ type routerFakeDaemon struct {
 	distributedCalls       int
 	distributedReq         DistributedFlockRequest
 	distributedReqs        []DistributedFlockRequest
+	distributedFlockIDs    []string
 	registerDistributedErr error
 	relayCalls             int
 	relayReq               RelayFlockRequest
 	relayReqs              []RelayFlockRequest
+	relayFlockIDs          []string
 	registerRelayErr       error
 	postWallCalls          int
 	postWallFlockID        string
@@ -68,17 +71,19 @@ type routerFakeDaemon struct {
 	deregisterErr          error
 }
 
-func (f *routerFakeDaemon) RegisterDistributedFlock(_ context.Context, _ string, req DistributedFlockRequest) error {
+func (f *routerFakeDaemon) RegisterDistributedFlock(_ context.Context, flockID string, req DistributedFlockRequest) error {
 	f.distributedCalls++
 	f.distributedReq = req
 	f.distributedReqs = append(f.distributedReqs, req)
+	f.distributedFlockIDs = append(f.distributedFlockIDs, flockID)
 	return f.registerDistributedErr
 }
 
-func (f *routerFakeDaemon) RegisterRelayFlock(_ context.Context, _ string, req RelayFlockRequest) error {
+func (f *routerFakeDaemon) RegisterRelayFlock(_ context.Context, flockID string, req RelayFlockRequest) error {
 	f.relayCalls++
 	f.relayReq = req
 	f.relayReqs = append(f.relayReqs, req)
+	f.relayFlockIDs = append(f.relayFlockIDs, flockID)
 	return f.registerRelayErr
 }
 
@@ -1064,6 +1069,134 @@ func TestReconcileReRegistersCallTokenAndVMIDRoster(t *testing.T) {
 	}
 	if member.relayReq.Agents[0].AgentID != "researcher-1" || member.relayReq.Agents[0].VMID != "vm-researcher-1" {
 		t.Fatalf("member relay Agents[0] = %+v, want researcher-1/vm-researcher-1", member.relayReq.Agents[0])
+	}
+}
+
+// TestReconcile_CrossFlockIsolationWithDeadHome proves reconcileRoutedFlockWalls'
+// per-flock loop (Piece 3, no product code change — Option B design already
+// isolates flocks; this only covers it) treats every routed flock
+// independently: a dead home for one flock must not block heal work for
+// another flock even when the two flocks share a host (flock1's member is
+// flock2's home). flock1 (hostA home, hostB member) and flock2 (hostB home,
+// hostC member) are built with two scheduler snapshots so their homes land on
+// different hosts (the scheduler does not track capacity across separate
+// CreateRoutedFlockMembers calls, so the second snapshot mirrors the capacity
+// flock1 already consumed). Home hosts are then read back from the store
+// rather than assumed, per the placement note below.
+func TestReconcile_CrossFlockIsolationWithDeadHome(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
+	daemons := map[string]*routerFakeDaemon{
+		"hostA": {spawnResponses: []*SpawnVMResponse{
+			{VMID: "vm-f1-coordinator", GuestIP: "10.0.1.10", AgentURL: "http://10.0.1.10:8080", TenantID: "tenant-1", EgressPolicy: "profile"},
+		}},
+		"hostB": {spawnResponses: []*SpawnVMResponse{
+			{VMID: "vm-f1-researcher", GuestIP: "10.0.2.10", AgentURL: "http://10.0.2.10:8080", TenantID: "tenant-1", EgressPolicy: "profile"},
+			{VMID: "vm-f2-coordinator", GuestIP: "10.0.2.11", AgentURL: "http://10.0.2.11:8080", TenantID: "tenant-1", EgressPolicy: "profile"},
+		}},
+		"hostC": {spawnResponses: []*SpawnVMResponse{
+			{VMID: "vm-f2-researcher", GuestIP: "10.0.3.10", AgentURL: "http://10.0.3.10:8080", TenantID: "tenant-1", EgressPolicy: "profile"},
+		}},
+	}
+	router := NewRuntimeRouterWithOptions(
+		NewScheduler(
+			[]RuntimeHost{
+				{Name: "hostA", Endpoint: "http://hostA.internal:8080", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+				{Name: "hostB", Endpoint: "http://hostB.internal:8080", Healthy: true, AvailableVMs: 2, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+				{Name: "hostC", Endpoint: "http://hostC.internal:8080", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+			},
+			nil, nil,
+		),
+		map[string]Daemon{"hostA": daemons["hostA"], "hostB": daemons["hostB"], "hostC": daemons["hostC"]},
+		RuntimeRouterOptions{PlacementStore: store},
+	)
+
+	out1, err := router.CreateRoutedFlockMembers(context.Background(), FlockCreateRequest{
+		Task: "flock1", Roles: []string{"coordinator", "researcher"},
+		TenantID: "tenant-1", EgressPolicy: "profile",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The scheduler snapshot is NOT cumulative across separate
+	// CreateRoutedFlockMembers calls (each ScheduleFlock call clones the
+	// configured hosts fresh), so a second, unmodified call would place
+	// flock2's coordinator on hostA again. Swap in a snapshot that mirrors
+	// what flock1 actually consumed (hostA exhausted, hostB down to 1 of its
+	// 2 slots) so flock2 is forced onto hostB (home) + hostC (member) —
+	// disjoint from flock1's home, which is what this test needs to prove
+	// isolation.
+	//
+	// Raw field write is safe ONLY because this test is single-goroutine:
+	// no StartReconcileLoop is running and every ReconcilePlacements call
+	// below is synchronous. If router.scheduler ever moves behind r.mu
+	// (locked-accessor trend, cf. D1b), replace this with a locked helper.
+	router.scheduler = NewScheduler(
+		[]RuntimeHost{
+			{Name: "hostA", Endpoint: "http://hostA.internal:8080", Healthy: true, AvailableVMs: 0, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+			{Name: "hostB", Endpoint: "http://hostB.internal:8080", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+			{Name: "hostC", Endpoint: "http://hostC.internal:8080", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+		},
+		nil, nil,
+	)
+	out2, err := router.CreateRoutedFlockMembers(context.Background(), FlockCreateRequest{
+		Task: "flock2", Roles: []string{"coordinator", "researcher"},
+		TenantID: "tenant-1", EgressPolicy: "profile",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Placement assumption check: read the actual homes back from the store
+	// instead of assuming the alphabetical placement above held exactly.
+	rec1, ok := store.RoutedFlock(out1.FlockID)
+	if !ok {
+		t.Fatalf("flock1 record not found")
+	}
+	rec2, ok := store.RoutedFlock(out2.FlockID)
+	if !ok {
+		t.Fatalf("flock2 record not found")
+	}
+	flock1Home := rec1.HomeHost
+	flock2Home := rec2.HomeHost
+	if flock1Home == "" || flock2Home == "" || flock1Home == flock2Home {
+		t.Fatalf("test setup failed: want disjoint non-empty homes, got flock1=%q flock2=%q", flock1Home, flock2Home)
+	}
+	var flock2Member string
+	for _, a := range rec2.Agents {
+		if a.Host != flock2Home {
+			flock2Member = a.Host
+			break
+		}
+	}
+	if flock2Member == "" {
+		t.Fatalf("flock2 has no member host distinct from its home %q: agents=%+v", flock2Home, rec2.Agents)
+	}
+
+	// Kill flock1's home only. flock2's home and member stay reachable.
+	killHost(daemons[flock1Home])
+	for _, d := range daemons {
+		d.distributedCalls, d.relayCalls = 0, 0
+		d.distributedFlockIDs, d.relayFlockIDs = nil, nil
+	}
+
+	reconcileN(t, router, 1)
+
+	// flock2's hub re-registration must have reached its home, tagged with
+	// flock2's id — a dead flock1 home must not have blocked this.
+	if ids := daemons[flock2Home].distributedFlockIDs; !slices.Contains(ids, out2.FlockID) {
+		t.Fatalf("flock2 hub re-registration never reached its home %q: distributedFlockIDs=%v", flock2Home, ids)
+	}
+	// flock2's member relay heal must have reached its member, also tagged
+	// with flock2's id.
+	if ids := daemons[flock2Member].relayFlockIDs; !slices.Contains(ids, out2.FlockID) {
+		t.Fatalf("flock2 member relay heal never reached %q: relayFlockIDs=%v", flock2Member, ids)
+	}
+
+	// flock1 must not have failed over yet: one dead-home pass is below
+	// homeFailureThreshold, so its HomeHost is unchanged.
+	if rec, _ := store.RoutedFlock(out1.FlockID); rec.HomeHost != flock1Home {
+		t.Fatalf("flock1 HomeHost changed after only 1 pass (below homeFailureThreshold): %q", rec.HomeHost)
 	}
 }
 

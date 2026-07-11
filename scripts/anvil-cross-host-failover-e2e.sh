@@ -189,6 +189,27 @@ cleanup() {
     local dc
     dc="$(curl -sS "${CURL_AUTH_ARGS[@]}" -o /dev/null -w "%{http_code}" -X DELETE "$API/vms/$RESEARCHER_VMID" 2>/dev/null || true)"
     ok "Deleted researcher VM $RESEARCHER_VMID (HTTP $dc)"
+  else
+    # RESEARCHER_VMID was never captured (e.g. the driver died before writing
+    # create.json) — this used to leave a leaked VM with nothing to delete it.
+    # Best-effort fallback: ask the member daemon for its live VMs and delete
+    # whatever belongs to this run's tenant, falling back to everything it
+    # reports if the tenant filter matches nothing (single-purpose e2e box).
+    local vms_json fallback_ids vid dc
+    vms_json="$(curl -sS "${CURL_AUTH_ARGS[@]}" "$API/vms" 2>/dev/null || true)"
+    if [ -n "$vms_json" ]; then
+      fallback_ids="$(printf '%s' "$vms_json" | jq -r '.[]? | select(.tenant_id == "e2e") | .vm_id // empty' 2>/dev/null || true)"
+      if [ -z "$fallback_ids" ]; then
+        fallback_ids="$(printf '%s' "$vms_json" | jq -r '.[]?.vm_id // empty' 2>/dev/null || true)"
+      fi
+      if [ -n "$fallback_ids" ]; then
+        while IFS= read -r vid; do
+          [ -n "$vid" ] || continue
+          dc="$(curl -sS "${CURL_AUTH_ARGS[@]}" -o /dev/null -w "%{http_code}" -X DELETE "$API/vms/$vid" 2>/dev/null || true)"
+          ok "Fallback-deleted VM $vid (HTTP $dc, RESEARCHER_VMID was never captured)"
+        done <<<"$fallback_ids"
+      fi
+    fi
   fi
   if [ -n "$FLOCK_ID" ]; then
     curl -sS "${CURL_AUTH_ARGS[@]}" -o /dev/null -X DELETE "$API/flocks/$FLOCK_ID" 2>/dev/null || true
@@ -740,17 +761,26 @@ else
 fi
 
 # Redaction spot check: adapter stderr must carry a failover line but leak no
-# relay/call token value and no stub loopback address.
-if grep -q "home failover" "$ADAPTER_STDERR" 2>/dev/null; then
-  ok "Adapter stderr recorded a home-failover line"
+# relay/call token value and no stub loopback address. Matched loosely (flock
+# id + "failover" substring, not the literal wording) so the assertion
+# survives a log-message rewording; see the cross-referenced comment above
+# the logf call in internal/anvilmcp/home_failover.go — still fail-closed if
+# no such line exists at all.
+# Keep ALL matching lines (not tail -1): the hex-token check below must cover
+# every failover-adjacent line, or a second such log line added later would
+# silently escape redaction coverage.
+FAILOVER_LINES="$(grep -F "$FLOCK_ID" "$ADAPTER_STDERR" 2>/dev/null | grep -i "failover" || true)"
+FAILOVER_LINE="$(printf '%s\n' "$FAILOVER_LINES" | tail -1)"
+if [ -n "$FAILOVER_LINE" ]; then
+  ok "Adapter stderr recorded a failover line for flock $FLOCK_ID"
 else
-  fail "phase1_failed: no home-failover line in adapter stderr"
+  fail "phase1_failed: no failover line for flock $FLOCK_ID in adapter stderr"
 fi
 red_ok=true
 if grep -qF "$RELAY_TOKEN" "$ADAPTER_STDERR" 2>/dev/null; then red_ok=false; fi
 if grep -qF "$CALL_TOKEN" "$ADAPTER_STDERR" 2>/dev/null; then red_ok=false; fi
 if grep -qE "127\.0\.0\.1:(3100|3101)" "$ADAPTER_STDERR" 2>/dev/null; then red_ok=false; fi
-if grep "home failover" "$ADAPTER_STDERR" 2>/dev/null | grep -qE '[0-9a-f]{64}'; then red_ok=false; fi
+if printf '%s' "$FAILOVER_LINES" | grep -qE '[0-9a-f]{64}'; then red_ok=false; fi
 if [ "$red_ok" = "true" ]; then
   ok "Adapter stderr leaks no relay/call token and no stub address"
 else

@@ -444,6 +444,14 @@ func (r *RuntimeRouter) reconcileRoutedFlockWalls(ctx context.Context, probes ma
 			case isDialError(hubErr):
 				homeDown = true
 			default:
+				// Non-dial hub error: the host answered (probe reachable), so the
+				// failure streak is broken exactly like a clean pass — only
+				// CONSECUTIVE dial-class failures may count (spec). Without this
+				// reset, dial,dial,(reachable+500),dial sequences fired on the
+				// third dial failure instead of never (not consecutive).
+				if probes[homeHost].reachable {
+					r.homeFailures[flockID] = 0
+				}
 				errs = append(errs, fmt.Errorf("reconcile routed flock %q: hub re-registration on home host %q failed", flockID, homeHost))
 				continue
 			}
