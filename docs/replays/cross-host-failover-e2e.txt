@@ -1,7 +1,8 @@
 anvil cross-host home failover E2E replay
 source run: untagged main (post-anvil-v0.7.0) target commit 9a9af7d
 recorded: 2026-07-12 01:25:38-01:27:12 KST
-source log: sudo bash scripts/anvil-cross-host-failover-e2e.sh
+command: sudo bash scripts/anvil-cross-host-failover-e2e.sh
+source log: /tmp/anvil-cross-host-failover-e2e-20260712-012538/ (adapter.stderr, daemon.log) -> docs/replays/cross-host-failover-e2e.txt
 result: All failover e2e steps passed (32 checks, 0 failures)
 
 == what this proves ==
