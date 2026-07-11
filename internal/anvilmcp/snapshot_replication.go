@@ -264,7 +264,13 @@ func isDiffSnapshot(snapshot SnapshotInfo) bool {
 //     counts a dial failure (target unreachable at probe — short-circuit, no doomed
 //     transfer) or fires one ReplicateSnapshot and classifies the outcome.
 //  4. Republishes the queue_depth / giving_up gauges.
-//  5. Sweeps in-memory counters for snapshots no longer observed (deleted).
+//  5. Sweeps in-memory counters for snapshots not observed THIS PASS. Caveat
+//     (Task 2 review): "unobserved" conflates deleted with transiently
+//     unobservable — if every host holding a snapshot is unreachable on a pass,
+//     a saturated giving-up mark is wiped even though the target is still down,
+//     defeating the bound under source flapping. Task 3 replaces this with a
+//     positive-evidence rule (GC only when the snapshot's recorded hosts were
+//     reachable this pass and it is genuinely absent).
 //
 // All log/error text carries snapshot id + host NAME only (never a daemon address
 // or token).
@@ -402,7 +408,10 @@ func (r *RuntimeRouter) reconcileSnapshotReplication(ctx context.Context, probes
 		errs = append(errs, fmt.Errorf("reconcile snapshot replication: recording gauges failed"))
 	}
 
-	// 5. Sweep counters for snapshots no longer observed (deleted/removed).
+	// 5. Sweep counters for snapshots not observed this pass. NOTE: this
+	// over-fires when all of a snapshot's hosts are transiently unreachable
+	// (wipes a saturated giving-up mark) — corrected in Task 3 with a
+	// positive-evidence deletion rule; see the function doc comment.
 	for key := range r.replicationDialFailures {
 		if s, _ := splitSnapshotTargetKey(key); !liveSnapshots[s] {
 			delete(r.replicationDialFailures, key)
