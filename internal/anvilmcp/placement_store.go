@@ -104,15 +104,16 @@ type ControlLoopStatus struct {
 }
 
 type PlacementStoreState struct {
-	Hosts                 map[string]RuntimeHost        `json:"hosts"`
-	VMPlacements          map[string]string             `json:"vm_placements"`
-	SnapshotLocations     map[string][]string           `json:"snapshot_locations"`
-	ConfigManagedHosts    map[string]bool               `json:"config_managed_hosts,omitempty"`
-	HostObservations      map[string]HostObservation    `json:"host_observations,omitempty"`
-	SuspectVMPlacements   map[string]SuspectVMPlacement `json:"suspect_vm_placements,omitempty"`
-	ControlLoopStatus     ControlLoopStatus             `json:"control_loop_status,omitempty"`
-	FlockPlacementMetrics FlockPlacementMetricsState    `json:"flock_placement_metrics,omitempty"`
-	RoutedFlocks          map[string]RoutedFlockRecord  `json:"routed_flocks,omitempty"`
+	Hosts                      map[string]RuntimeHost          `json:"hosts"`
+	VMPlacements               map[string]string               `json:"vm_placements"`
+	SnapshotLocations          map[string][]string             `json:"snapshot_locations"`
+	ConfigManagedHosts         map[string]bool                 `json:"config_managed_hosts,omitempty"`
+	HostObservations           map[string]HostObservation      `json:"host_observations,omitempty"`
+	SuspectVMPlacements        map[string]SuspectVMPlacement   `json:"suspect_vm_placements,omitempty"`
+	ControlLoopStatus          ControlLoopStatus               `json:"control_loop_status,omitempty"`
+	FlockPlacementMetrics      FlockPlacementMetricsState      `json:"flock_placement_metrics,omitempty"`
+	SnapshotReplicationMetrics SnapshotReplicationMetricsState `json:"snapshot_replication_metrics,omitempty"`
+	RoutedFlocks               map[string]RoutedFlockRecord    `json:"routed_flocks,omitempty"`
 	// RoutedFlockRelayTokens holds per-flock relay secrets keyed by flock id.
 	// Persisted for reconcile re-registration (Task 7) but REDACTED by State()
 	// so it never reaches the scheduler placements endpoint or any MCP output.
@@ -143,10 +144,11 @@ func NewPlacementStore(path string) *PlacementStore {
 			ControlLoopStatus: ControlLoopStatus{
 				Hosts: make(map[string]HostObservation),
 			},
-			FlockPlacementMetrics:  newFlockPlacementMetricsState(),
-			RoutedFlocks:           make(map[string]RoutedFlockRecord),
-			RoutedFlockRelayTokens: make(map[string]string),
-			RoutedFlockCallTokens:  make(map[string]string),
+			FlockPlacementMetrics:      newFlockPlacementMetricsState(),
+			SnapshotReplicationMetrics: newSnapshotReplicationMetricsState(),
+			RoutedFlocks:               make(map[string]RoutedFlockRecord),
+			RoutedFlockRelayTokens:     make(map[string]string),
+			RoutedFlockCallTokens:      make(map[string]string),
 		},
 	}
 }
@@ -208,6 +210,7 @@ func mergePersistedPlacementStoreFields(path string, state *PlacementStoreState,
 	}
 	if preserveMetrics {
 		state.FlockPlacementMetrics = cloneFlockPlacementMetricsState(persisted.FlockPlacementMetrics)
+		state.SnapshotReplicationMetrics = cloneSnapshotReplicationMetricsState(persisted.SnapshotReplicationMetrics)
 	}
 	mergePersistedRoutedFlocks(persisted.RoutedFlocks, state)
 	mergePersistedRoutedFlockTokens(persisted.RoutedFlockRelayTokens, persisted.RoutedFlockCallTokens, state)
@@ -339,6 +342,91 @@ func (s *PlacementStore) saveLockedRaw() error {
 		return nil
 	}
 	return savePlacementStoreStatePreserveRoutedFlocks(s.path, clonePlacementStoreState(s.state))
+}
+
+// refreshPersistedMetricsLocked reloads BOTH persisted metric families
+// (flock-placement and snapshot-replication) from disk into s.state before a
+// Record* method's saveLockedRaw, which writes both families from memory. Without
+// this, recording one family would clobber a concurrent process's counters of the
+// other. Caller must hold s.mu.
+func (s *PlacementStore) refreshPersistedMetricsLocked() error {
+	if strings.TrimSpace(s.path) == "" {
+		return nil
+	}
+	persisted, exists, err := readPlacementStoreState(s.path)
+	if err != nil {
+		return err
+	}
+	if exists {
+		s.state.FlockPlacementMetrics = cloneFlockPlacementMetricsState(persisted.FlockPlacementMetrics)
+		s.state.SnapshotReplicationMetrics = cloneSnapshotReplicationMetricsState(persisted.SnapshotReplicationMetrics)
+	}
+	return nil
+}
+
+func (s *PlacementStore) RecordSnapshotReplicationMetrics(obs SnapshotReplicationMetricObservation) error {
+	if obs.At.IsZero() {
+		obs.At = time.Now().UTC()
+	}
+	outcome := normalizeSnapshotReplicationOutcome(obs.Outcome)
+	reason := normalizeSnapshotReplicationReason(obs.Reason)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensureMaps()
+	if err := s.refreshPersistedMetricsLocked(); err != nil {
+		return err
+	}
+	previous := clonePlacementStoreState(s.state)
+	metrics := &s.state.SnapshotReplicationMetrics
+	normalizeSnapshotReplicationMetricsState(metrics)
+	metrics.AttemptsByOutcomeReason[snapshotReplicationAttemptKey(outcome, reason)]++
+	for phase, duration := range obs.Latencies {
+		phase = normalizeSnapshotReplicationPhase(phase)
+		if phase == "" || duration < 0 {
+			continue
+		}
+		hist := metrics.LatencyByPhase[phase]
+		recordLatencyHistogramObservation(&hist, duration)
+		metrics.LatencyByPhase[phase] = hist
+	}
+	if isSnapshotReplicationSuccessOutcome(outcome) {
+		metrics.LastSuccessAt = obs.At
+	} else {
+		metrics.LastFailureAt = obs.At
+	}
+	if err := s.saveLockedRaw(); err != nil {
+		s.state = previous
+		return err
+	}
+	return nil
+}
+
+// RecordSnapshotReplicationGauges republishes the two point-in-time gauges the
+// reconcile sweep computes each pass. queueDepth = snapshots below the replica
+// factor; givingUp = snapshots with a dial-saturated target. Counters/timestamps
+// are preserved (refreshed from disk first).
+func (s *PlacementStore) RecordSnapshotReplicationGauges(queueDepth, givingUp int64) error {
+	if queueDepth < 0 {
+		queueDepth = 0
+	}
+	if givingUp < 0 {
+		givingUp = 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensureMaps()
+	if err := s.refreshPersistedMetricsLocked(); err != nil {
+		return err
+	}
+	previous := clonePlacementStoreState(s.state)
+	s.state.SnapshotReplicationMetrics.QueueDepth = queueDepth
+	s.state.SnapshotReplicationMetrics.GivingUp = givingUp
+	if err := s.saveLockedRaw(); err != nil {
+		s.state = previous
+		return err
+	}
+	return nil
 }
 
 func (s *PlacementStore) SetHost(host RuntimeHost) error {
@@ -883,6 +971,7 @@ func normalizePlacementStoreState(state *PlacementStoreState) {
 		state.ControlLoopStatus.Hosts = make(map[string]HostObservation)
 	}
 	normalizeFlockPlacementMetricsState(&state.FlockPlacementMetrics)
+	normalizeSnapshotReplicationMetricsState(&state.SnapshotReplicationMetrics)
 	if state.RoutedFlockRelayTokens == nil {
 		state.RoutedFlockRelayTokens = make(map[string]string)
 	}
@@ -963,6 +1052,7 @@ func clonePlacementStoreState(state PlacementStoreState) PlacementStoreState {
 		out.ControlLoopStatus.Hosts[host] = obs
 	}
 	out.FlockPlacementMetrics = cloneFlockPlacementMetricsState(state.FlockPlacementMetrics)
+	out.SnapshotReplicationMetrics = cloneSnapshotReplicationMetricsState(state.SnapshotReplicationMetrics)
 	return out
 }
 

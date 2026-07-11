@@ -50,6 +50,22 @@ type RuntimeRouter struct {
 	// only — never tokens or daemon addresses). Set by StartReconcileLoop;
 	// nil-safe via logf.
 	reconcileLogf func(format string, args ...any)
+
+	// replicationDialFailures counts CONSECUTIVE dial-class replication failures
+	// per "<snapshot>\x1f<target>" for the bounded giving-up cap. Guarded by
+	// reconcileMu: only ever touched inside the reconcile sweep, which reconcileMu
+	// serializes end-to-end.
+	replicationDialFailures map[string]int
+	// replicationGivingUp marks "<snapshot>\x1f<target>" pairs that hit the cap;
+	// excluded from selection until the target host is observed reachable again.
+	// reconcileMu.
+	replicationGivingUp map[string]bool
+
+	// replicationTerminal marks "<snapshot>\x1f<target>" pairs a reachable target
+	// refused (D3 coarse-fs / tenant / validation). Excluded from re-selection for
+	// this process lifetime; reset only on restart (in-memory, like the dial
+	// counter). reconcileMu.
+	replicationTerminal map[string]bool
 }
 
 type RuntimeRouterOptions struct {
@@ -71,12 +87,15 @@ func NewRuntimeRouterWithOptions(scheduler *Scheduler, daemons map[string]Daemon
 		maxAttempts = 1
 	}
 	return &RuntimeRouter{
-		scheduler:      scheduler,
-		daemons:        daemonCopy,
-		placement:      initialPlacements(opts.PlacementStore),
-		placementStore: opts.PlacementStore,
-		maxAttempts:    maxAttempts,
-		homeFailures:   make(map[string]int),
+		scheduler:               scheduler,
+		daemons:                 daemonCopy,
+		placement:               initialPlacements(opts.PlacementStore),
+		placementStore:          opts.PlacementStore,
+		maxAttempts:             maxAttempts,
+		homeFailures:            make(map[string]int),
+		replicationDialFailures: make(map[string]int),
+		replicationGivingUp:     make(map[string]bool),
+		replicationTerminal:     make(map[string]bool),
 	}
 }
 
@@ -339,6 +358,7 @@ func (r *RuntimeRouter) ReconcilePlacements(ctx context.Context) error {
 		}
 	}
 	errs = append(errs, r.reconcileRoutedFlockWalls(ctx, probes))
+	errs = append(errs, r.reconcileSnapshotReplication(ctx, probes))
 	return errors.Join(errs...)
 }
 

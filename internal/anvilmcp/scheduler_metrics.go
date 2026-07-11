@@ -31,6 +31,7 @@ func RenderSchedulerMetrics(state PlacementStoreState) string {
 	writeSchedulerGauge(&out, "anvil_scheduler_poll_interval_seconds", "Configured scheduler poll interval in seconds.", float64(status.PollIntervalSeconds))
 	writeSchedulerGauge(&out, "anvil_scheduler_reconcile_interval_seconds", "Configured scheduler reconcile interval in seconds.", float64(status.ReconcileIntervalSeconds))
 	renderFlockPlacementMetrics(&out, state.FlockPlacementMetrics)
+	renderSnapshotReplicationMetrics(&out, state.SnapshotReplicationMetrics)
 	return out.String()
 }
 
@@ -68,6 +69,33 @@ func renderFlockPlacementMetrics(out *strings.Builder, state FlockPlacementMetri
 
 	writeSchedulerGauge(out, "anvil_scheduler_flock_placement_last_success_timestamp_seconds", "Unix timestamp of the last successful flock placement.", timestampMetric(state.LastSuccessAt))
 	writeSchedulerGauge(out, "anvil_scheduler_flock_placement_last_failure_timestamp_seconds", "Unix timestamp of the last failed flock placement.", timestampMetric(state.LastFailureAt))
+}
+
+func renderSnapshotReplicationMetrics(out *strings.Builder, state SnapshotReplicationMetricsState) {
+	normalizeSnapshotReplicationMetricsState(&state)
+
+	out.WriteString("# HELP anvil_scheduler_snapshot_replication_attempts_total Snapshot replication attempts by outcome and reason.\n")
+	out.WriteString("# TYPE anvil_scheduler_snapshot_replication_attempts_total counter\n")
+	for _, key := range sortedSnapshotReplicationAttemptKeys(state.AttemptsByOutcomeReason) {
+		outcome, reason := splitSnapshotReplicationAttemptKey(key)
+		fmt.Fprintf(out, "anvil_scheduler_snapshot_replication_attempts_total{outcome=\"%s\",reason=\"%s\"} %d\n", outcome, reason, state.AttemptsByOutcomeReason[key])
+	}
+
+	out.WriteString("# HELP anvil_scheduler_snapshot_replication_latency_seconds Snapshot replication latency by phase.\n")
+	out.WriteString("# TYPE anvil_scheduler_snapshot_replication_latency_seconds histogram\n")
+	hist := state.LatencyByPhase[SnapshotReplicationPhaseTotal]
+	for _, upper := range flockPlacementLatencyBuckets {
+		bucket := formatFlockPlacementBucket(upper)
+		fmt.Fprintf(out, "anvil_scheduler_snapshot_replication_latency_seconds_bucket{phase=\"%s\",le=\"%s\"} %d\n", SnapshotReplicationPhaseTotal, bucket, hist.Buckets[bucket])
+	}
+	fmt.Fprintf(out, "anvil_scheduler_snapshot_replication_latency_seconds_bucket{phase=\"%s\",le=\"+Inf\"} %d\n", SnapshotReplicationPhaseTotal, hist.Buckets["+Inf"])
+	fmt.Fprintf(out, "anvil_scheduler_snapshot_replication_latency_seconds_sum{phase=\"%s\"} %s\n", SnapshotReplicationPhaseTotal, strconv.FormatFloat(hist.SumSeconds, 'f', -1, 64))
+	fmt.Fprintf(out, "anvil_scheduler_snapshot_replication_latency_seconds_count{phase=\"%s\"} %d\n", SnapshotReplicationPhaseTotal, hist.Count)
+
+	writeSchedulerGauge(out, "anvil_scheduler_snapshot_replication_queue_depth", "Snapshots below the desired replica factor.", float64(state.QueueDepth))
+	writeSchedulerGauge(out, "anvil_scheduler_snapshot_replication_giving_up", "Snapshots with a dial-saturated replication target.", float64(state.GivingUp))
+	writeSchedulerGauge(out, "anvil_scheduler_snapshot_replication_last_success_timestamp_seconds", "Unix timestamp of the last successful snapshot replication.", timestampMetric(state.LastSuccessAt))
+	writeSchedulerGauge(out, "anvil_scheduler_snapshot_replication_last_failure_timestamp_seconds", "Unix timestamp of the last failed snapshot replication.", timestampMetric(state.LastFailureAt))
 }
 
 func writeSchedulerGauge(out *strings.Builder, name string, help string, value float64) {

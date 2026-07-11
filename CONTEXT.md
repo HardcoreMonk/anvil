@@ -420,6 +420,29 @@ daemon으로 보내는 outbound Bearer token이다.
   (`scripts/anvil-cross-host-failover-e2e.sh`)가 Goosetown MCP surface, daemon
   flock lifecycle, deterministic workload, cross-host relay/call/failover 검증
   경로에 포함된다.
+- cross-host snapshot replication 자동화가 구현됐다. adapter(`RuntimeRouter`)
+  reconcile 루프가 매 주기 desired replica factor(**상수 N=2**, 원본+복제 1)
+  미달 스냅샷을 discover(probe-reachable daemon `ListSnapshots` add-only union)
+  → drift 계산 → `SelectRuntimeHost`로 대상 선정(tenant/egress carry) →
+  `ReplicateSnapshot` 1회 재사용 시도로 heal한다. dial 실패는
+  (snapshot,target) in-memory 카운터로 세어 **연속 3회(상수 cap)** 도달 시
+  giving-up으로 표시하고, 대상 host 복귀 관측 시 카운터를 리셋한다(무한
+  재시도 금지, home failover와 동일한 재평가 규율). D3 coarse-fs 거부와
+  tenant/검증 실패는 **terminal**로 분류해 그 대상에 대한 재시도를
+  제외하지만, 이 exclude는 adapter(`cmd/anvil-mcp`) 프로세스 수명 한정이라
+  **adapter 재시작이 re-arm**한다(카운터 청소는 positive-evidence 규칙만
+  사용 — 실제 삭제가
+  관측될 때만 GC, 복제본 GC/전파 자체는 비목표). metric family
+  `anvil_scheduler_snapshot_replication_*`(`attempts_total{outcome,reason}`,
+  `latency_seconds{phase="total"만}`, `queue_depth`, `giving_up`,
+  `last_success`/`last_failure_timestamp_seconds`)가 `PlacementStore`에
+  영속되고 scheduler `/metrics`에 노출된다. anvil 경계는 metric 노출 +
+  runbook 권장 alert 식까지이며 실 alerting은 zone 대시보드 몫이다. 유닛
+  (`-race`) + KVM e2e `scripts/anvil-snapshot-replication-e2e.sh`(대상
+  down→dial 실패→복귀→자동 복제→metrics 전이 관측, 2연속 green)로
+  검증됐다. 상세:
+  [`docs/superpowers/specs/2026-07-11-snapshot-replication-automation-design.md`](docs/superpowers/specs/2026-07-11-snapshot-replication-automation-design.md),
+  [`docs/operations/2026-07-11-snapshot-replication-automation-handoff.md`](docs/operations/2026-07-11-snapshot-replication-automation-handoff.md).
 
 남은 후속 후보:
 
@@ -445,8 +468,6 @@ daemon으로 보내는 outbound Bearer token이다.
   (root-gated, prefix-anchored)이며 `/tmp/goose-rootfs`는 현재 source에 producer 없는
   stale no-op이다. 외부 Web UI 노출은 reverse proxy/TLS 또는 private network 뒤에서만 한다
 - scheduler service의 실제 운영 배포와 host inventory polling daemonization
-- cross-host snapshot replication 자동화(background retry queue·metrics·alert —
-  수동 동기 replication과 snapshot locality preference는 baseline 포함)
 - ~~비동기 relay buffer~~ — **기각 확정 (2026-07-11 사용자 결정)**: failover가
   home 불능 창을 유계화(~3×reconcile interval; §6b 실측 ~27s@10s)해 명분이
   소멸했고, buffer는 wall 손실 계약과 충돌하는 부분-부활 semantics·전달 보장

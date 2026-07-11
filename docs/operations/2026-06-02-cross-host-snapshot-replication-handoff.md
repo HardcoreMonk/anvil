@@ -60,12 +60,18 @@
 
 ## 잔여 위험
 
-- 첫 버전은 수동 동기 replication이다. background retry queue, metrics, alert는
-  후속 후보로 남는다.
+- ~~첫 버전은 수동 동기 replication이다. background retry queue, metrics, alert는
+  후속 후보로 남는다.~~ **해소 (2026-07-11, `feature/snapshot-replication-automation`
+  slice)**: adapter reconcile 루프가 background retry queue 역할(desired N=2로
+  bounded-cap 재시도 수렴)을 흡수했고, `anvil_scheduler_snapshot_replication_*`
+  metric family + runbook 권장 alert 식이 추가됐다. 상세:
+  [`docs/operations/2026-07-11-snapshot-replication-automation-handoff.md`](2026-07-11-snapshot-replication-automation-handoff.md).
 - KVM/Firecracker 기반 real restore 검증은 이번 로컬 검증에 포함하지 않았다. release
   전 실제 운영 host에서 별도 확인해야 한다.
 - source/target host degraded override는 지원하지 않는다.
 - replicated snapshot delete를 모든 replica에 전파하는 정책은 이번 범위가 아니다.
+  (2026-07-11 slice에서도 명시 비목표로 재확인 — `SnapshotLocations`는 add-only이며
+  삭제가 다른 replica로 전파되지 않는다.)
 
 ## 현재 lifecycle 단계
 
@@ -74,5 +80,6 @@
 ## 다음 작업
 
 - scheduler-aware cross-host flock placement 설계
-- replication metrics와 alert 설계
+- ~~replication metrics와 alert 설계~~ **해소 (2026-07-11)**: 위 "잔여 위험" 항목과
+  동일 slice/handoff 참조.
 - 운영 환경에서 KVM/Firecracker real restore smoke 검증

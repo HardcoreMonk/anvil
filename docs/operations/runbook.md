@@ -497,6 +497,70 @@ target import가 실패하면 daemon log를 확인하고 target snapshot directo
 확인한다. replication response, audit, 운영 기록에는 `agent_token`, authorization
 header, daemon raw body, raw `metadata.json` body를 남기지 않는다.
 
+### 자동 복제 sweep (reconcile)
+
+위 수동 `anvil_replicate_snapshot` 위에, adapter(`cmd/anvil-mcp`)의 reconcile
+루프가 **desired-state 자동 수렴**을 추가로 수행한다. 운영자 개입 없이 매 주기
+다음을 반복한다.
+
+1. **discover**: probe-reachable daemon마다 `ListSnapshots`을 호출해 실제 위치를
+   `PlacementStore.SnapshotLocations`에 add-only union(위치 기록은 절대 지우지
+   않는다 — 아래 "queue_depth 캐비앗" 참고)으로 반영한다.
+2. **drift**: 복제본 수(`len(SnapshotHosts)`)가 desired replica factor(**상수
+   N=2**, 원본+복제 1)에 못 미치는 스냅샷을 고른다.
+3. **select**: `SelectRuntimeHost`로 source 제외·tenant/egress 적격·healthy한
+   대상 host를 선정한다(수동 경로와 동일한 적격성 규칙).
+4. **replicate**: 기존 `ReplicateSnapshot`을 그대로 재사용해 1회 시도한다.
+   - dial 실패(대상 unreachable)는 (snapshot,target) 쌍의 in-memory 카운터를
+     증가시킨다. **연속 3회(상수 cap)** 도달하면 giving-up으로 표시하고 그
+     대상에 대한 hammering을 멈춘다. 이후 reconcile probe가 그 대상의 복귀를
+     관측하면 카운터를 즉시 리셋해 다음 sweep가 재시도한다(failover의 "후보
+     복귀 시 재평가" 규율과 동일).
+   - D3 coarse-fs 거부, tenant 불일치, 기타 검증 실패는 **terminal**로
+     분류돼 그 (snapshot,target) 쌍은 더 이상 재시도되지 않는다(`exclude`).
+     **이 exclude는 adapter(`cmd/anvil-mcp`) 프로세스 수명 한정이다 — adapter를 재시작하면
+     in-memory terminal 마크가 사라져 다음 sweep가 그 대상을 다시 시도한다
+     (re-arm)**. 영속 GC/차단 목록이 아니다.
+
+**권장 alert 식** (D-5 — anvil 경계는 여기까지: metric 노출 + 이 문서. 실제
+alerting rule 등록·발화는 zone `project-dashboard`가 scrape해 담당한다):
+
+- `anvil_scheduler_snapshot_replication_queue_depth > 0` **지속**(예: 수 분
+  이상) — desired 복제본 수에 못 미치는 스냅샷이 sweep에도 불구하고 줄지
+  않는다는 뜻이다.
+- `anvil_scheduler_snapshot_replication_giving_up > 0` — dial-cap이
+  포화돼 자동 재시도가 멈춘 (snapshot,target) 쌍이 있다는 뜻이다. 대상
+  host의 `/health`를 먼저 확인한다. **주의**: terminal_rejected로 전
+  대상이 소진된 스냅샷은 이 gauge에 잡히지 않는다 — dial-cap 전용이며,
+  terminal-소진은 `queue_depth` 지속 + `attempts_total{outcome="terminal_rejected"}`
+  증가로만 드러난다. terminal 마크는 adapter(`cmd/anvil-mcp`) 재시작이
+  re-arm한다.
+- `time() - anvil_scheduler_snapshot_replication_last_success_timestamp_seconds`
+  **staleness** — reconcile 주기 대비 과도하게 크면(예: 여러 주기 연속) sweep
+  자체가 멈췄거나(adapter dead) 모든 시도가 실패 중이라는 신호다.
+
+**queue_depth 캐비앗(삭제된 스냅샷 잔류 계상)**: `PlacementStore.SnapshotLocations`는
+add-only이고 — daemon `DELETE /snapshots/{id}` 경로는 이 맵을 정리하지 않는다
+— 스냅샷이 모든 host에서 실제로 삭제된 뒤에도 그 스냅샷 id의 옛 위치 기록이
+영속 상태에 남는다. sweep의 drift 계산(`len(SnapshotHosts) < N`)은 이
+기록만 보고 `queue_depth`를 올리므로, **완전히 삭제됐지만 기록이 남아
+복제본 미달로 계상된 스냅샷은 daemon 재시작으로도 해소되지 않는다**(이
+카운터는 영속 상태 자체의 특성이지 in-memory 카운터가 아니다). 복제본
+GC/전파는 이 slice의 명시 비목표이므로 지금은 운영자가 `queue_depth` alert를
+받으면 대상 id가 실존 스냅샷인지 `GET /snapshots`로 먼저 확인한다.
+
+**D3 상호작용**: 위 terminal 분류에서 D3 coarse-fs 거부는
+`terminal_rejected` outcome(reason `rejected`)으로 관측된다. 아래 "Diff
+snapshot 안전성" 절의 판독측 거부(`refusing overlay to avoid guest memory
+corruption (see D3)`)가 복제/임포트로 유입된 coarse diff까지 방어하는데,
+자동 sweep가 그 거부를 받은 대상은 **재시도하지 않는다** — 같은 fine
+source→coarse target 조합은 재시도해도 다시 거부되므로 무의미하다.
+
+**redaction 계약**: metric label은 `outcome`/`reason`/`phase`(latency)만
+싣는다 — host 주소, 토큰, 스냅샷 비밀은 어떤 label/log 라인에도 나타나지
+않는다. reconcile 로그는 flock/host 관례와 동일하게 스냅샷 id + host
+**이름**만 남긴다(daemon 주소·토큰 없음).
+
 ## Diff snapshot 안전성 — coarse-hole 파일시스템 가드 (D3)
 
 sparse diff snapshot(memory.bin diff + rootfs.diff)은 파일시스템이 **hole을 4KiB
