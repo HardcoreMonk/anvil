@@ -134,8 +134,14 @@ alerting은 zone `project-dashboard`가 scrape/발화한다(YAGNI + thin-adapter
 2. **터미널 오분류 창.** probe reachable 직후 대상이 죽어 `ReplicateSnapshot`이
    `(nil,error)`(list dial)로 실패하면 재시도 대상인 `error`로 가지만,
    `(resp,nil)` non-success면 `terminal`(exclude)로 간다 — 순수 일시적
-   import 실패가 terminal로 프로세스 수명 동안 제외될 수 있다(재시작이
-   re-arm하므로 영구는 아님).
+   import 실패가 terminal로 프로세스 수명 동안 제외될 수 있다(adapter
+   재시작이 re-arm하므로 영구는 아님). **최종 리뷰 보강(범위 명확화)**:
+   `ReplicateSnapshot`은 source-측 export 실패도 `(resp, non-success)`로
+   반환하므로 **source 문제가 무고한 target을 terminal로 오염**시킬 수
+   있고, pass마다 다음 후보가 차례로 오염되면 그 스냅샷은 no_candidate로
+   정체된다(원인 해소 후에도 adapter 재시작 전까지). metric reason도
+   `terminal_rejected`로 일괄 귀속돼 source/일시 장애가 target 거부로
+   오표기된다 — Follow-Up 4 참조.
 3. **uniform N=2 discovery.** discovery가 모든 reachable host의 모든
    스냅샷을 add-only 수집하므로 base/throwaway 스냅샷도 N=2로 수렴한다 —
    첫 sweep 트래픽이 클 수 있으나 bounded/idempotent.
@@ -166,6 +172,11 @@ alerting은 zone `project-dashboard`가 scrape/발화한다(YAGNI + thin-adapter
 
 ## Follow-Up Tasks
 
+0. **(최종 whole-branch 리뷰 파생) transfer 실패 분류 정밀화** — export/일시
+   전송 실패를 재시도 가능한 `error`로, 진짜 target 거부만 terminal로
+   라우팅(ReplicateSnapshot의 typed 분류 또는 resp.Status/Errors 검사),
+   또는 terminal 마크의 대상-복귀/유계-시간 만료. 최소안: metric reason
+   분리. 별도 승인 후 착수.
 1. **실 multi-host 수동 검증 수행** — KVM e2e(단일 호스트 + stub)가 아닌
    두 개의 실 daemon 사이에서 스냅샷 down/복귀·`queue_depth`/`giving_up`
    전이를 관측. 절차 신설 필요(§6b 유사 구조), 별도 승인 후 착수.

@@ -530,7 +530,11 @@ alerting rule 등록·발화는 zone `project-dashboard`가 scrape해 담당한�
   않는다는 뜻이다.
 - `anvil_scheduler_snapshot_replication_giving_up > 0` — dial-cap이
   포화돼 자동 재시도가 멈춘 (snapshot,target) 쌍이 있다는 뜻이다. 대상
-  host의 `/health`를 먼저 확인한다.
+  host의 `/health`를 먼저 확인한다. **주의**: terminal_rejected로 전
+  대상이 소진된 스냅샷은 이 gauge에 잡히지 않는다 — dial-cap 전용이며,
+  terminal-소진은 `queue_depth` 지속 + `attempts_total{outcome="terminal_rejected"}`
+  증가로만 드러난다. terminal 마크는 adapter(`cmd/anvil-mcp`) 재시작이
+  re-arm한다.
 - `time() - anvil_scheduler_snapshot_replication_last_success_timestamp_seconds`
   **staleness** — reconcile 주기 대비 과도하게 크면(예: 여러 주기 연속) sweep
   자체가 멈췄거나(adapter dead) 모든 시도가 실패 중이라는 신호다.
