@@ -48,6 +48,39 @@ bash scripts/install-anvil-scheduler-systemd.sh --dry-run --verify
 sudo bash scripts/install-anvil-scheduler-systemd.sh --start --verify
 ```
 
+### Resident host-inventory polling
+
+control loop(`SchedulerControlLoop`)는 service 안에 상주하며, `ANVIL_SCHEDULER_HOSTS_FILE`가
+가리키는 host 인벤토리(또는 persistent state의 host)를 주기적으로 poll한다. 실운영
+배포에서 어떤 host를 poll할지 선언적으로 고정하려면 hosts JSON을 설치한다. 설치
+스크립트는 operator가 설정한 polling knob만 systemd env 파일에 기록한다.
+
+```bash
+# hosts JSON: 각 host의 daemon control-plane endpoint(cross-host면 routable bind)
+cat > scheduler-hosts.json <<'JSON'
+{"hosts":[{"name":"host-b","endpoint":"http://192.168.1.20:3000","available_vms":8,"available_snapshot_bytes":21474836480,"egress_policies":["profile"]}]}
+JSON
+
+sudo env \
+  ANVIL_SCHEDULER_HOSTS_SRC="$PWD/scheduler-hosts.json" \
+  ANVIL_SCHEDULER_POLL_INTERVAL=5s \
+  ANVIL_SCHEDULER_RECONCILE_INTERVAL=10s \
+  ANVIL_SCHEDULER_HOST_TIMEOUT=2s \
+  ANVIL_SCHEDULER_FAILURE_THRESHOLD=3 \
+  bash scripts/install-anvil-scheduler-systemd.sh --no-build --start
+```
+
+`ANVIL_SCHEDULER_HOSTS_SRC`는 hosts JSON을 `ANVIL_SCHEDULER_HOSTS_FILE`
+(기본 `/etc/anvil/scheduler-hosts.json`, 0640 root:group)로 설치한다. host daemon이
+token 인증을 요구하면 `ANVIL_SCHEDULER_API_TOKEN`을 함께 넘긴다(env 파일에만 기록,
+dry-run preview에서는 `<redacted>`로 표시). polling이 상주하는지는
+`/control-loop/status`의 `running`과 각 host observation(`status`, `last_success_at`,
+`failure_count`)으로 확인한다. host daemon이 내려가면 `failure_threshold`회 poll 후
+`degraded`→`unhealthy`로 전이되고, 다시 응답하면 reconciliation이 `GET /vms`로
+placement를 정리한다. scheduler journal은 bind 주소만 남기며 host endpoint·token은
+남기지 않는다(endpoint는 `/control-loop/status`의 observation error에만 진단용으로
+노출되고 `/metrics`에는 포함되지 않는다).
+
 이미 실행 중인 service만 재검증할 때는 다음 명령을 사용한다.
 
 ```bash
@@ -469,3 +502,52 @@ probe 실패(예: 순간적 ENOSPC)로 coarse가 캐시되면 이후 diff 요청
 실측 참고 (2026-07-11, 192.168.1.19 실 ZFS): recordsize=128K rpool 경로에서 probe
 granularity **131072**(=recordsize, coarse 판정), `rpool/anvil-snapshots`(4K)에서
 **4096**(fine 판정) — RCA의 extent 부풀림 단위와 정확히 일치.
+
+## runtime MCP Gateway 운영 정책
+
+runtime MCP Gateway(`internal/mcpgateway`, `cmd/goose-daemon`)는 backend MCP server를
+하나의 host-resident endpoint(`http://ephemera-gw:{port}/mcp`, 기본 `3001`, bridge IP
+bind)로 집약해 VM 내부 goose client에 policy·rate-limit·audit로 중개한다. IronClaw
+adapter(`ANVIL_MCP_*`, `cmd/anvil-mcp`)와 별개 namespace다. 환경 변수 canonical set은
+`EPHEMERA_MCP_ENABLED`, `EPHEMERA_MCP_SERVERS`, `EPHEMERA_MCP_PORT`,
+`EPHEMERA_MCP_BIND_IP`, `EPHEMERA_MCP_RATE`, `EPHEMERA_MCP_BURST`,
+`EPHEMERA_MCP_STDIO_USER`(ANVIL alias 없음).
+
+### backend→profile 바인딩 기준
+
+- 최소 노출 원칙: server의 `profiles:`는 그 backend가 실제로 필요한 profile만 나열한다. 비우면 모든 profile에 노출되므로 운영에서는 지양한다(per-request tool schema/token budget 팽창).
+- profile은 API(`PUT /config/profiles/{name}/mcp`)로 `EPHEMERA_MCP_SERVERS` 바인딩을 더 좁힐 수 있고, 이는 `profiles:`와 **교집합**이라 넓힐 수는 없다(권한 확대 불가).
+- tool 단위 축소가 필요하면 server의 `tools_allow`(화이트리스트) / `tools_deny`(블랙리스트)로 노출 tool을 제한한다.
+- stdio backend는 `EPHEMERA_MCP_STDIO_USER`(기본 `nobody`, daemon이 root일 때)로 de-privileged 실행되며 v0.6.4에서 서로 격리되지 않는다(단일 uid 공유). 명령은 그 uid가 읽고 실행 가능한 경로(`/usr/local/bin` 등, `/root` 금지)에 둔다.
+
+### rate-limit / burst 기본 권고
+
+- `EPHEMERA_MCP_RATE` 기본 `0`=unlimited. 실운영에서는 per-(VM, server) tool-call 분당 예산을 명시적으로 건다(예: 신뢰 backend `60`, 외부/유료 backend `20~30`).
+- `EPHEMERA_MCP_BURST` unset이면 limiter가 rate로 기본값을 잡는다. 순간 스파이크를 흡수하려면 rate의 1~2배로 설정한다.
+- rate limit은 tool call뿐 아니라 resources/prompts에도 동일 policy·budget로 적용된다.
+
+### credential(secrets.yaml) 운영 규율
+
+- backend credential은 `configs/mcp/secrets.yaml`에만 두고 `servers.yaml`의 `credential:` 키로 참조한다. secrets.yaml은 **host에만** 존재하고 VM에 절대 주입되지 않는다. 두 파일 모두 gitignore — 커밋 금지.
+- http backend는 gateway가 `Authorization: Bearer <token>`을 매 호출에 주입한다. stdio backend는 `credential_env`가 지정한 env 변수로만 주입되며 cmdline/args에는 절대 넣지 않는다(`/proc/<pid>/cmdline`은 world-readable).
+- 운영 콘솔 노출(leak guard): `GET /config/mcp/servers`는 `has_credential`(bool)·`url`·`command`만 노출하고 token 값·`args`는 절대 포함하지 않는다. `GET /config/mcp`는 enabled/endpoint/server_count만 노출한다. 배포 후 이 두 endpoint 응답에 실제 token 문자열이 없음을 반드시 확인한다.
+
+### 배포 체크리스트 (dry-run 포함)
+
+```bash
+# 1) 정책 파일 준비 (gitignored)
+cp configs/mcp/servers.yaml.example configs/mcp/servers.yaml   # profiles/tools/rate 조정
+cp configs/mcp/secrets.yaml.example configs/mcp/secrets.yaml   # 실 token 기입 (0600)
+
+# 2) gateway enable + 정책 로드 dry-run
+EPHEMERA_MCP_ENABLED=1 EPHEMERA_MCP_RATE=30 <daemon 기동>
+#   로그: "mcp gateway configured endpoint=... bind=<bridge-ip>:<port> servers=N"
+
+# 3) leak guard 확인 (token 문자열이 응답에 없어야 함)
+curl -s http://127.0.0.1:3000/config/mcp
+curl -s http://127.0.0.1:3000/config/mcp/servers   # has_credential:true 만, token 없음
+```
+
+`EPHEMERA_MCP_BIND_IP`는 unset이면 bridge gateway IP에만 bind(VM·host에서만 도달, 외부
+노출 없음)한다. 외부로 넓히지 않는다 — 넓히면 credential-injecting proxy가 노출된다.
+gateway audit는 `{workDir}/audit/mcp.jsonl`에 metadata만 남긴다(arguments/results 미기록).
