@@ -61,11 +61,11 @@
 | `v0.3.4` | adapted | `EPHEMERA_API_TOKENS_FILE`, SIGHUP CP-token vsock fan-out, watchdog tunables/auto-heal, Firecracker SIGHUP forwarding hot-fix는 채택한다. true hot rotation은 token file과 v0.3.4+ guest agent가 있을 때만 보장한다. |
 | `v0.3.5` | adapted | `/metrics`, `/vms/{vm_id}/stats`, `log/slog`, observability demo는 채택한다. `ephemera_*` metric namespace와 `EPHEMERA_*` env는 runtime compatibility namespace로 유지한다. |
 | `v0.3.6` | adapted | autonomous webdev demo, in-VM `gtcall`, multi-line-safe `gtwall`, Goose JSON output parsing은 채택한다. `gtcall`은 peer `agent_token`을 VM 내부에 노출하지 않고 control-plane proxy token injection 경계를 유지한다. |
-| `v0.4.0` | adapted | storage/recovery core(memory auto-snapshot, diff/COW rootfs, spawn-path cold-restart)는 채택한다. `EPHEMERA_AUTOSNAPSHOT=true` auto-snapshot은 opt-in·disk-expensive로 두고 public support로 승격하지 않는다. |
+| `v0.4.0` | adapted, auto-snapshot env-only 확정 | storage/recovery core(memory auto-snapshot, diff/COW rootfs, spawn-path cold-restart)는 채택한다. `EPHEMERA_AUTOSNAPSHOT=true` auto-snapshot은 opt-in·disk-expensive로 두고 public support로 승격하지 않는다 — env-only 확정(2026-07-11: config API/UI/MCP 공개 표면 미노출, opt-in 운영법은 runbook). |
 | `v0.4.1` | adapted | client identity, daemon access audit(`GET /audit`), per-token TTL/rotation은 채택한다. `ephemera-ctl`은 runtime operator CLI로 유지하고 IronClaw MCP tool을 대체하거나 anvil MCP public surface로 승격하지 않는다. |
 | `v0.4.2` | adapted, default cow deferred | COW probe/fallback과 COW+Diff snapshot은 채택한다. `EPHEMERA_DISK_MODE=cow`는 anvil에서 명시적 opt-in이며 default 전환은 KVM burn-in 뒤 결정한다. |
 | `v0.4.3` | adapted | dynamic flock membership, pause/resume, per-flock `max_agents`, Town Wall filter/rotation single-host lifecycle은 채택한다. routed members-only cross-host flock에는 그대로 적용하지 않는다. |
-| `v0.4.4` | adapted, broadcast MCP exposure deferred | streaming `/tasks`(buffered 기본 계약 유지), nested depth guard(`EPHEMERA_MAX_TASK_DEPTH`, `508`), `GET /watchdog/status`, goose-agent slog는 채택한다. flock broadcast는 daemon API/CLI로만 두고 `anvil_*` MCP tool 노출은 tenant/rate/audit 설계 전까지 deferred다(guard로 고정). |
+| `v0.4.4` | adapted, broadcast MCP exposure 기각 확정 | streaming `/tasks`(buffered 기본 계약 유지), nested depth guard(`EPHEMERA_MAX_TASK_DEPTH`, `508`), `GET /watchdog/status`, goose-agent slog는 채택한다. flock broadcast는 daemon API/CLI(`ephemera-ctl`)로만 두고 `anvil_*` MCP tool 노출은 기각 확정이다(2026-07-11: 로컬 host scope 전용이라 routed flock 원격 멤버 미도달·audit 1:1 불변식·adapter rate limit 부재가 근거, guard로 계속 고정). |
 | `v0.4.5` | adapted | snapshot-restore auto-recovery(`recoverRestoredVM`/`reRestoreMachine`)를 채택하고 restore state에 `tenant_id`/`egress_policy`를 persist하되 응답 token redaction은 유지한다. anvil은 live·persisted restored VM이 참조하는 source snapshot의 `DELETE`를 `409`로 막아 upstream e2e 46c의 `200` orphan 동작과 의도적으로 divergent하다(먼저 VM을 삭제한 뒤 snapshot 삭제). |
 | `v0.5.0` | adapted | operator Web UI(Svelte SPA, EN/KO, `cmd/goose-daemon/uidist/` embedded), `/config/profiles`, multi-turn goose session, graceful VM delete를 채택한다. Web UI는 runtime/operator surface이고 IronClaw MCP surface가 아니다 — `/ui/`(정적 bundle + login)만 auth 밖, 모든 data API는 bearer 뒤(guard `config_api_anvil_test.go`). `/config/profiles`는 `goose-secrets.yaml`을 절대 read/write하지 않는다(sentinel test). `cmd/anvil-mcp`는 그대로이고 `VMInfo`는 additive `provider`/`model` 필드만 추가한다. |
 | `v0.5.1`-`v0.5.5` | adapted | `/config/providers`(key 존재 여부만), `/config/clients`(이름+만료만)를 sentinel test로 secret 비노출 확인. `system.md`-only prompt 편집(`64 KiB` cap), profile delete in-use → `409`, default profile 예약, traversal 거부. sizing preset + per-VM `VcpuCount`/`MemSizeMib`(snapshot metadata에 기록, legacy → 2/2048 fallback). Town Wall `SystemAuthor` author migration. restore agent-wait 30s→60s. |
@@ -95,9 +95,11 @@ Phase 4 handoff([`docs/operations/2026-07-06-ephemera-v0.7-parity-sync-handoff.m
 
 sizing 결정: `v0.5.3`부터 anvil은 upstream default VM sizing `1` vCPU / `1024` MiB를
 채택한다(이전 2/2048, KVM 근거로 승인, full e2e 3× `316✓`). snapshot metadata가 per-VM
-sizing을 기록하고 legacy snapshot은 2/2048로 fallback한다. flock member spawn이
-per-profile `EPHEMERA_VCPU_COUNT`/`EPHEMERA_MEM_SIZE_MIB` override를 무시하고
-`LookupProfile` default로만 sizing하는 upstream-inherited gap은 follow-up이다.
+sizing을 기록하고 legacy snapshot은 2/2048로 fallback한다. flock member spawn
+(createFlock·add-agent)이 per-profile `EPHEMERA_VCPU_COUNT`/`EPHEMERA_MEM_SIZE_MIB`
+override를 무시하고 `LookupProfile` default로만 sizing하던 upstream-inherited gap은
+`POST /vms` 경로와 동일한 `readProfileConfig` override 블록을 미러링해 닫혔다
+(2026-07-11, guard `TestSpawnVMForFlock_HonorsPerProfileSizing`).
 
 keep-alive divergence(`adapted`): `v0.5.x` `gracefulAgentStop`이 v0.2.0부터 잠재하던
 upstream shared pooled agent proxy client 결함을 드러냈다(guest IP 재활용 시 stale
@@ -123,9 +125,10 @@ stdio stderr scrub, `credential_env` reserved names, production-mux auth sentine
 2026-07-06 follow-up batch(`4a802f5`, `0376afa`, `613a01b`, `cd2e70b`, `de5a7aa`,
 `0625df5`)로 닫혔고, 마지막 open gate(valid provider key `semantic` run, e2e step 59)도
 `18c7559`에서 OpenAI `gpt-4o`로 닫혔다(full e2e `343✓/0✗`) — release-gate open 항목
-없음. 그 밖에 deferred 항목(`v0.4.4` broadcast MCP 노출, `v0.4.2` default COW,
-auto-snapshot public support, flock per-profile sizing, runtime MCP Gateway의 IronClaw
-표면 승격 금지)이다.
+없음. 2026-07-11 결정으로 `v0.4.4` broadcast MCP 노출은 기각 확정, auto-snapshot
+public support는 env-only 확정, flock member per-profile sizing 존중은 완료됐다. 남은
+deferred/비목표는 `v0.4.2` default COW 전환(KVM burn-in 후 flip)과 runtime MCP
+Gateway의 IronClaw 표면 승격 금지다.
 
 ---
 

@@ -68,9 +68,11 @@ Gateway(`EPHEMERA_MCP_*`, `internal/mcpgateway`), `v0.7.0` end-user installer
 runtime/operator surface로만 채택해 IronClaw `anvil_*` MCP surface로 노출하지 않으며
 (runtime MCP Gateway는 `cmd/anvil-mcp` IronClaw adapter를 대체하지 않는다), systemd
 service는 canonical `ephemera` 이름을 유지한다(anvil alias wrapper 없음). 남은
-deferred/비목표는 `v0.4.4` flock broadcast의 MCP tool 노출, `v0.4.2` default COW 전환,
-auto-snapshot public support, flock member spawn의 per-profile sizing 존중, runtime MCP
-Gateway의 IronClaw 표면 승격 금지(비목표 유지)다. release-gate 코드 항목 4종
+deferred/비목표는 `v0.4.2` default COW 전환(KVM burn-in 후 flip)과 runtime MCP
+Gateway의 IronClaw 표면 승격 금지(비목표 유지)다. `v0.4.4` flock broadcast의 MCP tool
+노출은 기각 확정(2026-07-11, daemon-only 유지), auto-snapshot public support는 env-only
+확정(2026-07-11, 공개 표면 미노출), flock member spawn의 per-profile sizing 존중은
+완료(2026-07-11)로 세 항목 모두 deferred에서 종결됐다. release-gate 코드 항목 4종
 (audit-writer sentinel, stdio stderr scrub, `credential_env` reserved names,
 production-mux auth assert)은 2026-07-06 follow-up batch로 닫혔고, 마지막 open gate
 (valid provider key `semantic` run, e2e step 59)도 `18c7559`에서 OpenAI `gpt-4o`로
@@ -177,7 +179,7 @@ backport(atomic temp+rename 무조건 검증 포함, upstream보다 stricter)가
   (upstream `v0.4.4` 신설, ANVIL alias 없음, 기본값 `5`, 한계 도달 시 `508`)
 - per-VM sizing canonical 환경 변수: `EPHEMERA_VCPU_COUNT`, `EPHEMERA_MEM_SIZE_MIB`
   (profile `goose.yaml`에서 읽음, unset이면 default `1` vCPU / `1024` MiB,
-  ANVIL alias 없음. `POST /vms`가 존중, flock member spawn은 아직 미존중 — 후속 참조)
+  ANVIL alias 없음. `POST /vms`와 flock member spawn(createFlock·add-agent) 모두 존중 — 2026-07-11)
 - runtime MCP Gateway canonical 환경 변수: `EPHEMERA_MCP_ENABLED`,
   `EPHEMERA_MCP_SERVERS`, `EPHEMERA_MCP_PORT`, `EPHEMERA_MCP_BIND_IP`,
   `EPHEMERA_MCP_RATE`, `EPHEMERA_MCP_BURST`, `EPHEMERA_MCP_STDIO_USER`
@@ -264,8 +266,10 @@ daemon으로 보내는 outbound Bearer token이다.
   채택됐고 full KVM gate로 검증됐다. storage/recovery, auth/audit, COW,
   single-host flock lifecycle, streaming task, nested task depth guard, watchdog
   status, snapshot-restore auto-recovery는 anvil 보안/운영 계약에 맞춰 `adapted`
-  상태다. `v0.4.2` default COW 전환과 auto-snapshot public support, `v0.4.4` flock
-  broadcast의 MCP tool 노출은 별도 검증/설계 전까지 deferred로 둔다.
+  상태다. `v0.4.2` default COW 전환은 KVM burn-in 후 flip 결정으로 deferred, auto-snapshot
+  public support는 env-only 확정(2026-07-11: config API/UI/MCP 공개 표면 미노출, opt-in
+  `EPHEMERA_AUTOSNAPSHOT` 운영법은 runbook), `v0.4.4` flock broadcast의 MCP tool 노출은
+  기각 확정(2026-07-11: daemon-only ephemera-ctl 유지)이다.
 - upstream `v0.4.5` snapshot-restore auto-recovery에서 anvil은 live·persisted
   restored VM이 참조하는 source snapshot의 `DELETE`를 `409`로 계속 보호한다.
   upstream e2e 46c의 `200` orphan 동작과 의도적으로 다르며, 이 divergence는
@@ -281,9 +285,11 @@ daemon으로 보내는 outbound Bearer token이다.
   surface는 그대로다.
 - `v0.5.3`부터 anvil은 upstream default VM sizing `1` vCPU / `1024` MiB를 채택한다
   (v0.5.3 이전 2/2048에서 변경, KVM 근거로 승인). snapshot metadata가 per-VM sizing을
-  기록하고 legacy snapshot은 2/2048로 fallback한다. flock member spawn이 per-profile
-  `EPHEMERA_VCPU_COUNT`/`EPHEMERA_MEM_SIZE_MIB` override를 무시하고 `LookupProfile`
-  default로만 sizing하는 upstream-inherited gap은 follow-up으로 기록한다.
+  기록하고 legacy snapshot은 2/2048로 fallback한다. flock member spawn(createFlock·
+  add-agent)이 per-profile `EPHEMERA_VCPU_COUNT`/`EPHEMERA_MEM_SIZE_MIB` override를
+  무시하고 `LookupProfile` default로만 sizing하던 upstream-inherited gap은 `POST /vms`
+  경로와 동일한 override 블록을 미러링해 닫혔다(2026-07-11). 기존 flock에 add-agent 시
+  신규 멤버만 profile sizing이 걸린다(의도된 동작).
 - Phase 2 KVM gate 중, `v0.5.x` `gracefulAgentStop`이 v0.2.0부터 잠재해 있던 upstream
   pooled-client 결함을 드러냈다. shared keep-alive agent proxy client가 guest IP
   재활용 사이에 stale pooled connection을 재사용해 restored VM `/tasks`가 hang/`502`로
@@ -417,10 +423,10 @@ daemon으로 보내는 outbound Bearer token이다.
 
 남은 후속 후보:
 
-- `v0.4.2` default COW 전환과 auto-snapshot public support의 KVM burn-in 후 결정,
-  `v0.4.4` flock broadcast의 MCP tool 노출을 위한 tenant/rate/audit 설계
-- flock member spawn이 per-profile `EPHEMERA_VCPU_COUNT`/`EPHEMERA_MEM_SIZE_MIB`
-  override를 존중하도록 sizing 경로 정리(현재는 `LookupProfile` default만 사용)
+- `v0.4.2` default COW 전환의 KVM burn-in 후 flip 결정(1차 burn-in은 2026-07-11 slice에서
+  수행, flip은 별도 slice). auto-snapshot public support(env-only 확정)와 `v0.4.4` flock
+  broadcast MCP tool 노출(기각 확정), flock member spawn per-profile sizing 존중(완료)은
+  2026-07-11 결정으로 종결 — 후속 후보 아님.
 - proxy agent client keep-alive 비활성화(`64ec57c`)의 upstream 기여 검토
 - runtime MCP Gateway backend 운영 정책(어떤 backend server를 profile에 바인딩할지,
   rate-limit·credential 운영)과 실제 operator 배포 검증

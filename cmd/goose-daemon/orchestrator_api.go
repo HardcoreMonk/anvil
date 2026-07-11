@@ -1608,6 +1608,21 @@ func (cp *ControlPlane) spawnVMForFlock(flockID, agentID, profile, tenantID, egr
 		return nil, "", err
 	}
 	agentProfile := LookupProfile(profile)
+	vcpu, mem := agentProfile.VcpuCount, agentProfile.MemSizeMib
+	// UI-created profiles persist their own sizing in goose.yaml (EPHEMERA_* keys);
+	// prefer those over the LookupProfile defaults when present. Mirrors the
+	// POST /vms path (spawnVM in api.go) so both spawn entry points size flock
+	// members identically. Note: add-agent to an existing flock routes through
+	// this same function, so a member joined under a sized profile is sized here
+	// too — intentionally, only the new member takes the profile's sizing.
+	if pc, err := cp.readProfileConfig(profile); err == nil {
+		if pc.VcpuCount > 0 {
+			vcpu = pc.VcpuCount
+		}
+		if pc.MemSizeMib > 0 {
+			mem = pc.MemSizeMib
+		}
+	}
 	return cp.spawnVMInternal(spawnVMOptions{
 		Profile:           profile,
 		ConfigPath:        configPath,
@@ -1618,8 +1633,8 @@ func (cp *ControlPlane) spawnVMForFlock(flockID, agentID, profile, tenantID, egr
 		FlockID:           flockID,
 		AgentID:           agentID,
 		ControlPlaneToken: cp.controlPlaneTokenForVM(),
-		VcpuCount:         agentProfile.VcpuCount,
-		MemSizeMib:        agentProfile.MemSizeMib,
+		VcpuCount:         vcpu,
+		MemSizeMib:        mem,
 	})
 }
 

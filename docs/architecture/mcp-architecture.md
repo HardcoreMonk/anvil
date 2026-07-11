@@ -177,10 +177,11 @@ stdio-compatible smoke와 inspection에는 `anvil_get_townwall_history`가 사�
 history endpoint를 쓴다. 현재 MCP surface에는 flock snapshot/restore가 없다.
 upstream `v0.4.4`의 flock broadcast(daemon `POST /flocks/{id}/broadcast`,
 `ephemera-ctl flock broadcast` CLI)도 이 phase에서 `anvil_*` MCP tool로 노출하지
-않는다. broadcast는 daemon-only runtime operator 표면으로만 두고 MCP 노출은
-tenant/rate/audit 설계 전까지 deferred이며, 이 결정은
-`TestToolRegistrationsExcludeBroadcast`와
-`TestCurrentIronClawSchemasExcludeBroadcastTool`로 고정한다. `anvil_run_task`는
+않는다. broadcast는 daemon-only runtime operator 표면(`ephemera-ctl`)으로만 두고 MCP
+노출은 기각 확정이다(2026-07-11): broadcast는 로컬 host scope 전용이라 routed flock의
+원격 멤버에 도달하지 못하고, audit 1:1 불변식과 adapter rate limit 부재가 근거다. 이
+결정은 `TestToolRegistrationsExcludeBroadcast`와
+`TestCurrentIronClawSchemasExcludeBroadcastTool`로 계속 고정한다. `anvil_run_task`는
 buffered `POST /vms/{vm_id}/tasks` 계약만 사용하고 `?stream=1` streaming path는
 호출하지 않는다(`TestRunTaskBuffered_DefaultShape`).
 MCP router config가 있을 때 `anvil_spawn_flock`은 scheduler-aware single-host

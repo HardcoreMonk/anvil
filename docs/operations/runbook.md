@@ -108,6 +108,38 @@ JSON body 처리 문제, `schedule_spawn_failed`는 host inventory나 quota/usag
 문제를 우선 의심한다. `metrics_failed`는 scheduler service가 `/metrics`를 제공하지
 않거나 smoke가 `anvil_scheduler_control_loop_running` line을 찾지 못한 상태다.
 
+### Memory auto-snapshot (opt-in, `EPHEMERA_AUTOSNAPSHOT`)
+
+memory auto-snapshot은 `EPHEMERA_AUTOSNAPSHOT=true` 환경으로만 켜지는 opt-in 기능이다
+(config API/UI/MCP 등 공개 표면에는 노출하지 않는다 — 2026-07-11 env-only 확정). 기본은
+꺼짐이다.
+
+```bash
+EPHEMERA_AUTOSNAPSHOT=true EPHEMERA_API_TOKENS="operator:$TOKEN" ./anvil-daemon
+```
+
+효과: daemon이 graceful shutdown(SIGTERM/SIGINT)될 때 `DestroyAll`이 복구 가능한 각
+VM의 memory+state를 `vms/<id>/auto/`에 한 번 snapshot한다(restored VM은 제외). 다음
+daemon 기동 시 `RecoverVMs`가 이 snapshot에서 warm-restore(in-VM 메모리 보존)하고,
+warm-restore가 실패하면 auto-snapshot을 지우고 cold boot로 fallback한다. SIGKILL이나
+비정상 종료로 graceful teardown이 돌지 못하면 snapshot이 없어 다음 기동은 cold boot다.
+
+경고(disk-expensive): auto-snapshot은 VM별 전체 memory dump라 디스크를 크게 먹는다
+(5-agent flock 기준 약 `10 GB`). 상시 켜지 말고, warm-restart가 실제로 필요한 host에서만
+켜고 `EPHEMERA_DISK_MIN_FREE_MIB` 여유를 함께 확인한다.
+
+관측: `/metrics`에서 다음 counter로 성공/실패를 본다.
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:3000/metrics \
+  | grep -E 'ephemera_auto_(snapshot|restore)_total'
+```
+
+`ephemera_auto_snapshot_total{outcome="ok|fail"}`은 graceful-shutdown snapshot 시도,
+`ephemera_auto_restore_total{outcome="ok|fail"}`은 recovery warm-restore 시도를 센다.
+`fail`이 누적되면 디스크 여유, `vms/<id>/auto/` 권한, daemon 종료가 graceful했는지를
+확인한다.
+
 ## Daemon API 확인
 
 daemon process 상태와 API 인증 경로는 top-level `/health` endpoint로 확인한다.
