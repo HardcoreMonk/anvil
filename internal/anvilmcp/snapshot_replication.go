@@ -5,8 +5,30 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
+	"time"
 )
+
+// snapshotReplicaFactor is the desired number of replicas per snapshot (원본 +
+// 복제 1). Constant, not configuration (YAGNI — same stance as homeFailureThreshold).
+const snapshotReplicaFactor = 2
+
+// snapshotReplicationFailureCap is the number of CONSECUTIVE dial-class target
+// failures before the sweep gives up on that (snapshot,target) pair. Constant.
+const snapshotReplicationFailureCap = 3
+
+func snapshotTargetKey(snapshotID, target string) string {
+	return strings.TrimSpace(snapshotID) + "\x1f" + strings.TrimSpace(target)
+}
+
+func splitSnapshotTargetKey(key string) (string, string) {
+	parts := strings.SplitN(key, "\x1f", 2)
+	if len(parts) != 2 {
+		return key, ""
+	}
+	return parts[0], parts[1]
+}
 
 type SnapshotReplicationRequest struct {
 	SnapshotID          string `json:"snapshot_id"`
@@ -226,4 +248,222 @@ func snapshotInfoByID(snapshots []SnapshotInfo, snapshotID string) (SnapshotInfo
 
 func isDiffSnapshot(snapshot SnapshotInfo) bool {
 	return strings.EqualFold(strings.TrimSpace(snapshot.SnapshotType), "diff")
+}
+
+// reconcileSnapshotReplication converges every observed snapshot toward
+// snapshotReplicaFactor replicas. It is a sibling of reconcileRoutedFlockWalls and
+// runs inside ReconcilePlacements (reconcileMu-serialized), so its in-memory
+// counters need no extra lock. Each pass:
+//  1. Discovers actual replica locations + snapshot tenant/egress from every
+//     probe-reachable daemon's ListSnapshots (add-only union into SnapshotLocations
+//     — replica GC is a non-goal).
+//  2. Resets the dial counter + giving-up mark for any target observed reachable
+//     again (spec D-2 보강: giving-up is not permanent).
+//  3. For each snapshot below the replica factor with a reachable source: selects
+//     an eligible target (SelectRuntimeHost, tenant/egress carried), and either
+//     counts a dial failure (target unreachable at probe — short-circuit, no doomed
+//     transfer) or fires one ReplicateSnapshot and classifies the outcome.
+//  4. Republishes the queue_depth / giving_up gauges.
+//  5. Sweeps in-memory counters for snapshots no longer observed (deleted).
+//
+// All log/error text carries snapshot id + host NAME only (never a daemon address
+// or token).
+func (r *RuntimeRouter) reconcileSnapshotReplication(ctx context.Context, probes map[string]hostProbe) error {
+	if r == nil || r.placementStore == nil || r.scheduler == nil {
+		return nil
+	}
+	var errs []error
+
+	// 1. Discover.
+	liveSnapshots := make(map[string]bool)
+	observedHosts := make(map[string]map[string]bool)
+	infoByID := make(map[string]SnapshotInfo)
+	discovered := false
+	for hostName, daemon := range r.daemons {
+		if daemon == nil || !probes[hostName].reachable {
+			continue
+		}
+		lister, ok := daemon.(snapshotTransferDaemon)
+		if !ok {
+			continue
+		}
+		snaps, err := lister.ListSnapshots(ctx)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("reconcile snapshot replication: list snapshots on runtime host %q failed", hostName))
+			continue
+		}
+		for _, s := range snaps {
+			id := strings.TrimSpace(s.SnapshotID)
+			if id == "" {
+				continue
+			}
+			liveSnapshots[id] = true
+			if observedHosts[id] == nil {
+				observedHosts[id] = make(map[string]bool)
+			}
+			observedHosts[id][hostName] = true
+			if _, seen := infoByID[id]; !seen {
+				infoByID[id] = s
+			}
+			if err := r.placementStore.SetSnapshotLocation(id, hostName); err == nil {
+				discovered = true
+			}
+		}
+	}
+	if discovered {
+		if err := r.placementStore.Save(); err != nil {
+			errs = append(errs, fmt.Errorf("reconcile snapshot replication: persisting discovered locations failed"))
+		}
+	}
+
+	// 2. Revival reset.
+	for key := range r.replicationDialFailures {
+		if _, target := splitSnapshotTargetKey(key); probes[target].reachable {
+			delete(r.replicationDialFailures, key)
+			delete(r.replicationGivingUp, key)
+		}
+	}
+
+	// 3. Heal drift.
+	locations := r.placementStore.State().SnapshotLocations
+	ids := make([]string, 0, len(locations))
+	for id := range locations {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	now := time.Now().UTC()
+	var queueDepth int64
+	for _, id := range ids {
+		hosts := locations[id] // sorted by SetSnapshotLocation
+		if len(hosts) >= snapshotReplicaFactor {
+			continue
+		}
+		queueDepth++
+		source := ""
+		for _, h := range hosts {
+			if probes[h].reachable && observedHosts[id][h] {
+				source = h
+				break
+			}
+		}
+		if source == "" {
+			continue // source unreachable/absent this pass; still counted in queue_depth
+		}
+		info := infoByID[id]
+		excluded := append([]string(nil), hosts...)
+		excluded = append(excluded, r.excludedReplicationTargets(id)...)
+		target, err := SelectRuntimeHost(r.scheduler.hosts, ScheduleRequest{
+			TenantID:      info.TenantID,
+			EgressPolicy:  EgressPolicy(info.EgressPolicy),
+			ExcludedHosts: excluded,
+		})
+		if err != nil {
+			r.recordSnapshotReplicationMetric(SnapshotReplicationMetricObservation{
+				Outcome: SnapshotReplicationOutcomeNoCandidate,
+				Reason:  SnapshotReplicationReasonNoEligibleHost,
+				At:      now,
+			})
+			continue
+		}
+		tgtName := strings.TrimSpace(target.Name)
+		key := snapshotTargetKey(id, tgtName)
+		if !probes[tgtName].reachable {
+			r.replicationDialFailures[key]++
+			r.recordSnapshotReplicationMetric(SnapshotReplicationMetricObservation{
+				Outcome: SnapshotReplicationOutcomeDialFailed,
+				Reason:  SnapshotReplicationReasonTargetUnreachable,
+				At:      now,
+			})
+			if r.replicationDialFailures[key] >= snapshotReplicationFailureCap {
+				r.replicationGivingUp[key] = true
+				r.logf("anvil-mcp: snapshot replication for %q giving up on target host %q after %d dial failures", id, tgtName, r.replicationDialFailures[key])
+			}
+			errs = append(errs, fmt.Errorf("reconcile snapshot replication for %q: target host %q unreachable", id, tgtName))
+			continue
+		}
+		start := time.Now()
+		resp, repErr := r.ReplicateSnapshot(ctx, SnapshotReplicationRequest{
+			SnapshotID:          id,
+			SourceHost:          source,
+			TargetHost:          tgtName,
+			IncludeDependencies: true,
+		})
+		errs = r.classifySnapshotReplication(id, tgtName, key, resp, repErr, time.Since(start), now, errs)
+	}
+
+	// 4. Gauges.
+	givingUpSnaps := make(map[string]bool)
+	for key := range r.replicationGivingUp {
+		if s, _ := splitSnapshotTargetKey(key); s != "" {
+			givingUpSnaps[s] = true
+		}
+	}
+	if err := r.placementStore.RecordSnapshotReplicationGauges(queueDepth, int64(len(givingUpSnaps))); err != nil {
+		errs = append(errs, fmt.Errorf("reconcile snapshot replication: recording gauges failed"))
+	}
+
+	// 5. Sweep counters for snapshots no longer observed (deleted/removed).
+	for key := range r.replicationDialFailures {
+		if s, _ := splitSnapshotTargetKey(key); !liveSnapshots[s] {
+			delete(r.replicationDialFailures, key)
+		}
+	}
+	for key := range r.replicationGivingUp {
+		if s, _ := splitSnapshotTargetKey(key); !liveSnapshots[s] {
+			delete(r.replicationGivingUp, key)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// excludedReplicationTargets lists the in-memory targets to keep out of selection
+// for a snapshot. Task 2: giving-up targets only. (Task 3 also adds terminal
+// targets.)
+func (r *RuntimeRouter) excludedReplicationTargets(snapshotID string) []string {
+	var out []string
+	for key := range r.replicationGivingUp {
+		if s, tgt := splitSnapshotTargetKey(key); s == snapshotID {
+			out = append(out, tgt)
+		}
+	}
+	return out
+}
+
+// classifySnapshotReplication records the metric outcome for one replication
+// attempt and updates the dial counter. Task 2: success (reset) vs error
+// (collected, retried next pass). Task 3 splits terminal out of error.
+func (r *RuntimeRouter) classifySnapshotReplication(id, target, key string, resp *SnapshotReplicationResponse, repErr error, total time.Duration, at time.Time, errs []error) []error {
+	if resp != nil && repErr == nil && resp.Status == "replicated" {
+		delete(r.replicationDialFailures, key)
+		delete(r.replicationGivingUp, key)
+		outcome, reason := SnapshotReplicationOutcomeReplicated, SnapshotReplicationReasonScheduled
+		if len(resp.Replicated) == 0 { // every item was already present on the target
+			outcome, reason = SnapshotReplicationOutcomeAlreadyPresent, SnapshotReplicationReasonIdempotent
+		}
+		r.recordSnapshotReplicationMetric(SnapshotReplicationMetricObservation{
+			Outcome:   outcome,
+			Reason:    reason,
+			Latencies: map[string]time.Duration{SnapshotReplicationPhaseTotal: total},
+			At:        at,
+		})
+		r.logf("anvil-mcp: snapshot %q replicated to host %q (%d desired replicas)", id, target, snapshotReplicaFactor)
+		return errs
+	}
+	// Reachable target but the transfer did not succeed. Task 2 collects it as a
+	// generic error and retries next pass (Task 3 refines the non-error case into a
+	// terminal exclusion).
+	r.recordSnapshotReplicationMetric(SnapshotReplicationMetricObservation{
+		Outcome:   SnapshotReplicationOutcomeError,
+		Reason:    SnapshotReplicationReasonTransferError,
+		Latencies: map[string]time.Duration{SnapshotReplicationPhaseTotal: total},
+		At:        at,
+	})
+	return append(errs, fmt.Errorf("reconcile snapshot replication for %q on target host %q failed", id, target))
+}
+
+func (r *RuntimeRouter) recordSnapshotReplicationMetric(obs SnapshotReplicationMetricObservation) {
+	if r == nil || r.placementStore == nil {
+		return
+	}
+	_ = r.placementStore.RecordSnapshotReplicationMetrics(obs)
 }
