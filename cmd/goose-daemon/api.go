@@ -418,6 +418,17 @@ type ControlPlane struct {
 
 	snapshotsMu      sync.RWMutex
 	snapshots        map[string]storage.SnapshotMetadata
+
+	// D3 creation-side guard. The snapshots filesystem is probed once per daemon
+	// lifetime (result cached under holeProbeMu); if it reports holes coarser than
+	// 4KiB (ZFS recordsize>4K) every diff snapshot is demoted to full, because a
+	// sparse diff would corrupt guest memory on restore. holeProbeFn is nil in
+	// production (uses storage.ProbeHoleGranularity); tests inject a coarse probe.
+	holeProbeMu     sync.Mutex
+	holeProbeDone   bool
+	holeProbeCoarse bool
+	holeProbeFn     func(dir string) (int64, error)
+
 	tenantStore      *anvilmcp.QuotaStore
 	egress           egressEnforcer
 	runtimeAuditPath string
@@ -2945,6 +2956,44 @@ func (cp *ControlPlane) handleSnapshotItem(w http.ResponseWriter, r *http.Reques
 	cp.deleteSnapshot(w, path)
 }
 
+// snapshotsDirCoarse reports whether the snapshots directory's filesystem exposes holes
+// at coarser than 4KiB granularity (ZFS recordsize>4K), which corrupts sparse diff
+// snapshots on restore (D3). The probe runs once per daemon lifetime and the result is
+// cached; a coarse result is logged once via slog.Warn (granularity value only — no
+// secrets). holeProbeFn is nil in production and defaults to storage.ProbeHoleGranularity.
+func (cp *ControlPlane) snapshotsDirCoarse() bool {
+	cp.holeProbeMu.Lock()
+	defer cp.holeProbeMu.Unlock()
+	if cp.holeProbeDone {
+		return cp.holeProbeCoarse
+	}
+	probe := cp.holeProbeFn
+	if probe == nil {
+		probe = storage.ProbeHoleGranularity
+	}
+	dir := filepath.Join(cp.workDir, "snapshots")
+	g, err := probe(dir)
+	// Fail safe: any probe error, or granularity above the 4KiB sparse-diff unit, is coarse.
+	cp.holeProbeCoarse = err != nil || g > 4096
+	cp.holeProbeDone = true
+	if cp.holeProbeCoarse {
+		slog.Warn("snapshot: coarse filesystem hole granularity detected — demoting diff snapshots to full to avoid guest memory corruption (D3); a recordsize=4K dataset is recommended for diff efficiency",
+			"dir", dir, "granularity", g, "probe_err", err)
+	}
+	return cp.holeProbeCoarse
+}
+
+// applyD3DiffGuard demotes a diff snapshot to full when the snapshots filesystem has
+// coarse hole granularity (D3). The returned (type, base) is used verbatim for the
+// snapshot metadata and API response, so the demotion is contract-visible and honest:
+// callers see snapshot_type "full", not a silently-corrupt "diff".
+func (cp *ControlPlane) applyD3DiffGuard(snapType, baseSnapID string) (string, string) {
+	if snapType == "diff" && cp.snapshotsDirCoarse() {
+		return "full", ""
+	}
+	return snapType, baseSnapID
+}
+
 // resolveSnapshotType determines whether to create a Full or Diff snapshot.
 // "" (auto): Full if no prior Full snapshot of this VM exists; Diff otherwise.
 // "full" / "diff": explicit override. "diff" without a base returns an error.
@@ -3043,6 +3092,13 @@ func (cp *ControlPlane) createSnapshot(w http.ResponseWriter, r *http.Request, v
 		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusBadRequest)
 		return
 	}
+
+	// D3 creation-side guard: on a coarse-hole filesystem (ZFS recordsize>4K) a sparse
+	// diff would corrupt guest memory on restore. Demote to a full snapshot BEFORE the
+	// disk pre-flight and Firecracker opts are derived, so the reservation, the SDK
+	// snapshot type, the stored metadata, and the API response all reflect an honest
+	// "full". On a fine filesystem (the KVM gate's ext4) this is a no-op.
+	snapType, baseSnapID = cp.applyD3DiffGuard(snapType, baseSnapID)
 
 	// Disk-space pre-flight (v0.4.0): refuse before pausing the VM if the snapshot would
 	// push free space below the operator margin. Full snapshots reserve memory.bin (≈ guest
