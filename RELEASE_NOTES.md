@@ -4,7 +4,7 @@
 cross-host shared Town Wall/gtcall/home 재선출 failover, adapter reconcile loop,
 bounded relay retry, cross-host snapshot replication 자동화에 더해 routed flock
 스택 결함 D1~D4 종결·web major(vite8/svelte5)·scheduler 실배포+installer 검증
-(PR #19~#46) 등 untagged 작업을 더 포함한다. anvil 버전은 이제
+(PR #19~#47) 등 untagged 작업을 더 포함한다. anvil 버전은 이제
 upstream ephemera 버전을 따른다. 이 릴리즈는 아래 `anvil-v0.4.0` 절의 parity
 편입(`v0.4.0`-`v0.7.0`)에 더해, `anvil-v0.4.0`(`de82481`) 이후 main에 반영된
 post-release backlog batch(PR #18 merge `726cbdc`)와 open-gate closure(step 59
@@ -1402,7 +1402,7 @@ Firecracker MicroVM을 만들고, 그 안에서 Goose task를 실행하는 기�
 - A one-shot operator demo (manual gate, like `observability_demo.sh`): preflight → swap per-role `*.webdev.{md,yaml}` overrides → spawn an `orchestrator + worker + reviewer` flock → background SSE harvester on the Town Wall → one `POST /vms/{orchestrator}/tasks` that drives the whole job → `npm install` + `vite build` → `vite preview` on `:5173` until `Ctrl-C`.
 - The orchestrator drives a single Goose session through ~13 tool calls: for each of `src/App.jsx`, `src/main.jsx`, `src/index.css`, `index.html` it calls `gtcall worker-1` to generate the file, `gtwall` to publish it to the Town Wall, and a best-effort `gtcall reviewer-1` review note — then posts `<<<DONE>>>`. All four `<<<FILE:>>>` posts are authored by `orchestrator-1`; there is no host authorship.
 - Per-role models: orchestrator `gemini-2.5-flash` (must drive the loop without stalling), worker + reviewer `gemini-2.5-flash-lite` (single-shot). Assumes a paid-tier Gemini key — the free tier's shared 20 RPM cap across all models cannot sustain multi-turn orchestration.
-- See [Multi-Agent Webdev Demo](README.md#multi-agent-webdev-demo-v036) in the README.
+- See [Multi-Agent Webdev Demo](docs/guides/demos.md#multi-agent-webdev-demo-v036) in the demos guide.
 
 ### In-VM agent-to-agent dispatch — `gtcall`
 
