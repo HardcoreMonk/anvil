@@ -153,12 +153,24 @@ EPHEMERA_API_TOKENS="operator:$TOKEN" ./anvil-daemon
    hub/relay 등록과 relay-token/call-token admission을 자동 재주입한다.
    즉시 반영이 필요하면 운영자가 승인한 수동 재등록 절차를 사용한다.
 
-5. home host 자체가 장기간 복구되지 않으면(프로세스가 아니라 host 다운) 현재는
-   home 부활을 기다리는 것 외에 자동 복구 경로가 없다. home 재선출 failover는
-   설계가 확정됐지만 구현은 수동 multi-host 검증 통과 후로 보류돼 있다
-   (`docs/superpowers/specs/2026-07-08-home-failover-design.md`). 그 spec은
-   failover 구현 후에도 wall 과거 기록 손실을 명시적으로 수용하는 계약임을
-   함께 규정한다.
+5. home host 자체가 장기간 복구되지 않으면(프로세스가 아니라 host 다운),
+   adapter reconcile 루프가 연속 `homeFailureThreshold`회(상수, 기본 3)
+   dial-계열 실패를 관측한 뒤 자동으로 재선출 failover를 발화한다 —
+   `record.Agents` 순서상 첫 생존 member host를 새 home으로 결정적으로
+   승격하고 전 member를 그 host로 재등록한다. 전환 창은 최대
+   ~`homeFailureThreshold`(3) × `ANVIL_MCP_RECONCILE_INTERVAL`(기본 `60s`)
+   + 전환 시간이며, 기본 설정 기준 최대 ~3분이다. 이 창 동안 wall/call은
+   계속 502 + bounded retry로 관측된다. **failover는 wall 과거 기록 손실을
+   명시적으로 수용하는 계약이다** — 새 home은 빈 log에서 seq를 재시작하고,
+   구 home 디스크의 기록은 병합되지 않는다. 자동 fail-back은 없다(구 host가
+   부활해도 새 home을 유지하고, 다음 reconcile이 구 host를 relay로 강등해
+   heal한다). 관측 방법(adapter 로그 라인, placements.json `home_host`)과
+   원래 host로 되돌리는 수동 fail-back 절차는 `runbook.md`의 "Home 재선출
+   failover 관측과 수동 fail-back" 절을 참고한다. 실 2-daemon 환경에서의
+   failover 시나리오 수동 검증은 아직 수행되지 않았다 — 상세:
+   [2026-07-08-cross-host-manual-verification.md](2026-07-08-cross-host-manual-verification.md)
+   ⑥b. 설계 원문:
+   [`docs/superpowers/specs/2026-07-08-home-failover-design.md`](../superpowers/specs/2026-07-08-home-failover-design.md).
 
 ## restore 실패
 

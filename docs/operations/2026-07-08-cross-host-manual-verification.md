@@ -5,6 +5,10 @@
   FAIL → D1/D1b fix(PR #30·#31) 당일 머지 후 ⑥ 재검증 PASS — 양 daemon 동시
   재시작 시나리오 포함). "실 2-daemon 통합 검증 완료". 수행 기록·증거·결함
   상세: [2026-07-10-cross-host-verification-run-handoff.md](2026-07-10-cross-host-verification-run-handoff.md).
+  이 상태는 wall/gtcall/재시작 복구(①~⑤, ⑥a, ⑦, ⑧) 항목에 한정된다. ⑥b
+  (home 재선출 failover)는 2026-07-11 home failover 구현 편입과 함께 신규
+  추가된 시나리오로, **아직 수행되지 않았다** — 트리거는 다음 서버 세션.
+  상세: [2026-07-11-home-failover-handoff.md](2026-07-11-home-failover-handoff.md).
 - 배경: 단일 host CI에서는 두 real daemon이 guest bridge(`goose-br0`,
   `10.0.1.0/24` — `internal/network/manager.go`에 고정)를 공유할 수 없어,
   wall/gtcall e2e는 home을 stub으로 대체한다. member 측 실경로(real VM →
@@ -76,8 +80,25 @@ debootstrap으로 Debian Trixie 생성 — `scripts/build_image.sh`). 서버 세
    기대: ①~③ 응답 텍스트 왕복, ③이 특히 C1 수정 경로(unmarked member→home →
    marked home→target)의 실증.
 
-6. **장애 시나리오 스팟** — home daemon 재시작 → 60s 내(reconcile) wall/call
-   재동작 확인. member daemon 재시작 → 동일.
+6. **장애 시나리오 스팟**
+   - **⑥a. 재시작 복구** (2026-07-10 수행, PASS — D1/D1b fix 이후 재검증
+     포함) — home daemon 재시작 → 60s 내(reconcile) wall/call 재동작 확인.
+     member daemon 재시작 → 동일. 상세:
+     [2026-07-10-cross-host-verification-run-handoff.md](2026-07-10-cross-host-verification-run-handoff.md).
+   - **⑥b. home 재선출 failover** (2026-07-11 신규 추가 — **미수행**, 트리거:
+     다음 서버 세션) — home daemon을 **정지**한다(재시작이 아니라 프로세스를
+     죽인 채로 유지 — reconcile이 dial-계열 실패를 연속 관측해야 한다) →
+     전환 창 동안 대기한다(최대 ~`homeFailureThreshold`(3) ×
+     `ANVIL_MCP_RECONCILE_INTERVAL`, 기본 `60s` + 전환 시간 — 기본 설정 기준
+     최대 ~3분) → adapter의 `scheduler_state_path`(placements.json)에서 해당
+     flock의 `home_host`가 새 host로 바뀌었는지 확인한다 → wall 양방향과
+     gtcall 4방향(④~⑤ 절차를 새 home 기준으로 재사용)이 새 home을 경유해
+     재확인되는지 확인한다 → **구 home을 재기동**한다 → 구 home이 relay로
+     강등됐는지 확인한다(`GET /flocks/{id}`의 `kind`가 `relay`로 바뀜; 구
+     home에서 `gtwall`을 실행하면 새 home으로 forward되고 `409` 없이
+     성공) → `GET /flocks/{id}/wall/history`에서 전환 이전(구 home 시절)
+     메시지가 더 이상 나타나지 않음을 확인한다(wall 손실 계약의 직접 관측
+     — 이 부재는 실패가 아니라 설계된 계약이다).
 
 7. **redaction 스팟** — 두 daemon stderr 로그에 `relay_token`/`call_token`
    값·상대 daemon 주소가 없는지 grep. `GET /flocks/{id}` 응답에 토큰/Addr
@@ -88,7 +109,18 @@ debootstrap으로 Debian Trixie 생성 — `scripts/build_image.sh`). 서버 세
 
 ## 판정 기준
 
-①~③ 왕복 + wall 양방향 + 재시작 복구 + redaction 스팟 전부 통과 시 "실
+| 시나리오 | 통과 조건 | 상태 |
+|---|---|---|
+| ①~③ gtcall 왕복 | 응답 텍스트 왕복, ③이 C1 수정 경로 실증 | PASS (2026-07-10) |
+| wall 양방향 | home `TOWN_WALL.log`에 양 host 발신 기록, `wall/history` 양쪽 daemon 동일 | PASS (2026-07-10) |
+| ⑥a 재시작 복구 | home/member daemon 재시작 후 60s 내 wall/call 재동작 | PASS (2026-07-10, D1/D1b fix 이후) |
+| redaction 스팟 | 양 daemon 로그·`GET /flocks/{id}` 응답에 토큰/상대 daemon 주소 부재 | PASS (2026-07-10) |
+| ⑥b home 재선출 failover | `home_host` 전환 확인 + 새 home 경유 wall/gtcall 재확인 + 구 home relay 강등(신 home으로 forward, `409` 없음) + wall history 전환-전 메시지 부재 확인 | **미수행** (트리거: 다음 서버 세션) |
+
+①~③ 왕복 + wall 양방향 + ⑥a 재시작 복구 + redaction 스팟 전부 통과 시 "실
 2-daemon 통합 검증 완료"로 이 문서 상태를 갱신하고 gtcall handoff의 MANUAL
-check 항목을 CLOSED 표기한다. 실패 시 증상·로그를 이 문서에 첨부하고 slice
-결함으로 회부한다.
+check 항목을 CLOSED 표기한다(2026-07-10 기준 이 조건은 이미 충족됐다). ⑥b는
+별도 시나리오로, 통과 시 이 표의 상태를 CLOSED로 갱신하고
+[2026-07-11-home-failover-handoff.md](2026-07-11-home-failover-handoff.md)의
+Follow-Up 항목을 완료로 갱신한다. 실패 시 증상·로그를 이 문서에 첨부하고
+slice 결함으로 회부한다.

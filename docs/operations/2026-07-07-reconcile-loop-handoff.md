@@ -65,7 +65,8 @@ bound하고, 테스트를 "원인 에러가 로그에 없어야 한다"는 redac
   relay retry slice; 비동기 buffer는 비목표로 남아 mesh/수동 검증 이후
   재평가, 상세:
   [`docs/operations/2026-07-08-bounded-relay-retry-handoff.md`](2026-07-08-bounded-relay-retry-handoff.md)).
-  home SPOF mesh 진화는 재선출 failover로 설계 확정
-  (`docs/superpowers/specs/2026-07-08-home-failover-design.md`, 구현은 수동
-  multi-host 검증 통과 후). SSE non-200 polish는 town wall handoff의 기존
-  follow-up 유지.
+  home SPOF mesh 진화는 재선출 failover로 설계 확정 후 ~~구현은 수동
+  multi-host 검증 통과 후로 보류~~ — **구현 완료** (2026-07-11,
+  `feature/home-failover`). 실 2-daemon 수동 검증(§6b)은 아직 미수행. 상세:
+  [2026-07-11-home-failover-handoff.md](2026-07-11-home-failover-handoff.md).
+  SSE non-200 polish는 town wall handoff의 기존 follow-up 유지.

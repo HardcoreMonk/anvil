@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -229,6 +230,60 @@ func TestRegisterDistributedAndRelayFlock(t *testing.T) {
 	}
 }
 
+// TestRegisterDistributedFlock_PromotesRelayToHub proves the failover promotion
+// path: a member daemon that holds a RELAY flock for this id accepts a hub
+// registration from the control plane (the adapter re-elected this host as the
+// new home) instead of 409ing. The promoted hub follows RegisterHub semantics:
+// fresh wall, roster from the request, EMPTY Agents map (the deleteFlock
+// VM-safety invariant), kind persisted as hub for restart recovery.
+func TestRegisterDistributedFlock_PromotesRelayToHub(t *testing.T) {
+	cp := newTestCP(t)
+
+	// Seed: this daemon is a member — relay flock with local agents.
+	relayBody := `{"home_addr":"http://old-home:3000","relay_token":"rt-1","call_token":"ct-1","agents":[{"agent_id":"researcher-1","vm_id":"vm-r1"}]}`
+	rr := httptest.NewRecorder()
+	cp.handleFlockItem(rr, httptest.NewRequest(http.MethodPost, "/flocks/routed-1/relay", strings.NewReader(relayBody)))
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("seed relay register = %d, want 201 (%s)", rr.Code, rr.Body.String())
+	}
+
+	// Failover: the adapter promotes this host to home. SAME tokens (guest-transparent).
+	hubBody := `{"roster":[{"agent_id":"coordinator-1","host":"hostA","vm_id":"vm-c1"},{"agent_id":"researcher-1","host":"hostB","vm_id":"vm-r1"}],"relay_token":"rt-1","call_token":"ct-1"}`
+	rr2 := httptest.NewRecorder()
+	cp.handleFlockItem(rr2, httptest.NewRequest(http.MethodPost, "/flocks/routed-1/distributed", strings.NewReader(hubBody)))
+	if rr2.Code != http.StatusCreated {
+		t.Fatalf("promote relay->hub = %d, want 201 (%s)", rr2.Code, rr2.Body.String())
+	}
+
+	f, ok := cp.flockMgr.Get("routed-1")
+	if !ok || f.Kind != orchestrator.FlockKindHub {
+		t.Fatalf("flock not promoted to hub: %+v", f)
+	}
+	if f.TownWall == nil {
+		t.Fatal("promoted hub has no town wall")
+	}
+	if len(f.RosterSnapshot()) != 2 {
+		t.Fatalf("promoted hub roster = %d members, want 2", len(f.RosterSnapshot()))
+	}
+	// deleteFlock VM-safety invariant: hub Agents stays EMPTY (local resolution
+	// uses roster VMID + cp.vms presence, same as a first-generation home).
+	if len(f.Snapshot()) != 0 {
+		t.Fatalf("promoted hub Agents = %d, want 0 (deleteFlock VM-safety invariant)", len(f.Snapshot()))
+	}
+	// Tokens admitted for inbound guest/hop auth.
+	if cp.relayTokenFor("routed-1") != "rt-1" || cp.callTokenFor("routed-1") != "ct-1" {
+		t.Fatalf("promotion did not admit tokens: relay=%q call=%q", cp.relayTokenFor("routed-1"), cp.callTokenFor("routed-1"))
+	}
+	// Kind persisted so a restart recovers a hub, not a relay.
+	meta, err := orchestrator.LoadFlockMetadata(cp.workDir, "routed-1")
+	if err != nil {
+		t.Fatalf("load persisted metadata: %v", err)
+	}
+	if meta.Kind != orchestrator.FlockKindHub {
+		t.Fatalf("persisted kind = %q, want hub", meta.Kind)
+	}
+}
+
 // TestRegisterDistributedFlock_RejectsDuplicateNonHubID proves a POST /distributed
 // for a flock id already registered under a non-hub kind (here a local flock) is
 // rejected with 409 Conflict instead of silently overwriting the existing flock
@@ -253,6 +308,57 @@ func TestRegisterDistributedFlock_RejectsDuplicateNonHubID(t *testing.T) {
 	}
 	if cp.relayTokenFor("routed-1") != "" {
 		t.Fatalf("rejected distributed register admitted relay token %q", cp.relayTokenFor("routed-1"))
+	}
+}
+
+// TestRegisterRelayFlock_DemotesHubToRelay proves the failover demotion path: a
+// revived old home still holding the stale HUB flock (restart recovery restores
+// kind=hub) accepts a relay registration from the control plane — the adapter's
+// record now points at the NEW home — instead of 409ing forever. The wall log
+// file stays on disk (audit artifact, same convention as DeleteFlockMetadata);
+// the demoted flock forwards to the new home and resolves its own local agents.
+func TestRegisterRelayFlock_DemotesHubToRelay(t *testing.T) {
+	cp := newTestCP(t)
+
+	// Seed: this daemon WAS the home — hub flock with a canonical wall.
+	hubBody := `{"roster":[{"agent_id":"coordinator-1","host":"hostA","vm_id":"vm-c1"}],"relay_token":"rt-1","call_token":"ct-1"}`
+	rr := httptest.NewRecorder()
+	cp.handleFlockItem(rr, httptest.NewRequest(http.MethodPost, "/flocks/routed-1/distributed", strings.NewReader(hubBody)))
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("seed hub register = %d, want 201 (%s)", rr.Code, rr.Body.String())
+	}
+	wallPath := filepath.Join(cp.workDir, "flocks", "routed-1", "TOWN_WALL.log")
+
+	// Failover happened elsewhere; reconcile now demotes this host to a member.
+	relayBody := `{"home_addr":"http://new-home:3000","relay_token":"rt-1","call_token":"ct-1","agents":[{"agent_id":"coordinator-1","vm_id":"vm-c1"}]}`
+	rr2 := httptest.NewRecorder()
+	cp.handleFlockItem(rr2, httptest.NewRequest(http.MethodPost, "/flocks/routed-1/relay", strings.NewReader(relayBody)))
+	if rr2.Code != http.StatusCreated {
+		t.Fatalf("demote hub->relay = %d, want 201 (%s)", rr2.Code, rr2.Body.String())
+	}
+
+	f, ok := cp.flockMgr.Get("routed-1")
+	if !ok || f.Kind != orchestrator.FlockKindRelay {
+		t.Fatalf("flock not demoted to relay: %+v", f)
+	}
+	if f.HomeAddr != "http://new-home:3000" {
+		t.Fatalf("demoted relay HomeAddr = %q, want new home", f.HomeAddr)
+	}
+	// Local agents resolvable for hopped calls.
+	if len(f.Snapshot()) != 1 {
+		t.Fatalf("demoted relay Agents = %d, want 1", len(f.Snapshot()))
+	}
+	// Old wall history remains on disk (spec: 이전 기록은 구 home 디스크에 남는다).
+	if _, err := os.Stat(wallPath); err != nil {
+		t.Fatalf("old wall log removed by demotion: %v", err)
+	}
+	// Kind persisted so a restart recovers a relay, not a hub.
+	meta, err := orchestrator.LoadFlockMetadata(cp.workDir, "routed-1")
+	if err != nil {
+		t.Fatalf("load persisted metadata: %v", err)
+	}
+	if meta.Kind != orchestrator.FlockKindRelay || meta.HomeAddr != "http://new-home:3000" {
+		t.Fatalf("persisted kind/home_addr = %q/%q, want relay/new-home", meta.Kind, meta.HomeAddr)
 	}
 }
 

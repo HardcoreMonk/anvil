@@ -17,9 +17,13 @@
 | #20/#25 | 문서 currency sweep 1·2차 | — |
 | #26 | 수동 검증 runbook 호스트 준비 체크리스트 | [2026-07-08-cross-host-manual-verification.md](2026-07-08-cross-host-manual-verification.md) |
 
-설계만 확정(구현 보류): **home 재선출 failover** —
+**구현 완료(branch `feature/home-failover`, main 병합·PR 대기)**: **home
+재선출 failover** —
 [`docs/superpowers/specs/2026-07-08-home-failover-design.md`](../superpowers/specs/2026-07-08-home-failover-design.md)
-(복제 없음, 단일 elector, wall 손실 수용 계약).
+(복제 없음, 단일 elector, wall 손실 수용 계약), 상세:
+[2026-07-11-home-failover-handoff.md](2026-07-11-home-failover-handoff.md).
+유닛 8종 + `-race` + KVM e2e(`scripts/anvil-cross-host-failover-e2e.sh`)
+게이트 통과. 실 2-daemon 수동 검증(§6b)은 아직 미수행.
 
 ## Next Action (순서 고정 — 2026-07-10 갱신)
 
@@ -33,21 +37,34 @@
 1. ~~D1 fix slice~~ — **완료** (PR #30 + 잔여 D1b PR #31, 2026-07-10 당일).
 2. ~~⑥ 재시작 복구 재검증~~ — **PASS** (양 daemon 동시 재시작 포함 전 방향).
    **검증 전체가 이로써 완전 통과 — "실 2-daemon 통합 검증 완료".**
-3. **failover 구현 slice 착수 승인 요청** (spec 확정본 기준 writing-plans →
-   SDD) — 게이트 충족, 승인 대기.
+3. ~~failover 구현 slice 착수 승인 요청~~ — **완료 (2026-07-11)**. 구현·
+   유닛(8종)·`-race`·KVM e2e 게이트 통과, `feature/home-failover` branch에
+   편입(main 병합은 §6b 통과 후). 상세:
+   [2026-07-11-home-failover-handoff.md](2026-07-11-home-failover-handoff.md).
+4. **실 2-daemon 수동 검증 §6b(home 재선출 failover) 수행** — 트리거: 다음
+   서버 세션(192.168.1.19/.20). 절차:
+   [2026-07-08-cross-host-manual-verification.md](2026-07-08-cross-host-manual-verification.md)
+   ⑥b.
 
-## Follow-Up Tasks (전체 큐 — 우선순위순, 2026-07-10 갱신)
+## Follow-Up Tasks (전체 큐 — 우선순위순, 2026-07-11 갱신)
 
 1. ~~수동 multi-host 검증~~ — **수행 완료** (부분 통과, 위 Next Action).
    신규 회부: **D1** 재시작 복구 결함 (주요, 새 1순위), **D2** delete
    cleanup_failed 오보고 (부차), **D3** ZFS diff-snapshot merge 오염 — 코드
    완화 필요 (부차, 운영 완화는 적용됨). 상세: run handoff.
-2. failover 구현 slice (D1 수정·⑥ 재검증 통과 후, 별도 승인).
+2. ~~failover 구현 slice~~ — **완료** (2026-07-11, D1 수정·⑥ 재검증 통과 후
+   승인). 상세:
+   [2026-07-11-home-failover-handoff.md](2026-07-11-home-failover-handoff.md).
+   신규 회부(새 1순위): **실 2-daemon 수동 검증 §6b failover 시나리오**
+   (트리거: 다음 서버 세션).
 3. ~~SSE relay non-200 content-type polish~~ — **CLOSED** (`b1c8c8c`,
    2026-07-10): wall handoff Follow-Up 참조.
 4. cross-host broadcast fan-out — 계속 비목표 (필요 대두 시 별도 설계).
-5. 소소한 잔여 (각 handoff Follow-Up 기록): e2e 포트 공유(wall/gtcall 동시
-   실행 불가 — 기존 특성), 비동기 relay buffer 재평가(failover 이후).
+5. 소소한 잔여 (각 handoff Follow-Up 기록): e2e 포트 공유(wall/gtcall/failover
+   동시 실행 불가 — 기존 특성), 비동기 relay buffer 재평가(failover 구현
+   완료로 재평가 가능 — §6b 수동 검증 통과 후 우선순위 판단), cross-flock
+   isolation 커버리지 테스트(Option B, home failover handoff Follow-Up 4번
+   참고).
 
 ## zone 연동
 

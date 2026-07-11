@@ -1502,40 +1502,49 @@ func (cp *ControlPlane) registerDistributedFlock(w http.ResponseWriter, r *http.
 	// restores admission before returning. A SIGHUP token reload does NOT clear
 	// it — ReloadClients only swaps cp.clients, never cp.relayTokens.
 	if existing, ok := cp.flockMgr.Get(flockID); ok {
-		// A non-hub flock already owns this id (a local flock, or a relay stub):
-		// RegisterHub below would blindly overwrite it (fm.flocks[id]=f), destroying
-		// the existing flock's wall/state. Refuse instead. Only the hub-kind path is
-		// the idempotent re-admission (fresh registration + reconcile heal).
-		if existing.Kind != orchestrator.FlockKindHub {
+		switch existing.Kind {
+		case orchestrator.FlockKindHub:
+			// Re-registration refreshes the roster too (not only the token): the
+			// post-spawn re-POST carries the VMID/Addr-enriched roster the initial
+			// pre-spawn registration could not know, and reconcile re-POSTs depend
+			// on the same path after a daemon restart.
+			if len(req.Roster) > 0 {
+				// UpdateHubRoster returns false only if the flock vanished (deleted
+				// by a concurrent request) between the Get above and this call — a
+				// narrow TOCTOU window, not reproducible as a deterministic unit
+				// test. Log and continue: the roster update is best-effort here,
+				// same as the token admission calls below.
+				if !cp.flockMgr.UpdateHubRoster(flockID, req.Roster) {
+					slog.Warn("flock: hub roster update raced with delete", "flock_id", flockID)
+				}
+			}
+			cp.setRelayToken(flockID, req.RelayToken)
+			cp.setCallToken(flockID, req.CallToken)
+			// Re-seat the hub Flock struct's own relay/call tokens too. setRelayToken/
+			// setCallToken above only refill INBOUND admission maps; the struct fields
+			// drive the hub's OUTBOUND hops. A restarted home recovers the hub without
+			// its tokens (never persisted), so without this its 2nd-hop /call to a
+			// member sends an empty bearer and the member 401s (D1b). Best-effort like
+			// the roster update above; empty tokens are ignored so a token-less re-POST
+			// cannot blank a live secret.
+			cp.flockMgr.UpdateHubTokens(flockID, req.RelayToken, req.CallToken)
+			w.WriteHeader(http.StatusCreated)
+			return
+		case orchestrator.FlockKindRelay:
+			// Failover promotion: the adapter (the sole control plane; this
+			// endpoint sits behind the full CP bearer — relay/call tokens are
+			// never admitted here) re-elected this member host as the flock's
+			// new home. Fall through to the fresh hub registration below:
+			// RegisterHub replaces the relay stub, local agent resolution moves
+			// to the VMID-enriched roster + cp.vms presence (identical to a
+			// first-generation home), and the hub's Agents map stays EMPTY so a
+			// later best-effort DELETE of a stale failed-over hub can never
+			// destroy this host's member VMs (deleteFlock destroys f.Agents).
+		default:
+			// A local flock owns this id: an id collision, never a failover.
 			writeJSONError(w, http.StatusConflict, fmt.Errorf("flock %q already registered as a non-hub flock", flockID))
 			return
 		}
-		// Re-registration refreshes the roster too (not only the token): the
-		// post-spawn re-POST carries the VMID/Addr-enriched roster the initial
-		// pre-spawn registration could not know, and reconcile re-POSTs depend
-		// on the same path after a daemon restart.
-		if len(req.Roster) > 0 {
-			// UpdateHubRoster returns false only if the flock vanished (deleted
-			// by a concurrent request) between the Get above and this call — a
-			// narrow TOCTOU window, not reproducible as a deterministic unit
-			// test. Log and continue: the roster update is best-effort here,
-			// same as the token admission calls below.
-			if !cp.flockMgr.UpdateHubRoster(flockID, req.Roster) {
-				slog.Warn("flock: hub roster update raced with delete", "flock_id", flockID)
-			}
-		}
-		cp.setRelayToken(flockID, req.RelayToken)
-		cp.setCallToken(flockID, req.CallToken)
-		// Re-seat the hub Flock struct's own relay/call tokens too. setRelayToken/
-		// setCallToken above only refill INBOUND admission maps; the struct fields
-		// drive the hub's OUTBOUND hops. A restarted home recovers the hub without
-		// its tokens (never persisted), so without this its 2nd-hop /call to a
-		// member sends an empty bearer and the member 401s (D1b). Best-effort like
-		// the roster update above; empty tokens are ignored so a token-less re-POST
-		// cannot blank a live secret.
-		cp.flockMgr.UpdateHubTokens(flockID, req.RelayToken, req.CallToken)
-		w.WriteHeader(http.StatusCreated)
-		return
 	}
 	wallPath := filepath.Join(cp.workDir, "flocks", flockID, "TOWN_WALL.log")
 	wall, err := orchestrator.NewTownWall(flockID, wallPath)
@@ -1561,10 +1570,14 @@ func (cp *ControlPlane) registerRelayFlock(w http.ResponseWriter, r *http.Reques
 		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("home_addr and relay_token required"))
 		return
 	}
-	// A non-relay flock already owns this id (a local flock, or a hub): RegisterRelay
-	// below would blindly overwrite it. Refuse instead. A relay-kind re-register is
-	// left as the current overwrite so reconcile heal can refresh HomeAddr/token.
-	if existing, ok := cp.flockMgr.Get(flockID); ok && existing.Kind != orchestrator.FlockKindRelay {
+	// A LOCAL flock owning this id is an id collision — refuse (unchanged). A
+	// hub-kind occupant is the failover demotion path: the control plane's
+	// record now names another host as home, so this (revived old-home) daemon
+	// converts its stale hub into a relay stub. RegisterRelay below overwrites
+	// the registry entry and persists kind=relay; the old TOWN_WALL.log stays
+	// on disk as an audit artifact (spec: wall history is lost, not merged).
+	// Relay->relay re-register remains the reconcile heal overwrite.
+	if existing, ok := cp.flockMgr.Get(flockID); ok && existing.Kind == orchestrator.FlockKindLocal {
 		writeJSONError(w, http.StatusConflict, fmt.Errorf("flock %q already registered as a non-relay flock", flockID))
 		return
 	}

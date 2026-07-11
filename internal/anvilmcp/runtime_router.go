@@ -40,6 +40,16 @@ type RuntimeRouter struct {
 	placement      map[string]string
 	placementStore *PlacementStore
 	maxAttempts    int
+
+	// homeFailures counts CONSECUTIVE dial-class home failures per routed
+	// flock id for failover detection. Guarded by reconcileMu: it is only
+	// ever touched inside ReconcilePlacements, which reconcileMu serializes.
+	homeFailures map[string]int
+
+	// reconcileLogf reports reconcile/failover events (flock/host identifiers
+	// only — never tokens or daemon addresses). Set by StartReconcileLoop;
+	// nil-safe via logf.
+	reconcileLogf func(format string, args ...any)
 }
 
 type RuntimeRouterOptions struct {
@@ -66,6 +76,7 @@ func NewRuntimeRouterWithOptions(scheduler *Scheduler, daemons map[string]Daemon
 		placement:      initialPlacements(opts.PlacementStore),
 		placementStore: opts.PlacementStore,
 		maxAttempts:    maxAttempts,
+		homeFailures:   make(map[string]int),
 	}
 }
 
@@ -266,10 +277,21 @@ func (r *RuntimeRouter) Delete(ctx context.Context, vmID string) (*RawDaemonResp
 	return resp, nil
 }
 
+// hostProbe records one reconcile pass's reachability observation for a host.
+// reachable is true only when the host's daemon answered ListVMs this pass;
+// dialFailed is true when ListVMs failed with a dial-class transport error
+// (host down), the only failure class that counts toward home failover.
+type hostProbe struct {
+	reachable  bool
+	dialFailed bool
+}
+
 func (r *RuntimeRouter) ReconcilePlacements(ctx context.Context) error {
 	r.reconcileMu.Lock()
 	defer r.reconcileMu.Unlock()
 	next := make(map[string]string)
+	probes := make(map[string]hostProbe)
+	var errs []error
 	for hostName, daemon := range r.daemons {
 		if daemon == nil {
 			continue
@@ -282,11 +304,26 @@ func (r *RuntimeRouter) ReconcilePlacements(ctx context.Context) error {
 		}
 		vms, err := lister.ListVMs(ctx)
 		if err != nil {
-			return fmt.Errorf("list vms on runtime host %q failed", hostName)
+			// Per-host fault isolation: one unreachable daemon must not abort
+			// placement reconciliation and wall healing for every other host
+			// (failover detection depends on reconcile continuing while the
+			// home is down). Carry the failed host's existing placements over
+			// unchanged — replacing them from a partial view would orphan its
+			// VMs until the host returns.
+			probes[hostName] = hostProbe{dialFailed: isDialError(err)}
+			errs = append(errs, fmt.Errorf("list vms on runtime host %q failed", hostName))
+			r.mu.RLock()
+			for vmID, host := range r.placement {
+				if host == hostName {
+					next[vmID] = host
+				}
+			}
+			r.mu.RUnlock()
+			continue
 		}
+		probes[hostName] = hostProbe{reachable: true}
 		for _, vm := range vms {
-			vmID := strings.TrimSpace(vm.VMID)
-			if vmID != "" {
+			if vmID := strings.TrimSpace(vm.VMID); vmID != "" {
 				next[vmID] = hostName
 			}
 		}
@@ -296,13 +333,13 @@ func (r *RuntimeRouter) ReconcilePlacements(ctx context.Context) error {
 	r.mu.Unlock()
 	if r.placementStore != nil {
 		if err := r.placementStore.ReplaceVMPlacements(next); err != nil {
-			return err
-		}
-		if err := r.placementStore.Save(); err != nil {
-			return err
+			errs = append(errs, err)
+		} else if err := r.placementStore.Save(); err != nil {
+			errs = append(errs, err)
 		}
 	}
-	return r.reconcileRoutedFlockWalls(ctx)
+	errs = append(errs, r.reconcileRoutedFlockWalls(ctx, probes))
+	return errors.Join(errs...)
 }
 
 // StartReconcileLoop runs ReconcilePlacements once immediately and then every
@@ -317,6 +354,7 @@ func (r *RuntimeRouter) StartReconcileLoop(ctx context.Context, interval time.Du
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
+	r.reconcileLogf = logf
 	run := func() {
 		if err := r.ReconcilePlacements(ctx); err != nil {
 			logf("anvil-mcp: reconcile placements: %v", err)
@@ -337,6 +375,15 @@ func (r *RuntimeRouter) StartReconcileLoop(ctx context.Context, interval time.Du
 	}()
 }
 
+// logf reports a reconcile/failover event through the configured sink, if any.
+// nil-safe: before StartReconcileLoop wires reconcileLogf (and in unit tests
+// that inject it directly) a nil sink simply drops the line.
+func (r *RuntimeRouter) logf(format string, args ...any) {
+	if r.reconcileLogf != nil {
+		r.reconcileLogf(format, args...)
+	}
+}
+
 // reconcileRoutedFlockWalls re-registers the shared Town Wall hub and relay
 // flocks for every persisted routed flock, healing the in-memory flock
 // registrations a home/member daemon loses on restart. It re-issues
@@ -353,11 +400,12 @@ func (r *RuntimeRouter) StartReconcileLoop(ctx context.Context, interval time.Du
 // unreachable daemon cannot block healing the rest. Error strings are bounded to
 // flock/host identifiers only: the relay/call tokens and daemon addresses are
 // never surfaced (redaction discipline — the tokens flow daemon-to-daemon only).
-func (r *RuntimeRouter) reconcileRoutedFlockWalls(ctx context.Context) error {
+func (r *RuntimeRouter) reconcileRoutedFlockWalls(ctx context.Context, probes map[string]hostProbe) error {
 	if r == nil || r.placementStore == nil {
 		return nil
 	}
 	var errs []error
+	live := make(map[string]bool)
 	for _, record := range r.placementStore.ListRoutedFlocks() {
 		flockID := strings.TrimSpace(record.FlockID)
 		homeHost := strings.TrimSpace(record.HomeHost)
@@ -373,67 +421,128 @@ func (r *RuntimeRouter) reconcileRoutedFlockWalls(ctx context.Context) error {
 			// re-registering without it would admit an unauthenticated hub, so skip.
 			continue
 		}
-		homeDaemon, ok := r.daemons[homeHost]
-		if !ok || homeDaemon == nil {
-			errs = append(errs, fmt.Errorf("reconcile routed flock %q: home host %q has no daemon client", flockID, homeHost))
-			continue
-		}
 		// Call token is optional for backward compatibility: older records saved
 		// before the call token existed have none persisted. Re-registration
 		// continues with an empty CallToken in that case (relay token alone still
 		// heals the wall); it does not skip the record.
 		callToken, _ := r.placementStore.RoutedFlockCallToken(flockID)
-		roster := make([]RosterMember, 0, len(record.Agents))
-		for _, a := range record.Agents {
-			roster = append(roster, RosterMember{
-				AgentID: strings.TrimSpace(a.AgentID),
-				Host:    strings.TrimSpace(a.Host),
-				VMID:    strings.TrimSpace(a.VMID),
-				Addr:    r.daemonAddr(strings.TrimSpace(a.Host)),
-			})
+		live[flockID] = true
+
+		// ── home failover detection (2026-07-08 spec) ─────────────────────
+		// Only dial-class failures count: the probe's ListVMs dial failure
+		// short-circuits (a doomed hub POST adds nothing but latency), and a
+		// hub POST that fails with a dial error counts the same way. Any
+		// successful hub registration resets the consecutive counter. HTTP
+		// errors mean the host is alive: collected as heal errors, counter
+		// untouched.
+		homeDown := probes[homeHost].dialFailed
+		if !homeDown {
+			hubErr := r.registerRoutedHub(ctx, record, relayToken, callToken)
+			switch {
+			case hubErr == nil:
+				r.homeFailures[flockID] = 0
+			case isDialError(hubErr):
+				homeDown = true
+			default:
+				errs = append(errs, fmt.Errorf("reconcile routed flock %q: hub re-registration on home host %q failed", flockID, homeHost))
+				continue
+			}
 		}
-		if err := homeDaemon.RegisterDistributedFlock(ctx, flockID, DistributedFlockRequest{Roster: roster, RelayToken: relayToken, CallToken: callToken}); err != nil {
-			errs = append(errs, fmt.Errorf("reconcile routed flock %q: hub re-registration on home host %q failed", flockID, homeHost))
+		if homeDown {
+			r.homeFailures[flockID]++
+			if r.homeFailures[flockID] >= homeFailureThreshold && record.Status == RoutedFlockStatusReady {
+				if newHome, ok := r.electNewHome(record, probes); ok {
+					switched, err := r.failoverRoutedFlock(ctx, record, newHome, relayToken, callToken)
+					if switched {
+						r.homeFailures[flockID] = 0
+					}
+					if err != nil {
+						errs = append(errs, err)
+					}
+					continue
+				}
+				// No reachable candidate: no-op, counter stays saturated so the
+				// next pass with a revived member fires immediately (spec).
+			}
+			errs = append(errs, fmt.Errorf("reconcile routed flock %q: home host %q unreachable", flockID, homeHost))
 			continue
 		}
-		homeAddr := r.daemonAddr(homeHost)
-		// memberAgents groups each non-home member host's own local agents
-		// (agent_id + vm_id) so its relay re-registration lets a hopped /call
-		// landing on that daemon resolve the target locally.
-		memberAgents := make(map[string][]RosterMember)
-		for _, a := range record.Agents {
-			host := strings.TrimSpace(a.Host)
-			if host == "" || host == homeHost {
-				continue
-			}
-			memberAgents[host] = append(memberAgents[host], RosterMember{
-				AgentID: strings.TrimSpace(a.AgentID),
-				VMID:    strings.TrimSpace(a.VMID),
-			})
-		}
-		relayed := map[string]bool{homeHost: true}
-		for _, a := range record.Agents {
-			host := strings.TrimSpace(a.Host)
-			if host == "" || relayed[host] {
-				continue
-			}
-			relayed[host] = true
-			daemon, ok := r.daemons[host]
-			if !ok || daemon == nil {
-				errs = append(errs, fmt.Errorf("reconcile routed flock %q: member host %q has no daemon client", flockID, host))
-				continue
-			}
-			if err := daemon.RegisterRelayFlock(ctx, flockID, RelayFlockRequest{
-				HomeAddr:   homeAddr,
-				RelayToken: relayToken,
-				CallToken:  callToken,
-				Agents:     memberAgents[host],
-			}); err != nil {
-				errs = append(errs, fmt.Errorf("reconcile routed flock %q: relay re-registration on member host %q failed", flockID, host))
-			}
+		errs = append(errs, r.registerRoutedRelays(ctx, record, relayToken, callToken)...)
+	}
+	// Sweep counters for flocks that no longer exist (deleted/removed) so the
+	// map cannot grow unboundedly across flock lifecycles.
+	for id := range r.homeFailures {
+		if !live[id] {
+			delete(r.homeFailures, id)
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// registerRoutedHub re-issues the hub registration for record on its current
+// HomeHost: the VMID/Addr-enriched roster from the record's agents plus the
+// persisted relay/call tokens. Error strings carry flock/host identifiers only.
+func (r *RuntimeRouter) registerRoutedHub(ctx context.Context, record RoutedFlockRecord, relayToken, callToken string) error {
+	flockID := strings.TrimSpace(record.FlockID)
+	homeHost := strings.TrimSpace(record.HomeHost)
+	homeDaemon, ok := r.daemons[homeHost]
+	if !ok || homeDaemon == nil {
+		return fmt.Errorf("reconcile routed flock %q: home host %q has no daemon client", flockID, homeHost)
+	}
+	roster := make([]RosterMember, 0, len(record.Agents))
+	for _, a := range record.Agents {
+		roster = append(roster, RosterMember{
+			AgentID: strings.TrimSpace(a.AgentID),
+			Host:    strings.TrimSpace(a.Host),
+			VMID:    strings.TrimSpace(a.VMID),
+			Addr:    r.daemonAddr(strings.TrimSpace(a.Host)),
+		})
+	}
+	return homeDaemon.RegisterDistributedFlock(ctx, flockID, DistributedFlockRequest{Roster: roster, RelayToken: relayToken, CallToken: callToken})
+}
+
+// registerRoutedRelays re-issues relay registrations on every member host that
+// is not the record's current HomeHost, each carrying that host's own local
+// agents so a hopped /call resolves locally. Failures are collected per host
+// (identifiers only) so one unreachable member cannot block the rest.
+func (r *RuntimeRouter) registerRoutedRelays(ctx context.Context, record RoutedFlockRecord, relayToken, callToken string) []error {
+	flockID := strings.TrimSpace(record.FlockID)
+	homeHost := strings.TrimSpace(record.HomeHost)
+	homeAddr := r.daemonAddr(homeHost)
+	memberAgents := make(map[string][]RosterMember)
+	for _, a := range record.Agents {
+		host := strings.TrimSpace(a.Host)
+		if host == "" || host == homeHost {
+			continue
+		}
+		memberAgents[host] = append(memberAgents[host], RosterMember{
+			AgentID: strings.TrimSpace(a.AgentID),
+			VMID:    strings.TrimSpace(a.VMID),
+		})
+	}
+	var errs []error
+	relayed := map[string]bool{homeHost: true}
+	for _, a := range record.Agents {
+		host := strings.TrimSpace(a.Host)
+		if host == "" || relayed[host] {
+			continue
+		}
+		relayed[host] = true
+		daemon, ok := r.daemons[host]
+		if !ok || daemon == nil {
+			errs = append(errs, fmt.Errorf("reconcile routed flock %q: member host %q has no daemon client", flockID, host))
+			continue
+		}
+		if err := daemon.RegisterRelayFlock(ctx, flockID, RelayFlockRequest{
+			HomeAddr:   homeAddr,
+			RelayToken: relayToken,
+			CallToken:  callToken,
+			Agents:     memberAgents[host],
+		}); err != nil {
+			errs = append(errs, fmt.Errorf("reconcile routed flock %q: relay re-registration on member host %q failed", flockID, host))
+		}
+	}
+	return errs
 }
 
 func (r *RuntimeRouter) scheduleDaemon(req ScheduleRequest, requested TenantUsage) (ScheduleDecision, Daemon, error) {
