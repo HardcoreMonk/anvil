@@ -61,6 +61,18 @@
   기동을 `go` 없는 PATH로 실행해 `micro-init` 재빌드가 실패(`exec: "go": not found`)
   → PATH에 `/opt/anvil-go/go/bin` 추가 후 정상. golden image rebake 완료까지 첫
   기동 ~수분 소요(1회성).
+- **down-테스트 절차 편차(무효 시도 1회 → clean 재실행)**: host-b 첫 정지 시도에
+  `pkill -f "anvil/anvil-daemon"`를 썼으나 실제 프로세스 cmdline이 `./anvil-daemon`
+  (상대 경로)이라 **패턴 미매치 → host-b가 정지되지 않았다.** 그 미정지 상태에서
+  생성한 **snap2**(`snap-1783773385858083791`)는 host-b가 살아 있어 **정상 자동
+  복제**돼 버려 다운-테스트 증거로는 **무효**다(down 없이 복제됐을 뿐). 발견 후:
+  (a) snap2가 host-b로 완전 복제되도록 두어 상태를 settle하고, (b) `pkill -x
+  anvil-daemon`(정확한 프로세스명 매치)로 host-b를 **실제로 정지**(`:3000` closed,
+  워크스테이션 curl exit 7 확인)한 뒤, (c) **fresh snap3로 다운-테스트를 clean
+  재실행**했다. 따라서 host-b 재기동 시 on-disk에는 down 이전에 복제 완료된
+  **snap1 + snap2 = count 2**만 존재하고 snap3은 부재 — 이것이 ③-down 행의
+  `loaded existing snapshots count=2`(snap3 미수신)와 ⑧ 정리 행에 snap2가 함께
+  등장하는 이유다. 정리 단계에서 snap1/2/3 모두 삭제.
 
 ## 결과 매트릭스
 
@@ -86,8 +98,9 @@
 - **down → giving-up 전이**: snap3 생성(21:38:58) → 첫 dial(21:39:01, 첫 reconcile
   tick) → 3연속 dial-failure(10s cadence) → **cap 3 도달·giving-up 발화(21:39:21)
   = 생성 후 23s**. interval 환산: 첫 dial 후 `3 × reconcile_interval` = **30s
-  상한 안**(관측 3-pass = 20s). **default 60s 환산** = `3 × 60s ≈ 3분` 상한
-  (runbook "자동 복제 sweep" alert 권고와 정합).
+  상한 안**(관측 3-pass = 20s). **default 60s 환산** = `3 × 60s ≈ 3분` 상한 —
+  이 `cap 3 × reconcile_interval` 구조에서 자체 도출한 값이다(runbook은 replication
+  sweep에 이 수치를 명시하지 않는다).
 - **복귀 수렴**: host-b ready(21:42:31) → snap3 재복제 완료(21:44:30) =
   **~119s**. revival 감지는 host-b 복귀 후 **첫 reconcile pass(≤10s)** 내(그
   pass가 곧바로 복제 발화), 나머지는 full-snapshot 전송(~115–120s)이 지배.
