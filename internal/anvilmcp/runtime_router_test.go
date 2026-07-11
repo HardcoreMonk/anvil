@@ -1126,6 +1126,11 @@ func TestReconcile_CrossFlockIsolationWithDeadHome(t *testing.T) {
 	// 2 slots) so flock2 is forced onto hostB (home) + hostC (member) —
 	// disjoint from flock1's home, which is what this test needs to prove
 	// isolation.
+	//
+	// Raw field write is safe ONLY because this test is single-goroutine:
+	// no StartReconcileLoop is running and every ReconcilePlacements call
+	// below is synchronous. If router.scheduler ever moves behind r.mu
+	// (locked-accessor trend, cf. D1b), replace this with a locked helper.
 	router.scheduler = NewScheduler(
 		[]RuntimeHost{
 			{Name: "hostA", Endpoint: "http://hostA.internal:8080", Healthy: true, AvailableVMs: 0, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},

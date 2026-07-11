@@ -766,7 +766,11 @@ fi
 # survives a log-message rewording; see the cross-referenced comment above
 # the logf call in internal/anvilmcp/home_failover.go — still fail-closed if
 # no such line exists at all.
-FAILOVER_LINE="$(grep -F "$FLOCK_ID" "$ADAPTER_STDERR" 2>/dev/null | grep -i "failover" | tail -1 || true)"
+# Keep ALL matching lines (not tail -1): the hex-token check below must cover
+# every failover-adjacent line, or a second such log line added later would
+# silently escape redaction coverage.
+FAILOVER_LINES="$(grep -F "$FLOCK_ID" "$ADAPTER_STDERR" 2>/dev/null | grep -i "failover" || true)"
+FAILOVER_LINE="$(printf '%s\n' "$FAILOVER_LINES" | tail -1)"
 if [ -n "$FAILOVER_LINE" ]; then
   ok "Adapter stderr recorded a failover line for flock $FLOCK_ID"
 else
@@ -776,7 +780,7 @@ red_ok=true
 if grep -qF "$RELAY_TOKEN" "$ADAPTER_STDERR" 2>/dev/null; then red_ok=false; fi
 if grep -qF "$CALL_TOKEN" "$ADAPTER_STDERR" 2>/dev/null; then red_ok=false; fi
 if grep -qE "127\.0\.0\.1:(3100|3101)" "$ADAPTER_STDERR" 2>/dev/null; then red_ok=false; fi
-if printf '%s' "$FAILOVER_LINE" | grep -qE '[0-9a-f]{64}'; then red_ok=false; fi
+if printf '%s' "$FAILOVER_LINES" | grep -qE '[0-9a-f]{64}'; then red_ok=false; fi
 if [ "$red_ok" = "true" ]; then
   ok "Adapter stderr leaks no relay/call token and no stub address"
 else
