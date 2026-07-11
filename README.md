@@ -12,11 +12,12 @@ VM 생성, 작업 실행, health 확인, graceful stop/delete, snapshot/restore 
 하나의 실행 계약으로 관리한다.
 
 <p align="center">
-  <img src="docs/assets/ironclaw-e2e.gif" alt="IronClaw anvil E2E terminal replay" width="900">
+  <img src="docs/assets/ironclaw-e2e.gif" alt="IronClaw anvil MCP tool surface E2E terminal replay" width="900">
 </p>
 
 <p align="center">
-  <sub>IronClaw 본체에서 anvil MCP tool을 호출한 E2E terminal replay</sub>
+  <sub>IronClaw가 anvil-mcp에 연결해 19개 anvil tool을 발견하고, anvil MCP tool surface로
+  실제 Firecracker VM lifecycle을 실행한 E2E replay</sub>
 </p>
 
 ---

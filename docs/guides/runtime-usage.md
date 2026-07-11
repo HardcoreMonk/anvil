@@ -794,6 +794,25 @@ rate limit에 따라 보통 15-30분 이상 걸릴 수 있다.
 ══════════════════════════════════
 ```
 
+### E2E demo replays
+
+최근 `main`(post-`anvil-v0.7.0`, commit `9a9af7d`) 실 run에서 큐레이션·녹화한 데모 replay다.
+
+**Full KVM gate** — `sudo bash e2e_test.sh` (89 steps · 334 ✓ · 0 ✗):
+
+<p align="center">
+  <img src="../assets/anvil-full-kvm-e2e.gif" alt="anvil full KVM E2E gate replay" width="820">
+</p>
+
+**Cross-host home failover** — `sudo bash scripts/anvil-cross-host-failover-e2e.sh` (32 ✓):
+routed flock의 Town Wall home(hub)이 응답을 멈추면 adapter가 새 home을 재선출하고 모든
+member relay를 새 hub로 재타겟, 최종적으로 real member daemon을 relay→hub로 승격한다.
+세 번의 home 교체 동안 guest `gtwall`은 한 건도 유실 없이 현재 wall을 소유한 host에 착지한다.
+
+<p align="center">
+  <img src="../assets/anvil-failover-e2e.gif" alt="anvil cross-host home failover E2E replay" width="820">
+</p>
+
 ### E2E replay player
 
 `cmd/e2e-replay-server`는 full KVM E2E와 IronClaw E2E terminal recording을
@@ -804,8 +823,14 @@ ANSI 제어 문자와 token/API key를 제거한 뒤 `/api/recording`으로 제�
 
 | Replay | Source | 설명 |
 |---|---|---|
-| `full-kvm-e2e` | `docs/replays/full-kvm-e2e.txt` | `anvil-v0.2.0` full KVM 58단계 replay |
+| `full-kvm-e2e` | `docs/replays/full-kvm-e2e.txt` | `anvil-v0.2.0` full KVM 58단계 replay (dated 기록) |
 | `ironclaw-e2e` | `/tmp/anvil-real-e2e-recording.typescript` | 로컬에 recording이 있을 때만 사용 가능한 IronClaw MCP replay |
+
+playlist는 위 두 항목으로 하드코딩돼 있고 디렉토리를 스캔하지 않는다. `docs/replays/`에는
+최신 curated replay가 더 있다 — `full-kvm-e2e-v0.7.0.txt`(post-v0.7.0 89-step gate)와
+`cross-host-failover-e2e.txt`(home failover). 이들을 player로 재생하려면 아래처럼
+`-full-kvm-recording`으로 파일 경로를 직접 지정한다. 구 `full-kvm-e2e.txt`(anvil-v0.2.0)는
+비교용 dated 기록으로 유지한다.
 
 ```bash
 go run ./cmd/e2e-replay-server
@@ -816,7 +841,7 @@ go run ./cmd/e2e-replay-server
 ```bash
 go run ./cmd/e2e-replay-server \
   -addr 127.0.0.1:8788 \
-  -full-kvm-recording docs/replays/full-kvm-e2e.txt \
+  -full-kvm-recording docs/replays/full-kvm-e2e-v0.7.0.txt \
   -recording /tmp/anvil-real-e2e-recording.typescript
 ```
 
