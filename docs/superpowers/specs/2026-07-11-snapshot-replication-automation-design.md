@@ -116,7 +116,10 @@ failover의 "desired HomeHost 영속 → reconcile heal"과 정확히 대칭이�
     replicated/already_present/dial_failed/terminal_rejected 등. outcome/reason 어휘는
     `flock_placement_metrics.go:11-31` 패턴 재사용.
   - `anvil_scheduler_snapshot_replication_latency_seconds{phase}` (histogram) —
-    export/import/total. 버킷은 `flockPlacementLatencyBuckets`(`:43`) 재사용.
+    **`total`만** (플랜 검수 정정 2026-07-11: D-3의 `ReplicateSnapshot` 재사용
+    지시상 adapter가 export/import sub-timing을 관측할 수단이 없음 — sub-phase
+    계측은 재사용 원칙을 깨는 로직 중복이라 기각, 필요 대두 시 별도 결정).
+    버킷은 `flockPlacementLatencyBuckets`(`:43`) 재사용.
   - `..._last_success/last_failure_timestamp_seconds` (gauge).
   - `..._giving_up` (gauge) — bounded cap 도달 스냅샷 수(D-2).
 - **기록 경로**: `PlacementStore.RecordSnapshotReplicationMetrics`(신설, `:147`
