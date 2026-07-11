@@ -67,6 +67,7 @@ func (r *RuntimeRouter) electNewHome(record RoutedFlockRecord, probes map[string
 //  4. Best-effort stale-hub DELETE on the old home. VM-safe by construction:
 //     a hub flock's Agents map is always empty (RegisterHub/promotion
 //     invariant), so the daemon's deleteFlock destroys no member VMs.
+//
 // Tokens are reused unchanged — the guest-injected token never changes, so
 // guests ride through the failover untouched. switched reports whether step 1
 // committed; the caller resets the failure counter only then. All log/error
