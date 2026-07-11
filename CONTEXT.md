@@ -38,7 +38,7 @@ backlog + open-gate 마감; full KVM e2e 343✓, step 59 실 LLM 포함)이며 �
 (SLIM/FULL tarball + sha256)를 제공한다. 이후 main은 cross-host shared Town
 Wall/gtcall/home 재선출 failover, adapter reconcile loop, bounded relay retry,
 cross-host snapshot replication 자동화에 더해 routed flock 스택 결함 D1~D4 종결,
-web major(vite8/svelte5), scheduler 실배포+installer 검증(PR #19~#46) 등 untagged
+web major(vite8/svelte5), scheduler 실배포+installer 검증(PR #19~#47) 등 untagged
 작업을 더 포함한다(요지는 아래 "후속 완료 상태", 상세는 dated handoff).
 
 이전 anvil 통합 번호 계보(`anvil-v0.1.0`→`v0.4.0`)와 upstream 시리즈별 마일스톤은
