@@ -2974,7 +2974,7 @@ func (cp *ControlPlane) snapshotsDirCoarse() bool {
 	dir := filepath.Join(cp.workDir, "snapshots")
 	g, err := probe(dir)
 	// Fail safe: any probe error, or granularity above the 4KiB sparse-diff unit, is coarse.
-	cp.holeProbeCoarse = err != nil || g > 4096
+	cp.holeProbeCoarse = err != nil || g > storage.HoleGranularityFine
 	cp.holeProbeDone = true
 	if cp.holeProbeCoarse {
 		slog.Warn("snapshot: coarse filesystem hole granularity detected — demoting diff snapshots to full to avoid guest memory corruption (D3); a recordsize=4K dataset is recommended for diff efficiency",

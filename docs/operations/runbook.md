@@ -461,3 +461,11 @@ sudo zfs create -o recordsize=4k -o mountpoint=/home/$USER/anvil/snapshots rpool
 정상 생성·restore된다. ext4/xfs 등은 기본이 4KiB이므로 조치가 필요 없다. daemon log에
 위 warning이 반복 없이 1회만 보이는지, `GET /snapshots`에서 의도한 host의
 `snapshot_type`이 `diff`인지로 상태를 확인한다.
+
+주의 — 창설측 probe 결과는 **에러 포함** daemon 수명당 1회 캐시된다(안전측). 일시적
+probe 실패(예: 순간적 ENOSPC)로 coarse가 캐시되면 이후 diff 요청이 계속 full로
+강등되므로, 원인 해소 후 **daemon 재시작으로 캐시를 해제**한다.
+
+실측 참고 (2026-07-11, 192.168.1.19 실 ZFS): recordsize=128K rpool 경로에서 probe
+granularity **131072**(=recordsize, coarse 판정), `rpool/anvil-snapshots`(4K)에서
+**4096**(fine 판정) — RCA의 extent 부풀림 단위와 정확히 일치.

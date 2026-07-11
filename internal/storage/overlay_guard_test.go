@@ -62,7 +62,7 @@ func TestOverlaySparseDiffRefusesCoarseFS(t *testing.T) {
 func TestOverlaySparseDiffFineInjectionRoundTrip(t *testing.T) {
 	orig := holeGranularityFn
 	t.Cleanup(func() { holeGranularityFn = orig })
-	holeGranularityFn = func(string) (int64, error) { return holeGranularityFine, nil }
+	holeGranularityFn = func(string) (int64, error) { return HoleGranularityFine, nil }
 
 	dir := t.TempDir()
 	const size = 1 << 20

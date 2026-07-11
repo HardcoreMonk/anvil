@@ -7,12 +7,12 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// holeGranularityFine is the filesystem hole granularity (bytes) that sparse diff
+// HoleGranularityFine is the filesystem hole granularity (bytes) that sparse diff
 // snapshots require: exactly the 4KiB page/block the Firecracker diff format records
 // as a dirty unit. A coarser value (e.g. ZFS recordsize 128K) makes SEEK_DATA/SEEK_HOLE
 // over-report the written region of a diff, so overlaySparseDiff would splat unwritten
 // record padding over live base memory and triple-fault the guest (defect D3).
-const holeGranularityFine = 4096
+const HoleGranularityFine = 4096
 
 // holeProbeFileSize is the length the probe truncates its temp file to. It must exceed a
 // common coarse record size (ZFS default 128K) so that a coarse fs still exposes an
@@ -39,7 +39,7 @@ func ProbeHoleGranularity(dir string) (int64, error) {
 	defer os.Remove(name)
 	defer f.Close()
 
-	block := make([]byte, holeGranularityFine)
+	block := make([]byte, HoleGranularityFine)
 	for i := range block {
 		block[i] = 0xff
 	}
@@ -75,8 +75,8 @@ func ProbeHoleGranularity(dir string) (int64, error) {
 // 4KiB granularity — or the probe itself failed — in which case sparse diff snapshots are
 // unsafe (D3) and callers must demote diff→full (creation) or refuse the overlay (read).
 func HoleGranularityCoarse(dir string) bool {
-	g, err := ProbeHoleGranularity(dir)
-	return err != nil || g > holeGranularityFine
+	g, err := holeGranularityFn(dir)
+	return err != nil || g > HoleGranularityFine
 }
 
 // holeGranularityFn measures a directory's filesystem hole granularity. Package-level so

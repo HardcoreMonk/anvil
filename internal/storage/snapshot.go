@@ -434,9 +434,9 @@ func MergeRootfsDiff(baseRootfsPath, diffPath, outputPath string) error {
 // this also catches coarse diffs that arrived via replication/import, not just local ones.
 func overlaySparseDiff(diffPath, outputPath string) error {
 	dir := filepath.Dir(diffPath)
-	if g, perr := holeGranularityFn(dir); perr != nil || g > holeGranularityFine {
+	if g, perr := holeGranularityFn(dir); perr != nil || g > HoleGranularityFine {
 		os.Remove(outputPath)
-		return fmt.Errorf("sparse diff hole granularity %d > %d on %s: refusing overlay to avoid guest memory corruption (see D3)", g, holeGranularityFine, dir)
+		return fmt.Errorf("sparse diff hole granularity %d > %d on %s: refusing overlay to avoid guest memory corruption (see D3)", g, HoleGranularityFine, dir)
 	}
 
 	diff, err := os.Open(diffPath)
