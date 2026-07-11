@@ -1,0 +1,101 @@
+anvil full KVM E2E test replay
+source run: untagged main (post-anvil-v0.7.0) target commit 9a9af7d
+recorded: 2026-07-12 01:15:26-01:21:31 KST
+source log: /tmp/ephemera-test-SROXBY.log -> docs/replays/full-kvm-e2e-v0.7.0.txt
+result: All test steps passed (89 steps, 334 checks, 0 failures)
+
+== runtime evidence ==
+daemon API bind: 0.0.0.0:3000
+control plane API ready after 74s (first-run golden image build)
+VM1 spawned: vm-1783786600192818345  IP 10.0.1.10  agent http://10.0.1.10:8080
+VM1 real task (gpt-4o): "Used Space: 441MB - Available Space: 249MB - Usage: 64%"
+step count: 89 (with lettered sub-steps)  checks: 334 ✓  failures: 0
+release: untagged main, PR #19~#50 merged on top of anvil-v0.7.0
+
+== full e2e step trace ==
+PASS  1. Start daemon — control plane API responding
+PASS  2. Create one VM (HTTP 201) — vm-...10  IP 10.0.1.10  64-char agent token
+PASS  3. Run a task on VM1 — real gpt-4o response
+PASS  3a. Streaming /tasks (?stream=1) emits NDJSON frames (v0.4.4)
+PASS  3b. Task depth guard rejects an over-cap hop (508 Loop Detected, v0.4.4)
+PASS  4. Stop goose agent on VM1 (HTTP 200)
+PASS  5. Delete VM1 (HTTP 200)
+PASS  6-9. Two VMs in parallel — concurrent tasks, stop, delete, list empty
+PASS  11. Create VM for snapshot test
+PASS  12. Take snapshot of snap-source VM (stop_after=true)
+PASS  13. Verify snapshot list (should be 1)
+PASS  14. Restore VM from snapshot — Restore response omits agent_token
+PASS  15. Run task on restored VM
+PASS  16-17. Delete restored VM, delete snapshot
+PASS  19-24. Concurrent restore — two snapshots restored at once, both agents respond
+PASS  26. Create VM for diff snapshot test
+PASS  27. Take snapshot #1 (auto-detect -> Full)
+PASS  28. Take snapshot #2 (auto-detect -> Diff)
+PASS  29. Verify Diff memory.bin uses fewer disk blocks than Full (sparse-aware)
+PASS  30. Stop source VM before restoring diff snapshot
+PASS  31. Restore from Diff snapshot — Diff restore response omits agent_token
+PASS  32. Verify Diff-restored agent responds
+PASS  33. Attempt to delete Full snapshot (should fail — Diff depends on it) -> 409
+PASS  34. Cleanup diff snapshot test
+PASS  36. Create VM for COW rootfs test
+PASS  37. Take snapshot of COW-test VM (stop_after=true)
+PASS  38. Restore from snapshot (COW path) — COW restore response omits agent_token
+PASS  39. Verify dm-snapshot COW device is active (/dev/mapper/cow-*)
+PASS  40. Verify exception store initial disk usage is minimal
+PASS  41. Verify COW-restored agent responds
+PASS  42. Delete COW-restored VM and verify kernel resource cleanup
+PASS  43. Delete COW snapshot
+PASS  44a. Relaunch daemon in COW spawn mode (EPHEMERA_DISK_MODE=cow)
+PASS  44b. Verify COW dm-snapshot devices + persisted state
+PASS  44c. Graceful shutdown preserves COW exception stores (keep-store)
+PASS  44d. COW VMs recovered with same vm_id + dm device + health
+PASS  44e. Simulated crash: SIGKILL daemon with one COW VM orphaned
+PASS  44f. Orphan COW device reclaimed + survivor cold-restarted
+PASS  44g. Delete COW VM + return daemon to plain disk mode
+PASS  46a. Restore a snapshot, capture its recovery record
+PASS  46b. Graceful daemon bounce -> restored VM re-restored from its snapshot
+PASS  46c. Deleting a snapshot referenced by a live restored VM is blocked (anvil)
+PASS  45-49. Agent proxy — GET /health, POST /stop; EPHEMERA_PUBLIC_URL proxy path
+PASS  52. Create flock with 5 agents (orchestrator/researcher×2/worker/reviewer)
+PASS  53. Verify /vms shows the 5 flock members
+PASS  54. Post a message to the Town Wall
+PASS  54b. Flock spawn response omits agent token fields
+PASS  56. Retrieve Town Wall history — 3 entries
+PASS  56a. Town Wall history query filters (?agent_id=, ?contains=) (v0.4.3)
+PASS  57a-c. Dynamic agent membership — add / PATCH role (VM recreated) / remove
+PASS  57d-e. Pause + resume flock (watchdog leaves paused members alone)
+PASS  57g. GET /watchdog/status returns config + state (v0.4.4)
+PASS  58. Delete flock and verify all 5 member VMs torn down
+PASS  57b-h. Resilience flock — monotonic seq, metadata.json persist + disk recovery
+PASS  57i. Watchdog persists dead status to metadata.json (Persist hook)
+PASS  57j. Per-agent restart preserves identity and reuses agent_token
+PASS  58b.i. In-VM /townwall/post auto-authenticates under auth-on CP (v0.3.3)
+PASS  58c.iii-vi. CP token hot rotation via SIGHUP — v2 reaches VM, v1 bearer 401
+PASS  61. /metrics endpoint exposes Prometheus format (HELP/TYPE + vm_count)
+PASS  62. /vms/{vm_id}/stats returns per-VM snapshot (uptime/mem/cpu, ?stats=true)
+PASS  76. EPHEMERA_AUTOSNAPSHOT warm restore preserves VM memory across a bounce
+PASS  77. Recovery with a missing disk artifact drops state cleanly (TAP released)
+PASS  78-80. Audit log (client+status, no secrets), 401 as client=-, per-token TTL
+PASS  81. SSE /flocks/{id}/wall streams through the audit statusRecorder (Flusher)
+PASS  82. ephemera-ctl spawn/ls/rm against the live daemon; bogus token non-zero
+PASS  83. ephemera-ctl audit reads the access log
+PASS  84. Relaunch daemon with MCP gateway enabled (DeepWiki backend)
+PASS  84a-d. GET /config/mcp gateway enabled, backend listed, ebtables EPHEMERA_AS
+PASS  85. MCP tool-call round-trip through the gateway
+PASS  87. Relaunch daemon with a stdio MCP backend (jq fixture)
+PASS  87a. GET /config/mcp/servers spawns the stdio child and probes up (up=true)
+PASS  87b. stdio child runs as nobody with clamped RLIMIT_NOFILE/NPROC
+PASS  89. Daemon shutdown reaps the stdio subprocess (Registry.Close)
+
+== security and resilience checkpoints ==
+PASS  Restore / concurrent / Diff / COW responses all omit agent_token
+PASS  Flock spawn + add-agent responses omit agent_token and agent_tokens
+PASS  Unauthenticated in-VM Town Wall post returns 401
+PASS  Town Wall seq is monotonic and survives daemon restart
+PASS  flock metadata.json persisted and recovered after daemon restart
+PASS  CP token SIGHUP rotation: v2 propagated to VM, stale v1 operator bearer 401
+PASS  MCP stdio child sandboxed as nobody with clamped rlimits; args not in API
+PASS  Watchdog start log present across every daemon restart
+
+== final ==
+All test steps passed  (89 steps · 334 ✓ · 0 ✗)

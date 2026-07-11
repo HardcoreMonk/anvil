@@ -225,3 +225,50 @@ go test ./internal/anvilmcp ./cmd/anvil-mcp -run 'Test.*IronClaw|Test.*ToolRegis
 2. `anvil_run_task`를 포함한 장시간 tool call을 IronClaw agent 기준으로 재검증한다.
 3. Gemini schema 호환성 문제가 IronClaw upstream에서 해결되면 기본 tool inventory
    상태로 회귀 테스트한다.
+
+## v0.7.0 재검증 (2026-07-12)
+
+E2E 데모 asset refresh(`docs/e2e-demo-refresh`) 과정에서 IronClaw 실세션을 재시도했다.
+대상은 untagged `main`(post-`anvil-v0.7.0`, commit `9a9af7d`). 결과는 2026-05-12 관찰과 일치한다.
+
+- 재현 환경: 로컬 `ironclaw`(`~/.local/bin/ironclaw`), backend `gemini` / `gemini-2.5-flash`,
+  `anvil` stdio MCP server를 이번 worktree의 fresh `anvil-mcp`로 repoint, `anvil-daemon`
+  auth-off `127.0.0.1:3000`.
+- `ironclaw mcp test anvil`: 연결 성공, `anvil_*` tool **19개** 조회(2026-05-12에는 11개 —
+  Goosetown/snapshot replication 등 surface 확장).
+- 기본(full) tool inventory로 `ironclaw --cli-only --no-onboard --auto-approve -m <lifecycle
+  prompt>` 실행 시 2026-05-12와 **동일 시그니처** 재현:
+  `Invalid value at 'tools[0].function_declarations[29].parameters.properties[..].value.type', ""`
+  (Gemini 400 `INVALID_ARGUMENT`). anvil tool이 아니라 IronClaw 내장 tool inventory 전체를
+  Gemini에 노출한 데서 발생한다.
+- 완화책 적용(anvil 전용 profile): `ironclaw config set tool_permissions.<31개 내장 tool>
+  disabled` + env `SKILLS_ENABLED / WASM_ENABLED / BUILDER_ENABLED / GATEWAY_ENABLED /
+  HEARTBEAT_ENABLED = false`. → **스키마 오류 해소**. tool declaration 배열이 Gemini 검증을
+  통과했고 요청이 다음 단계로 진행됐다.
+- 다음 단계에서 **credential 오류**로 차단: `API key not valid. Please pass a valid API key.`
+  (Gemini 400, `reason: API_KEY_INVALID`). `~/.ironclaw` DB에 저장된 Gemini API key가
+  2026-07-12 시점 무효/만료 상태다. 프로젝트 내 대체 가능한 유효 Google/Gemini key는 없다
+  (`configs/goose-secrets.yaml`는 provider openai). 따라서 이번 세션에서는 IronClaw
+  agent-driven full lifecycle 재녹화를 완료하지 못했다.
+- 데모 (a)는 fallback으로 유지: 실제 `ironclaw mcp test anvil` 핸드셰이크(장면 1) + 동일
+  anvil MCP tool surface를 `anvil-mcp-smoke`로 구동한 실 VM lifecycle(장면 2)을 녹화.
+  README 캡션에서 두 장면의 주체를 분리 서술한다.
+
+### `TestCurrentAnvilToolInputsAreGeminiCompatible` 커버리지 판단
+
+`internal/anvilmcp/ironclaw_schema_test.go`의 이 테스트는
+`ValidateIronClawToolInputSchemas(CurrentIronClawToolInputSchemas())`로 **anvil tool input
+스키마**가 빈 Gemini type을 만들지 않는지만 검증한다. 이번 실패는 IronClaw **내장** tool
+inventory에서 발생하므로 이 테스트 범위 밖이며, 테스트가 실패 모드를 놓친 것이 아니다 —
+anvil surface는 정상 커버된다. IronClaw 내장 tool의 Gemini 스키마 호환은 anvil 테스트로
+막을 수 없고, upstream 수정 또는 anvil 전용 profile 유지로만 다룰 수 있다.
+
+### 잔여 후속
+
+1. `~/.ironclaw` Gemini API key rotation/refresh 후 anvil 전용 profile로 agent-driven full
+   lifecycle을 재녹화한다(스키마 통과는 이번에 확인됨).
+2. IronClaw upstream이 전체 built-in tool inventory의 Gemini function schema 변환을 고치면
+   기본 inventory 상태로 회귀 테스트한다.
+
+이번 세션의 `~/.ironclaw` 변경(tool_permissions 31개 `disabled`, `mcp-servers.json` repoint)은
+검증 종료 후 원값으로 **전부 원복**했다(원복 후 per-key diff 일치 확인).
