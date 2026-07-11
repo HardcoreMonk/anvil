@@ -172,3 +172,12 @@ failover 후 새 home은 빈 `TOWN_WALL.log`에서 seq를 재시작한다. **이
 5. **비동기 relay buffer 재평가** — home failover 구현 완료로 이제 재평가
    가능해졌다. §6b 수동 검증 통과 후 우선순위 판단(stack handoff
    Follow-Up 5번 참고).
+6. **(최종 whole-branch 리뷰 파생, minor)** 감지 카운터의 "연속" 정밀화 —
+   home이 probe에는 도달 가능하나 hub 재등록이 비-dial 에러로 실패하는
+   pass는 카운터를 리셋하지 않아, flapping home이 이론상 최대 2 pass 이르게
+   발화할 수 있다(스펙 문언 "성공 시 리셋"에는 합치, 동작상 무해).
+   원하면 `probes[homeHost].reachable`일 때도 리셋하도록 한 줄 보강.
+7. **(최종 whole-branch 리뷰 파생, minor·테스트 위생)** failover e2e의
+   cleanup이 `RESEARCHER_VMID` 미포착 시 VM DELETE를 생략하는 좁은 누수
+   창, 그리고 adapter 로그 grep이 리터럴 "home failover" 문구에 결합된
+   취약성 — 스크립트 후속 폴리시 후보.
