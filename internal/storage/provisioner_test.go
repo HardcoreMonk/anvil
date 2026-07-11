@@ -382,7 +382,9 @@ func TestEnsureGooseAgentAcceptsPrebuiltWhenSourceAbsent(t *testing.T) {
 	if err := os.WriteFile(binaryPath, []byte("prebuilt"), 0755); err != nil {
 		t.Fatalf("write prebuilt binary: %v", err)
 	}
-	if err := os.WriteFile(binaryPath+gooseAgentStampSuffix, []byte("deadbeef\n"), 0644); err != nil {
+	// A valid stamp is a lowercase hex sha256 (64 chars) — the shape GooseAgentSourceHash emits.
+	validHash := strings.Repeat("0123456789abcdef", 4)
+	if err := os.WriteFile(binaryPath+gooseAgentStampSuffix, []byte(validHash+"\n"), 0644); err != nil {
 		t.Fatalf("write stamp: %v", err)
 	}
 
@@ -440,6 +442,49 @@ func TestEnsureGooseAgentDiagnosticWhenSourceAbsentAndStampMissing(t *testing.T)
 	}
 	if strings.Contains(err.Error(), "walk goose-agent sources") {
 		t.Fatalf("error should be diagnostic, not the raw walk error: %v", err)
+	}
+}
+
+// TestEnsureGooseAgentDiagnosticWhenStampContentInvalid covers a source-less install whose
+// prebuilt binary + stamp are both present, but the stamp content is not a valid source hash
+// (empty, wrong length, or non-hex garbage). EnsureGooseAgent must reject it at accept time
+// with the same diagnostic shape as a missing artifact — not accept it silently (which would
+// skew currency downstream) and not defer the failure to EnsureGoldenImageGooseAgent.
+func TestEnsureGooseAgentDiagnosticWhenStampContentInvalid(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		stamp string
+	}{
+		{"empty", "\n"},
+		{"whitespace", "   \n"},
+		{"non-hex garbage", "not-a-valid-source-hash\n"},
+		{"too short", "deadbeef\n"},
+		{"uppercase hex", strings.Repeat("ABCDEF0123456789", 4) + "\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			binaryPath := filepath.Join(root, "artifacts", "goose-agent")
+			if err := os.MkdirAll(filepath.Dir(binaryPath), 0755); err != nil {
+				t.Fatalf("mkdir artifacts: %v", err)
+			}
+			if err := os.WriteFile(binaryPath, []byte("prebuilt"), 0755); err != nil {
+				t.Fatalf("write prebuilt binary: %v", err)
+			}
+			if err := os.WriteFile(binaryPath+gooseAgentStampSuffix, []byte(tc.stamp), 0644); err != nil {
+				t.Fatalf("write stamp: %v", err)
+			}
+
+			err := EnsureGooseAgent(binaryPath, root)
+			if err == nil {
+				t.Fatalf("EnsureGooseAgent with invalid stamp %q should error", tc.stamp)
+			}
+			if strings.Contains(err.Error(), "walk goose-agent sources") {
+				t.Fatalf("error should be diagnostic, not the raw walk error: %v", err)
+			}
+			if !strings.Contains(err.Error(), "reinstall from an intact release tarball") {
+				t.Fatalf("error should carry the corrupt-install diagnostic: %v", err)
+			}
+		})
 	}
 }
 

@@ -701,14 +701,51 @@ func acceptPrebuiltGooseAgent(binaryPath string) error {
 	stampPath := binaryPath + gooseAgentStampSuffix
 	binOK := regularFileExists(binaryPath)
 	stampOK := regularFileExists(stampPath)
-	if binOK && stampOK {
-		stamp, _ := os.ReadFile(stampPath)
-		log.Printf("goose-agent source tree absent; accepting shipped prebuilt %s (source stamp %s).", binaryPath, strings.TrimSpace(string(stamp)))
-		return nil
+	if !binOK || !stampOK {
+		return corruptGooseAgentInstallErr(fmt.Sprintf(
+			"no usable prebuilt artifact (binary %s present=%t, stamp %s present=%t)",
+			binaryPath, binOK, stampPath, stampOK))
 	}
-	return fmt.Errorf("goose-agent source tree absent and no usable prebuilt artifact "+
-		"(binary %s present=%t, stamp %s present=%t): this release install looks incomplete or corrupt — "+
-		"reinstall from an intact release tarball", binaryPath, binOK, stampPath, stampOK)
+
+	// Validate the stamp CONTENT, not just its presence. An empty stamp would otherwise
+	// pass here and only fail later as a fatal in EnsureGoldenImageGooseAgent (:628); a
+	// non-empty garbage stamp would be accepted silently and skew currency decisions
+	// downstream. Fail at accept time, with the same diagnostic shape as a missing
+	// artifact, when the stamp is not the exact hash shape GooseAgentSourceHash produces.
+	stamp, err := os.ReadFile(stampPath)
+	if err != nil {
+		return corruptGooseAgentInstallErr(fmt.Sprintf("read source stamp %s: %v", stampPath, err))
+	}
+	hash := strings.TrimSpace(string(stamp))
+	if !isGooseAgentSourceHash(hash) {
+		return corruptGooseAgentInstallErr(fmt.Sprintf(
+			"source stamp %s does not contain a valid source hash (want %d-char lowercase hex)",
+			stampPath, sha256.Size*2))
+	}
+
+	log.Printf("goose-agent source tree absent; accepting shipped prebuilt %s (source stamp %s).", binaryPath, hash)
+	return nil
+}
+
+// corruptGooseAgentInstallErr wraps a specific reason in the shared diagnostic that
+// points operators at a broken release install rather than a raw walk/stamp error.
+func corruptGooseAgentInstallErr(reason string) error {
+	return fmt.Errorf("goose-agent source tree absent and %s: "+
+		"this release install looks incomplete or corrupt — reinstall from an intact release tarball", reason)
+}
+
+// isGooseAgentSourceHash reports whether s has the exact shape GooseAgentSourceHash
+// produces: a lowercase hex-encoded SHA-256 (sha256.Size*2 chars, each in [0-9a-f]).
+func isGooseAgentSourceHash(s string) bool {
+	if len(s) != sha256.Size*2 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func regularFileExists(path string) bool {
