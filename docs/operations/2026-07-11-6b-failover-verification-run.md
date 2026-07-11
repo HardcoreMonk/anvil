@@ -100,10 +100,13 @@
   revoke 401 확인). 보고/멱등성 결함, ⑥b와 무관. fix는 stack Follow-Up 큐에
   잔존(우선순위 유지).
 - RCA/fix slice (`fix/d2-delete-cleanup-misreport`, 머지 전): shared wall
-  deregister(`DeleteFlock`)가 daemon 측에서 멤버 VM 을 cascade teardown 하므로
-  뒤이은 per-VM `DELETE /vms/{id}`가 404 → `deleteRoutedFlockAgents`가 오분류.
-  결정적 경로라 3회 + ⑥b 모두 재현. fix: 404 를 teardown 완료로 취급, 진짜
-  실패(비-404)는 계속 cleanup_failed.
+  deregister(`DeleteFlock`)의 cascade 는 비대칭 — member 의 relay flock 만 멤버
+  VM 을 tear down 하고(RegisterRelay 가 Agents 채움), home 의 hub flock 은
+  Agents 가 영구 빈 map(RegisterHub 불변식, orchestrator_api.go:1540-1542)이라
+  home VM 은 정상 200. relay-측 멤버 VM 의 뒤이은 per-VM `DELETE /vms/{id}`가
+  404 → `deleteRoutedFlockAgents`가 오분류, 단 1건의 404 로 flock 전체가
+  뒤집힘. 결정적 경로라 3회 + ⑥b 모두 재현. fix: 404 를 teardown 완료로 취급,
+  진짜 실패(비-404: unreachable/5xx)는 계속 cleanup_failed.
 
 ## 후속 작업
 

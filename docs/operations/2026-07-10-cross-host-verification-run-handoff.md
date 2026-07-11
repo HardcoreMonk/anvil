@@ -92,11 +92,15 @@ teardown과 token revoke까지 전부 성공. 보고/멱등성 결함 — 운영
 삭제를 실패로 오인하게 만든다.
 
 > RCA/fix slice (`fix/d2-delete-cleanup-misreport`, 머지 전): delete가 shared
-> wall 을 먼저 deregister(`DeleteFlock`)하는데 daemon `deleteFlock`이 그 flock의
-> 멤버 VM 까지 cascade teardown 하므로, 뒤이은 per-VM `DELETE /vms/{id}`가
-> 항상 404 를 받고 `deleteRoutedFlockAgents`가 이를 실패로 오분류 → 3회 모두
-> 결정적으로 재현. fix: 404(=이미 소멸=teardown 성공)를 pending 이 아닌 완료로
-> 취급, 진짜 실패(비-404)는 계속 cleanup_failed 유지.
+> wall 을 먼저 deregister(`DeleteFlock`)한다. 이 cascade 는 비대칭 — member
+> daemon 의 **relay** flock 만 멤버 VM 을 Agents 에 담으므로(RegisterRelay)
+> `deleteFlock`이 그 VM 을 tear down 하고, home 의 **hub** flock 은 Agents 가
+> 영구 빈 map(RegisterHub 불변식, orchestrator_api.go:1540-1542)이라 home/
+> coordinator VM 은 살아남아 per-VM DELETE 가 정상 200. 뒤이은 relay-측 멤버 VM
+> 의 `DELETE /vms/{id}`가 404 를 받고 `deleteRoutedFlockAgents`가 이를 실패로
+> 오분류 → 단 1건의 404 만으로 flock 전체가 failed_cleanup_pending 으로 뒤집혀
+> 3회 모두 결정적으로 재현. fix: 404(=이미 소멸=teardown 성공)를 pending 이
+> 아닌 완료로 취급, 진짜 실패(비-404: unreachable/5xx)는 계속 cleanup_failed 유지.
 
 ### D3 (부차·플랫폼) — diff snapshot merge가 ZFS에서 guest 메모리 오염
 

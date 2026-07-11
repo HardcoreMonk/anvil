@@ -552,13 +552,21 @@ func TestDeleteRoutedFlock_RevokesCallToken(t *testing.T) {
 }
 
 // TestDeleteRoutedFlock_AlreadyGoneVMsReportSuccess reproduces defect D2: the
-// routed-flock delete deregisters the shared wall first (DeleteFlock), which on
-// the real daemon cascades a teardown of that flock's member VMs. The subsequent
-// per-VM DELETE /vms/{id} then hits an already-absent VM and the daemon answers
-// 404. A 404 here is the success end-state of teardown, so the delete must
-// report success — not "cleanup pending: reason=cleanup_failed". Both hosts'
-// VMs return 404, mirroring the cross-host verification run where teardown fully
-// succeeded (flock 404 / VM 0 / token 401) yet the tool reported is_error.
+// routed-flock delete deregisters the shared wall first (DeleteFlock). On the
+// real daemon that cascade is asymmetric — only the member host's RELAY flock
+// carries the member VMs in its Agents map (RegisterRelay), so deleteFlock tears
+// those VMs down; the home host's HUB flock has a permanently empty Agents map
+// (RegisterHub invariant, orchestrator_api.go:1540-1542), so the home/coordinator
+// VM survives and its per-VM DELETE returns a normal 200. The relay-side member
+// VM's subsequent DELETE /vms/{id} then hits an already-absent VM and the daemon
+// answers 404. A single such 404 is enough to flip the whole flock to
+// failed_cleanup_pending, which is why the misreport was deterministic. A 404
+// here is the success end-state of teardown, so the delete must report success —
+// not "cleanup pending: reason=cleanup_failed". This test drives the worst case
+// (both hosts 404) so it also covers topologies where the home VM is likewise
+// already gone; it still must report success, mirroring the cross-host run where
+// teardown fully succeeded (flock 404 / VM 0 / token 401) yet the tool reported
+// is_error.
 func TestDeleteRoutedFlock_AlreadyGoneVMsReportSuccess(t *testing.T) {
 	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
 	home := &routerFakeDaemon{spawnResponses: []*SpawnVMResponse{{
@@ -590,8 +598,9 @@ func TestDeleteRoutedFlock_AlreadyGoneVMsReportSuccess(t *testing.T) {
 		t.Fatalf("CreateRoutedFlockMembers: %v", err)
 	}
 
-	// Deregistering the shared wall already tore the VMs down on the daemon, so the
-	// per-VM DELETE finds nothing and 404s. Model that end-state on both hosts.
+	// The relay-side member VM is torn down by the wall deregister cascade, so its
+	// per-VM DELETE 404s. Drive the worst case where the home VM is already gone
+	// too (both hosts 404); the delete must still report success.
 	home.deleteErr = &DaemonError{StatusCode: http.StatusNotFound, Body: "vm not found"}
 	member.deleteErr = &DaemonError{StatusCode: http.StatusNotFound, Body: "vm not found"}
 
@@ -615,69 +624,94 @@ func TestDeleteRoutedFlock_AlreadyGoneVMsReportSuccess(t *testing.T) {
 }
 
 // TestDeleteRoutedFlock_GenuineTeardownFailureStaysCleanupPending pins the
-// D2-fix boundary: a genuine, non-404 delete failure (e.g. the daemon is
-// unreachable) must still surface as is_error "cleanup pending:
-// reason=cleanup_failed", persist the flock as failed_cleanup_pending, and keep
-// the un-torn-down agent marked cleanup_pending so the retry path survives. Only
-// "already gone" (404) is reclassified as success — real failures are not.
+// D2-fix boundary: ONLY "already gone" (404) is reclassified as teardown
+// success. Every other member-delete failure is genuine — the VM may still be
+// standing — so the delete must still surface as is_error "cleanup pending:
+// reason=cleanup_failed", persist the flock as failed_cleanup_pending, keep the
+// un-torn-down agent marked cleanup_pending for retry, and stay redacted. Two
+// subcases fix both sides of the boundary: an unreachable daemon, and an
+// explicit 5xx (a non-404 DaemonError) that must NOT be treated like a 404.
 func TestDeleteRoutedFlock_GenuineTeardownFailureStaysCleanupPending(t *testing.T) {
-	store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
-	home := &routerFakeDaemon{spawnResponses: []*SpawnVMResponse{{
-		VMID: "vm-coordinator-1", GuestIP: "10.0.1.10", AgentURL: "http://10.0.1.10:8080", TenantID: "tenant-1", EgressPolicy: "profile",
-	}}}
-	member := &routerFakeDaemon{spawnResponses: []*SpawnVMResponse{{
-		VMID: "vm-researcher-1", GuestIP: "10.0.2.10", AgentURL: "http://10.0.2.10:8080", TenantID: "tenant-1", EgressPolicy: "profile",
-	}}}
-	router := NewRuntimeRouterWithOptions(
-		NewScheduler(
-			[]RuntimeHost{
-				{Name: "hostA", Endpoint: "http://hostA.internal:8080", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
-				{Name: "hostB", Endpoint: "http://hostB.internal:8080", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
-			},
-			nil,
-			nil,
-		),
-		map[string]Daemon{"hostA": home, "hostB": member},
-		RuntimeRouterOptions{PlacementStore: store},
-	)
+	cases := []struct {
+		name       string
+		deleteErr  error
+		wantAbsent []string // substrings the redacted error must never contain
+	}{
+		{
+			name:       "unreachable daemon",
+			deleteErr:  errors.New("dial tcp: connection refused"),
+			wantAbsent: []string{"connection refused", "dial"},
+		},
+		{
+			// A 5xx is a DaemonError just like a 404, but only 404 means "gone".
+			name:       "5xx is not 404",
+			deleteErr:  &DaemonError{StatusCode: http.StatusInternalServerError, Body: "boom internal"},
+			wantAbsent: []string{"boom internal", "daemon returned status"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := NewPlacementStore(filepath.Join(t.TempDir(), "placements.json"))
+			home := &routerFakeDaemon{spawnResponses: []*SpawnVMResponse{{
+				VMID: "vm-coordinator-1", GuestIP: "10.0.1.10", AgentURL: "http://10.0.1.10:8080", TenantID: "tenant-1", EgressPolicy: "profile",
+			}}}
+			member := &routerFakeDaemon{spawnResponses: []*SpawnVMResponse{{
+				VMID: "vm-researcher-1", GuestIP: "10.0.2.10", AgentURL: "http://10.0.2.10:8080", TenantID: "tenant-1", EgressPolicy: "profile",
+			}}}
+			router := NewRuntimeRouterWithOptions(
+				NewScheduler(
+					[]RuntimeHost{
+						{Name: "hostA", Endpoint: "http://hostA.internal:8080", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+						{Name: "hostB", Endpoint: "http://hostB.internal:8080", Healthy: true, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}},
+					},
+					nil,
+					nil,
+				),
+				map[string]Daemon{"hostA": home, "hostB": member},
+				RuntimeRouterOptions{PlacementStore: store},
+			)
 
-	out, err := router.CreateRoutedFlockMembers(context.Background(), FlockCreateRequest{
-		Task:         "smoke",
-		Roles:        []string{"coordinator", "researcher"},
-		TenantID:     "tenant-1",
-		EgressPolicy: "profile",
-	})
-	if err != nil {
-		t.Fatalf("CreateRoutedFlockMembers: %v", err)
-	}
+			out, err := router.CreateRoutedFlockMembers(context.Background(), FlockCreateRequest{
+				Task:         "smoke",
+				Roles:        []string{"coordinator", "researcher"},
+				TenantID:     "tenant-1",
+				EgressPolicy: "profile",
+			})
+			if err != nil {
+				t.Fatalf("CreateRoutedFlockMembers: %v", err)
+			}
 
-	// Home VM tears down cleanly; the member daemon is unreachable — a genuine,
-	// non-404 failure that leaves that VM standing.
-	member.deleteErr = errors.New("dial tcp: connection refused")
+			// Home VM tears down cleanly (normal 200); the member delete fails
+			// genuinely (non-404), leaving that VM standing.
+			member.deleteErr = tc.deleteErr
 
-	_, err = router.DeleteRoutedFlock(context.Background(), out.FlockID)
-	if err == nil {
-		t.Fatal("DeleteRoutedFlock error = nil, want cleanup-pending on genuine teardown failure")
-	}
-	if msg := err.Error(); !strings.Contains(msg, "cleanup pending") || !strings.Contains(msg, routedFlockReasonCleanupFailed) {
-		t.Fatalf("DeleteRoutedFlock error = %q, want cleanup-pending/%s", msg, routedFlockReasonCleanupFailed)
-	}
-	// The error string must not leak the daemon-side dial detail (redaction: only
-	// flock/host/vm identifiers, never addresses).
-	if strings.Contains(err.Error(), "connection refused") || strings.Contains(err.Error(), "dial") {
-		t.Fatalf("DeleteRoutedFlock error leaked daemon detail: %q", err.Error())
-	}
-	record, ok := store.RoutedFlock(out.FlockID)
-	if !ok {
-		t.Fatalf("flock %q missing from store after failed delete", out.FlockID)
-	}
-	if record.Status != RoutedFlockStatusFailedCleanupPending {
-		t.Fatalf("flock status = %q, want %q", record.Status, RoutedFlockStatusFailedCleanupPending)
-	}
-	if len(record.Agents) != 1 {
-		t.Fatalf("failed-cleanup flock retains %d agents, want 1 (the un-torn-down member)", len(record.Agents))
-	}
-	if got := record.Agents[0]; got.VMID != "vm-researcher-1" || got.Status != routedFlockAgentStatusCleanupPending {
-		t.Fatalf("pending agent = %+v, want vm-researcher-1 status=%s", got, routedFlockAgentStatusCleanupPending)
+			_, err = router.DeleteRoutedFlock(context.Background(), out.FlockID)
+			if err == nil {
+				t.Fatal("DeleteRoutedFlock error = nil, want cleanup-pending on genuine teardown failure")
+			}
+			if msg := err.Error(); !strings.Contains(msg, "cleanup pending") || !strings.Contains(msg, routedFlockReasonCleanupFailed) {
+				t.Fatalf("DeleteRoutedFlock error = %q, want cleanup-pending/%s", msg, routedFlockReasonCleanupFailed)
+			}
+			// The error string must not leak the daemon-side failure detail
+			// (redaction: only flock/host/vm identifiers, never addresses/bodies).
+			for _, absent := range tc.wantAbsent {
+				if strings.Contains(err.Error(), absent) {
+					t.Fatalf("DeleteRoutedFlock error leaked daemon detail %q: %q", absent, err.Error())
+				}
+			}
+			record, ok := store.RoutedFlock(out.FlockID)
+			if !ok {
+				t.Fatalf("flock %q missing from store after failed delete", out.FlockID)
+			}
+			if record.Status != RoutedFlockStatusFailedCleanupPending {
+				t.Fatalf("flock status = %q, want %q", record.Status, RoutedFlockStatusFailedCleanupPending)
+			}
+			if len(record.Agents) != 1 {
+				t.Fatalf("failed-cleanup flock retains %d agents, want 1 (the un-torn-down member)", len(record.Agents))
+			}
+			if got := record.Agents[0]; got.VMID != "vm-researcher-1" || got.Status != routedFlockAgentStatusCleanupPending {
+				t.Fatalf("pending agent = %+v, want vm-researcher-1 status=%s", got, routedFlockAgentStatusCleanupPending)
+			}
+		})
 	}
 }
