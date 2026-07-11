@@ -80,6 +80,11 @@ func (r *RuntimeRouter) failoverRoutedFlock(ctx context.Context, record RoutedFl
 	if err := r.placementStore.SaveRoutedFlockAndPlacements(record, nil); err != nil {
 		return false, fmt.Errorf("failover routed flock %q: persisting new home host %q failed: %w", flockID, newHome, err)
 	}
+	// e2e greps this line (scripts/anvil-cross-host-failover-e2e.sh phase 1): it
+	// matches loosely on the flock id plus a case-insensitive "failover"
+	// substring, not this exact wording — but if you drop either the flock id
+	// or every form of "failover" from this message, update that script's
+	// match together with this line.
 	r.logf("anvil-mcp: routed flock %q home failover %q -> %q (canonical wall restarts empty on the new home)", flockID, oldHome, newHome)
 	var errs []error
 	if err := r.registerRoutedHub(ctx, record, relayToken, callToken); err != nil {
