@@ -429,8 +429,9 @@ daemon으로 보내는 outbound Bearer token이다.
   giving-up으로 표시하고, 대상 host 복귀 관측 시 카운터를 리셋한다(무한
   재시도 금지, home failover와 동일한 재평가 규율). D3 coarse-fs 거부와
   tenant/검증 실패는 **terminal**로 분류해 그 대상에 대한 재시도를
-  제외하지만, 이 exclude는 daemon 프로세스 수명 한정이라 **재시작이
-  re-arm**한다(카운터 청소는 positive-evidence 규칙만 사용 — 실제 삭제가
+  제외하지만, 이 exclude는 adapter(`cmd/anvil-mcp`) 프로세스 수명 한정이라
+  **adapter 재시작이 re-arm**한다(카운터 청소는 positive-evidence 규칙만
+  사용 — 실제 삭제가
   관측될 때만 GC, 복제본 GC/전파 자체는 비목표). metric family
   `anvil_scheduler_snapshot_replication_*`(`attempts_total{outcome,reason}`,
   `latency_seconds{phase="total"만}`, `queue_depth`, `giving_up`,

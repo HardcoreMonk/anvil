@@ -518,7 +518,7 @@ header, daemon raw body, raw `metadata.json` body를 남기지 않는다.
      복귀 시 재평가" 규율과 동일).
    - D3 coarse-fs 거부, tenant 불일치, 기타 검증 실패는 **terminal**로
      분류돼 그 (snapshot,target) 쌍은 더 이상 재시도되지 않는다(`exclude`).
-     **이 exclude는 daemon 프로세스 수명 한정이다 — daemon을 재시작하면
+     **이 exclude는 adapter(`cmd/anvil-mcp`) 프로세스 수명 한정이다 — adapter를 재시작하면
      in-memory terminal 마크가 사라져 다음 sweep가 그 대상을 다시 시도한다
      (re-arm)**. 영속 GC/차단 목록이 아니다.
 

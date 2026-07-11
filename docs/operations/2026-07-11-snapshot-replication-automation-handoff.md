@@ -38,7 +38,7 @@ baseline(2026-06-02, main에 이미 있음)의 수동·동기 `anvil_replicate_s
    - dial 실패는 in-memory 카운터++, **연속 3회(상수 cap)** 도달 시 giving-up.
    - non-dial 실패(D3 coarse-fs 거부, tenant 불일치 등)는 **terminal**로
      분류돼 그 (snapshot,target) 쌍이 즉시 exclude된다. **이 exclude는
-     in-memory(프로세스 수명 한정)라 daemon 재시작이 re-arm**한다 — 영속
+     in-memory(프로세스 수명 한정)라 adapter(`cmd/anvil-mcp`) 재시작이 re-arm**한다 — 영속
      차단 목록이 아니다(무한 재시도 금지라는 스펙 요구와, 복제 GC 비목표라는
      제약을 동시에 만족).
 4. **카운터 GC**: dial-failure/giving-up/terminal 세 counter map 모두
