@@ -6,7 +6,11 @@
   `internal/anvilmcp`(`home_failover.go` 신설, `runtime_router.go` reconcile
   per-host 격리 + failover 발화), `scripts/anvil-cross-host-failover-e2e.sh`
 - 상태: 구현·유닛(+`-race`)·KVM e2e 게이트 완료. **실 2-daemon 수동 검증
-  (§6b)은 아직 수행되지 않았다** — 트리거는 다음 서버 세션. 설계:
+  (§6b) 2026-07-11 수행 완료 — 전 세부 단계 PASS** (감지·재선출·kind hub→relay
+  강등·wall 손실 계약·양방향 wall/gtcall 재확인·redaction·정리+revoke; 전환
+  창 실측 ~27s @`reconcile 10s`; 신규 결함 없음). 기록:
+  [`docs/operations/2026-07-11-6b-failover-verification-run.md`](2026-07-11-6b-failover-verification-run.md).
+  설계:
   [`docs/superpowers/specs/2026-07-08-home-failover-design.md`](../superpowers/specs/2026-07-08-home-failover-design.md)
 - 선행: [`docs/operations/2026-07-08-routed-flock-stack-handoff.md`](2026-07-08-routed-flock-stack-handoff.md)
   (stack 전체 상태·Next Action), [`docs/operations/2026-07-10-cross-host-verification-run-handoff.md`](2026-07-10-cross-host-verification-run-handoff.md)
@@ -130,30 +134,34 @@ failover 후 새 home은 빈 `TOWN_WALL.log`에서 seq를 재시작한다. **이
   되돌리지 않는다 — 원래 host로 되돌리려면 runbook의 수동 fail-back
   절차를 따른다(adapter 중지 → placements.json `home_host` 수정 → adapter
   재기동).
-- **실 2-daemon 수동 검증 미수행.** KVM e2e는 stub/single-host 환경에서
-  재선출·kind 전환·wall 손실 계약을 검증했지만, 실 2-daemon 환경에서의
-  전체 왕복(전환 창 실측, 새 home 경유 wall/gtcall, 구 home relay 강등)은
-  아직 확인되지 않았다 — §6b(아래 Follow-Up).
+- ~~**실 2-daemon 수동 검증 미수행.**~~ **2026-07-11 수행 완료 — 전 세부
+  단계 PASS.** 실 2-daemon(192.168.1.19/.20, `0feb9fb`)에서 전환 창 실측
+  ~27s(`reconcile 10s`; 기본 60s 환산 ~2.7분), 새 home 경유 wall/gtcall
+  양방향 재확인, 구 home hub→relay 강등(on-disk metadata `kind:"relay"` +
+  구 home guest gtwall forward `409` 없음 + audit `/distributed`→`/relay`),
+  wall 손실 계약 관측 확인. 기록:
+  [2026-07-11-6b-failover-verification-run.md](2026-07-11-6b-failover-verification-run.md).
 - 단일-host flock과 생존 후보가 0인 경우 failover는 no-op이다(현행 502
   지속) — 이것은 spec의 명시 비목표(경계 사례)이지 결함이 아니다.
 
 ## Next Action
 
-1. **실 2-daemon 수동 검증 §6b 수행**(트리거: 다음 서버 세션,
-   192.168.1.19/.20) — 이 slice의 유일한 대기 게이트.
-2. §6b 통과 후 "최종 검증(전체 슬라이스)" 블록(전체 suite + 3개 KVM e2e
-   회귀 + 전체 KVM 게이트 + secret-scan) 실행, PR 생성
-   (`feature/home-failover` → main, 자체 머지 금지).
+1. ~~**실 2-daemon 수동 검증 §6b 수행**~~ — **완료 (2026-07-11, PASS)**.
+   기록: [2026-07-11-6b-failover-verification-run.md](2026-07-11-6b-failover-verification-run.md).
+2. ~~§6b 통과 후 "최종 검증(전체 슬라이스)" + PR 생성~~ — **완료**: slice는
+   PR #33로 main 병합됨(`0feb9fb`). §6b는 그 병합본에 대한 최종 field 게이트로
+   수행돼 PASS — slice 전 게이트 CLOSED.
 
 ## Follow-Up Tasks
 
-1. **실 2-daemon 수동 검증 §6b failover 시나리오 수행** (새 1순위, 트리거:
-   다음 서버 세션) — home daemon 정지 → 전환 창 대기 → placements.json
-   `home_host` 전환 확인 → wall 양방향·gtcall 재확인(새 home 경유) → 구
-   home 재기동 → relay 강등 확인(gtwall이 새 home으로 forward, `409`
-   없음) → wall history에 전환 전 메시지 부재 확인. 절차:
-   [2026-07-08-cross-host-manual-verification.md](2026-07-08-cross-host-manual-verification.md)
-   ⑥b.
+1. ~~**실 2-daemon 수동 검증 §6b failover 시나리오 수행**~~ — **완료
+   (2026-07-11, 전 세부 단계 PASS)**. home daemon 정지 → `home_host`
+   host-a→host-b 전환(실측 ~27s @`reconcile 10s`) → 새 home 경유 wall
+   양방향·gtcall 재확인 → 구 home 재기동 → hub→relay 강등(forward `409`
+   없음) → wall 손실 계약(전환 전 메시지 부재) 확인. 신규 결함 없음(정리
+   단계에서 기존 D2 재현만). 기록:
+   [2026-07-11-6b-failover-verification-run.md](2026-07-11-6b-failover-verification-run.md).
+   절차: [2026-07-08-cross-host-manual-verification.md](2026-07-08-cross-host-manual-verification.md) ⑥b.
 2. **zone `~/projects/claude-zone/docs/FOLLOWUP.md` P3-09 갱신** — zone
    repo는 이 anvil branch 밖이므로 이 handoff에는 트리거만 기록한다. 갱신
    내용: home failover 구현 완료, 대기 게이트는 §6b 실 2-daemon 수동 검증.

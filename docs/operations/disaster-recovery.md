@@ -167,8 +167,10 @@ EPHEMERA_API_TOKENS="operator:$TOKEN" ./anvil-daemon
    heal한다). 관측 방법(adapter 로그 라인, placements.json `home_host`)과
    원래 host로 되돌리는 수동 fail-back 절차는 `runbook.md`의 "Home 재선출
    failover 관측과 수동 fail-back" 절을 참고한다. 실 2-daemon 환경에서의
-   failover 시나리오 수동 검증은 아직 수행되지 않았다 — 상세:
-   [2026-07-08-cross-host-manual-verification.md](2026-07-08-cross-host-manual-verification.md)
+   failover 시나리오 수동 검증은 2026-07-11 수행 완료 — 전 세부 단계 PASS
+   (전환 창 실측 ~27s @`reconcile 10s`; 기록:
+   [2026-07-11-6b-failover-verification-run.md](2026-07-11-6b-failover-verification-run.md)).
+   절차: [2026-07-08-cross-host-manual-verification.md](2026-07-08-cross-host-manual-verification.md)
    ⑥b. 설계 원문:
    [`docs/superpowers/specs/2026-07-08-home-failover-design.md`](../superpowers/specs/2026-07-08-home-failover-design.md).
 
