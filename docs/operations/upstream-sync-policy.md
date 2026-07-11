@@ -140,9 +140,10 @@ anvil-side에서 유지하고 upstream 제안(기여)은 하지 않는다. 같�
 [`docs/ADR_INDEX.md`](../ADR_INDEX.md) Section 4에도 기록한다.
 
 sizing 결정: `v0.5.3`부터 anvil은 upstream default VM sizing `1` vCPU / `1024` MiB를
-채택한다(이전 2/2048, KVM 근거로 승인, full e2e 3× `316✓`). flock member spawn이
-per-profile `EPHEMERA_VCPU_COUNT`/`EPHEMERA_MEM_SIZE_MIB` override를 무시하고
-`LookupProfile` default로만 sizing하는 upstream-inherited gap은 follow-up이다.
+채택한다(이전 2/2048, KVM 근거로 승인, full e2e 3× `316✓`). flock member spawn
+(createFlock·add-agent)이 per-profile `EPHEMERA_VCPU_COUNT`/`EPHEMERA_MEM_SIZE_MIB`
+override를 무시하고 `LookupProfile` default로만 sizing하던 upstream-inherited gap은
+`POST /vms`와 동일한 override 블록을 미러링해 닫혔다(2026-07-11).
 
 `v0.6.0`-`v0.6.4` MCP gateway sync 채택 상태(이 v0.6 sync의 merge/adapt commit 기준;
 upstream에 `v0.6.3` 없음):
