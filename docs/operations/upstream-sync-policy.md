@@ -112,9 +112,9 @@ commit 기준으로 기록한다):
 |---|---|---|
 | `v0.4.0` | 병합됨, `adapted` | storage/recovery core. `EPHEMERA_AUTOSNAPSHOT=true` auto-snapshot은 opt-in·disk-expensive로 두고 public support로 승격하지 않는다. |
 | `v0.4.1` | 병합됨, `adapted` | client identity, `GET /audit`, per-token TTL, `ephemera-ctl` operator CLI(IronClaw MCP 대체 아님). |
-| `v0.4.2` | 병합됨, `adapted`, default cow deferred | COW probe/fallback + COW+Diff snapshot. `EPHEMERA_DISK_MODE=cow`는 명시적 opt-in이고 default 전환은 KVM burn-in 뒤 결정한다. |
+| `v0.4.2` | 병합됨, `adapted`, default cow deferred(flip 승인 대기) | COW probe/fallback + COW+Diff snapshot. `EPHEMERA_DISK_MODE=cow`는 명시적 opt-in. default 전환 burn-in 조건 충족(run 1 FAIL→D4 fix PR #46 후 재-burn-in `334✓/0✗` green), 실제 flip만 별도 승인 대기. |
 | `v0.4.3` | 병합(`aab3299`), `adapted` | dynamic flock membership, pause/resume, per-flock `max_agents`, Town Wall filter/rotation. |
-| `v0.4.4` | 병합(`7d65c12`)/적응(`2ffd282`), `adapted`, broadcast MCP exposure deferred | streaming `/tasks`(buffered 기본 계약 유지), `EPHEMERA_MAX_TASK_DEPTH`/`508` depth guard, `GET /watchdog/status`, goose-agent slog. flock broadcast는 daemon API/`ephemera-ctl` CLI로만 채택하고 `anvil_*` MCP tool로 노출하지 않는다. |
+| `v0.4.4` | 병합(`7d65c12`)/적응(`2ffd282`), `adapted`, broadcast MCP exposure 기각 확정 | streaming `/tasks`(buffered 기본 계약 유지), `EPHEMERA_MAX_TASK_DEPTH`/`508` depth guard, `GET /watchdog/status`, goose-agent slog. flock broadcast는 daemon API/`ephemera-ctl` CLI로만 채택하고 `anvil_*` MCP tool로 노출하지 않는다(2026-07-11 기각 확정). |
 | `v0.4.5` | 병합(`8bd84ec`)/적응(`8daf6f3`), `adapted` | snapshot-restore auto-recovery(`recoverRestoredVM`/`reRestoreMachine`). restore state에 `tenant_id`/`egress_policy` persist, 응답 token redaction 유지. divergence는 아래 참조. |
 
 의도적 divergence (`adapted`): anvil은 live·persisted restored VM이 참조하는 source
@@ -186,9 +186,10 @@ historical analysis로 보존한다. 현재 채택 상태는
    sync에서, `v0.6.0`-`v0.6.4` MCP gateway 변경은 v0.6 MCP gateway sync에서, `v0.7.0`
    installer/transcript/hardening 변경은 v0.7 parity sync에서 각각 병합/적응·검증을
    마쳤다(위 채택 상태 표 참조). 이로써 upstream parity scope 코드 편입이 완료됐다.
-   남은 항목은 tag 채택이 아니라 `v0.4.2` default COW 전환, `v0.4.4` flock broadcast의
-   MCP tool 노출, flock member spawn의 per-profile sizing 존중이며, 각각 KVM burn-in과
-   tenant/rate/audit·sizing 경로 설계 뒤 결정한다. release-gate는 코드 4종(2026-07-06
+   tag 채택 외 deferred였던 3항목은 2026-07-11 결정으로 정리됐다: flock member spawn의
+   per-profile sizing 존중은 완료(위 sizing 결정), `v0.4.4` flock broadcast의 MCP tool
+   노출은 기각 확정(daemon-only 유지), `v0.4.2` default COW 전환은 burn-in 조건 충족
+   (D4 fix PR #46 후 재-burn-in green)으로 실제 flip만 승인 대기다. release-gate는 코드 4종(2026-07-06
    batch)과 마지막 open gate(valid provider key `semantic` run, `18c7559`에서 OpenAI
    `gpt-4o`로 e2e `343✓/0✗`) 모두 닫혔다 — open 항목 없음.
 2. `v0.7.0` 이후 upstream 태그는 2026-07-02 기준 아직 관찰되지 않았다. 새 태그가

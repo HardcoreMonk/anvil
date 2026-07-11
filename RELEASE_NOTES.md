@@ -1,8 +1,10 @@
 # anvil-v0.7.0 — ephemera-aligned current release (post-parity cleanup)
 
 **`anvil-v0.7.0`(tag target `2f367dd`)은 현행(Latest) 릴리즈다.** 이후 main은
-cross-host shared Town Wall/gtcall, adapter reconcile loop, bounded relay
-retry 등(PR #19·#21-#24) untagged 작업을 더 포함한다. anvil 버전은 이제
+cross-host shared Town Wall/gtcall/home 재선출 failover, adapter reconcile loop,
+bounded relay retry, cross-host snapshot replication 자동화에 더해 routed flock
+스택 결함 D1~D4 종결·web major(vite8/svelte5)·scheduler 실배포+installer 검증
+(PR #19~#46) 등 untagged 작업을 더 포함한다. anvil 버전은 이제
 upstream ephemera 버전을 따른다. 이 릴리즈는 아래 `anvil-v0.4.0` 절의 parity
 편입(`v0.4.0`-`v0.7.0`)에 더해, `anvil-v0.4.0`(`de82481`) 이후 main에 반영된
 post-release backlog batch(PR #18 merge `726cbdc`)와 open-gate closure(step 59
