@@ -390,6 +390,7 @@ internal/
                       quota, placement, runtime audit helper, hub/home failover
                       re-election, cross-host snapshot replication
   orchestrator/       flock registry, agent 상태, Town Wall append-only log
+  metrics/            Prometheus text exposition registry (daemon `/metrics`)
   vm/machine.go       Firecracker SDK wrapper
   network/manager.go  IP pool, TAP lifecycle, bridge, NAT
   storage/
