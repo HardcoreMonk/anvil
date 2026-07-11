@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -12,6 +13,27 @@ import (
 	"ephemera/internal/network"
 	"ephemera/internal/storage"
 )
+
+// printGooseAgentSourceHash implements the build-time helper subcommand
+//
+//	ephemera-daemon print-goose-agent-source-hash [projectRoot]
+//
+// used by scripts/build_release.sh to stamp the shipped goose-agent artifact with the
+// exact source hash EnsureGooseAgent computes. That lets a source-less release install
+// accept the prebuilt binary as current (EnsureGooseAgent) and lets the golden-image
+// path read a consistent stamp — without duplicating the hash algorithm in bash.
+func printGooseAgentSourceHash(args []string) {
+	root := "."
+	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
+		root = args[0]
+	}
+	h, err := storage.GooseAgentSourceHash(root)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "print-goose-agent-source-hash: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(h)
+}
 
 // initSlog configures the global slog default handler from
 // EPHEMERA_LOG_FORMAT (text|json) and EPHEMERA_LOG_LEVEL (debug|info|warn|error).
@@ -52,6 +74,13 @@ func resolveWorkDir() (string, error) {
 }
 
 func main() {
+	// Build-time helper subcommand (used by scripts/build_release.sh). Handled before
+	// any control-plane startup so it stays a pure, side-effect-free print.
+	if len(os.Args) > 1 && os.Args[1] == "print-goose-agent-source-hash" {
+		printGooseAgentSourceHash(os.Args[2:])
+		return
+	}
+
 	initSlog()
 	slog.Warn("starting ephemera control plane")
 	if len(apiClients) == 0 {
