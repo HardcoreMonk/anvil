@@ -274,3 +274,29 @@ curl -X DELETE \
 
 삭제가 거부되면 응답의 dependency 이유를 따른다. snapshot directory를 직접 삭제하지
 않는다.
+
+## coarse-hole 파일시스템의 diff snapshot 오염 (D3)
+
+증상: diff snapshot restore 직후 guest가 즉사한다 (fc log의
+`Unexpected exit reason on vcpu run: Shutdown` = triple fault). 원인은 ZFS 등
+recordsize>4K 파일시스템에서 sparse diff의 hole이 record 단위로만 보고되어 미기록
+padding이 base 메모리를 덮어쓰는 것이다 (RCA:
+`2026-07-10-cross-host-verification-run-handoff.md` §D3).
+
+1. daemon은 이제 이를 코드로 막는다. 로그에서 아래를 확인한다.
+   - 창설측: `coarse filesystem hole granularity detected ...` warning이 있으면 해당
+     daemon은 diff 대신 **full snapshot**을 만든 것이다 (`GET /snapshots`의
+     `snapshot_type`이 `full`). 데이터 손실 없음.
+   - 판독측: restore가 `refusing overlay to avoid guest memory corruption (see D3)`로
+     실패하면, 그 diff는 coarse 파일시스템에서 생성됐거나 복제된 것이다. 해당 diff는
+     restore하지 않는다.
+
+2. 거부된 diff의 base full snapshot이 있으면 그 full로 restore한다 (위 "diff base
+   snapshot 누락" 3항과 동일 절차).
+
+3. 재발 방지: snapshot 디렉토리를 recordsize=4K dataset에 올린다 (runbook "Diff
+   snapshot 안전성" 절 참조). 4K dataset 위에서는 diff가 정상 생성·restore된다.
+
+4. 손상된 것으로 의심되는 이미 생성된 diff snapshot을 삭제해야 하면 dry-run GC 또는
+   개별 delete 응답으로 보호 상태를 먼저 확인한다. snapshot directory를 직접 삭제하지
+   않는다.

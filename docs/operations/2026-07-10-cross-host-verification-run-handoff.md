@@ -107,8 +107,15 @@ teardown과 token revoke까지 전부 성공. 보고/멱등성 결함 — 운영
   — 이번 smoke에선 changed_bytes=0이라 미발화.
 - 운영 완화 (적용 완료): 양 host에 `rpool/anvil-snapshots` dataset
   (**recordsize=4K**)을 `~/anvil/snapshots`에 마운트 → smoke 전체 green.
-- 코드 후속: snapshot 디렉토리 hole-granularity probe(4K sparse 테스트 파일)를
-  daemon에 추가해 >4K면 diff 생성을 거부하거나 full로 강등 + 문서화.
+- 코드 후속 (**완료**, `fix/d3-zfs-diff-guard`): snapshot 디렉토리 hole-granularity
+  probe(`storage.ProbeHoleGranularity` — 4K sparse 테스트 파일 + SEEK_HOLE)를
+  daemon에 추가. **창설측 강등**(coarse면 diff→full, metadata·응답 `snapshot_type`
+  정직 기록, daemon 수명당 warning 1회, probe 1회 캐시) + **판독측 거부**
+  (`overlaySparseDiff` 진입 시 diff 디렉토리 probe, coarse면 명확한 에러로 overlay
+  거부 — 복제/임포트 유입분까지 방어). 두 가드 모두 fine fs(ext4)에서는 no-op —
+  KVM e2e 게이트 전 594 체크 green(diff 생성·restore 포함 불변) 재확인. 4K
+  recordsize dataset 운영 완화는 diff 효율을 위해 계속 권장. 상세: runbook "Diff
+  snapshot 안전성" 절 + disaster-recovery "coarse-hole ... (D3)" 절.
 
 ## 후속 작업 (우선순위순 — 2026-07-10 갱신)
 
@@ -116,7 +123,8 @@ teardown과 token revoke까지 전부 성공. 보고/멱등성 결함 — 운영
 2. ~~failover 구현 slice 착수 승인 요청~~ — **완료**: 승인 → 구현 완료
    (2026-07-11, `feature/home-failover`). 상세:
    [2026-07-11-home-failover-handoff.md](2026-07-11-home-failover-handoff.md).
-3. **D3 코드 완화** — granularity 감지 + diff→full 강등/거부.
+3. ~~D3 코드 완화~~ — **완료** (`fix/d3-zfs-diff-guard`): hole-granularity probe +
+   창설측 diff→full 강등 + 판독측 overlay 거부. 위 D3 "코드 후속" 참조.
 4. **D2 fix** — delete cleanup 보고 정합.
 5. fc upstream/OpenZFS 참고 보고 검토 (D3는 fc diff 포맷의 "sparseness=의미"
    계약이 coarse-granularity fs에서 깨지는 일반 문제 — fc 문서 개선 제안 후보).

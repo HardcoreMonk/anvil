@@ -431,3 +431,33 @@ target import가 실패하면 daemon log를 확인하고 target snapshot directo
 수동 삭제하기 전에 같은 import를 재시도할지, daemon이 해당 staging path를 사용 중인지
 확인한다. replication response, audit, 운영 기록에는 `agent_token`, authorization
 header, daemon raw body, raw `metadata.json` body를 남기지 않는다.
+
+## Diff snapshot 안전성 — coarse-hole 파일시스템 가드 (D3)
+
+sparse diff snapshot(memory.bin diff + rootfs.diff)은 파일시스템이 **hole을 4KiB
+단위로** 보고한다고 가정한다. ZFS는 hole을 recordsize(기본 128K) 단위로만 보고하므로,
+diff가 실제로 기록한 dirty page 바깥의 미기록 record padding까지 "기록된 영역"으로
+부풀려져 restore 시 base 메모리의 유효 데이터를 제로로 덮어쓴다 → guest triple fault.
+
+daemon은 두 지점에서 이를 코드로 막는다 (운영자 조치 불필요):
+
+- **창설측 강등**: snapshot 생성 시 `{workDir}/snapshots` 파일시스템의 hole
+  granularity를 daemon 수명당 1회 probe한다. >4KiB면 diff 요청을 **full snapshot으로
+  강등**하고 metadata·API 응답의 `snapshot_type`을 정직하게 `full`로 기록한다. 강등
+  시 daemon log에 `coarse filesystem hole granularity detected ...` warning이 1회 남는다
+  (관측 granularity 값 포함, 비밀 없음).
+- **판독측 거부**: restore/merge가 diff를 overlay하기 직전 diff 디렉토리를 probe한다.
+  coarse면 `refusing overlay to avoid guest memory corruption (see D3)` 에러로
+  거부한다 — 복제/임포트로 유입된 coarse diff까지 방어한다.
+
+**운영 완화(권장)**: 강등은 안전하지만 diff 효율(작은 delta)을 잃는다. diff snapshot
+효율이 필요한 호스트에서는 snapshot 디렉토리를 **recordsize=4K dataset**에 올린다.
+
+```bash
+sudo zfs create -o recordsize=4k -o mountpoint=/home/$USER/anvil/snapshots rpool/anvil-snapshots
+```
+
+4K dataset 위에서는 probe가 fine(4096)으로 관측되어 강등/거부가 발생하지 않고 diff가
+정상 생성·restore된다. ext4/xfs 등은 기본이 4KiB이므로 조치가 필요 없다. daemon log에
+위 warning이 반복 없이 1회만 보이는지, `GET /snapshots`에서 의도한 host의
+`snapshot_type`이 `diff`인지로 상태를 확인한다.
