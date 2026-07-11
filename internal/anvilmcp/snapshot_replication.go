@@ -264,13 +264,17 @@ func isDiffSnapshot(snapshot SnapshotInfo) bool {
 //     counts a dial failure (target unreachable at probe — short-circuit, no doomed
 //     transfer) or fires one ReplicateSnapshot and classifies the outcome.
 //  4. Republishes the queue_depth / giving_up gauges.
-//  5. Sweeps in-memory counters for snapshots not observed THIS PASS. Caveat
-//     (Task 2 review): "unobserved" conflates deleted with transiently
-//     unobservable — if every host holding a snapshot is unreachable on a pass,
-//     a saturated giving-up mark is wiped even though the target is still down,
-//     defeating the bound under source flapping. Task 3 replaces this with a
-//     positive-evidence rule (GC only when the snapshot's recorded hosts were
-//     reachable this pass and it is genuinely absent).
+//  5. Sweeps the dial-failure, giving-up, and terminal counters using a
+//     positive-evidence deletion rule: a (snapshot,target) pair's counters are
+//     GC'd only when the snapshot's recorded locations (SnapshotHosts) include
+//     a host that was probe-reachable THIS PASS and did not list the snapshot
+//     in its ListSnapshots — deletion positively observed, not merely absent
+//     from this pass's union of listings. If every recorded host was
+//     unreachable this pass, the pass is uninformative and the counters are
+//     left untouched (Task 2 review: a naive "not observed this pass" rule
+//     wipes a saturated giving-up mark whenever a snapshot's recorded hosts go
+//     unreachable together, reviving dead-target reselection and stalling
+//     convergence under source flapping).
 //
 // All log/error text carries snapshot id + host NAME only (never a daemon address
 // or token).
@@ -281,7 +285,6 @@ func (r *RuntimeRouter) reconcileSnapshotReplication(ctx context.Context, probes
 	var errs []error
 
 	// 1. Discover.
-	liveSnapshots := make(map[string]bool)
 	observedHosts := make(map[string]map[string]bool)
 	infoByID := make(map[string]SnapshotInfo)
 	discovered := false
@@ -303,7 +306,6 @@ func (r *RuntimeRouter) reconcileSnapshotReplication(ctx context.Context, probes
 			if id == "" {
 				continue
 			}
-			liveSnapshots[id] = true
 			if observedHosts[id] == nil {
 				observedHosts[id] = make(map[string]bool)
 			}
@@ -408,29 +410,62 @@ func (r *RuntimeRouter) reconcileSnapshotReplication(ctx context.Context, probes
 		errs = append(errs, fmt.Errorf("reconcile snapshot replication: recording gauges failed"))
 	}
 
-	// 5. Sweep counters for snapshots not observed this pass. NOTE: this
-	// over-fires when all of a snapshot's hosts are transiently unreachable
-	// (wipes a saturated giving-up mark) — corrected in Task 3 with a
-	// positive-evidence deletion rule; see the function doc comment.
+	// 5. Sweep counters using the positive-evidence deletion rule (see function
+	// doc). snapshotDeletionConfirmed is the single source of truth so the three
+	// counter maps can never disagree on whether a pair's evidence is in.
 	for key := range r.replicationDialFailures {
-		if s, _ := splitSnapshotTargetKey(key); !liveSnapshots[s] {
+		if s, _ := splitSnapshotTargetKey(key); r.snapshotDeletionConfirmed(s, probes, observedHosts) {
 			delete(r.replicationDialFailures, key)
 		}
 	}
 	for key := range r.replicationGivingUp {
-		if s, _ := splitSnapshotTargetKey(key); !liveSnapshots[s] {
+		if s, _ := splitSnapshotTargetKey(key); r.snapshotDeletionConfirmed(s, probes, observedHosts) {
 			delete(r.replicationGivingUp, key)
+		}
+	}
+	for key := range r.replicationTerminal {
+		if s, _ := splitSnapshotTargetKey(key); r.snapshotDeletionConfirmed(s, probes, observedHosts) {
+			delete(r.replicationTerminal, key)
 		}
 	}
 	return errors.Join(errs...)
 }
 
-// excludedReplicationTargets lists the in-memory targets to keep out of selection
-// for a snapshot. Task 2: giving-up targets only. (Task 3 also adds terminal
-// targets.)
+// snapshotDeletionConfirmed reports whether this pass has positive evidence
+// that snapshot id is genuinely gone, for step 5's counter GC (dial failures,
+// giving-up, terminal). Evidence requires at least one of the snapshot's
+// recorded locations (SnapshotHosts) to have been probe-reachable this pass —
+// if none were reachable, the pass is uninformative and GC must hold (Task 2
+// review: "not observed this pass" alone conflates genuine deletion with every
+// recorded host being transiently unreachable together). Among the reachable
+// recorded hosts, if none reported the snapshot in this pass's ListSnapshots
+// (observedHosts), deletion is confirmed.
+func (r *RuntimeRouter) snapshotDeletionConfirmed(id string, probes map[string]hostProbe, observedHosts map[string]map[string]bool) bool {
+	sawReachableRecordedHost := false
+	for _, host := range r.placementStore.SnapshotHosts(id) {
+		if !probes[host].reachable {
+			continue
+		}
+		sawReachableRecordedHost = true
+		if observedHosts[id][host] {
+			return false
+		}
+	}
+	return sawReachableRecordedHost
+}
+
+// excludedReplicationTargets lists the in-memory targets to keep out of
+// selection for a snapshot: dial-saturated giving-up targets (Task 2) and
+// terminal-rejected targets (Task 3) — both reconcileMu-guarded, checked at
+// selection time only.
 func (r *RuntimeRouter) excludedReplicationTargets(snapshotID string) []string {
 	var out []string
 	for key := range r.replicationGivingUp {
+		if s, tgt := splitSnapshotTargetKey(key); s == snapshotID {
+			out = append(out, tgt)
+		}
+	}
+	for key := range r.replicationTerminal {
 		if s, tgt := splitSnapshotTargetKey(key); s == snapshotID {
 			out = append(out, tgt)
 		}
@@ -439,8 +474,9 @@ func (r *RuntimeRouter) excludedReplicationTargets(snapshotID string) []string {
 }
 
 // classifySnapshotReplication records the metric outcome for one replication
-// attempt and updates the dial counter. Task 2: success (reset) vs error
-// (collected, retried next pass). Task 3 splits terminal out of error.
+// attempt and updates the dial counter. Success clears the dial/giving-up
+// counters for the pair. Reachable-target non-success splits into two cases —
+// see the inline comment below.
 func (r *RuntimeRouter) classifySnapshotReplication(id, target, key string, resp *SnapshotReplicationResponse, repErr error, total time.Duration, at time.Time, errs []error) []error {
 	if resp != nil && repErr == nil && resp.Status == "replicated" {
 		delete(r.replicationDialFailures, key)
@@ -458,16 +494,33 @@ func (r *RuntimeRouter) classifySnapshotReplication(id, target, key string, resp
 		r.logf("anvil-mcp: snapshot %q replicated to host %q (%d desired replicas)", id, target, snapshotReplicaFactor)
 		return errs
 	}
-	// Reachable target but the transfer did not succeed. Task 2 collects it as a
-	// generic error and retries next pass (Task 3 refines the non-error case into a
-	// terminal exclusion).
+	// Reachable target, transfer did not succeed. Two cases:
+	//  - repErr != nil: ReplicateSnapshot failed BEFORE the transfer completed
+	//    (source/target ListSnapshots, transient). The target answered the probe,
+	//    so this is not a dial failure; surface it and retry next pass. Do NOT
+	//    exclude the target — it may well succeed next time.
+	//  - (resp, nil) with a non-"replicated" status: the reachable target refused
+	//    the content — D3 coarse-fs overlay refusal, tenant/validation mismatch, or
+	//    a missing diff base. TERMINAL (spec D-6): retrying the same target is
+	//    futile, so exclude it in-memory (reset only on restart), record a terminal
+	//    reason, and never count it toward the dial cap.
+	if repErr != nil {
+		r.recordSnapshotReplicationMetric(SnapshotReplicationMetricObservation{
+			Outcome:   SnapshotReplicationOutcomeError,
+			Reason:    SnapshotReplicationReasonTransferError,
+			Latencies: map[string]time.Duration{SnapshotReplicationPhaseTotal: total},
+			At:        at,
+		})
+		return append(errs, fmt.Errorf("reconcile snapshot replication for %q on target host %q failed", id, target))
+	}
+	r.replicationTerminal[key] = true
 	r.recordSnapshotReplicationMetric(SnapshotReplicationMetricObservation{
-		Outcome:   SnapshotReplicationOutcomeError,
-		Reason:    SnapshotReplicationReasonTransferError,
+		Outcome:   SnapshotReplicationOutcomeTerminalRejected,
+		Reason:    SnapshotReplicationReasonRejected,
 		Latencies: map[string]time.Duration{SnapshotReplicationPhaseTotal: total},
 		At:        at,
 	})
-	return append(errs, fmt.Errorf("reconcile snapshot replication for %q on target host %q failed", id, target))
+	return append(errs, fmt.Errorf("reconcile snapshot replication for %q on target host %q rejected (terminal)", id, target))
 }
 
 func (r *RuntimeRouter) recordSnapshotReplicationMetric(obs SnapshotReplicationMetricObservation) {

@@ -2,9 +2,13 @@ package anvilmcp
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 )
 
 func replicationHosts(names ...string) []RuntimeHost {
@@ -188,5 +192,150 @@ func TestSnapshotReplication_RespectsHostEligibility(t *testing.T) {
 	}
 	if len(hostC.importCalls) != 1 {
 		t.Fatalf("did not replicate to the eligible host: hostC imports=%d", len(hostC.importCalls))
+	}
+}
+
+// TestSnapshotReplication_TerminalRejectionIsNotRetried: a reachable target that
+// refuses the import (D3 coarse-fs / tenant / validation surface as a failed
+// transfer status) is terminal — recorded once, excluded from re-selection, never
+// retried against the same target, and never counted toward the dial cap.
+func TestSnapshotReplication_TerminalRejectionIsNotRetried(t *testing.T) {
+	hostA := &routerFakeDaemon{snapshotList: []SnapshotInfo{snapInfo("snap-1")}}
+	hostB := &routerFakeDaemon{importErrForBody: map[string]error{
+		"bundle:snap-1": errors.New("refusing overlay to avoid guest memory corruption (see D3)"),
+	}}
+	router, store := newReplicationRouter(t, replicationHosts("hostA", "hostB"),
+		map[string]*routerFakeDaemon{"hostA": hostA, "hostB": hostB})
+	probes := allReachable("hostA", "hostB")
+
+	_ = router.reconcileSnapshotReplication(context.Background(), probes) // first attempt → terminal
+	if len(hostB.importCalls) != 1 {
+		t.Fatalf("first pass import calls = %d, want 1", len(hostB.importCalls))
+	}
+	m := store.State().SnapshotReplicationMetrics
+	if m.AttemptsByOutcomeReason[snapshotReplicationAttemptKey(SnapshotReplicationOutcomeTerminalRejected, SnapshotReplicationReasonRejected)] != 1 {
+		t.Fatalf("terminal_rejected not recorded: %+v", m.AttemptsByOutcomeReason)
+	}
+	if got := m.AttemptsByOutcomeReason[snapshotReplicationAttemptKey(SnapshotReplicationOutcomeDialFailed, SnapshotReplicationReasonTargetUnreachable)]; got != 0 {
+		t.Fatalf("terminal failure wrongly counted as dial: %d", got)
+	}
+
+	_ = router.reconcileSnapshotReplication(context.Background(), probes) // second pass → excluded, not retried
+	if len(hostB.importCalls) != 1 {
+		t.Fatalf("terminal target retried: import calls = %d, want still 1", len(hostB.importCalls))
+	}
+}
+
+// TestReconcilePlacements_RunsSnapshotReplicationSweep proves the sweep is wired
+// into ReconcilePlacements (probes built from ListVMs) and that its logs leak no
+// daemon address.
+func TestReconcilePlacements_RunsSnapshotReplicationSweep(t *testing.T) {
+	hostA := &routerFakeDaemon{
+		snapshotList: []SnapshotInfo{snapInfo("snap-1")},
+		listVMResp:   []VMInfo{{VMID: "vm-a"}},
+	}
+	hostB := &routerFakeDaemon{listVMResp: []VMInfo{}}
+	router, _ := newReplicationRouter(t, replicationHosts("hostA", "hostB"),
+		map[string]*routerFakeDaemon{"hostA": hostA, "hostB": hostB})
+	var logs []string
+	router.reconcileLogf = func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}
+
+	if err := router.ReconcilePlacements(context.Background()); err != nil {
+		t.Fatalf("reconcile error: %v", err)
+	}
+	if len(hostB.importCalls) != 1 {
+		t.Fatal("snapshot replication sweep did not run within ReconcilePlacements")
+	}
+	joined := strings.Join(logs, "\n")
+	for _, forbidden := range []string{"hostA.internal:8080", "hostB.internal:8080"} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("sweep log leaked a daemon address: %s", joined)
+		}
+	}
+}
+
+// TestSnapshotReplication_CounterGCRequiresPositiveEvidence: step 5's counter GC
+// must not fire on mere "not observed this pass" — that conflates a snapshot's
+// genuine deletion with its recorded hosts being transiently unreachable
+// together, which would revive a saturated giving-up mark under source flapping
+// and stall convergence (Task 2 review). GC fires only when a recorded location
+// (SnapshotHosts) was reachable this pass and did not list the snapshot
+// (positive evidence of deletion); if every recorded host was unreachable this
+// pass, the counters are left untouched (uncertainty preserved).
+func TestSnapshotReplication_CounterGCRequiresPositiveEvidence(t *testing.T) {
+	hostA := &routerFakeDaemon{snapshotList: []SnapshotInfo{snapInfo("snap-1")}}
+	hostB := &routerFakeDaemon{}
+	router, store := newReplicationRouter(t, replicationHosts("hostA", "hostB"),
+		map[string]*routerFakeDaemon{"hostA": hostA, "hostB": hostB})
+	down := map[string]hostProbe{"hostA": {reachable: true}, "hostB": {dialFailed: true}}
+	for i := 0; i < snapshotReplicationFailureCap; i++ {
+		_ = router.reconcileSnapshotReplication(context.Background(), down)
+	}
+	if store.State().SnapshotReplicationMetrics.GivingUp != 1 {
+		t.Fatal("precondition: sweep did not give up")
+	}
+	key := snapshotTargetKey("snap-1", "hostB")
+	if !router.replicationGivingUp[key] {
+		t.Fatal("precondition: giving-up map missing key")
+	}
+
+	// Every recorded host of snap-1 (just hostA — it never replicated to hostB)
+	// goes unreachable together with hostB: no recorded host was observed
+	// reachable this pass, so there is no positive evidence either way. GC must
+	// hold.
+	allDown := map[string]hostProbe{"hostA": {dialFailed: true}, "hostB": {dialFailed: true}}
+	_ = router.reconcileSnapshotReplication(context.Background(), allDown)
+	if !router.replicationGivingUp[key] {
+		t.Fatal("giving-up mark GC'd with no positive evidence (all recorded hosts unreachable this pass)")
+	}
+	if router.replicationDialFailures[key] < snapshotReplicationFailureCap {
+		t.Fatalf("dial counter reset with no positive evidence: %d", router.replicationDialFailures[key])
+	}
+
+	// snap-1 is genuinely deleted: hostA (its only recorded host) is reachable
+	// again this pass and no longer lists it — positive evidence. GC must fire.
+	hostA.snapshotList = nil
+	stillDown := map[string]hostProbe{"hostA": {reachable: true}, "hostB": {dialFailed: true}}
+	_ = router.reconcileSnapshotReplication(context.Background(), stillDown)
+	if router.replicationGivingUp[key] {
+		t.Fatal("giving-up mark survived genuine deletion with positive evidence")
+	}
+	if _, ok := router.replicationDialFailures[key]; ok {
+		t.Fatal("dial counter survived genuine deletion with positive evidence")
+	}
+}
+
+// TestClassifySnapshotReplication_AlreadyPresentDeletesCounters calls
+// classifySnapshotReplication directly (no sweep plumbing) to pin the
+// already_present/idempotent branch: every transferred item was already on the
+// target (Replicated empty, Skipped non-empty), and the dial/giving-up counters
+// for the pair are cleared exactly like a full "replicated" success.
+func TestClassifySnapshotReplication_AlreadyPresentDeletesCounters(t *testing.T) {
+	router, store := newReplicationRouter(t, replicationHosts("hostA", "hostB"), nil)
+	key := snapshotTargetKey("snap-1", "hostB")
+	router.replicationDialFailures[key] = 2
+	router.replicationGivingUp[key] = true
+
+	resp := &SnapshotReplicationResponse{
+		SnapshotID: "snap-1",
+		TargetHost: "hostB",
+		Status:     "replicated",
+		Skipped:    []string{"snap-1"},
+	}
+	errs := router.classifySnapshotReplication("snap-1", "hostB", key, resp, nil, time.Millisecond, time.Now().UTC(), nil)
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errs: %v", errs)
+	}
+	if _, ok := router.replicationDialFailures[key]; ok {
+		t.Fatal("dial counter survived an already_present classification")
+	}
+	if router.replicationGivingUp[key] {
+		t.Fatal("giving-up mark survived an already_present classification")
+	}
+	m := store.State().SnapshotReplicationMetrics
+	if m.AttemptsByOutcomeReason[snapshotReplicationAttemptKey(SnapshotReplicationOutcomeAlreadyPresent, SnapshotReplicationReasonIdempotent)] != 1 {
+		t.Fatalf("already_present not recorded: %+v", m.AttemptsByOutcomeReason)
 	}
 }

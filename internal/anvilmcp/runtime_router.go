@@ -60,6 +60,12 @@ type RuntimeRouter struct {
 	// excluded from selection until the target host is observed reachable again.
 	// reconcileMu.
 	replicationGivingUp map[string]bool
+
+	// replicationTerminal marks "<snapshot>\x1f<target>" pairs a reachable target
+	// refused (D3 coarse-fs / tenant / validation). Excluded from re-selection for
+	// this process lifetime; reset only on restart (in-memory, like the dial
+	// counter). reconcileMu.
+	replicationTerminal map[string]bool
 }
 
 type RuntimeRouterOptions struct {
@@ -89,6 +95,7 @@ func NewRuntimeRouterWithOptions(scheduler *Scheduler, daemons map[string]Daemon
 		homeFailures:            make(map[string]int),
 		replicationDialFailures: make(map[string]int),
 		replicationGivingUp:     make(map[string]bool),
+		replicationTerminal:     make(map[string]bool),
 	}
 }
 
@@ -351,6 +358,7 @@ func (r *RuntimeRouter) ReconcilePlacements(ctx context.Context) error {
 		}
 	}
 	errs = append(errs, r.reconcileRoutedFlockWalls(ctx, probes))
+	errs = append(errs, r.reconcileSnapshotReplication(ctx, probes))
 	return errors.Join(errs...)
 }
 
