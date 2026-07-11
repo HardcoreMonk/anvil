@@ -414,6 +414,52 @@ func TestSpawnVM_AcceptsFlockIdentity(t *testing.T) {
 	}
 }
 
+// TestSpawnVMForFlock_HonorsPerProfileSizing locks in that flock member spawn
+// honors per-profile VM sizing persisted in the profile's goose.yaml
+// (EPHEMERA_VCPU_COUNT / EPHEMERA_MEM_SIZE_MIB), mirroring the POST /vms path
+// (see spawnVM: readProfileConfig override in api.go). Before this fix
+// spawnVMForFlock used only LookupProfile's default (1 vCPU / 1024 MiB) and
+// silently dropped the persisted override. Both flock entry points route
+// through spawnVMForFlock — createFlock and add-agent (POST /flocks/{id}/agents,
+// orchestrator_api.go) — so this single assertion covers both. The startMachine
+// hook captures the resolved vm.VMConfig and stops before the firecracker start.
+func TestSpawnVMForFlock_HonorsPerProfileSizing(t *testing.T) {
+	cp := newTestCP(t)
+	// A UI-created profile persists custom sizing in its goose.yaml.
+	writeProfileFixture(t, cp, "beefy", "GOOSE_PROVIDER: groq\nGOOSE_MODEL: llama\nEPHEMERA_VCPU_COUNT: 4\nEPHEMERA_MEM_SIZE_MIB: 8192\n")
+
+	workspace := t.TempDir()
+	golden := filepath.Join(workspace, "golden.ext4")
+	if err := os.WriteFile(golden, []byte("golden"), 0600); err != nil {
+		t.Fatalf("write golden image: %v", err)
+	}
+	cp.provisioner = &storage.Provisioner{GoldenImagePath: golden, WorkspaceDir: workspace}
+	cp.allocateNetwork = func() (string, string, string, error) {
+		return "tap-test", "10.0.1.77", "AA:FC:00:00:00:4D", nil
+	}
+	cp.releaseVMNetwork = func(tapDevice, guestIP string) error { return nil }
+	cp.cloneDisk = func(vmID string) (string, error) {
+		return filepath.Join(workspace, vmID+".ext4"), nil
+	}
+	cp.prepareVM = func(vmID string, opts storage.VMPrepareOptions) error { return nil }
+
+	var captured vm.VMConfig
+	cp.startMachine = func(ctx context.Context, cfg vm.VMConfig) (*firecracker.Machine, error) {
+		captured = cfg
+		return nil, errors.New("stop before firecracker start")
+	}
+
+	if _, _, err := cp.spawnVMForFlock("flock-1", "researcher-1", "beefy", "", ""); err == nil {
+		t.Fatal("spawnVMForFlock returned nil error, want stop-before-start sentinel")
+	}
+	if captured.VcpuCount != 4 {
+		t.Fatalf("VcpuCount = %d, want 4 (per-profile override honored)", captured.VcpuCount)
+	}
+	if captured.MemSizeMib != 8192 {
+		t.Fatalf("MemSizeMib = %d, want 8192 (per-profile override honored)", captured.MemSizeMib)
+	}
+}
+
 func TestSpawnVMRollbackCleansEgressAndReleasesNetworkOnce(t *testing.T) {
 	cp := newTestCP(t)
 	workspace := t.TempDir()
