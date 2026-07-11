@@ -367,6 +367,123 @@ func TestGooseAgentArtifactIsCurrentFalseWhenStampMissing(t *testing.T) {
 	}
 }
 
+// TestEnsureGooseAgentAcceptsPrebuiltWhenSourceAbsent covers the release-install
+// layout: no cmd/goose-agent source checkout, but the shipped prebuilt binary and
+// its source-hash stamp are present (as build_release.sh stages them). EnsureGooseAgent
+// must accept the prebuilt artifact as current instead of trying to walk the absent
+// source tree (the release daemon-startup blocker fixed on fix/release-daemon-goose-agent).
+func TestEnsureGooseAgentAcceptsPrebuiltWhenSourceAbsent(t *testing.T) {
+	root := t.TempDir()
+	// Deliberately NO cmd/goose-agent source tree under root.
+	binaryPath := filepath.Join(root, "artifacts", "goose-agent")
+	if err := os.MkdirAll(filepath.Dir(binaryPath), 0755); err != nil {
+		t.Fatalf("mkdir artifacts: %v", err)
+	}
+	if err := os.WriteFile(binaryPath, []byte("prebuilt"), 0755); err != nil {
+		t.Fatalf("write prebuilt binary: %v", err)
+	}
+	if err := os.WriteFile(binaryPath+gooseAgentStampSuffix, []byte("deadbeef\n"), 0644); err != nil {
+		t.Fatalf("write stamp: %v", err)
+	}
+
+	if err := EnsureGooseAgent(binaryPath, root); err != nil {
+		t.Fatalf("EnsureGooseAgent with source absent + prebuilt present should succeed, got: %v", err)
+	}
+
+	// It must NOT rebuild (no go build); the shipped binary content is untouched.
+	got, err := os.ReadFile(binaryPath)
+	if err != nil {
+		t.Fatalf("read binary after ensure: %v", err)
+	}
+	if string(got) != "prebuilt" {
+		t.Fatalf("prebuilt binary was modified: got %q, want prebuilt", string(got))
+	}
+}
+
+// TestEnsureGooseAgentDiagnosticWhenSourceAndArtifactAbsent covers a corrupt/incomplete
+// release install: no source tree AND no usable prebuilt artifact. EnsureGooseAgent must
+// fail with a diagnostic pointing at a broken install, not the raw "walk goose-agent
+// sources" lstat error that reads like an INSTALL-contract violation.
+func TestEnsureGooseAgentDiagnosticWhenSourceAndArtifactAbsent(t *testing.T) {
+	root := t.TempDir()
+	binaryPath := filepath.Join(root, "artifacts", "goose-agent")
+
+	err := EnsureGooseAgent(binaryPath, root)
+	if err == nil {
+		t.Fatal("EnsureGooseAgent with no source and no artifact should error")
+	}
+	if strings.Contains(err.Error(), "walk goose-agent sources") {
+		t.Fatalf("error should be diagnostic, not the raw walk error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "goose-agent") {
+		t.Fatalf("diagnostic error should mention goose-agent: %v", err)
+	}
+}
+
+// TestEnsureGooseAgentDiagnosticWhenSourceAbsentAndStampMissing covers a source-less
+// install where the binary is present but its source-hash stamp is not — an incomplete
+// artifact. EnsureGooseAgent must refuse (diagnostic), because the golden-image path
+// downstream reads that stamp unconditionally.
+func TestEnsureGooseAgentDiagnosticWhenSourceAbsentAndStampMissing(t *testing.T) {
+	root := t.TempDir()
+	binaryPath := filepath.Join(root, "artifacts", "goose-agent")
+	if err := os.MkdirAll(filepath.Dir(binaryPath), 0755); err != nil {
+		t.Fatalf("mkdir artifacts: %v", err)
+	}
+	if err := os.WriteFile(binaryPath, []byte("prebuilt"), 0755); err != nil {
+		t.Fatalf("write prebuilt binary: %v", err)
+	}
+
+	err := EnsureGooseAgent(binaryPath, root)
+	if err == nil {
+		t.Fatal("EnsureGooseAgent with binary but no stamp (source absent) should error")
+	}
+	if strings.Contains(err.Error(), "walk goose-agent sources") {
+		t.Fatalf("error should be diagnostic, not the raw walk error: %v", err)
+	}
+}
+
+// TestEnsureGooseAgentSkipsRebuildWhenStampMatchesSource guards the dev path: when the
+// source tree IS present and the artifact stamp already matches the current source hash,
+// EnsureGooseAgent short-circuits without shelling out to `go build`.
+func TestEnsureGooseAgentSkipsRebuildWhenStampMatchesSource(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "cmd", "goose-agent"), 0755); err != nil {
+		t.Fatalf("mkdir goose-agent: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module test\n"), 0644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "cmd", "goose-agent", "main.go"), []byte("package main\nfunc main() {}\n"), 0644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	hash, err := GooseAgentSourceHash(root)
+	if err != nil {
+		t.Fatalf("GooseAgentSourceHash: %v", err)
+	}
+	binaryPath := filepath.Join(root, "artifacts", "goose-agent")
+	if err := os.MkdirAll(filepath.Dir(binaryPath), 0755); err != nil {
+		t.Fatalf("mkdir artifacts: %v", err)
+	}
+	if err := os.WriteFile(binaryPath, []byte("devbinary"), 0755); err != nil {
+		t.Fatalf("write binary: %v", err)
+	}
+	if err := os.WriteFile(binaryPath+gooseAgentStampSuffix, []byte(hash+"\n"), 0644); err != nil {
+		t.Fatalf("write stamp: %v", err)
+	}
+
+	if err := EnsureGooseAgent(binaryPath, root); err != nil {
+		t.Fatalf("EnsureGooseAgent dev up-to-date path should succeed, got: %v", err)
+	}
+	got, err := os.ReadFile(binaryPath)
+	if err != nil {
+		t.Fatalf("read binary: %v", err)
+	}
+	if string(got) != "devbinary" {
+		t.Fatalf("dev binary was rebuilt/modified: got %q, want devbinary", string(got))
+	}
+}
+
 func TestGooseAgentImageIsCurrentUsesMountedStamp(t *testing.T) {
 	mntDir := t.TempDir()
 	stampPath := filepath.Join(mntDir, "usr", "local", "bin", "goose-agent.sha256")

@@ -687,11 +687,53 @@ func EnsureGoldenImageGooseAgent(goldenImagePath, binaryPath string) error {
 	return nil
 }
 
+// acceptPrebuiltGooseAgent handles the release-install layout, where there is no
+// cmd/goose-agent source checkout to hash or rebuild from — INSTALL.md promises the
+// daemon runs "no Go toolchain or source checkout needed". scripts/build_release.sh
+// ships the prebuilt binary alongside its source-hash stamp; when both are present we
+// trust the shipped artifact as current (no rebuild). A missing binary or stamp means
+// the release tarball was extracted incompletely, so we fail with a diagnostic that
+// points at the broken install rather than the raw "walk goose-agent sources" lstat
+// error, which reads like an INSTALL-contract violation. Requiring the stamp here also
+// keeps the downstream EnsureGoldenImageGooseAgent (which reads it unconditionally)
+// from failing later with a more obscure message.
+func acceptPrebuiltGooseAgent(binaryPath string) error {
+	stampPath := binaryPath + gooseAgentStampSuffix
+	binOK := regularFileExists(binaryPath)
+	stampOK := regularFileExists(stampPath)
+	if binOK && stampOK {
+		stamp, _ := os.ReadFile(stampPath)
+		log.Printf("goose-agent source tree absent; accepting shipped prebuilt %s (source stamp %s).", binaryPath, strings.TrimSpace(string(stamp)))
+		return nil
+	}
+	return fmt.Errorf("goose-agent source tree absent and no usable prebuilt artifact "+
+		"(binary %s present=%t, stamp %s present=%t): this release install looks incomplete or corrupt — "+
+		"reinstall from an intact release tarball", binaryPath, binOK, stampPath, stampOK)
+}
+
+func regularFileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
+}
+
 // EnsureGooseAgent builds the goose-agent binary into binaryPath if it doesn't exist
 // or if the sidecar source-hash stamp no longer matches the current source tree.
 // The binary is compiled from cmd/goose-agent/ in the projectRoot directory using
 // CGO_ENABLED=0 so it is statically linked and portable across the VM's glibc version.
+//
+// In a release install there is no cmd/goose-agent source tree; in that case the shipped
+// prebuilt binary + stamp are accepted as current (see acceptPrebuiltGooseAgent). The
+// development path (source present) is unchanged: hash the source, compare the stamp,
+// rebuild when stale.
 func EnsureGooseAgent(binaryPath, projectRoot string) error {
+	agentDir := filepath.Join(projectRoot, "cmd", "goose-agent")
+	if _, err := os.Stat(agentDir); err != nil {
+		if os.IsNotExist(err) {
+			return acceptPrebuiltGooseAgent(binaryPath)
+		}
+		return fmt.Errorf("stat goose-agent source dir %s: %w", agentDir, err)
+	}
+
 	sourceHash, err := GooseAgentSourceHash(projectRoot)
 	if err != nil {
 		return err
