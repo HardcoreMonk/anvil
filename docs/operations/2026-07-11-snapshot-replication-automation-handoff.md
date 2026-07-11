@@ -6,7 +6,10 @@
   `runtime_router.go` reconcile 배선 + in-memory 카운터 필드, `placement_store.go`
   metric 영속, `scheduler_metrics.go` `/metrics` 렌더), `scripts/anvil-snapshot-replication-e2e.sh`
 - 상태: 구현·유닛(+`-race`)·KVM e2e 게이트 완료(2연속 green). **실 multi-host(비-stub)
-  수동 검증은 미수행**(Follow-Up). 설계:
+  수동 검증 완료 (2026-07-11, PASS)** —
+  [2026-07-11-replication-multihost-verification-run.md](2026-07-11-replication-multihost-verification-run.md)
+  (두 실 daemon 간 자동 복제·down giving-up·복귀 revival·redaction 전부 관측, 신규
+  결함 없음). 설계:
   [`docs/superpowers/specs/2026-07-11-snapshot-replication-automation-design.md`](../superpowers/specs/2026-07-11-snapshot-replication-automation-design.md)
 - 선행: [`docs/operations/2026-06-02-cross-host-snapshot-replication-handoff.md`](2026-06-02-cross-host-snapshot-replication-handoff.md)
   (수동 동기 replication baseline — 이 slice가 "잔여 위험"/"다음 작업"의
@@ -187,11 +190,14 @@ alerting은 zone `project-dashboard`가 scrape/발화한다(YAGNI + thin-adapter
    잡힌다. 재시작으로도 해소되지 않는다(영속 상태 자체의 특성). 상세 +
    운영 대응: `docs/operations/runbook.md`의 "자동 복제 sweep" 절, "queue_depth
    캐비앗" 문단.
-5. **실 multi-host(비-stub) 수동 검증 미수행.** KVM e2e는 단일 물리 호스트 +
-   python stub target(failover/wall e2e와 동일한 bridge-collision 회피
-   구조)으로 sweep 로직·metric·redaction을 검증했지만, 두 개의 실제 daemon
-   사이에서 실제 네트워크 순단·복귀를 관측하는 수동 검증(failover 슬라이스의
-   §6b에 해당하는 절차)은 아직 없다.
+5. ~~**실 multi-host(비-stub) 수동 검증 미수행.**~~ **완료 (2026-07-11, PASS)** —
+   KVM e2e(단일 물리 호스트 + python stub target)를 넘어, 두 개의 실제 anvil-daemon
+   (192.168.1.19/.20) 사이에서 자동 복제·네트워크 순단(dial-cap giving-up, 전송
+   미발화)·복귀(revival reset·자동 수렴)·metric 전이·redaction을 모두 관측했다.
+   host-b가 실 daemon으로서 import bundle을 실제 수신·저장·재서빙(byte-identical)
+   함까지 확증. 실측: 복제 지연 ~120s(full snapshot), giving-up 전이 ~23s(3-pass),
+   복귀 수렴 ~119s. 상세:
+   [2026-07-11-replication-multihost-verification-run.md](2026-07-11-replication-multihost-verification-run.md).
 
 ## Next Action
 
@@ -202,25 +208,23 @@ alerting은 zone `project-dashboard`가 scrape/발화한다(YAGNI + thin-adapter
    secret-scan.
 2. PR 생성(`feature/snapshot-replication-automation` → `main`). **자체 머지
    금지** — 머지는 사용자 승인으로만.
-3. PR 승인·머지 후: 실 multi-host 수동 검증 절차를 별도로 설계해 수행(현재
-   `docs/operations/2026-07-08-cross-host-manual-verification.md`에는
-   snapshot replication 전용 섹션이 없다 — 신설 여부는 별도 결정).
+3. ~~PR 승인·머지 후: 실 multi-host 수동 검증 절차를 별도로 설계해 수행~~ —
+   **완료 (2026-07-11, PASS)**: 절차를 §6b-동형으로 신설·수행
+   ([2026-07-11-replication-multihost-verification-run.md](2026-07-11-replication-multihost-verification-run.md)).
 
 ## Follow-Up Tasks
 
 0. ~~**(최종 whole-branch 리뷰 파생) transfer 실패 분류 정밀화**~~ **완료
-   (branch `fix/replication-failure-classes`, 2026-07-11, 사용자 승인
-   하 착수 — PR 대기 · main 미병합).** export/일시 전송 실패를 재시도
-   가능한 `error`로, 진짜 target 거부(HTTP 4xx)만 terminal로 라우팅:
-   `ReplicateSnapshot`이 typed `FailureStage`/`FailureRejected`를
+   (PR #44 머지, 2026-07-11).** export/일시 전송 실패를 재시도 가능한
+   `error`로, 진짜 target 거부(content-rejection {400,409})만 terminal로
+   라우팅: `ReplicateSnapshot`이 typed `FailureStage`/`FailureRejected`를
    `SnapshotReplicationResponse`에 추가(하위호환)해 분류하고, metric
    reason도 `export_failed`/`import_failed`/`rejected`로 분리. 상세는
-   Known limitations #2(해소로 갱신) 참고. 이 branch 자체는 아직 별도
-   PR·리뷰·머지 전이므로, "최종 검증(전체 슬라이스)" Next Action의
-   범위에는 아직 들어가지 않는다 — 별도 PR로 진행.
-1. **실 multi-host 수동 검증 수행** — KVM e2e(단일 호스트 + stub)가 아닌
-   두 개의 실 daemon 사이에서 스냅샷 down/복귀·`queue_depth`/`giving_up`
-   전이를 관측. 절차 신설 필요(§6b 유사 구조), 별도 승인 후 착수.
+   Known limitations #2(해소로 갱신) 참고.
+1. ~~**실 multi-host 수동 검증 수행**~~ — **완료 (2026-07-11, PASS)**: 두 실
+   daemon(192.168.1.19/.20) 사이 자동 복제·down/복귀·`queue_depth`/`giving_up`
+   전이 전부 관측, 신규 결함 없음. §6b-동형 절차 신설·수행:
+   [2026-07-11-replication-multihost-verification-run.md](2026-07-11-replication-multihost-verification-run.md).
 2. **zone `~/projects/claude-zone/docs/FOLLOWUP.md` P1-09 "C replication
    자동화" 항목 갱신** — zone repo는 이 anvil branch 밖이므로 이 handoff에는
    트리거만 기록한다. 현재 그 항목은 "설계 리뷰 승인 ... 플랜 초안 작성
