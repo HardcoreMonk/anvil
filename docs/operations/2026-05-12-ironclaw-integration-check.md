@@ -317,3 +317,35 @@ anvil surface는 정상 커버된다. IronClaw 내장 tool의 Gemini 스키마 �
    IronClaw agent-driven full lifecycle을 재녹화해 `docs/assets/ironclaw-e2e.gif`를 교체한다.
 2. `TestCurrentAnvilToolInputsAreGeminiCompatible`가 이상화 표현이 아닌 **실제 MCP wire schema**
    (SDK reflection 산출물)를 검증하도록 보강해 이 괴리를 회귀 방지한다.
+
+### D5 fix로 전체 표면 실세션 성공 (2026-07-12)
+
+위 "잔여 후속 (갱신)" 2건을 D5 slice로 처리했다.
+
+- **근본 원인 확정**: jsonschema-go는 nilable Go kind(slice/map/pointer)를 null union으로
+  렌더링한다 — `[]string roles`가 `{"type":["null","array"],"items":{"type":"string"}}`로
+  나온다. Gemini function declaration 검증은 이 union을 `Type.ARRAY`로 매핑하지 못해
+  `properties[roles].items: field predicate failed: $type == Type.ARRAY`로 전체 tool 배열을
+  거부한다(문제는 items type 누락이 아니라 property의 null-union type).
+- **fix**: `NormalizeSchemaForGemini`가 생성 시점에서 `["null", X]`를 단일 type `X`로 축약한다
+  (roles뿐 아니라 모든 `[]T`/nilable 필드 커버). `AddToolGeminiSafe`가 모든 등록 tool의 input
+  schema에 적용한다. 단일-type array + typed items는 표준 JSON Schema라 비-Gemini MCP
+  클라이언트에 additive(하위호환). tool 의미·필드는 불변.
+- **가드**: `TestAnvilToolInputWireSchemasAreGeminiCompatible`가 이상화 표현이 아닌 **실제 SDK
+  wire schema**(19 tool 전체)를 검증한다 — union type이나 items type 누락을 잡는다. fix 전
+  flock 2종에서 RED, fix 후 GREEN. 관측된 Gemini 거부 시그니처를 테스트 주석에 보존.
+- **검증(갱신된 credential로, 값 미기록)**:
+  - `go test -race ./internal/... ./cmd/...`: anvilmcp/cmd 전부 green (무관한 기존
+    flaky `TestDistributedTokens_ConcurrentRefill`은 -count=1 재실행 시 안정 통과).
+  - `scripts/anvil-mcp-e2e.sh semantic` + `flock`: 둘 다 `smoke test passed`.
+  - **결정판**: IronClaw 실세션을 **전체 19-tool 표면**(flock 제외 없이, 완화책+갱신 key)으로
+    구동 → gemini-2.5-flash가 자율로 spawn → run_task(`anvil-smoke-ok`) → create_snapshot →
+    delete(source) → restore → get_vm_health(idle) → delete → delete_snapshot →
+    `LIFECYCLE OK`. **스키마 오류 0**, `INVALID_ARGUMENT`/`function_declarations`/`roles.items`
+    재현 없음.
+  - full KVM gate 1회(adapter 변경 회귀) 실행.
+- **데모 격상**: 위 실세션 로그로 `docs/assets/ironclaw-e2e.gif` 재녹화, README/runtime-usage
+  캡션을 "IronClaw 본체가 anvil MCP tool로 실제 VM lifecycle 구동"으로 단순화.
+- IronClaw 내장 tool inventory 전체는 여전히 Gemini 비호환이므로 anvil 전용 profile(31 built-in
+  `disabled`)은 실세션에 계속 필요하다 — 이는 IronClaw upstream 사안이며 D5 범위 밖. 세션 후
+  tool_permissions는 원복, 갱신 credential은 `~/.ironclaw`에 유지.
