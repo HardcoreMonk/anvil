@@ -1,9 +1,11 @@
 # default COW 전환 burn-in 1차 — 수행 기록 (2026-07-11)
 
-- 상태: **run 1 FAIL → D4 회부 → 1차 fix(fsync) 불충분 → D4 REOPENED (round 2, 미해결).**
-  ⚠️ 아래 "D4 — CLOSED" 서술은 **정정됨**: 1차 fix 직후의 green 은 n=1 우연이었고,
-  default-cow-flip 재검증에서 재발 확인. 결정성/재-RCA/round-2 실험은 아래
-  "D4 — REOPENED (round 2)" 참조. **default COW flip 은 여전히 보류.**
+- 상태: **run 1 FAIL → D4 회부 → 1차 fix(fsync) 불충분 → D4 REOPENED → host-b 재현으로
+  일반 결함 확정 (미해결, runtime 계층).** ⚠️ 아래 "D4 — CLOSED" 서술은 **정정됨**:
+  1차 fix green 은 n=1 우연, default-cow-flip 재검증·host-b 에서 동일 GPF 재발. 재-RCA·
+  host-b 분별·runtime probe(음성)는 아래 "D4 — REOPENED (round 2)" 참조.
+  anvil 저장소·복원-설정 레버로는 미해결 — 원인은 heavy 동시-부하 하 diff-restore resume
+  경합(KVM/Firecracker/host). **default COW flip 은 여전히 보류.**
 - 환경: host-a(192.168.1.19, root-on-ZFS 128K + `rpool/anvil-snapshots` 4K
   dataset → `~/anvil/snapshots`), full KVM gate `e2e_test.sh`, 소스
   `feature/deferred-decisions`(sizing fix 포함, main f43e8e8 + 2 커밋).
@@ -112,21 +114,50 @@ step 31 diff-restore 500 → 동일 `inet_bind2_bucket_find` GPF 재발. 1차 fi
   항상 bhash2 라는 **결정적 위치**성은 순수 랜덤 배드램보다 SW/레이아웃-특이 이슈를 시사.
 - **상태**: **저장소-계층 최소 수정으로는 해결 불가(n≥2 green 달성 실패). 커밋한 코드 fix 없음.**
 
+### host-b 분별 실험 (2026-07-12) — 결론: **일반 결함**(host-a 하드웨어 특이 아님)
+
+목적: host-a(non-ECC) 하드웨어 특이 vs 일반 KVM/Firecracker×부하 결함 분리.
+
+- **배포**: host-b(192.168.1.20, PureCVisor-Prod-2) — host-a 와 **동일 레이아웃**
+  (ZFS rpool 128K + `rpool/anvil-snapshots` 4K, **RAM 도 non-ECC**). flip 소스
+  (5beb744) rsync + **host-a flip 데몬 바이너리(sha256 e340cb5f…) 그대로 복사**(빌드
+  환경 변수 제거). snapshots 4K mount·configs 보존. DEPLOY_RECORD 기록.
+- **재현**: host-b default-cow full gate → **step 31 diff-restore 500 + 동일
+  `inet_bind2_bucket_find` non-canonical GPF ~7s** 재발(gate#1 + 실험 gate 2회 = 3회
+  전부). ⇒ **양 host 동일 코드·동일 GPF 재현 = 일반 결함.** host-a 하드웨어(배드램)
+  단일 원인 배제(양쪽 non-ECC 인데 둘 다 재발은 배드램 우연 일치보다 SW/일반 결함).
+- **runtime probe (i) vsock IP-reconfig 타이밍**: resume 직후 reconfig 를 **4000ms
+  지연**(env `EPHEMERA_D4_RECONFIG_DELAY_MS`) → GPF **그대로**. ⇒ reconfig 타이밍은
+  원인 아님(게스트 agent 가 스스로 :8080 bind → 지연된 reconfig 이전에 bhash2 touch).
+- **runtime probe (ii) restore TrackDirtyPages**: 복원 VM 의 `TrackDirtyPages` 를
+  **끔**(env `EPHEMERA_D4_NO_DIRTY_TRACK`) → GPF **그대로**. ⇒ 복원 dirty-tracking 도
+  원인 아님.
+- **정밀화**: full-snapshot restore 는 통과, **diff-restore 만** 실패. diff 경로는
+  base(1GB) memory copy + overlay 로 **더 느리다** → ZFS 유발 동시-부하 하에서 resume
+  순간의 **경합 창(window)**이 커져 게스트 커널 RAM 이 (로드된 뒤) 오손됨. ext4/full 은
+  빨라 창이 작아 통과. 큰 지연(round-1 ~3–5s)이 마스킹한 것도 동일(부하/창 축소).
+- **결론**: 원인은 **heavy 동시 microVM 부하 하 diff-restore resume 경합** —
+  KVM/Firecracker/host runtime 계층. **anvil 저장소·복원-설정 레버로는 인과 미확정·미해결.**
+  제안한 두 probe 모두 음성. **커밋 fix 없음.**
+
 ## 후속
 
 1. ⚠️ **[정정]** round-1 의 "burn-in 재실행 green → flip 가능" 결론은 **무효**.
    D4 는 미해결이며 **default COW flip 은 계속 보류**. (round-1 green 은 n=1 우연.)
-2. **호스트-특이 vs 일반 분별(권장 최우선)**: 두 번째 ZFS 테스트 서버(192.168.1.20)에서
-   동일 default-cow full gate 실행 → .19 에서만 재발하면 host-a 하드웨어/구성 특이
-   (non-ECC RAM memtest 후보), 양쪽 재발이면 KVM/Firecracker×ZFS-부하 일반 결함.
-3. **runtime 계층 조사**: (a) Firecracker `LoadSnapshot`+`TrackDirtyPages`+tmpfs mmap 이
-   heavy 동시 microVM 하에서 guest RAM 페이지를 잃/오손하는지, (b) restore 후 vsock
-   guest-IP 재구성 타이밍이 guest 네트워크 스택과 경합하는지(bhash2 일관 손상 단서),
-   (c) 완화책으로 restore 동시성 축소/bounded quiescence 지연을 n≥2 로 시험.
-4. host-a `~/anvil` 배포본은 **feat/default-cow-flip 빌드로 원복 완료**. round-2 잔재
-   (테스트 daemon/캡처/loop/dm) 제거. 스케줄러 서비스·snapshots 4K mount 보존됨.
-5. 저장소-계층 최소 수정으로는 해결 불가 확인 — 커밋한 코드 fix **없음**(round-2 브랜치는
-   본 문서 정정만 포함).
+2. ✅ **[완료] 호스트-특이 vs 일반 분별**: host-b(192.168.1.20)에서 동일 flip 바이너리
+   재현 = **일반 결함 확정**(위 "host-b 분별 실험"). host-a 배드램 단일 원인 배제.
+   memtest 류(재부팅 필요)는 여전히 잔여 하드웨어 배제용 사용자 옵션이나 우선순위 하락.
+3. ✅ **[완료·음성] runtime probe (i)(ii)**: vsock reconfig 지연·복원 TrackDirtyPages
+   off 모두 GPF 존속 → 둘 다 원인 아님. **잔여 조사**: (a) Firecracker **diff-snapshot
+   생성**의 dirty-tracking 이 부하 하에서 페이지를 누락해 merged memory 가 stale/inconsistent
+   해지는지(단, ext4 diff 는 통과하므로 순수 생성-결함보다 resume-순간 경합 가능성↑),
+   (b) diff-restore resume 창을 좁히는 완화(1GB memory copy 가속/제거, restore 동시성
+   축소, bounded quiescence)를 **n≥2** 로 시험. 근본 수정은 Firecracker/KVM 계층 후보.
+4. host-a·host-b 배포본 모두 **feat/default-cow-flip 빌드로 원복 완료**(host-b sha256
+   e340cb5f = host-a). round-2 잔재(테스트 daemon/loop/dm/캡처) 제거. 스케줄러·snapshots
+   4K mount 보존.
+5. 저장소-계층·복원-설정 레버로는 인과 미확정·미해결 — 커밋한 코드 fix **없음**(round-2
+   브랜치는 본 문서 정정·확장만 포함).
 
 ## upstream 함의 (기여 후보)
 
