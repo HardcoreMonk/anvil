@@ -112,8 +112,9 @@ func (p *Provisioner) EnsureGoldenImage() error {
 // On error every resource allocated by this call is rolled back, so callers
 // only need to handle the error path themselves.
 //
-// Activated via EPHEMERA_DISK_MODE=cow; the default behavior (full copy) is
-// preserved when the variable is unset to keep a safe rollback path.
+// Used when COW is active: as of the 2026-07-12 default flip an unset
+// EPHEMERA_DISK_MODE (or explicit "cow") enables COW where dm-snapshot is
+// available; EPHEMERA_DISK_MODE=plain/full forces the full copy (rollback path).
 func (p *Provisioner) CloneDiskCOW(vmID string) (string, string, *DMSnapshotInfo, error) {
 	mountTarget := filepath.Join(p.WorkspaceDir, vmID+".ext4")
 	cowStore := filepath.Join(p.WorkspaceDir, vmID+".cow")

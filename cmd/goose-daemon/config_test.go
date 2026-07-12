@@ -365,7 +365,10 @@ func TestEnvBool_Autosnapshot(t *testing.T) {
 	}
 }
 
-func TestResolveDiskModeCOW_AnvilDefaultPlain(t *testing.T) {
+// Default flip (2026-07-12, feat/default-cow-flip): unset EPHEMERA_DISK_MODE now
+// probes dm-snapshot support and enables COW when available, matching upstream
+// ephemera's default. Explicit plain/full remain the rollback path (probe-free).
+func TestResolveDiskModeCOW_DefaultProbesAndEnablesCow(t *testing.T) {
 	clearDaemonConfigEnv(t)
 
 	probes := 0
@@ -373,11 +376,27 @@ func TestResolveDiskModeCOW_AnvilDefaultPlain(t *testing.T) {
 		probes++
 		return nil
 	})
-	if got {
-		t.Fatalf("unset EPHEMERA_DISK_MODE should resolve to plain/full clone")
+	if !got {
+		t.Fatalf("unset EPHEMERA_DISK_MODE with passing probe should default to COW")
 	}
-	if probes != 0 {
-		t.Fatalf("unset EPHEMERA_DISK_MODE probe calls = %d, want 0", probes)
+	if probes != 1 {
+		t.Fatalf("unset EPHEMERA_DISK_MODE probe calls = %d, want 1", probes)
+	}
+}
+
+func TestResolveDiskModeCOW_DefaultFallsBackWhenProbeFails(t *testing.T) {
+	clearDaemonConfigEnv(t)
+
+	probes := 0
+	got := resolveDiskModeCOW(func() error {
+		probes++
+		return errors.New("no dm-snapshot")
+	})
+	if got {
+		t.Fatalf("unset EPHEMERA_DISK_MODE with failing probe should fall back to plain")
+	}
+	if probes != 1 {
+		t.Fatalf("unset EPHEMERA_DISK_MODE probe calls = %d, want 1", probes)
 	}
 }
 

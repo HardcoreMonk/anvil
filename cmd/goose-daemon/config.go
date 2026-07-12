@@ -335,18 +335,27 @@ func envBool(key string, defaultVal bool) bool {
 	return defaultVal
 }
 
-// resolveDiskModeCOW decides the spawn disk strategy once at startup. anvil keeps
-// the plain/full clone default; only EPHEMERA_DISK_MODE=cow opts into COW. When
-// COW is requested but the host lacks dm-snapshot support, it logs a warning and
-// falls back to plain so spawns still succeed. probe is injected so the decision
-// logic is unit-testable without real device-mapper.
+// resolveDiskModeCOW decides the spawn disk strategy once at startup. As of the
+// 2026-07-12 default flip (feat/default-cow-flip) anvil matches upstream ephemera:
+// an unset EPHEMERA_DISK_MODE (and an explicit "cow") probes dm-snapshot support
+// and enables COW when available, falling back to a plain full clone otherwise so
+// spawns still succeed. Explicit "plain"/"full" force the full byte-for-byte clone
+// without probing — this is the documented rollback path. When the default falls
+// back it logs at info level (expected on hosts without dm-snapshot); an explicit
+// "cow" that can't be honored still warns. probe is injected so the decision logic
+// is unit-testable without real device-mapper.
 func resolveDiskModeCOW(probe func() error) bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("EPHEMERA_DISK_MODE"))) {
-	case "", "plain", "full":
+	mode := strings.ToLower(strings.TrimSpace(os.Getenv("EPHEMERA_DISK_MODE")))
+	switch mode {
+	case "plain", "full":
 		return false
-	case "cow":
+	case "", "cow":
 		if err := probe(); err != nil {
-			slog.Warn("COW disk mode unavailable; falling back to plain full-clone", "err", err)
+			if mode == "cow" {
+				slog.Warn("COW disk mode unavailable; falling back to plain full-clone", "err", err)
+			} else {
+				slog.Info("COW disk mode unavailable; falling back to plain full-clone", "err", err)
+			}
 			return false
 		}
 		return true
