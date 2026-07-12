@@ -140,6 +140,35 @@ step 31 diff-restore 500 → 동일 `inet_bind2_bucket_find` GPF 재발. 1차 fi
   KVM/Firecracker/host runtime 계층. **anvil 저장소·복원-설정 레버로는 인과 미확정·미해결.**
   제안한 두 probe 모두 음성. **커밋 fix 없음.**
 
+### memory-immutability 가설 + fc CHANGELOG 대조 (2026-07-12) — 둘 다 음성
+
+fc 문서 계약("snapshot **memory file 은 resume 후에도 page cache 로 guest RAM 을 backing
+하므로 immutable 이어야 한다; 외부 수정 시 guest memory 오손**")에 기반해 두 단서를 검증.
+
+- **단서 1 — 병합 memory 산출물이 live guest 를 backing 하는 동안 후속 writer 가 덮는가**:
+  - **코드 감사**: 병합 memory/rootfs 경로는 `pickMerged*Path(workDir, newVMID)` 로
+    **restore 마다 newVMID(=`vm-<UnixNano>`) 고유**. 유일한 writer 는 load *이전*의
+    merge(`copyFile` O_TRUNC + `overlaySparseDiff` O_WRONLY), 유일한 remover 는 `os.Remove`
+    (unlink=안전). rootfs 산출물은 losetup 직후 즉시 unlink; memory 산출물은 handler
+    return 시 defer-unlink(더 늦으나 여전히 unlink). ⇒ **live 산출물에 쓰는 자연 경로 없음**
+    (경로 고유 + defer-unlink). (recovery 경로는 `vmID` 사용하나 재시작 직후라 live VM 없음.)
+  - **표적 기전 재현**(host-b): 경로를 **고정**(env)하고 defer-unlink 를 **끔**(env) →
+    VM-A 를 fixed 경로 backing 으로 live/health 200 확인 후 그 파일을 **외부에서 200MB
+    덮어씀** → VM-A **health 200 유지·GPF 없음**. (fc 는 MAP_PRIVATE/COW 로 로드해 실행
+    중 guest 가 이미 fault-in/COW 한 페이지는 파일 수정 영향 없음.) ⇒ **기전 미성립**.
+  - 순차 2회 재현도 A 의 defer-unlink 가 B 이전에 경로를 비워 충돌 미발생.
+  ⇒ **단서 1 반증**(자연 충돌 없음 + 외부 write 로 running guest 미오손).
+- **단서 2 — fc "diff snapshot memory corruption(multiple memory slots)" fix**:
+  CHANGELOG **#5705 = v1.15.0**: ">3GiB 또는 memory-hotplug(=multiple memory slots) x86 VM
+  의 **diff snapshot memory 파일 오손**" fix. **우리 fc = v1.15.1**(양 host `--version`
+  확인) → **이미 포함**. 게다가 우리 VM 은 **≤2GiB(default 1024, 캡처 merged=정확히 1GiB)
+  = 단일 memory slot** → 애초에 해당 버그 조건 미충족. 1.16.x 까지 관련 추가 fix 없음.
+  ⇒ **단서 2 반증**(fix 포함 + 조건 미충족).
+- **잔여**: byte-match(캡처 merged == idle re-merge)는 병합 *결정성*만 증명 → diff *생성*
+  자체가 부하 하에서 stale/incomplete 할 가능성(단일-slot fc diff 생성 결함)은 남으나
+  #5705(멀티-slot) 외 알려진 fc 버그·fix 없음, 그리고 diff 는 ext4 에서 통과 → 순수
+  생성-결함보다 resume-순간 runtime 경합 유력. **anvil-측 원인 없음 재확인.**
+
 ## 후속
 
 1. ⚠️ **[정정]** round-1 의 "burn-in 재실행 green → flip 가능" 결론은 **무효**.
@@ -147,16 +176,19 @@ step 31 diff-restore 500 → 동일 `inet_bind2_bucket_find` GPF 재발. 1차 fi
 2. ✅ **[완료] 호스트-특이 vs 일반 분별**: host-b(192.168.1.20)에서 동일 flip 바이너리
    재현 = **일반 결함 확정**(위 "host-b 분별 실험"). host-a 배드램 단일 원인 배제.
    memtest 류(재부팅 필요)는 여전히 잔여 하드웨어 배제용 사용자 옵션이나 우선순위 하락.
-3. ✅ **[완료·음성] runtime probe (i)(ii)**: vsock reconfig 지연·복원 TrackDirtyPages
-   off 모두 GPF 존속 → 둘 다 원인 아님. **잔여 조사**: (a) Firecracker **diff-snapshot
-   생성**의 dirty-tracking 이 부하 하에서 페이지를 누락해 merged memory 가 stale/inconsistent
-   해지는지(단, ext4 diff 는 통과하므로 순수 생성-결함보다 resume-순간 경합 가능성↑),
-   (b) diff-restore resume 창을 좁히는 완화(1GB memory copy 가속/제거, restore 동시성
-   축소, bounded quiescence)를 **n≥2** 로 시험. 근본 수정은 Firecracker/KVM 계층 후보.
-4. host-a·host-b 배포본 모두 **feat/default-cow-flip 빌드로 원복 완료**(host-b sha256
+3. ✅ **[완료·음성] runtime probe (i)(ii) + memory-immutability 단서 1·2**: vsock reconfig
+   지연·복원 TrackDirtyPages off·병합 memory 경로 충돌/외부 write·fc #5705 대조 **전부 음성**
+   (위 참조). anvil-측 원인 없음 재확인.
+4. **잔여 조사(모두 Firecracker/KVM 계층, anvil 밖)**: (a) 단일-slot VM 의 diff-snapshot
+   **생성**이 부하 하에서 stale/incomplete 해지는지(fc 계측 필요; 알려진 fc 버그·fix 없음),
+   (b) resume-순간 동시-부하 KVM 경합. **완화**(anvil-측, 근본 수정 아님): diff-restore
+   resume 창 축소(1GB memory copy 가속/제거, restore 동시성 축소, bounded quiescence)를
+   **host-a·host-b 각 n≥2 + ext4 회귀**로 A/B. **fc 업그레이드(≥1.16.1 또는 최신)는 별도
+   결정** — 단일-slot 관련 fix 는 없으나 상위 버전 소거법으로 값싸게 시험 가치.
+5. host-a·host-b 배포본 모두 **feat/default-cow-flip 빌드로 원복 완료**(host-b sha256
    e340cb5f = host-a). round-2 잔재(테스트 daemon/loop/dm/캡처) 제거. 스케줄러·snapshots
    4K mount 보존.
-5. 저장소-계층·복원-설정 레버로는 인과 미확정·미해결 — 커밋한 코드 fix **없음**(round-2
+6. 저장소-계층·복원-설정 레버로는 인과 미확정·미해결 — 커밋한 코드 fix **없음**(round-2
    브랜치는 본 문서 정정·확장만 포함).
 
 ## upstream 함의 (기여 후보)
