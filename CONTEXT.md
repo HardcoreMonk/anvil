@@ -37,8 +37,9 @@ target은 `2f367dd`(태그 시점 main; parity + release-gate hardening + post-r
 backlog + open-gate 마감; full KVM e2e 343✓, step 59 실 LLM 포함)이며 설치 아티팩트
 (SLIM/FULL tarball + sha256)를 제공한다. 이후 main은 cross-host shared Town
 Wall/gtcall/home 재선출 failover, adapter reconcile loop, bounded relay retry,
-cross-host snapshot replication 자동화에 더해 routed flock 스택 결함 D1~D4 종결,
-web major(vite8/svelte5), scheduler 실배포+installer 검증(PR #19~#47) 등 untagged
+cross-host snapshot replication 자동화에 더해 routed flock 스택 결함 D1~D3 종결
+(D4는 재발로 미해결 — 아래), web major(vite8/svelte5), scheduler 실배포+installer
+검증(PR #19~#47) 등 untagged
 작업을 더 포함한다(요지는 아래 "후속 완료 상태", 상세는 dated handoff).
 
 이전 anvil 통합 번호 계보(`anvil-v0.1.0`→`v0.4.0`)와 upstream 시리즈별 마일스톤은
@@ -388,7 +389,8 @@ daemon으로 보내는 outbound Bearer token이다.
   [`docs/superpowers/specs/2026-07-11-snapshot-replication-automation-design.md`](docs/superpowers/specs/2026-07-11-snapshot-replication-automation-design.md),
   [`docs/operations/2026-07-11-snapshot-replication-automation-handoff.md`](docs/operations/2026-07-11-snapshot-replication-automation-handoff.md),
   [`docs/operations/2026-07-11-replication-multihost-verification-run.md`](docs/operations/2026-07-11-replication-multihost-verification-run.md).
-- routed flock 스택 결함 D1~D4가 전부 종결됐다(2026-07-10~11). D1: daemon 재시작
+- routed flock 스택 결함 D1~D3가 종결됐다(2026-07-10~11); **D4는 재발로 미해결**
+  (아래). D1: daemon 재시작
   시 routed flock 분산 상태 유실 + 재등록 비멱등 `409`(PR #30·#31, hub/relay 토큰
   refill 포함). D2: routed flock delete가 이미 소멸한 VM의 `DELETE` `404`를
   cleanup 실패로 오보고하던 것을 "이미 소멸"로 분류(진짜 실패는 계속
@@ -396,10 +398,12 @@ daemon으로 보내는 outbound Bearer token이다.
   >4K) 파일시스템에서 sparse diff snapshot의 hole이 record 단위로만 보고돼 guest
   메모리를 오염시키던 것을 `ProbeHoleGranularity`(fine=`HoleGranularityFine` 4096B)
   기반 창설측 diff→full 강등 + 판독측 overlay 거부(`refusing overlay ... (see D3)`)
-  로 방어(PR #36). D4: cow-스폰 VM의 diff-restore가 ZFS+전체 게이트 부하에서만
-  guest kernel panic(GPF)하던 fsync 부재 durability race를 `overlaySparseDiff`가
-  loop attach 전 `out.Sync()`로 커밋하도록 수정(PR #46, 재-burn-in host-a full cow
-  gate `334✓/0✗` green). D1~D3 상세:
+  로 방어(PR #36). **D4(미해결)**: cow-스폰 VM의 diff-restore가 ZFS+전체 게이트
+  부하에서만 guest kernel panic(GPF `inet_bind2_bucket_find`). 1차 fix(PR #46:
+  `overlaySparseDiff` loop attach 전 `out.Sync()`)는 필요했으나 불충분 — flip
+  재검증에서 재발(그 green은 n=1 우연), host-b도 byte-identical 데몬으로 재현된
+  일반 결함이며 anvil-측 레버·fc CHANGELOG 전부 음성, 잔여 원인은 fc/KVM 계층의
+  부하-경합(위 완료 목록 아래 "D4 후속"·default COW 항목). D1~D3 상세:
   [`docs/operations/2026-07-10-cross-host-verification-run-handoff.md`](docs/operations/2026-07-10-cross-host-verification-run-handoff.md),
   D4 상세:
   [`docs/operations/2026-07-11-cow-burnin-run.md`](docs/operations/2026-07-11-cow-burnin-run.md).
