@@ -1,9 +1,9 @@
 # default COW 전환 burn-in 1차 — 수행 기록 (2026-07-11)
 
-- 상태: **run 1 FAIL → D4 회부 → D4 CLOSED (`fix/d4-cow-diff-restore`).** 재-burn-in
-  (host-a full cow gate, fix 적용) **334✓/0✗ green** — 아래 "D4 — CLOSED" 참조.
-  2026-07-11 사용자 결정("burn-in 후 전환")의 조건(“D4 해소·재-burn-in 통과”) 충족;
-  flip slice 는 별도 승인 하에 진행 가능.
+- 상태: **run 1 FAIL → D4 회부 → 1차 fix(fsync) 불충분 → D4 REOPENED (round 2, 미해결).**
+  ⚠️ 아래 "D4 — CLOSED" 서술은 **정정됨**: 1차 fix 직후의 green 은 n=1 우연이었고,
+  default-cow-flip 재검증에서 재발 확인. 결정성/재-RCA/round-2 실험은 아래
+  "D4 — REOPENED (round 2)" 참조. **default COW flip 은 여전히 보류.**
 - 환경: host-a(192.168.1.19, root-on-ZFS 128K + `rpool/anvil-snapshots` 4K
   dataset → `~/anvil/snapshots`), full KVM gate `e2e_test.sh`, 소스
   `feature/deferred-decisions`(sizing fix 포함, main f43e8e8 + 2 커밋).
@@ -39,7 +39,11 @@
   반증됐다 — 확정 원인은 fsync 부재 durability race(CLOSED 절).
 - 재현: 위 명령 1회 재실행으로 결정성 확인 필요(현재 n=1).
 
-## D4 — CLOSED (2026-07-11, `fix/d4-cow-diff-restore`)
+## D4 — CLOSED (2026-07-11, `fix/d4-cow-diff-restore`) — ⚠️ SUPERSEDED, 결론 오류
+
+> **정정(2026-07-12)**: 이 절의 "원인 확정 + 최소 수정 완료" 결론은 **틀렸다**.
+> `out.Sync()` fsync 는 불충분했고 (default-cow-flip 재검증에서 동일 GPF 재발), 아래
+> "REOPENED (round 2)" 가 실제 상태다. 이 절은 round-1 조사 기록으로만 보존한다.
 
 원인 확정 + 최소 수정 완료. burn-in 의 D4 가설(merge 산출물 128K 경로/dm 정렬)은
 **부분적으로만 맞았다** — 128K 경로 자체가 아니라 그 산출물의 **내구성(durability)**
@@ -76,15 +80,53 @@
   **334✓/0✗**(재현 해소), `go test ./internal/storage` green, `go vet` clean.
   기존 유닛 `TestWriteRootfsDiffIdentical`(changed_bytes=0 = D4 시나리오) 통과.
 
+## D4 — REOPENED (round 2, 2026-07-12, `fix/d4-round2-cow-loop-coherence`) — 미해결/BLOCKED
+
+`feat/default-cow-flip`(로컬 ext4 게이트 통과)의 host-a **default-cow full gate** 에서
+step 31 diff-restore 500 → 동일 `inet_bind2_bucket_find` GPF 재발. 1차 fix(`out.Sync()`)는
+**존재**했다 → fsync 는 충분하지 않았다. 이번엔 충분성 기준을 **n≥2 연속 green** 으로 잡고
+재-RCA 수행. **결론: 저장소-계층 결함이 아니다. runtime/host 수준의 간헐적 손상.**
+
+- **재현 결정성**: host-a full cow gate 3회 fail(repro #1 329✓/5✗, sync-fix gate, fix2 gate#2),
+  전부 step 31 restore 500 + `inet_bind2_bucket_find` non-canonical GPF ~6s. 확정적 재현.
+- **결정적 해부(round-2 핵심)**: 실패 restore 의 merged memory 를 캡처(D4-CAP: skip-delete +
+  hardlink, hot-path 지연 0) → `MergeMemoryDiff` idle 재계산과 **byte-identical**(sha 일치).
+  ⇒ **Firecracker 가 로드하는 메모리는 정확하다.** 손상은 **load 이후** guest 커널 RAM 에서 발생.
+  guest 콘솔에 EXT4/블록 I/O 에러 전무 → rootfs 내용도 정상.
+- **가설별 실험(전부 n=2 미달/무효)**:
+  - **fsync** (`overlaySparseDiff out.Sync`, main 반영): FAIL(재발).
+  - **guest resume 직전 global `sync()`**: FAIL. (round-1 의 green 은 sync 가 아니라 그
+    진단이 동반한 ~3–5s 대량 I/O **지연** 때문이었음 — 빠른 sync 는 무효.)
+  - **`losetup --direct-io=on`**(origin+cow loop): FAIL. ZFS 2.2.2 는 O_DIRECT 미완성
+    (제대로 된 direct I/O 는 ZFS 2.3+) → loop 는 버퍼드 유지, 무효.
+  - **merged rootfs → tmpfs**(`/dev/shm`): gate#1 334✓/0✗ **green**, gate#2 329✓/5✗ **FAIL**.
+    즉 origin+memory 를 **둘 다 ZFS 밖(tmpfs)** 에 둬도 재발 → ZFS 데이터-경로가 원인이 아님.
+    (2/3 통과로 rate 를 낮출 여지는 있으나 n=2 기준 불충족.)
+  - **loop coherence / loop-number-reuse-stale-cache 합성 실험**(부하 하): 0 divergence.
+    **swap**: 비-ZFS raw 파티션·미사용. **KSM**: run=1 이나 pages_shared=0(무활동). 전부 무관.
+- **패턴**: 손상이 **항상 bhash2(inet_bind2_bucket)** — restore 직후 daemon 이 vsock 로
+  guest IP 재구성할 때 커널 네트워크 스택이 touch 하는 구조. 간헐적, **부하 상관**(ZFS 게이트가
+  느려 동시 microVM 수↑ → 실패율↑; ext4 게이트는 빨라 통과), **큰 지연이 마스킹**.
+- **함의**: 원인은 **heavy 동시 microVM churn 하의 runtime**(KVM/Firecracker restore, 또는
+  host). host-a RAM 은 **non-ECC**(silent bit-flip 미검출) — hardware 배제 불가하나, 손상이
+  항상 bhash2 라는 **결정적 위치**성은 순수 랜덤 배드램보다 SW/레이아웃-특이 이슈를 시사.
+- **상태**: **저장소-계층 최소 수정으로는 해결 불가(n≥2 green 달성 실패). 커밋한 코드 fix 없음.**
+
 ## 후속
 
-1. **cow burn-in 재실행 1차 = 위 host-a full cow gate 334✓/0✗ green** (fix 반영
-   단일 실행 — 반복 soak가 필요하면 flip slice에서 추가 판단). default COW
-   flip slice 진행 가능(2026-07-11 결정의 조건부 이행) — 별도 승인 하에.
-2. host-a `~/anvil` 배포본은 **aa2b0b0(main) 로 원복 완료**(fix 는 아직 branch —
-   merge+release 시 재배포로 반영). 스케줄러 서비스·snapshots mount 보존됨.
-3. 내구성 결함은 ZFS+부하 종속이라 고전적 실패-우선 유닛테스트가 불가 — 검증은
-   재현 게이트로 수행. 병합 *정확성* 회귀는 기존 유닛으로 커버.
+1. ⚠️ **[정정]** round-1 의 "burn-in 재실행 green → flip 가능" 결론은 **무효**.
+   D4 는 미해결이며 **default COW flip 은 계속 보류**. (round-1 green 은 n=1 우연.)
+2. **호스트-특이 vs 일반 분별(권장 최우선)**: 두 번째 ZFS 테스트 서버(192.168.1.20)에서
+   동일 default-cow full gate 실행 → .19 에서만 재발하면 host-a 하드웨어/구성 특이
+   (non-ECC RAM memtest 후보), 양쪽 재발이면 KVM/Firecracker×ZFS-부하 일반 결함.
+3. **runtime 계층 조사**: (a) Firecracker `LoadSnapshot`+`TrackDirtyPages`+tmpfs mmap 이
+   heavy 동시 microVM 하에서 guest RAM 페이지를 잃/오손하는지, (b) restore 후 vsock
+   guest-IP 재구성 타이밍이 guest 네트워크 스택과 경합하는지(bhash2 일관 손상 단서),
+   (c) 완화책으로 restore 동시성 축소/bounded quiescence 지연을 n≥2 로 시험.
+4. host-a `~/anvil` 배포본은 **feat/default-cow-flip 빌드로 원복 완료**. round-2 잔재
+   (테스트 daemon/캡처/loop/dm) 제거. 스케줄러 서비스·snapshots 4K mount 보존됨.
+5. 저장소-계층 최소 수정으로는 해결 불가 확인 — 커밋한 코드 fix **없음**(round-2 브랜치는
+   본 문서 정정만 포함).
 
 ## upstream 함의 (기여 후보)
 
