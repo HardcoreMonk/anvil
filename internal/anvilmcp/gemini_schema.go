@@ -11,8 +11,9 @@ import (
 // Gemini function-declaration subset, which requires every schema node to carry a
 // single `type` value.
 //
-// jsonschema-go marks nilable Go kinds (slices, maps, pointers) as a null union —
-// e.g. a `[]string` field becomes {"type":["null","array"],"items":{"type":"string"}}.
+// jsonschema-go marks nilable Go slices and pointers as a null union — e.g. a
+// `[]string` field becomes {"type":["null","array"],"items":{"type":"string"}}.
+// (Maps render as a single "object" type in v0.4.3, so they are not affected.)
 // Gemini rejects that union: it cannot map ["null","array"] to Type.ARRAY, so the
 // request fails with
 //
