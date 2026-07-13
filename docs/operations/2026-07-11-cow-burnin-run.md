@@ -5,7 +5,10 @@
   "D4 — CLOSED" 서술은 **정정됨**(round-2/3 참조). round-3(아래 "fc 업그레이드 소거법"):
   fc v1.16.1 이 실패율을 100%→~25% 로 **대폭 낮추나**(v1.16.0 vsock RX race fix 주효)
   **완전 소거 실패**(host-b gate#2 동일 GPF). fc 업그레이드는 순 개선으로 **유지**하되
-  **D4 fix 아님**, flip 은 되돌림. **default COW flip 은 여전히 보류.**
+  **D4 fix 아님**, flip 은 되돌림. round-4(아래 "anvil 완화 A/B"): **pre-resume 지연**은
+  v1.15.1(100%) 을 green 으로 만드는 인과 효과가 있으나 고정값(3000·5000ms) 어느 것도
+  **양 host n≥2 미달**(위상-이동일 뿐 제거 못함) → **완화 미달, flip·완화 되돌림.**
+  근본 원인 = KVM/Firecracker resume-race(anvil 밖). **default COW flip 은 여전히 보류.**
 - 환경: host-a(192.168.1.19, root-on-ZFS 128K + `rpool/anvil-snapshots` 4K
   dataset → `~/anvil/snapshots`), full KVM gate `e2e_test.sh`, 소스
   `feature/deferred-decisions`(sizing fix 포함, main f43e8e8 + 2 커밋).
@@ -194,6 +197,34 @@ cherry-pick 해 default=cow 로 만든 뒤 host-a·host-b **default-cow full gat
   host-a n=2 green) — **단 D4 fix 아님**. **flip 완료 문서 미작성. D4 open.**
 - **다음 후보**: anvil-측 **완화 A/B**(diff-restore resume 창 축소: 1GB memory copy
   가속/제거, restore 동시성 축소, bounded quiescence)를 host-a·host-b 각 n≥2 로.
+
+## D4 — anvil 완화 A/B (round 4, 2026-07-13, `fix/d4-mitigation`) — **완화 미달, D4 open 유지**
+
+가설(candidate A): resume 직후 오손이 부하-상관이고 round-1 에서 "큰 지연이 마스킹"을
+관측 → **LoadSnapshot(guest paused) 와 ResumeVM 사이에 bounded quiescence** 를 넣어 잔여
+경합을 없앤다. (`RestoreMachine` 은 `m.Start`=로드[paused] → `m.ResumeVM`=재개 2단계.)
+
+- **위치 확정**: round-2 exp(i) 는 reconfig **후**(resume 후) 지연 → GPF 존속(게스트가
+  스스로 bhash2 touch, 지연된 reconfig 이전에 GPF). 따라서 배리어는 **resume 전**이어야 함.
+- **인과 확인(v1.15.1 = 100% 실패 baseline 에서)**: pre-resume 지연 **3000ms** →
+  host-b default-cow full gate **334✓/0✗ green** (0ms=100% 실패, 1000ms=여전히 실패).
+  ⇒ **pre-resume 지연은 실패율을 낮추는 인과 효과가 있다.** (지연 적용은 daemon 로그
+  "starting vm→reconfig" 사이 3s gap 으로 확인.)
+- **결정판(fc v1.16.1 + 지연 + flip, default-cow full gate)**:
+  - 3000ms: **host-a 334✓/0✗ green, host-b 329✓/5✗ FAIL**(동일 GPF).
+  - 5000ms: **host-b 334✓/0✗ ×2 green, host-a 92✓/4✗ FAIL**(동일 GPF, guest 9.5s).
+  - ⇒ **어떤 고정 지연값도 양 host n≥2 미달** — 3000ms 는 host-b, 5000ms 는 host-a 에서
+    실패. 지연은 경합을 **위상-이동(phase-shift)**해 확률만 낮출 뿐 **제거하지 못한다**
+    (연속-부하 경합의 특성). ~15–25% 간헐성에서 n=2 green 은 우연(0.75²≈56%)일 수 있어
+    통계적 신뢰도도 부족.
+- **로컬 ext4 cow gate 회귀**: mitig+flip+fc1.16.1 **334✓/0✗**(무회귀), `go test -race` green.
+- **판정: 완화 미달(D4 미해소).** coordinator 규칙 "미달": **정직하게 D4 open 유지**,
+  flip·완화 **되돌림**(branch = main 로 reset), **flip 완료 문서 미작성**.
+- **다음 후보(coordinator 판단)**: (a) **retry-on-failure** — diff-restore 후 agent 미기동
+  이면 teardown 후 재시도(간헐 ~20% → 재시도로 신뢰성 확보; 근본 제거 아닌 **마스킹**,
+  실패 시 latency↑). (b) **fc 상류 제보** — v1.16.0 vsock RX race fix 이후 잔여 bhash2
+  resume-race 를 Firecracker 에 리포트. (c) 지연값 **soak**(10+ run) 로 통계적 재평가.
+  근본 원인은 여전히 KVM/Firecracker resume-race (anvil 밖).
 
 ## 후속
 
