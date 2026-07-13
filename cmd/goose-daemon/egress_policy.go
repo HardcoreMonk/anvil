@@ -104,14 +104,23 @@ func validateEgressHost(host string) error {
 	if host == "" {
 		return fmt.Errorf("allow_hosts entries must be non-empty")
 	}
+	return validateDomainCharset("allow_hosts", host)
+}
+
+// validateDomainCharset enforces the shared ASCII domain charset (letters,
+// digits, '.', '-') on an already-trimmed, non-empty host. field names the JSON
+// key the host came from ("allow_hosts" or "allow_sni") so the error points at
+// the entry the operator actually wrote — validateEgressHost and
+// validateEgressSNI both reuse this so the rule lives in one place.
+func validateDomainCharset(field, host string) error {
 	for _, r := range host {
 		if r > 127 {
-			return fmt.Errorf("allow_hosts entry %q must be ASCII", host)
+			return fmt.Errorf("%s entry %q must be ASCII", field, host)
 		}
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '-' {
 			continue
 		}
-		return fmt.Errorf("allow_hosts entry %q contains unsupported character %q", host, r)
+		return fmt.Errorf("%s entry %q contains unsupported character %q", field, host, r)
 	}
 	return nil
 }
@@ -128,8 +137,15 @@ func validateEgressSNI(entry string) error {
 	if strings.ContainsRune(host, '*') {
 		return fmt.Errorf("allow_sni entry %q: '*' only allowed as a leading %q label", entry, "*.")
 	}
-	// host now has no '*'; reuse the ASCII domain-charset validator.
-	return validateEgressHost(host)
+	if host == "" {
+		// A bare "*." carries no domain label to validate; reject it as empty
+		// (preserves the pre-refactor behavior when this fell through to
+		// validateEgressHost's non-empty guard).
+		return fmt.Errorf("allow_sni entries must be non-empty")
+	}
+	// host now has no '*'; reuse the ASCII domain-charset validator with the
+	// allow_sni field so the message names the right JSON key.
+	return validateDomainCharset("allow_sni", host)
 }
 
 func planProfileEgressCommands(vmID, guestIP string, profile egressProfile) ([]egressCommand, error) {
