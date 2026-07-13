@@ -19,6 +19,14 @@ func TestDistributedTokens_ConcurrentRefill(t *testing.T) {
 	wg.Add(3)
 	go func() {
 		defer wg.Done()
+		// Land one refill unconditionally before entering the stop-checked loop.
+		// wg.Wait() blocks on this Done, so this write happens-before the
+		// post-condition assertion regardless of scheduling. Without it, a fast
+		// main loop can close(stop) before this goroutine is ever scheduled; the
+		// loop below would then return via <-stop having written nothing, leaving
+		// the tokens at their rt-0/ct-0 seed and flaking the final assertion.
+		fm.UpdateHubTokens("hub-1", "rt-1", "ct-1")
+		fm.UpdateHubRoster("hub-1", []RosterMember{{AgentID: "a-1", Host: "h", VMID: "vm-1", Addr: "http://x"}})
 		for i := 0; ; i++ {
 			select {
 			case <-stop:
