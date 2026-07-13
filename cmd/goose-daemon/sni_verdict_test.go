@@ -3,8 +3,15 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
+	"ephemera/internal/anvilmcp"
 	"ephemera/internal/network/sni"
 )
 
@@ -105,5 +112,107 @@ func TestSNIDeregisterFailsClosed(t *testing.T) {
 	l.Deregister("10.0.1.10")
 	if d := l.decide("10.0.1.10", mustHello(t, "api.anthropic.com")); d.Action != sniDrop {
 		t.Fatal("deregistered source must fail closed")
+	}
+}
+
+// --- Task 6: recordVerdict / auditDeny (audit + metric emit) ---
+//
+// applyVerdict itself needs a live *nfqueue.Nfqueue (root + netfilter, see
+// Start's doc comment) so it is exercised only by the Task 7 KVM e2e.
+// recordVerdict/auditDeny factor the Task 6 audit/metric side effects out of
+// that nf-dependent path, so they are unit-testable here in isolation.
+
+func TestSNIRecordVerdictAuditsDenyWithTenant(t *testing.T) {
+	dir := t.TempDir()
+	auditPath := filepath.Join(dir, "audit.jsonl")
+	l := newSNIVerdictLoop(88, auditPath, nil)
+	entry := sniRegistryEntry{VMID: "vm-1", TenantID: "t1", Profile: "p"}
+
+	l.recordVerdict(entry, sniDecision{Action: sniDrop, Reason: "egress_sni_denied", SNI: "evil.test"})
+
+	recs, err := anvilmcp.ReadRuntimeAudit(auditPath)
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("read err=%v n=%d", err, len(recs))
+	}
+	rec := recs[0]
+	if rec.SNI != "evil.test" || rec.TenantID != "t1" || rec.VMID != "vm-1" ||
+		rec.DaemonOperation != "egress_sni_denied" || rec.ResultCode != "denied" ||
+		rec.ToolName != "egress_sni_filter" {
+		t.Fatalf("unexpected record: %+v", rec)
+	}
+	// redaction: no field beyond {timestamp, tenant, vmid, tool, op, result,
+	// sni} should ever be populated — no tokens/authorization/args/profile.
+	if rec.SessionAlias != "" || rec.Error != "" {
+		t.Fatalf("unexpected extra fields leaked into audit record: %+v", rec)
+	}
+}
+
+func TestSNIRecordVerdictNoAuditWithoutTenant(t *testing.T) {
+	dir := t.TempDir()
+	auditPath := filepath.Join(dir, "audit.jsonl")
+	l := newSNIVerdictLoop(88, auditPath, nil)
+	entry := sniRegistryEntry{VMID: "vm-2", Profile: "p"} // no TenantID
+
+	l.recordVerdict(entry, sniDecision{Action: sniDrop, Reason: "egress_sni_denied", SNI: "evil.test"})
+
+	if _, err := os.Stat(auditPath); !os.IsNotExist(err) {
+		t.Fatalf("expected no audit file written without tenant (must degrade to slog), stat err=%v", err)
+	}
+}
+
+func TestSNIRecordVerdictDegradesOnEmptyAuditPath(t *testing.T) {
+	l := newSNIVerdictLoop(88, "", nil) // auditPath intentionally empty (pre-Task-6 daemon wiring)
+	entry := sniRegistryEntry{VMID: "vm-3", TenantID: "t3"}
+
+	// AppendRuntimeAudit rejects an empty path; must degrade to slog, not panic.
+	l.recordVerdict(entry, sniDecision{Action: sniDrop, Reason: "egress_sni_denied", SNI: "evil.test"})
+}
+
+func TestSNIRecordVerdictUnparsedNoAudit(t *testing.T) {
+	dir := t.TempDir()
+	auditPath := filepath.Join(dir, "audit.jsonl")
+	l := newSNIVerdictLoop(88, auditPath, nil)
+	entry := sniRegistryEntry{VMID: "vm-5", TenantID: "t5"}
+
+	// No SNI was parsed, so there is nothing worth auditing — only the metric fires.
+	l.recordVerdict(entry, sniDecision{Action: sniDrop, Reason: "egress_sni_unparsed"})
+
+	if _, err := os.Stat(auditPath); !os.IsNotExist(err) {
+		t.Fatalf("expected no audit record for unparsed (no SNI) deny, stat err=%v", err)
+	}
+}
+
+func TestSNIRecordVerdictNilMetricsSafe(t *testing.T) {
+	l := newSNIVerdictLoop(88, "", nil) // metrics intentionally nil
+	entry := sniRegistryEntry{VMID: "vm-4", TenantID: "t4"}
+
+	// Must not panic on a nil *daemonMetrics receiver.
+	l.recordVerdict(entry, sniDecision{Action: sniAcceptMark, SNI: "ok.test"})
+	l.recordVerdict(entry, sniDecision{Action: sniDrop, Reason: "egress_sni_unparsed"})
+}
+
+func TestSNIRecordVerdictMetricAlwaysIncrements(t *testing.T) {
+	cp := newMetricsTestCP(t)
+	dir := t.TempDir()
+	auditPath := filepath.Join(dir, "audit.jsonl")
+	l := newSNIVerdictLoop(88, auditPath, cp.metrics)
+
+	// One deny with a tenant (audit succeeds) and one without (degrades to
+	// slog) — the metric must increment identically in both cases.
+	l.recordVerdict(sniRegistryEntry{VMID: "vm-a", TenantID: "ta"}, sniDecision{Action: sniDrop, Reason: "egress_sni_denied", SNI: "evil.test"})
+	l.recordVerdict(sniRegistryEntry{VMID: "vm-b"}, sniDecision{Action: sniDrop, Reason: "egress_sni_denied", SNI: "evil2.test"})
+	l.recordVerdict(sniRegistryEntry{VMID: "vm-c", TenantID: "tc"}, sniDecision{Action: sniAcceptMark, SNI: "ok.test"})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	cp.handleMetrics(rec, req)
+	body, _ := io.ReadAll(rec.Body)
+	out := string(body)
+
+	if !strings.Contains(out, `ephemera_egress_sni_verdict_total{outcome="denied"} 2`) {
+		t.Fatalf("expected denied=2 regardless of tenant/audit outcome, got:\n%s", out)
+	}
+	if !strings.Contains(out, `ephemera_egress_sni_verdict_total{outcome="allowed"} 1`) {
+		t.Fatalf("expected allowed=1, got:\n%s", out)
 	}
 }

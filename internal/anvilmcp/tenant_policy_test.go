@@ -287,3 +287,22 @@ func TestReadAndPruneRuntimeAudit(t *testing.T) {
 		t.Fatalf("records after prune = %+v, want last two records", records)
 	}
 }
+
+func TestRuntimeAuditRecordSNIRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "audit.jsonl")
+	if err := AppendRuntimeAudit(p, RuntimeAuditRecord{
+		TenantID: "t1", ToolName: "egress_sni_filter",
+		DaemonOperation: "egress_sni_denied", ResultCode: "denied",
+		VMID: "vm-1", SNI: "evil.test",
+	}); err != nil {
+		t.Fatalf("append err = %v", err)
+	}
+	recs, err := ReadRuntimeAudit(p)
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("read err=%v n=%d", err, len(recs))
+	}
+	if recs[0].SNI != "evil.test" || recs[0].DaemonOperation != "egress_sni_denied" {
+		t.Fatalf("record = %+v", recs[0])
+	}
+}

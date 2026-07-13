@@ -37,6 +37,7 @@ type daemonMetrics struct {
 	cpTokenPropagated *metrics.CounterVec // outcome=ok|fail
 	authTotal         *metrics.CounterVec // outcome=ok|denied|expired (v0.4.1)
 	mcpToolCalls      *metrics.CounterVec // server, outcome=ok|fail|forbidden|rate_limited (v0.6.0)
+	sniVerdictTotal   *metrics.CounterVec // outcome=allowed|denied (egress SNI filter, Task 6)
 
 	// Histograms (seconds).
 	vmSpawnDuration         *metrics.Histogram
@@ -112,6 +113,11 @@ func newDaemonMetrics(cp *ControlPlane) *daemonMetrics {
 			"ephemera_mcp_tool_calls_total",
 			"Total MCP gateway tool calls by backend server and outcome.",
 			"server", "outcome",
+		),
+		sniVerdictTotal: r.NewCounterVec(
+			"ephemera_egress_sni_verdict_total",
+			"Total :443 SNI verdicts by outcome.",
+			"outcome",
 		),
 
 		vmSpawnDuration: r.NewHistogram(
@@ -217,6 +223,20 @@ func (m *daemonMetrics) IncAuthFailure() {
 	m.legacy.IncAuthFailure()
 	if m.authFailure != nil {
 		m.authFailure.Inc()
+	}
+}
+
+// IncSNIVerdict records one :443 SNI verdict by outcome ("allowed" or
+// "denied"). Called from the sniVerdictLoop hook path regardless of tenant
+// availability or audit-append success/failure — the counter is a
+// content-free signal (outcome only, never SNI/VMID/tenant) so it carries no
+// redaction risk and must never be gated on the audit write.
+func (m *daemonMetrics) IncSNIVerdict(outcome string) {
+	if m == nil {
+		return
+	}
+	if m.sniVerdictTotal != nil {
+		m.sniVerdictTotal.WithLabelValues(outcome).Inc()
 	}
 }
 

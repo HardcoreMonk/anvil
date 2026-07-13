@@ -607,17 +607,19 @@ func NewControlPlane(
 	// registering here is safe. Do not move this back below RecoverVMs.
 	cp.metrics = newDaemonMetrics(cp)
 
-	// In-process NFQUEUE SNI verdict loop (Task 4/5): enforces allow_sni egress
-	// profiles. Bound to a daemon-lifetime context cancelled in Shutdown. audit
-	// path is "" for now (Task 6 wires the runtime audit trail); Start's
-	// netlink bind needs root + NFQUEUE support, so it runs in a goroutine and
-	// its failure is logged, never fatal — commandEgressEnforcer.ApplyWithProfile
-	// preflight-refuses allow_sni profiles while Ready()==false, so an
-	// unbindable host fails closed (spawn error) rather than silently
-	// forwarding unfiltered TLS traffic.
+	// In-process NFQUEUE SNI verdict loop (Task 4/5/6): enforces allow_sni
+	// egress profiles. Bound to a daemon-lifetime context cancelled in
+	// Shutdown. audit path reuses cp.runtimeAuditPath (the same tenant-scoped
+	// RuntimeAuditRecord stream tools.go's auditSuccess/auditFailure append
+	// to) so deny records land in one unified audit trail rather than a
+	// second file. Start's netlink bind needs root + NFQUEUE support, so it
+	// runs in a goroutine and its failure is logged, never fatal —
+	// commandEgressEnforcer.ApplyWithProfile preflight-refuses allow_sni
+	// profiles while Ready()==false, so an unbindable host fails closed
+	// (spawn error) rather than silently forwarding unfiltered TLS traffic.
 	sniCtx, sniCancel := context.WithCancel(context.Background())
 	cp.sniCancel = sniCancel
-	sniLoop := newSNIVerdictLoop(sniQueueNum(), "", cp.metrics)
+	sniLoop := newSNIVerdictLoop(sniQueueNum(), cp.runtimeAuditPath, cp.metrics)
 	go func() {
 		if err := sniLoop.Start(sniCtx); err != nil {
 			slog.Warn("sni verdict loop failed to start; allow_sni egress profiles will be refused (fail-closed)", "err", err)

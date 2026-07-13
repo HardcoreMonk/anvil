@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"ephemera/internal/anvilmcp"
 	"ephemera/internal/network/sni"
 
 	nfqueue "github.com/florianl/go-nfqueue/v2"
@@ -73,8 +74,8 @@ type sniFlowEntry struct {
 
 type sniVerdictLoop struct {
 	queueNum  int
-	auditPath string         // Task 6 consumes this for deny/allow audit trail.
-	metrics   *daemonMetrics // Task 6 adds allowed/denied SNI counters here.
+	auditPath string         // tenant-scoped runtime audit trail; deny records land here via recordVerdict/auditDeny.
+	metrics   *daemonMetrics // allowed/denied SNI verdict counters; nil-safe (see daemonMetrics.IncSNIVerdict).
 	connMark  int            // approved conntrack mark applied on sniAcceptMark.
 
 	mu       sync.RWMutex
@@ -315,7 +316,7 @@ func (l *sniVerdictLoop) Start(ctx context.Context) error {
 		case ferr != nil:
 			// Terminal parse error (malformed / no-SNI / oversized) -> fail closed.
 			l.evictFlow(flowKey)
-			l.applyVerdict(nf, id, sniDecision{Action: sniDrop, Reason: "egress_sni_unparsed"}, t)
+			l.applyVerdict(nf, id, sniDecision{Action: sniDrop, Reason: "egress_sni_unparsed"}, t, entry)
 		case !done:
 			// Incomplete ClientHello: forward this segment unmarked so the next
 			// segment re-queues here. Bounded by the reassembler's 16 KiB buffer
@@ -323,7 +324,7 @@ func (l *sniVerdictLoop) Start(ctx context.Context) error {
 			l.setAccept(nf, id)
 		default:
 			l.evictFlow(flowKey)
-			l.applyVerdict(nf, id, l.classifyParsedSNI(entry, name), t)
+			l.applyVerdict(nf, id, l.classifyParsedSNI(entry, name), t, entry)
 		}
 		return 0
 	}
@@ -358,19 +359,73 @@ func (l *sniVerdictLoop) Start(ctx context.Context) error {
 
 // applyVerdict turns a decision into a kernel verdict. sniAcceptMark is the only
 // path that sets the approved connmark; every drop path is best-effort RST +
-// unconditional DROP.
-func (l *sniVerdictLoop) applyVerdict(nf *nfqueue.Nfqueue, id uint32, d sniDecision, t ipv4TCP) {
+// unconditional DROP. The kernel verdict is issued first and unconditionally;
+// recordVerdict's metric/audit side effects run after and can never delay or
+// change it (entry is the registry snapshot already resolved by the caller,
+// carried through only for the deny audit's VMID/TenantID).
+func (l *sniVerdictLoop) applyVerdict(nf *nfqueue.Nfqueue, id uint32, d sniDecision, t ipv4TCP, entry sniRegistryEntry) {
 	switch d.Action {
 	case sniAcceptMark:
 		if err := nf.SetVerdictWithConnMark(id, nfqueue.NfAccept, l.connMark); err != nil {
 			slog.Error("sni verdict: set accept+connmark failed", "err", err, "sni", d.SNI)
 		}
-		// Task 6: metrics allowed++, audit allow(d.SNI).
 	case sniPassthrough:
 		l.setAccept(nf, id)
 	case sniDrop:
 		l.setDrop(nf, id, t)
-		// Task 6: metrics denied++, audit deny(d.Reason, d.SNI).
+	}
+	l.recordVerdict(entry, d)
+}
+
+// recordVerdict emits the audit/metric side effects for a completed SNI
+// verdict. It never touches the kernel verdict itself (already issued by
+// applyVerdict's caller), so it is pure enough to unit test without root or a
+// live nfqueue socket.
+//
+// Metric: outcome-only counter, incremented unconditionally for both
+// accept and drop verdicts, independent of tenant availability or the audit
+// write's success/failure — a content-free signal never gated on redaction
+// concerns.
+//
+// Audit: only the sniDrop / "egress_sni_denied" case carries a domain worth
+// recording (unregistered_source and egress_sni_unparsed drops have no SNI to
+// audit). See auditDeny for the tenant seam.
+func (l *sniVerdictLoop) recordVerdict(entry sniRegistryEntry, d sniDecision) {
+	switch d.Action {
+	case sniAcceptMark:
+		l.metrics.IncSNIVerdict("allowed")
+	case sniDrop:
+		l.metrics.IncSNIVerdict("denied")
+		if d.Reason == "egress_sni_denied" {
+			l.auditDeny(entry, d)
+		}
+	}
+}
+
+// auditDeny records a fail-closed SNI drop into the tenant-scoped runtime
+// audit trail (the same RuntimeAuditRecord stream/redaction contract used by
+// anvilmcp's tool-call audit, tenant_policy.go:222). AppendRuntimeAudit
+// rejects records with an empty tenant, so a VM whose registry entry carries
+// no TenantID degrades to a redaction-safe slog line instead of silently
+// losing the signal. Only the SNI domain and VM/tenant identifiers are
+// logged — never tokens, authorization, or call args. A write failure
+// (including an unset l.auditPath) also degrades to slog rather than
+// panicking; the kernel verdict has already been applied by the time this
+// runs, so an audit failure can never flip allow/deny.
+func (l *sniVerdictLoop) auditDeny(entry sniRegistryEntry, d sniDecision) {
+	if entry.TenantID == "" {
+		slog.Warn("egress sni denied", "vm_id", entry.VMID, "sni", d.SNI)
+		return
+	}
+	if err := anvilmcp.AppendRuntimeAudit(l.auditPath, anvilmcp.RuntimeAuditRecord{
+		TenantID:        entry.TenantID,
+		VMID:            entry.VMID,
+		ToolName:        "egress_sni_filter",
+		DaemonOperation: "egress_sni_denied",
+		ResultCode:      "denied",
+		SNI:             d.SNI,
+	}); err != nil {
+		slog.Warn("egress sni deny audit append failed", "vm_id", entry.VMID, "err", err)
 	}
 }
 
