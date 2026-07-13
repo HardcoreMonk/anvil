@@ -70,7 +70,7 @@ func TestValidateEgressSNIAcceptsWildcardAndExact(t *testing.T) {
 			t.Fatalf("validateEgressSNI(%q) = %v, want nil", ok, err)
 		}
 	}
-	for _, bad := range []string{"", "*", "a.*.com", "under_score.com", "space host.com", "*.*.com"} {
+	for _, bad := range []string{"", "*", "*.", "a.*.com", "under_score.com", "space host.com", "*.*.com"} {
 		if err := validateEgressSNI(bad); err == nil {
 			t.Fatalf("validateEgressSNI(%q) = nil, want error", bad)
 		}
