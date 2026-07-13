@@ -70,10 +70,26 @@ func TestValidateEgressSNIAcceptsWildcardAndExact(t *testing.T) {
 			t.Fatalf("validateEgressSNI(%q) = %v, want nil", ok, err)
 		}
 	}
-	for _, bad := range []string{"", "*", "a.*.com", "under_score.com", "space host.com", "*.*.com"} {
+	for _, bad := range []string{"", "*", "*.", "a.*.com", "under_score.com", "space host.com", "*.*.com"} {
 		if err := validateEgressSNI(bad); err == nil {
 			t.Fatalf("validateEgressSNI(%q) = nil, want error", bad)
 		}
+	}
+}
+
+func TestValidateEgressSNIErrorNamesAllowSNIField(t *testing.T) {
+	// validateEgressSNI reuses the shared domain-charset validator; the error must
+	// name the allow_sni field (not allow_hosts) so an operator sees the JSON key
+	// they actually wrote.
+	err := validateEgressSNI("under_score.com")
+	if err == nil {
+		t.Fatal("validateEgressSNI(under_score.com) = nil, want charset error")
+	}
+	if !strings.Contains(err.Error(), "allow_sni entry") {
+		t.Fatalf("error %q must name the allow_sni field", err)
+	}
+	if strings.Contains(err.Error(), "allow_hosts") {
+		t.Fatalf("error %q leaked the allow_hosts field for an allow_sni entry", err)
 	}
 }
 
@@ -111,6 +127,25 @@ func TestPlanProfileEgressCommandsEmitsSNIDispatch(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("commands missing %q:\n%s", want, joined)
 		}
+	}
+}
+
+func TestPlanProfileEgressCommandsSNINfqueueBeforeFastpath(t *testing.T) {
+	// Ordering contract WITHIN the SNI block: the emitted slice must place the
+	// -sni-nfqueue dispatch BEFORE the -sni-fastpath accept so that after the
+	// `-I` head-insert reversal the fastpath rule sits ABOVE the dispatch — the
+	// approved connmark short-circuits to ACCEPT before the packet can re-queue.
+	commands, err := planProfileEgressCommands("vm-1", "10.0.1.10", egressProfile{
+		AllowSNI: []string{"api.anthropic.com"},
+	})
+	if err != nil {
+		t.Fatalf("planProfileEgressCommands error = %v", err)
+	}
+	joined := joinCommands(commands)
+	nfqueueIdx := strings.Index(joined, "-sni-nfqueue")
+	fastpathIdx := strings.Index(joined, "-sni-fastpath")
+	if nfqueueIdx < 0 || fastpathIdx < 0 || !(nfqueueIdx < fastpathIdx) {
+		t.Fatalf("expected sni-nfqueue before sni-fastpath in slice order; nfqueue=%d fastpath=%d\n%s", nfqueueIdx, fastpathIdx, joined)
 	}
 }
 

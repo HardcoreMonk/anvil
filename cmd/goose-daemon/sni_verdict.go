@@ -82,8 +82,13 @@ type sniVerdictLoop struct {
 	registry map[string]sniRegistryEntry // key: guest source IP (dotted quad)
 	ready    bool
 
-	// Reassembly LRU. Touched only from the single hook goroutine in Start, but
-	// guarded so Start could be extended to multiple readers without a data race.
+	// Reassembly LRU. flowMu guards ONLY this flow table (map + list); it is NOT
+	// held across the reassembler's Feed call in the Start hook. That Feed runs
+	// lock-free and is safe solely because go-nfqueue dispatches the hook from a
+	// single goroutine, so at most one Feed touches any *sni.Reassembler at a time.
+	// Adding a second concurrent reader (e.g. a worker pool over the hook) would
+	// race on the per-flow reassembler state and MUST be preceded by a per-flow
+	// guard around Feed — flowMu alone does not make that safe.
 	flowMu  sync.Mutex
 	flows   map[string]*list.Element // key -> element carrying *sniFlowEntry
 	flowLRU *list.List               // front = most recently used
@@ -150,9 +155,7 @@ func (l *sniVerdictLoop) Ready() bool {
 // bytes" signal via sni.Reassembler) before any decision is taken, so decide
 // never has to say "retry" — the loop, not the classifier, re-queues partials.
 func (l *sniVerdictLoop) decide(srcIP string, payload []byte) sniDecision {
-	l.mu.RLock()
-	entry, ok := l.registry[srcIP]
-	l.mu.RUnlock()
+	entry, ok := l.resolveEntry(srcIP)
 	if !ok {
 		return sniDecision{Action: sniDrop, Reason: "unregistered_source"}
 	}
@@ -166,6 +169,19 @@ func (l *sniVerdictLoop) decide(srcIP string, payload []byte) sniDecision {
 	return l.classifyParsedSNI(entry, name)
 }
 
+// resolveEntry does the locked registry lookup that both decide (single-packet
+// core) and the Start hook's pre-classify stage share, so the RLock/RUnlock dance
+// and the unregistered-source fail-closed contract live in exactly one place. It
+// only reads the registry; callers own the drop/passthrough/parse routing that
+// follows, which differs between the pure core (returns a decision) and the hook
+// (issues kernel verdicts + drives the reassembler).
+func (l *sniVerdictLoop) resolveEntry(srcIP string) (sniRegistryEntry, bool) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	entry, ok := l.registry[srcIP]
+	return entry, ok
+}
+
 // classifyParsedSNI applies the allow-list policy to an already-parsed SNI for a
 // registered source. Shared by decide (single-packet fast path) and Start's
 // multi-segment reassembly path so the accept/deny rule lives in exactly one place.
@@ -177,7 +193,10 @@ func (l *sniVerdictLoop) classifyParsedSNI(entry sniRegistryEntry, name string) 
 }
 
 // reassemblerFor returns the flow's reassembler, creating one if absent and
-// evicting the least-recently-used flow when the table is at capacity.
+// evicting the least-recently-used flow when the table is at capacity. flowMu is
+// released before the returned reassembler's Feed runs in the hook; that is safe
+// only under single-goroutine hook dispatch (see the flowMu field comment) — a
+// parallel reader would need a per-flow guard around Feed first.
 func (l *sniVerdictLoop) reassemblerFor(key string) *sni.Reassembler {
 	l.flowMu.Lock()
 	defer l.flowMu.Unlock()
@@ -283,23 +302,24 @@ func (l *sniVerdictLoop) Start(ctx context.Context) error {
 		if a.Payload == nil {
 			// No packet bytes to inspect -> cannot verify -> fail closed.
 			l.setDrop(nf, id, ipv4TCP{})
+			l.metrics.IncSNIVerdict("dropped") // pre-classify infra drop (distinct from policy denial)
 			return 0
 		}
 		t, perr := parseIPv4TCP(*a.Payload)
 		if perr != nil {
 			slog.Debug("sni verdict: unparsable packet, fail-closed drop", "err", perr)
 			l.setDrop(nf, id, t)
+			l.metrics.IncSNIVerdict("dropped") // pre-classify infra drop (distinct from policy denial)
 			return 0
 		}
 		srcIP := t.srcIP.String()
 
-		l.mu.RLock()
-		entry, ok := l.registry[srcIP]
-		l.mu.RUnlock()
+		entry, ok := l.resolveEntry(srcIP)
 		if !ok {
 			// Defense in depth: the iptables dispatch rule is already scoped by
 			// -s guestIP, but an unregistered source still fails closed here.
 			l.setDrop(nf, id, t)
+			l.metrics.IncSNIVerdict("dropped") // pre-classify infra drop (distinct from policy denial)
 			return 0
 		}
 		if len(t.payload) == 0 {

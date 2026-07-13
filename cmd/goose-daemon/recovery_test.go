@@ -149,6 +149,46 @@ func TestReapplyRecoveredEgressIdempotentFlush(t *testing.T) {
 	}
 }
 
+// TestFlushByCommentDeletesBareDenyAllComment covers flushByComment's
+// exact-match arm: a deny_all VM installs a BARE comment ("anvil-egress-<vmID>"
+// with no suffix), which the dash-prefix arm ("anvil-egress-<vmID>-") alone would
+// miss. The bare rule must be -D'd, while the base-subnet blanket ACCEPT (no
+// comment) and a prefix-adjacent VM ("anvil-egress-vm-x2-...") stay untouched.
+func TestFlushByCommentDeletesBareDenyAllComment(t *testing.T) {
+	dump := strings.Join([]string{
+		"-P FORWARD ACCEPT",
+		"-A FORWARD -i goose-br0 -s 10.0.1.0/24 -j ACCEPT",
+		`-A FORWARD -s 10.0.1.20/32 -j REJECT --reject-with icmp-port-unreachable -m comment --comment "anvil-egress-vm-x"`,
+		`-A FORWARD -s 10.0.1.21/32 -j REJECT --reject-with icmp-port-unreachable -m comment --comment "anvil-egress-vm-x2-default"`,
+		"",
+	}, "\n")
+	var cmds [][]string
+	e := &commandEgressEnforcer{
+		run: func(name string, args ...string) error {
+			cmds = append(cmds, append([]string{name}, args...))
+			return nil
+		},
+		runOutput: func(string, ...string) ([]byte, error) { return []byte(dump), nil },
+	}
+
+	e.flushByComment("vm-x")
+
+	wantDel := "iptables -D FORWARD -s 10.0.1.20/32 -j REJECT --reject-with icmp-port-unreachable -m comment --comment anvil-egress-vm-x"
+	if !containsCommand(cmds, wantDel) {
+		t.Fatalf("bare deny_all comment not deleted (exact-match arm miss): cmds = %v", cmds)
+	}
+	// Exactly one delete: only the bare rule. Base ACCEPT and adjacent VM survive.
+	if len(cmds) != 1 {
+		t.Fatalf("expected exactly 1 delete (the bare rule), got %v", cmds)
+	}
+	for _, c := range cmds {
+		j := strings.Join(c, " ")
+		if strings.Contains(j, "10.0.1.0/24") || strings.Contains(j, "anvil-egress-vm-x2") {
+			t.Fatalf("flush deleted a foreign/base rule: %q", j)
+		}
+	}
+}
+
 // TestReapplyRecoveredEgressFailClosedOnApplyError proves invariant 1: when the
 // re-apply fails, the VM is fenced with an emergency REJECT (never left behind the
 // blanket ACCEPT), the error propagates, and the flock agent is marked dead.

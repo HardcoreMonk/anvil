@@ -37,7 +37,7 @@ type daemonMetrics struct {
 	cpTokenPropagated *metrics.CounterVec // outcome=ok|fail
 	authTotal         *metrics.CounterVec // outcome=ok|denied|expired (v0.4.1)
 	mcpToolCalls      *metrics.CounterVec // server, outcome=ok|fail|forbidden|rate_limited (v0.6.0)
-	sniVerdictTotal   *metrics.CounterVec // outcome=allowed|denied (egress SNI filter, Task 6)
+	sniVerdictTotal   *metrics.CounterVec // outcome=allowed|denied|dropped (egress SNI filter, Task 6)
 
 	// Histograms (seconds).
 	vmSpawnDuration         *metrics.Histogram
@@ -116,7 +116,7 @@ func newDaemonMetrics(cp *ControlPlane) *daemonMetrics {
 		),
 		sniVerdictTotal: r.NewCounterVec(
 			"ephemera_egress_sni_verdict_total",
-			"Total :443 SNI verdicts by outcome.",
+			"Total :443 SNI verdicts by outcome (allowed|denied|dropped; dropped = pre-classify infra fail-closed).",
 			"outcome",
 		),
 
@@ -226,11 +226,14 @@ func (m *daemonMetrics) IncAuthFailure() {
 	}
 }
 
-// IncSNIVerdict records one :443 SNI verdict by outcome ("allowed" or
-// "denied"). Called from the sniVerdictLoop hook path regardless of tenant
-// availability or audit-append success/failure — the counter is a
-// content-free signal (outcome only, never SNI/VMID/tenant) so it carries no
-// redaction risk and must never be gated on the audit write.
+// IncSNIVerdict records one :443 SNI verdict by outcome. The classify path emits
+// "allowed" (accept+mark) and "denied" (policy deny) via recordVerdict; the Start
+// hook's pre-classify fail-closed sites (no payload, unparsable packet,
+// unregistered source) emit "dropped" so the counter reflects every kernel
+// verdict, not just policy decisions. Called regardless of tenant availability or
+// audit-append success/failure — the counter is a content-free signal (outcome
+// only, never SNI/VMID/tenant) so it carries no redaction risk and must never be
+// gated on the audit write.
 func (m *daemonMetrics) IncSNIVerdict(outcome string) {
 	if m == nil {
 		return
