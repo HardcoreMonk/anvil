@@ -162,11 +162,16 @@ in-guest 루트에 대한 완전 봉쇄가 아니다.
 8. **golden-image staleness robustness**(pre-existing, 이 slice가 새로
    만든 문제 아님) — `build_image.sh`가 중단됐을 때 부분 이미지가 재사용될
    수 있는 known limitation.
-9. **zone `~/projects/claude-zone/docs/FOLLOWUP.md` 갱신** — zone repo는
+9. **복구 경로 egress-before-boot 검토**(transient 창 제거) — 복구는 현재
+   VM 부팅 후에 per-VM egress를 재적용해, 호스트 리부트 직후 복구 VM의
+   부팅~agent-wait 구간에 일시 fail-open 창이 있다(durable 종상태는
+   fail-closed, self-healing, 신뢰 워크로드 위협 모델 밖 — ADR-0002 잔여위험
+   표에 등재). spawn처럼 부팅 전 egress를 적용하면 창을 완전 제거할 수 있다.
+10. **zone `~/projects/claude-zone/docs/FOLLOWUP.md` 갱신** — zone repo는
    이 anvil branch 밖이므로 이 handoff에는 트리거만 기록한다. "egress
    L7/SNI hardening"류 이월 항목이 있으면 구현 완료로 갱신 필요(anvil
    `CONTEXT.md`/`RELEASE_NOTES.md`는 이 slice에서 이미 갱신했다).
-10. **release 단계 zone 인벤토리 동기화** — PR 머지 후 release 단계에서
+11. **release 단계 zone 인벤토리 동기화** — PR 머지 후 release 단계에서
     `ops/units.yaml`/`ops/projects.yaml`/`wiki/entities/`(필요 시) 갱신.
     이 slice는 신규 systemd unit/서비스를 추가하지 않는다(goose-daemon
     in-process 확장뿐) — 인벤토리 변경 필요 여부는 release 단계에서
