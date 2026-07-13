@@ -64,6 +64,38 @@ func TestPlanProfileEgressCommandsEnforcesDNSAllowlist(t *testing.T) {
 	}
 }
 
+func TestValidateEgressSNIAcceptsWildcardAndExact(t *testing.T) {
+	for _, ok := range []string{"api.anthropic.com", "*.example.com", "sub.domain-1.io"} {
+		if err := validateEgressSNI(ok); err != nil {
+			t.Fatalf("validateEgressSNI(%q) = %v, want nil", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "*", "a.*.com", "under_score.com", "space host.com", "*.*.com"} {
+		if err := validateEgressSNI(bad); err == nil {
+			t.Fatalf("validateEgressSNI(%q) = nil, want error", bad)
+		}
+	}
+}
+
+func TestLoadEgressProfileParsesAllowSNI(t *testing.T) {
+	dir := t.TempDir()
+	pd := filepath.Join(dir, "sni")
+	if err := os.MkdirAll(pd, 0700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pd, "egress.json"), []byte(
+		`{"allow_sni":["api.anthropic.com","*.example.com"],"dns_servers":["1.1.1.1"]}`), 0600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	profile, ok, err := loadEgressProfile(dir, "sni")
+	if err != nil || !ok {
+		t.Fatalf("loadEgressProfile ok=%v err=%v", ok, err)
+	}
+	if len(profile.AllowSNI) != 2 || profile.AllowSNI[0] != "api.anthropic.com" {
+		t.Fatalf("AllowSNI = %#v", profile.AllowSNI)
+	}
+}
+
 func joinCommands(commands []egressCommand) string {
 	var lines []string
 	for _, command := range commands {

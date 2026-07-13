@@ -18,6 +18,7 @@ const (
 type egressProfile struct {
 	AllowCIDRs []string `json:"allow_cidrs"`
 	AllowHosts []string `json:"allow_hosts"`
+	AllowSNI   []string `json:"allow_sni"`
 	DNSServers []string `json:"dns_servers"`
 }
 
@@ -65,6 +66,11 @@ func validateEgressProfile(profile egressProfile) error {
 			return err
 		}
 	}
+	for _, entry := range profile.AllowSNI {
+		if err := validateEgressSNI(entry); err != nil {
+			return err
+		}
+	}
 	for _, server := range profile.DNSServers {
 		if ip := net.ParseIP(strings.TrimSpace(server)); ip == nil {
 			return fmt.Errorf("invalid dns_servers entry %q", server)
@@ -88,6 +94,22 @@ func validateEgressHost(host string) error {
 		return fmt.Errorf("allow_hosts entry %q contains unsupported character %q", host, r)
 	}
 	return nil
+}
+
+func validateEgressSNI(entry string) error {
+	entry = strings.TrimSpace(entry)
+	if entry == "" {
+		return fmt.Errorf("allow_sni entries must be non-empty")
+	}
+	host := entry
+	if strings.HasPrefix(host, "*.") {
+		host = host[2:]
+	}
+	if strings.ContainsRune(host, '*') {
+		return fmt.Errorf("allow_sni entry %q: '*' only allowed as a leading %q label", entry, "*.")
+	}
+	// host now has no '*'; reuse the ASCII domain-charset validator.
+	return validateEgressHost(host)
 }
 
 func planProfileEgressCommands(vmID, guestIP string, profile egressProfile) ([]egressCommand, error) {
