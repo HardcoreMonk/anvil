@@ -1,7 +1,13 @@
 # Egress L7 도메인 강제 — Transparent SNI 필터 설계
 
 - 작성일: 2026-07-13
-- 상태: **초안 — 설계 리뷰 대기** (사용자 리뷰 전 단계. 옵션과 권고를 담되
+- 상태: **설계 확정 (2026-07-13 사용자 설계 리뷰 승인)** — 골격(in-process
+  NFQUEUE + userspace TLS 파서·conntrack fast-path / default-deny additive SNI 층 /
+  신규 `allow_sni` 필드 / 명시적 잔여-위험 계약)과 미결 8건 전부 **권고안대로 확정**:
+  OQ1 fail-closed+preflight, OQ2 baseline 요구, OQ3 in-process, OQ4 iptables-exec
+  재사용, OQ5 `*.` 단일 wildcard+exact, OQ6 RST 응답, OQ7 ECH는 CIDR fallback만,
+  OQ8 allow_hosts deprecated 유지. 아래 각 Q절의 권고가 곧 확정안이다.
+  (원래 초안 표기 — 기록 보존: 옵션과 권고를 담되
   각 미결 질문의 최종 결정은 리뷰에서. 구현 착수는 별도 승인 후.)
 - 브랜치: `feature/egress-sni-filter`
 - 사용자 확정 접근: **transparent SNI 필터 (host nftables, guest 무변경)**.
@@ -301,7 +307,11 @@ per-VM 적용은 기존 `commandEgressEnforcer.ApplyWithProfile`
 
 ---
 
-## 미결 질문 (설계 리뷰 대상)
+## 결정 기록 (2026-07-13 설계 리뷰 — 전 항목 권고 확정)
+
+초안의 미결 8건은 모두 권고안대로 확정됐다(위 상태 절 요약). 아래는 각 결정의 원 근거 보존.
+
+### (구) 미결 질문 — 확정 근거
 
 1. **OQ1 — degrade 방향**: NFQUEUE/verdict 부재 시 fail-open(:443 허용+로그) vs
    fail-closed(:443 차단). fail-closed가 보안 정직성엔 맞으나 커널 기능 부재로
