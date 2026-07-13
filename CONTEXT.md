@@ -405,7 +405,7 @@ daemon으로 보내는 outbound Bearer token이다.
   1차 fix(PR #46: `overlaySparseDiff` loop attach 전 `out.Sync()`)는 필요했으나
   불충분(flip 재검증에서 재발), host-b도 byte-identical 데몬으로 재현된 일반 결함,
   anvil-측 레버·fc CHANGELOG 전부 음성. fc v1.15.1→v1.16.1 업그레이드가 실패율을
-  100%→~25%로 극감(v1.16.0 vsock RX-race fix #5882가 주 기여)시켰으나 잔여 존속,
+  100%→~15–25%로 극감(v1.16.0 vsock RX-race fix #5882가 주 기여)시켰으나 잔여 존속,
   pre-resume quiescence 지연도 확률만 낮출 뿐 어느 고정값도 양 host n≥2 미달. 근본
   원인은 anvil 밖 KVM/Firecracker resume-race로 좁혀졌고 anvil-측 소진으로 **종결**
   (default plain 유지·COW opt-in, fc v1.16.1 최대 완화, fc/KVM 상류 추적). D1~D3 상세:
@@ -421,7 +421,7 @@ daemon으로 보내는 outbound Bearer token이다.
   anvil 저장소·복원-설정 레버(fsync/global sync/direct-io/산출물 경로·unlink 감사·
   메모리 파일 불가침 가설)는 전부 음성, fc CHANGELOG 대조(#5705=v1.15.0 multi-slot
   손상 fix — 우리 v1.15.1에 이미 포함, 단일 slot이라 조건 미충족)도 음성. fc
-  v1.16.1 업그레이드가 실패율을 100%→~25%로 극감(v1.16.0 vsock RX-race fix #5882
+  v1.16.1 업그레이드가 실패율을 100%→~15–25%로 극감(v1.16.0 vsock RX-race fix #5882
   주 기여)시켰으나 잔여 존속하고, pre-resume quiescence 지연도 확률만 낮출 뿐 어느
   고정값도 양 host n≥2 미달. 근본 원인은 anvil 밖 KVM/Firecracker resume-race이며
   anvil-측 소진으로 default COW flip을 무기한 접고(=종결) fc/KVM 상류에 제보한다
@@ -456,27 +456,22 @@ daemon으로 보내는 outbound Bearer token이다.
 
 남은 후속 후보:
 
-- `v0.4.2` default COW flip — **종결(default plain 확정)**. D4가 upstream KVM/fc
-  resume-race로 종결됨에 따라(위 "D4" 항목) flip은 보류가 아니라 무기한 접었다 —
-  재개는 upstream이 resume-race를 해소하고 host-a·host-b n≥2 green을 재검증할 때에만.
-  `feat/default-cow-flip` 브랜치(unset→cow flip 코드 + ext4 gate 2종 green)는 origin에
-  참조로 미머지 보존(정리하지 않음 — upstream 해소 시 ZFS 게이트 재검증만 얹으면 재사용).
-  (auto-snapshot env-only 확정·`v0.4.4` broadcast MCP 노출 기각 확정·flock member
-  per-profile sizing 존중 완료는 2026-07-11 종결 — 후보 아님.)
+- **D4 / `v0.4.2` default COW flip — 종결(upstream-tracked, 2026-07-13)**: default-cow
+  diff-restore가 heavy 부하 하 guest kernel panic. 4라운드 조사(fsync 불충분 → host-b
+  재현=일반 결함 → fc v1.16.1 업그레이드 = 실패율 100%→~15–25%(vsock RX-race #5882 주
+  기여) → anvil-측 완화 A/B = 어느 고정 지연값도 양 host n≥2 미달)로 anvil-측 레버가
+  소진됐고 근본은 anvil 밖 KVM/Firecracker resume-race로 확정. 따라서 **default plain
+  확정**(flip은 보류가 아니라 무기한 접음), COW는 opt-in 유지. `feat/default-cow-flip`
+  브랜치(unset→cow flip + ext4 gate 2종 green)는 origin에 참조로 미머지 보존 —
+  upstream이 resume-race를 해소하고 host-a·host-b n≥2 green을 재검증하는 것이 유일한
+  재개 트리거(ZFS 게이트만 얹으면 재사용). fc/KVM 상류 제보문
+  [`docs/operations/2026-07-13-d4-firecracker-upstream-report.md`](docs/operations/2026-07-13-d4-firecracker-upstream-report.md)
+  작성 완료. (auto-snapshot env-only 확정·`v0.4.4` broadcast MCP 노출 기각 확정·flock
+  member per-profile sizing 존중 완료도 2026-07-11 종결 — 후보 아님.)
 - upstream 기여 후보: proxy agent client keep-alive 비활성화(`64ec57c`, guest IP
   재활용 시 stale pooled connection) — upstream ephemera에 동형 경로가 있으면 같은
   잠재 결함이라 upstream 확인 후 기여 검토. (D4 fsync `out.Sync()`는 필요조건이었으나
-  단독으로는 불충분했다 — 위 COW 항목 참조. 근본 원인이 fc/KVM 계층이라 anvil 기여
-  후보가 아니라 **fc/KVM 상류 제보**이며, 제보문
-  [`docs/operations/2026-07-13-d4-firecracker-upstream-report.md`](docs/operations/2026-07-13-d4-firecracker-upstream-report.md)
-  작성 완료.)
-- **D4(종결, upstream-tracked)**: default-cow diff-restore가 heavy 부하 하 guest
-  kernel panic. 4라운드 조사(① fc v1.16.1 업그레이드 = 실패율 100%→~25%, ② anvil-측
-  완화 A/B = 어느 고정 지연값도 양 host n≥2 미달)로 anvil-측 레버가 소진됐고 근본은
-  anvil 밖 KVM/Firecracker resume-race로 확정 → 2026-07-13 종결. fc/KVM 상류 제보문
-  [`docs/operations/2026-07-13-d4-firecracker-upstream-report.md`](docs/operations/2026-07-13-d4-firecracker-upstream-report.md)
-  작성 완료. default COW flip 무기한 보류(=종결), `feat/default-cow-flip` 브랜치는
-  origin에 참조로 미머지 보존. upstream resume-race 해소 관측이 유일한 재개 트리거.
+  단독 불충분이었고 근본이 fc/KVM이라 anvil 기여 아닌 상류 제보로 처리됨 — 위 D4 항목.)
 - runtime MCP Gateway backend 실 operator 배포 검증. 운영 정책(backend→profile
   바인딩, rate-limit/burst, `secrets.yaml` 규율)은 `runbook.md` 문서화 + live
   dry-run까지 완료(PR #40 트랙 C) — 실 backend server를 붙인 operator 배포 검증만 잔여.

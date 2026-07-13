@@ -7,7 +7,7 @@ bounded relay retry, cross-host snapshot replication 자동화에 더해 routed 
 scheduler 실배포+installer 검증 (PR #19~#47) 등 untagged 작업을 더 포함한다.
 (D4 cow diff-restore panic은 4라운드 조사로 anvil-측 소진, 근본은 anvil 밖
 KVM/Firecracker resume-race로 확정 → 2026-07-13 **종결**(default plain 유지·COW
-opt-in, fc v1.16.1이 실패율 100%→~25%로 최대 완화) — `docs/ADR_INDEX.md` v0.4.2 행
+opt-in, fc v1.16.1이 실패율 100%→~15–25%로 최대 완화) — `docs/ADR_INDEX.md` v0.4.2 행
 참조.) anvil 버전은 이제
 upstream ephemera 버전을 따른다. 이 릴리즈는 아래 `anvil-v0.4.0` 절의 parity
 편입(`v0.4.0`-`v0.7.0`)에 더해, `anvil-v0.4.0`(`de82481`) 이후 main에 반영된

@@ -234,6 +234,8 @@ cherry-pick 해 default=cow 로 만든 뒤 host-a·host-b **default-cow full gat
 
 1. ⚠️ **[정정]** round-1 의 "burn-in 재실행 green → flip 가능" 결론은 **무효**.
    D4 는 미해결이며 **default COW flip 은 계속 보류**. (round-1 green 은 n=1 우연.)
+   **→ 2026-07-13 최종: D4 종결(upstream-tracked), default plain 확정 — 상단 상태
+   헤더 및 `docs/ADR_INDEX.md` v0.4.2 행 참조. 이 "후속" 목록은 round-2 시점 기록이다.**
 2. ✅ **[완료] 호스트-특이 vs 일반 분별**: host-b(192.168.1.20)에서 동일 flip 바이너리
    재현 = **일반 결함 확정**(위 "host-b 분별 실험"). host-a 배드램 단일 원인 배제.
    memtest 류(재부팅 필요)는 여전히 잔여 하드웨어 배제용 사용자 옵션이나 우선순위 하락.
