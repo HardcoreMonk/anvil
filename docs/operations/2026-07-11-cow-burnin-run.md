@@ -1,11 +1,11 @@
 # default COW 전환 burn-in 1차 — 수행 기록 (2026-07-11)
 
-- 상태: **run 1 FAIL → D4 회부 → 1차 fix(fsync) 불충분 → D4 REOPENED → host-b 재현으로
-  일반 결함 확정 (미해결, runtime 계층).** ⚠️ 아래 "D4 — CLOSED" 서술은 **정정됨**:
-  1차 fix green 은 n=1 우연, default-cow-flip 재검증·host-b 에서 동일 GPF 재발. 재-RCA·
-  host-b 분별·runtime probe(음성)는 아래 "D4 — REOPENED (round 2)" 참조.
-  anvil 저장소·복원-설정 레버로는 미해결 — 원인은 heavy 동시-부하 하 diff-restore resume
-  경합(KVM/Firecracker/host). **default COW flip 은 여전히 보류.**
+- 상태: **run1 FAIL → D4 회부 → fsync fix 불충분 → REOPENED → host-b 재현=일반 결함 →
+  fc v1.16.1 업그레이드로도 host-b 재현 = 소거 실패 (D4 open, runtime 계층).** ⚠️ 아래
+  "D4 — CLOSED" 서술은 **정정됨**(round-2/3 참조). round-3(아래 "fc 업그레이드 소거법"):
+  fc v1.16.1 이 실패율을 100%→~25% 로 **대폭 낮추나**(v1.16.0 vsock RX race fix 주효)
+  **완전 소거 실패**(host-b gate#2 동일 GPF). fc 업그레이드는 순 개선으로 **유지**하되
+  **D4 fix 아님**, flip 은 되돌림. **default COW flip 은 여전히 보류.**
 - 환경: host-a(192.168.1.19, root-on-ZFS 128K + `rpool/anvil-snapshots` 4K
   dataset → `~/anvil/snapshots`), full KVM gate `e2e_test.sh`, 소스
   `feature/deferred-decisions`(sizing fix 포함, main f43e8e8 + 2 커밋).
@@ -168,6 +168,32 @@ fc 문서 계약("snapshot **memory file 은 resume 후에도 page cache 로 gue
   자체가 부하 하에서 stale/incomplete 할 가능성(단일-slot fc diff 생성 결함)은 남으나
   #5705(멀티-slot) 외 알려진 fc 버그·fix 없음, 그리고 diff 는 ext4 에서 통과 → 순수
   생성-결함보다 resume-순간 runtime 경합 유력. **anvil-측 원인 없음 재확인.**
+
+## D4 — fc 업그레이드 소거법 (round 3, 2026-07-13, `fix/d4-fc-upgrade`) — **소거 실패, D4 open 유지**
+
+가설: fc **v1.16.0** "vsock RX race after snapshot restore"(RX queue 가 TRANSPORT_RESET
+ack 전에 데이터 전달) 가 우리 D4(resume 직후 vsock IP 재설정 시점 bhash2 GPF) 의 원인.
+핀을 **v1.15.1 → v1.16.1** 로 올리고(그 외 golden image·kernel·configs 동일) flip 을
+cherry-pick 해 default=cow 로 만든 뒤 host-a·host-b **default-cow full gate n=2** 실행.
+
+- **핀**: `main.go` firecrackerDownloadURL/SHA256 = v1.16.1, SHA256
+  `382a02a869e4d6d5cb14c40577f9545e8458021ea8b0b2d3fc10ec14d9c242e6`(릴리즈
+  `.sha256.txt` 실측 = 다운로드 재계산 일치). guest kernel 6.1.155 유지. `EnsureFirecracker`
+  download+SHA 통과, `firecracker --version`=v1.16.1(양 host). `go test -race` green.
+- **로컬 ext4 plain 회귀**: **334✓/0✗**(fc v1.16.1 무회귀).
+- **결정판 게이트(default-cow, 양 host n=2)**:
+  - host-a: gate#1 **334✓/0✗**, gate#2 **334✓/0✗** — **n=2 green** ✓
+  - host-b: gate#1 **334✓/0✗**, gate#2 **329✓/5✗** — step 31 diff-restore 500 + **동일
+    `inet_bind2_bucket_find` non-canonical GPF ~6.8s** 재발. **n≥2 미충족** ✗
+- **판정: 소거 실패(D4 미해소).** 단, fc v1.16.1 은 실패율을 **극적으로 낮춘다**
+  (v1.15.1 = 매 run 100% 실패[round-2 다수 재현] → v1.16.1 = 4 run 중 3 green,
+  host-b #2 만 실패). ⇒ v1.16.0 vsock RX race fix 가 **주 기여 요인**이었으나 **잔여 경합**
+  존재. fc-결함 단일-원인 가설은 부분 성립·완전 반증.
+- **조치(coordinator 규칙 "재현되면")**: **flip 되돌림**(cherry-pick 취소, default plain 복귀).
+  fc 업그레이드 커밋(`22b12fe`)은 **유지**(순 개선: D4 확률↓, 최신 stable, plain/ext4 무회귀,
+  host-a n=2 green) — **단 D4 fix 아님**. **flip 완료 문서 미작성. D4 open.**
+- **다음 후보**: anvil-측 **완화 A/B**(diff-restore resume 창 축소: 1GB memory copy
+  가속/제거, restore 동시성 축소, bounded quiescence)를 host-a·host-b 각 n≥2 로.
 
 ## 후속
 
