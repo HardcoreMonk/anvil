@@ -446,9 +446,13 @@ daemon으로 보내는 outbound Bearer token이다.
   가 `print-goose-agent-source-hash`로 stamp를 동봉하도록 고쳐, host-b FULL
   재검증에서 daemon 기동 성공 + VM spawn(`{"status":"idle"}`)/rm smoke +
   `uninstall.sh --purge` 원복(격리 유지)까지 통과. runtime MCP Gateway 운영 정책은
-  `runbook.md` 문서화 + live dry-run(credential 0회 노출)까지 검증됐다(PR #40 트랙 C,
-  실 backend operator 배포 검증은 잔여). 상세:
-  [`docs/operations/2026-07-11-scheduler-ops-deploy-handoff.md`](docs/operations/2026-07-11-scheduler-ops-deploy-handoff.md).
+  `runbook.md` 문서화 + live dry-run(credential 0회 노출)까지 검증됐고(PR #40 트랙 C),
+  **실 backend operator 배포 검증도 종결(2026-07-13, DeepWiki no-auth http backend)** —
+  host-b에서 daemon 집약·VM 내부 왕복(worker profile VM → `ephemera-gw:3001` → DeepWiki
+  `read_wiki_structure` 실 결과, exit 0)·경계 3종(미등록 source-IP `403`, audit
+  metadata-only, `/config` leak guard) 모두 PASS, 신규 gateway 결함 없음. 상세:
+  [`docs/operations/2026-07-13-mcp-gateway-deployment-verification-run.md`](docs/operations/2026-07-13-mcp-gateway-deployment-verification-run.md)
+  (dry-run 트랙: [`docs/operations/2026-07-11-scheduler-ops-deploy-handoff.md`](docs/operations/2026-07-11-scheduler-ops-deploy-handoff.md)).
 - ~~비동기 relay buffer~~는 **기각 확정(2026-07-11)**이다. failover가 home 불능
   창을 유계화(~3×reconcile interval; §6b 실측 ~27s@10s)해 명분이 소멸했고, buffer는
   wall 손실 계약과 충돌하는 부분-부활 semantics·전달 보장 약화·seq/중복 복잡성을
@@ -537,9 +541,11 @@ daemon으로 보내는 outbound Bearer token이다.
   재활용 시 stale pooled connection) — upstream ephemera에 동형 경로가 있으면 같은
   잠재 결함이라 upstream 확인 후 기여 검토. (D4 fsync `out.Sync()`는 필요조건이었으나
   단독 불충분이었고 근본이 fc/KVM이라 anvil 기여 아닌 상류 제보로 처리됨 — 위 D4 항목.)
-- runtime MCP Gateway backend 실 operator 배포 검증. 운영 정책(backend→profile
-  바인딩, rate-limit/burst, `secrets.yaml` 규율)은 `runbook.md` 문서화 + live
-  dry-run까지 완료(PR #40 트랙 C) — 실 backend server를 붙인 operator 배포 검증만 잔여.
+- ~~runtime MCP Gateway backend 실 operator 배포 검증~~ — **종결(2026-07-13)**. 운영 정책
+  (backend→profile 바인딩, rate-limit/burst, `secrets.yaml` 규율)은 `runbook.md` 문서화 +
+  live dry-run(PR #40 트랙 C)에 이어, DeepWiki(no-auth http)를 붙인 host-b 실 배포 검증까지
+  PASS(왕복+경계 3종, 신규 결함 없음).
+  [`docs/operations/2026-07-13-mcp-gateway-deployment-verification-run.md`](docs/operations/2026-07-13-mcp-gateway-deployment-verification-run.md).
 - egress SNI 필터 후속(ADR-0002 잔여 위험/설계 한계에서 파생, 미착수):
   `allow_hosts`(legacy substring) 제거 시점 재검토(OQ8, 고정 런타임 계약
   표면이라 즉시 제거하지 않음), multi-queue per-VM NFQUEUE 재검토(현재 단일

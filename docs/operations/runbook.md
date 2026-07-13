@@ -809,3 +809,38 @@ curl -s http://127.0.0.1:3000/config/mcp/servers   # has_credential:true 만, to
 `EPHEMERA_MCP_BIND_IP`는 unset이면 bridge gateway IP에만 bind(VM·host에서만 도달, 외부
 노출 없음)한다. 외부로 넓히지 않는다 — 넓히면 credential-injecting proxy가 노출된다.
 gateway audit는 `{workDir}/audit/mcp.jsonl`에 metadata만 남긴다(arguments/results 미기록).
+
+### 실 backend 배포 검증 완료 (DeepWiki, 2026-07-13)
+
+실 backend를 붙인 operator 배포 검증이 host-b에서 **PASS**했다 — public no-auth backend
+DeepWiki(`https://mcp.deepwiki.com/mcp`)로 daemon 집약·VM 내부 왕복·경계 3종(미등록 source-IP
+`403`, audit metadata-only, `/config` leak guard)까지 실증. 실동작 config 예시는
+`configs/mcp/servers.yaml.example`의 DeepWiki 블록, 상세는
+[`docs/operations/2026-07-13-mcp-gateway-deployment-verification-run.md`](2026-07-13-mcp-gateway-deployment-verification-run.md).
+
+### in-guest 왕복 확인 (VM 내부 caller → gateway → backend)
+
+gateway가 실제로 VM 안에서 도달·왕복하는지 확인하려면, backend가 허용된 profile로 VM을 띄우고
+그 VM 안에서 gateway로 MCP 요청을 넣는다(게스트는 `curl` 포함). control plane이 아니라 게스트가
+호출해야 source-IP caller 판정 경로를 실측한다.
+
+```bash
+API=http://127.0.0.1:3000; TOK=<op-token>
+# 1) backend를 허용한 profile로 VM spawn (예: servers.yaml에서 deepwiki가 profiles:[worker])
+VM=$(curl -s -H "Authorization: Bearer $TOK" -X POST "$API/vms" \
+       -H 'Content-Type: application/json' -d '{"profile":"worker"}' | jq -r .vm_id)
+# 2) 게스트 workspace에 probe 스크립트 업로드 (gateway는 http://ephemera-gw:{port}/mcp로 주입됨)
+cat > /tmp/mcp-probe.sh <<'SH'
+curl -sS -m 25 -X POST http://ephemera-gw:3001/mcp -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"deepwiki__read_wiki_structure","arguments":{"repoName":"modelcontextprotocol/servers"}}}'
+SH
+curl -s -H "Authorization: Bearer $TOK" -X PUT \
+  "$API/vms/$VM/workspace?path=workloads/mcp-probe.sh&overwrite=true" --data-binary @/tmp/mcp-probe.sh
+# 3) VM 안에서 실행 → stdout에 backend 실 결과(exit_code:0)면 왕복 성립
+curl -s -H "Authorization: Bearer $TOK" -X POST "$API/vms/$VM/workloads/run" \
+  -H 'Content-Type: application/json' -d '{"script":"workloads/mcp-probe.sh","timeout_seconds":60}'
+```
+
+tool 이름은 `<backend-namespace>__<tool>`로 접두된다. host에서 직접 `http://10.0.1.1:3001/mcp`로
+POST하면 미등록 source-IP라 `403 forbidden`(정상 — VM만 호출 가능). 검증 후 VM 삭제·임시
+`servers.yaml` 제거·daemon 정지.
