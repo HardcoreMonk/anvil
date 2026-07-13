@@ -4,7 +4,10 @@
 cross-host shared Town Wall/gtcall/home 재선출 failover, adapter reconcile loop,
 bounded relay retry, cross-host snapshot replication 자동화에 더해 routed flock
 스택 결함 D1~D3 종결(D4는 upstream KVM/fc 이슈로 종결 — 아래)·web major(vite8/svelte5)·
-scheduler 실배포+installer 검증 (PR #19~#47) 등 untagged 작업을 더 포함한다.
+scheduler 실배포+installer 검증 (PR #19~#47)·**egress :443 transparent SNI
+필터**(신규 `allow_sni` additive 필드, in-process NFQUEUE verdict + fail-closed
+preflight, [ADR-0002](docs/adr/0002-egress-sni-transparent-filter.md)) 등
+untagged 작업을 더 포함한다.
 (D4 cow diff-restore panic은 4라운드 조사로 anvil-측 소진, 근본은 anvil 밖
 KVM/Firecracker resume-race로 확정 → 2026-07-13 **종결**(default plain 유지·COW
 opt-in, fc v1.16.1이 실패율 100%→~15–25%로 최대 완화) — `docs/ADR_INDEX.md` v0.4.2 행
@@ -744,7 +747,10 @@ PR-A storage/recovery 변경은 포함하지 않는다.
 - scheduler observability metrics/alerts.
 - cross-host snapshot replication.
 - scheduler-aware cross-host flock placement.
-- egress L7 proxy/SNI hardening.
+- egress L7 proxy/SNI hardening — **구현 완료**(2026-07-13/14, transparent SNI
+  필터: `allow_sni` additive 필드 + in-process NFQUEUE verdict + fail-closed
+  preflight; [`docs/adr/0002-egress-sni-transparent-filter.md`](docs/adr/0002-egress-sni-transparent-filter.md)
+  참조). full HTTP CONNECT/forward proxy·TLS 종단은 여전히 비목표.
 - snapshot storage quota dashboard.
 - scheduler host registration hardening.
 - upstream ephemera `v0.4.0` PR-A adoption review. 이 항목은 당분간 구현 범위에서
@@ -857,7 +863,10 @@ fake host는 `smoke_only: true`로 등록되어 `PreferredHosts`에 명시된 sm
 fallback에서 무시되는지도 확인한다.
 다음 후보는 upstream ephemera `v0.4.0` PR-A storage/recovery 변경의
 adoption review, cross-host snapshot replication, scheduler-aware cross-host flock
-placement, L7 egress proxy/SNI hardening, snapshot storage quota dashboard다.
+placement, snapshot storage quota dashboard다. (L7 egress proxy/SNI hardening은
+2026-07-13/14 transparent SNI 필터로 **구현 완료** —
+[`docs/adr/0002-egress-sni-transparent-filter.md`](docs/adr/0002-egress-sni-transparent-filter.md)
+참조.)
 
 ## 문서화됨
 

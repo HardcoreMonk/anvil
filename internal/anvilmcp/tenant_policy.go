@@ -76,6 +76,7 @@ type RuntimeAuditRecord struct {
 	DaemonOperation string    `json:"daemon_operation"`
 	ResultCode      string    `json:"result_code"`
 	Error           string    `json:"error,omitempty"`
+	SNI             string    `json:"sni,omitempty"` // Task 6: egress SNI filter deny audit (domain only, never tenant tokens/args)
 }
 
 type RuntimeAuditRetention struct {

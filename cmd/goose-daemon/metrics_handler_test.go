@@ -118,3 +118,31 @@ func TestMetrics_HandlerReflectsCounterUpdates(t *testing.T) {
 		}
 	}
 }
+
+func TestMetrics_HandlerExposesSNIVerdictTotal(t *testing.T) {
+	cp := newMetricsTestCP(t)
+	cp.metrics.IncSNIVerdict("allowed")
+	cp.metrics.IncSNIVerdict("allowed")
+	cp.metrics.IncSNIVerdict("denied")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	cp.handleMetrics(rec, req)
+	body, _ := io.ReadAll(rec.Body)
+	out := string(body)
+
+	wantLines := []string{
+		`ephemera_egress_sni_verdict_total{outcome="allowed"} 2`,
+		`ephemera_egress_sni_verdict_total{outcome="denied"} 1`,
+	}
+	for _, w := range wantLines {
+		if !strings.Contains(out, w) {
+			t.Errorf("missing line %q in:\n%s", w, out)
+		}
+	}
+}
+
+func TestMetrics_IncSNIVerdictNilMetricsSafe(t *testing.T) {
+	var m *daemonMetrics
+	m.IncSNIVerdict("allowed") // must not panic on nil receiver
+}

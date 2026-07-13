@@ -242,9 +242,11 @@ daemon은 선택된 policy를 VM/snapshot/restore metadata에 보존한다. `den
 host-local `iptables` reject rule로 강제한다. `profile`은
 `configs/profiles/{profile}/egress.json`, `EPHEMERA_EGRESS_PROFILE_DIR` 또는
 `ANVIL_EGRESS_PROFILE_DIR` 아래의
-profile별 policy 파일이 있을 때 allow CIDR, allow host string match, DNS server
-allowlist와 DNS/default reject rule을 적용한다. policy 파일이 없으면 기존 profile
-동작과 호환되도록 no-op이다.
+profile별 policy 파일이 있을 때 allow CIDR, allow host string match(legacy
+`allow_hosts`, substring 기반 deprecated), `allow_sni`(파싱된 ClientHello SNI
+기반 default-deny `:443` 필터 — ADR-0002), DNS server allowlist와 DNS/default
+reject rule을 적용한다. policy 파일이 없으면 기존 profile 동작과 호환되도록
+no-op이다. SNI 필터의 계약·위협 모델·잔여 위험은 ADR-0002가 권위다.
 
 ## 감사 저장소
 
@@ -297,7 +299,13 @@ restore 경로의 direct token exposure는 제거됐다. 새로운 audit record,
 
 - 완전한 multi-tenant runtime 즉시 구현
 - cross-host broadcast fan-out
-- L7 egress proxy 또는 full HTTP CONNECT/SNI gateway
+- **full HTTP CONNECT/forward proxy, TLS 종단(MITM), QUIC L7 SNI 파싱** — :443
+  transparent SNI 필터(`allow_sni`, ADR-0002)는 이제 in-scope이고 구현됐다
+  (신뢰 워크로드의 의도된 :443 egress를 강제·감사; 적대적 in-guest 루트에
+  대한 완전 봉쇄는 아니다 — 잔여 위험 계약은
+  [`docs/adr/0002-egress-sni-transparent-filter.md`](../adr/0002-egress-sni-transparent-filter.md)
+  참조). full L7 forward proxy(임의 프로토콜 CONNECT), TLS 종단/MITM 복호화,
+  QUIC Initial SNI 파싱은 여전히 비목표다.
 - billing
 - UI
 - OpenClaw compatibility layer

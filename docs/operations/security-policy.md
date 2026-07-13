@@ -113,14 +113,87 @@ policy를 VM/snapshot/restore metadata에 보존하고, host-local network rule 
 - `deny_all`: guest IP 기준 `iptables FORWARD` reject rule을 적용한다.
 - `profile`: `configs/profiles/{profile}/egress.json`,
   `EPHEMERA_EGRESS_PROFILE_DIR`, `ANVIL_EGRESS_PROFILE_DIR` 아래의 profile별
-  `egress.json`이 있으면 allow CIDR, allow host string match, DNS server allowlist와
-  default reject rule을 적용한다.
+  `egress.json`이 있으면 allow CIDR, allow host string match, `allow_sni`
+  transparent SNI 필터(아래), DNS server allowlist와 default reject rule을
+  적용한다.
 - `allow_all`: 기존 NAT outbound 동작을 유지한다.
 
 `egress.json`은 secret 저장소가 아니다. provider API key, Bearer token, 내부
-credential을 넣지 않는다. `allow_hosts` rule은 packet string match 기반의 coarse
-host allowlist이며, L7 proxy 또는 SNI gateway를 대체하지 않는다. policy 파일이 없는
-`profile`은 기존 profile 호환성을 위해 no-op이다.
+credential을 넣지 않는다. `allow_hosts` rule은 **legacy/deprecated**다 —
+packet string match(`-m string --algo bm`) 기반의 coarse host allowlist이며,
+TLS ClientHello가 여러 TCP 세그먼트로 쪼개지면 매치가 실패하고 SNI가 아닌
+위치의 같은 문자열에도 우연히 매치한다. 신규 profile은 `allow_sni`를 쓴다.
+`allow_sni`가 없고 `allow_hosts`만 있는 기존 profile은 무변경 동작을
+유지한다(하위호환). policy 파일이 없는 `profile`은 기존 profile 호환성을
+위해 no-op이다.
+
+### `allow_sni` — transparent SNI 필터 (ADR-0002)
+
+`allow_sni []string`은 실제 파싱된 TLS ClientHello의 `server_name`
+extension을 :443 새 TCP 흐름 단위로 강제하는 신규·additive 필드다(기존
+`allow_hosts`의 재해석이 아니며, `allow_cidrs`/`dns_servers`와 병렬로
+동작한다). exact match가 기본이고 `*.example.com` 형태로 leading label
+wildcard(한 개 이상 라벨)를 지원한다 — 임의 위치 glob은 비지원.
+
+**메커니즘**: :443 새 흐름의 ClientHello 세그먼트가
+`iptables -j NFQUEUE --queue-num 88`(env `ANVIL_SNI_QUEUE_NUM`로 override)로
+goose-daemon의 **in-process** verdict 루프에 dispatch된다. 루프
+(`github.com/florianl/go-nfqueue/v2`)가 SNI를 파싱해 `allow_sni` 매처와
+대조한다 — 허용이면 흐름의 conntrack 엔트리에 승인 mark(`0x534e49`)를 찍고
+이후 패킷은 커널 fast-path로 ACCEPT된다(NFQUEUE 슬로우패스는 최초
+ClientHello 세그먼트에만 탄다). 비허용/파싱 불가는 **fail-closed
+DROP**(+best-effort TCP RST로 guest 빠른 실패)이다.
+
+**fail-closed 계약**: `--queue-bypass`(fail-open 플래그)는 명시적으로 배제한다
+— verdict 루프가 죽거나 리스너가 없으면 커널이 큐에 들어간 패킷을 그냥
+DROP한다. 이에 더해 daemon은 **preflight**로, `allow_sni` profile인데
+verdict 루프가 준비되지 않은 host면 iptables 규칙을 하나도 깔지 않고 VM
+spawn 자체를 거부한다("규칙은 있는데 검사기가 없는" 조용한 fail-open 상태를
+원천 차단). `profile` egress를 지원하는 모든 host는 NFQUEUE 사용 가능이
+baseline 요구다(확인 절차는 `docs/operations/runbook.md`).
+
+**additive 순서 계약**: SNI는 CIDR allowlist를 대체하지 않는다 — `:443`
+목적지가 `allow_cidrs`에 있으면 CIDR allow 규칙이 SNI 검사보다 위에서
+평가되어 SNI 판정 없이 ACCEPT된다(명시 IP 신뢰가 도메인 검사보다 우선).
+CDN 뒤 도메인은 SNI로, 고정 IP 백엔드/비-TLS 엔드포인트는 CIDR로, DNS는
+`dns_servers`로 통제한다.
+
+**위협 모델과 잔여 위험**: anvil guest는 신뢰된 golden-image 워크로드이지,
+루트를 쥔 적대적 사용자가 host를 공격하는 환경이 아니다. **핵심 계약 한 줄**:
+SNI 필터는 신뢰 워크로드의 의도된 :443 egress를 강제·감사한다. 적대적 in-guest
+루트에 대한 완전 봉쇄가 아니다. 알려진 잔여 위험:
+
+- **ECH/ESNI**: cleartext SNI가 없거나 decoy outer만 있으면 인식 가능한
+  allowlisted SNI가 없어 fail-closed DROP된다. anvil은 ECH를 무력화하지
+  않는다. ECH 엔드포인트는 CIDR fallback으로만 명시 opt-in 허용한다(outer-SNI
+  allowlist는 지원 안 함).
+- **non-TLS**(HTTP:80, 임의 TCP): SNI가 없어 NFQUEUE 대상이 아니다 — 기존
+  base REJECT + CIDR만 통제한다.
+- **QUIC/UDP:443**: v1은 SNI 파싱 비목표이며 UDP:443은 default-deny다.
+- **SNI spoofing**: SNI는 guest-asserted다. CIDR 핀 없이는 allowed SNI
+  값을 제시하며 실제로는 다른 IP로 터널링할 수 있다. `dns_servers` 강제로
+  부분 완화하지만 목적지 IP를 DNS 응답에 핀하지는 않는다.
+- **domain fronting**: SNI ≠ 내부 Host는 TLS 종단 없이 탐지 불가하다.
+- **pre-decision 부분 ClientHello 전달**: 멀티세그먼트 ClientHello에서
+  아직 완결되지 않은 세그먼트는 판정 전에 unmarked ACCEPT로 통과하고, 다음
+  세그먼트가 재조립을 이어간다(재조립 테이블이 가득 차 LRU eviction되면
+  다음 세그먼트는 새 reassembler로 시작해 fail-closed DROP한다 — never
+  fail-open). 승인 conntrack mark는 오직 완결된 ClientHello의 positive SNI
+  매치에서만 찍히므로 이 전달 자체는 승인 누수가 아니다. 다만 흐름당 16 KiB
+  재조립 버퍼는 하드 캡이 아니다 — eviction 후 새 인스턴스가 다시 시작되므로
+  세그먼트를 의도적으로 지연시키는 적대자는 개별 세그먼트의 반복 통과를
+  TCP 자체의 hiccup 속도로만 rate-limit받는다. 완전 봉쇄는 hold-then-decide
+  재설계가 필요하며 v1은 채택하지 않는다.
+
+anti-spoof(`EPHEMERA_NET_ANTISPOOF`, source MAC/IP pin)는 SNI 필터와 직교하지만
+load-bearing 전제다 — verdict/규칙이 `-s guestIP`로 VM을 식별하므로 anti-spoof가
+degrade되면 SNI 강제도 함께 약화된다. `dns_servers`는 golden image
+`resolv.conf`가 baked-in한 `8.8.8.8`/`1.1.1.1`을 포함해야 DNS 자체가 깨지지
+않는다.
+
+전체 결정 기록·잔여 위험 표·경계 사례는
+[`docs/adr/0002-egress-sni-transparent-filter.md`](../adr/0002-egress-sni-transparent-filter.md)를
+참조한다.
 
 ## Audit, metrics, trace redaction
 

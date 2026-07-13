@@ -305,6 +305,71 @@ func (cp *ControlPlane) registerRecoveredVM(s storage.VMState, machine *firecrac
 	cp.mu.Unlock()
 
 	cp.reconcileRecoveredFlockAgent(s, agentURL)
+
+	// Re-apply per-VM egress LAST, after the flock agent is back to ready: a
+	// recovered VM must return to the same enforcement state a spawn produces
+	// (base REJECT + allow exceptions + allow_sni NFQUEUE dispatch + verdict
+	// Register), not inherit only the base-subnet blanket ACCEPT. On failure the
+	// helper installs an emergency fence and marks the agent dead, so it stays
+	// fail-closed even though registerRecoveredVM itself does not propagate the
+	// error (its three callers keep counting this VM as recovered — its identity,
+	// network, and machine are all up; only egress is fenced).
+	if err := cp.reapplyRecoveredEgress(s); err != nil {
+		slog.Error("recovery: egress re-apply failed, VM fenced fail-closed", "vm_id", s.VMID, "guest_ip", s.GuestIP, "err", err)
+	}
+}
+
+// reapplyRecoveredEgress restores a recovered VM's per-VM egress enforcement.
+// It first flushes any per-VM FORWARD rules a prior daemon left in the kernel
+// (mode-1 idempotency; a no-op after a reboot), then re-applies the VM's policy
+// through the same applyEgressPolicy path spawn uses — which, for allow_sni
+// profiles, also rebuilds the in-process SNI verdict registry entry (Task 5), the
+// piece a daemon restart drops. A nil enforcer or an empty/allow_all policy is a
+// harmless no-op, matching the spawn path. On any apply failure the VM is fenced
+// fail-closed (see fenceRecoveredVMEgress) and the error returned for logging.
+func (cp *ControlPlane) reapplyRecoveredEgress(s storage.VMState) error {
+	if cp.egress == nil {
+		return nil
+	}
+	cp.flushEgressByComment(s.VMID)
+	if err := cp.applyEgressPolicy(s.VMID, s.TapDevice, s.GuestIP, s.EgressPolicy, s.Profile, s.TenantID); err != nil {
+		cp.fenceRecoveredVMEgress(s)
+		return err
+	}
+	return nil
+}
+
+// flushEgressByComment delegates to the enforcer's comment-scoped FORWARD flush
+// when the enforcer supports it (production commandEgressEnforcer and test
+// fakes). Enforcers without the capability (e.g. minimal Apply/Cleanup fakes)
+// simply skip the flush — the fresh apply is still correct after a reboot.
+func (cp *ControlPlane) flushEgressByComment(vmID string) {
+	if cp.egress == nil {
+		return
+	}
+	if f, ok := cp.egress.(interface{ flushByComment(vmID string) }); ok {
+		f.flushByComment(vmID)
+	}
+}
+
+// fenceRecoveredVMEgress is the fail-closed fallback for a recovered VM whose
+// egress re-apply failed (invariant 1): a best-effort emergency REJECT so the VM
+// can never sit behind only the base-subnet blanket ACCEPT, a loud error log, and
+// a dead marking on its flock agent. If even the fence install fails the VM may be
+// exposed, so that case escalates to a second loud error for the operator.
+func (cp *ControlPlane) fenceRecoveredVMEgress(s storage.VMState) {
+	slog.Error("recovery: egress re-apply FAILED — installing emergency fence (fail-closed)", "vm_id", s.VMID, "guest_ip", s.GuestIP, "flock_id", s.FlockID, "agent_id", s.AgentID)
+	guestIP := strings.TrimSpace(s.GuestIP)
+	if guestIP != "" && cp.egress != nil {
+		if f, ok := cp.egress.(interface {
+			fenceGuestEgress(vmID, guestIP string) error
+		}); ok {
+			if err := f.fenceGuestEgress(s.VMID, guestIP); err != nil {
+				slog.Error("recovery: emergency egress fence install FAILED — recovered VM may be fail-OPEN", "vm_id", s.VMID, "guest_ip", guestIP, "err", err)
+			}
+		}
+	}
+	cp.markFlockAgentDead(s.FlockID, s.AgentID)
 }
 
 func (cp *ControlPlane) reconcileRecoveredFlockAgent(s storage.VMState, agentURL string) {

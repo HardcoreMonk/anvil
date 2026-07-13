@@ -31,6 +31,7 @@ import (
 	"ephemera/internal/mcpgateway"
 	"ephemera/internal/metrics"
 	"ephemera/internal/network"
+	"ephemera/internal/network/sni"
 	"ephemera/internal/orchestrator"
 	"ephemera/internal/storage"
 	"ephemera/internal/vm"
@@ -416,8 +417,8 @@ type ControlPlane struct {
 	callTokens   map[string]string
 	callTokensMu sync.RWMutex
 
-	snapshotsMu      sync.RWMutex
-	snapshots        map[string]storage.SnapshotMetadata
+	snapshotsMu sync.RWMutex
+	snapshots   map[string]storage.SnapshotMetadata
 
 	// D3 creation-side guard. The snapshots filesystem is probed once per daemon
 	// lifetime (result cached under holeProbeMu); if it reports holes coarser than
@@ -432,6 +433,10 @@ type ControlPlane struct {
 	tenantStore      *anvilmcp.QuotaStore
 	egress           egressEnforcer
 	runtimeAuditPath string
+	// sniCancel stops the in-process NFQUEUE SNI verdict loop's netlink hook
+	// (Task 4/5). Cancelled in Shutdown; nil only if NewControlPlane somehow
+	// skipped SNI-loop init (never true in production construction).
+	sniCancel context.CancelFunc
 	// metrics holds the Prometheus registry plus typed collectors used across
 	// the control plane. Wired in NewControlPlane after vms/snapshots/flockMgr
 	// are constructed because GaugeFunc closures observe those fields.
@@ -535,6 +540,7 @@ func NewControlPlane(
 	netManager *network.Manager,
 	kernelPath, firecrackerPath, gooseConfigPath, gooseSecretsPath, workDir, snapshotDir string,
 ) *ControlPlane {
+	egressEnf := newCommandEgressEnforcer()
 	cp := &ControlPlane{
 		vms:              make(map[string]*runningVM),
 		clients:          apiClients,
@@ -542,7 +548,7 @@ func NewControlPlane(
 		callTokens:       map[string]string{},
 		snapshots:        make(map[string]storage.SnapshotMetadata),
 		tenantStore:      anvilmcp.NewQuotaStore(filepath.Join(workDir, "tenants", "tenants.json")),
-		egress:           newCommandEgressEnforcer(),
+		egress:           egressEnf,
 		runtimeAuditPath: filepath.Join(workDir, "audit", "runtime-audit.jsonl"),
 		traceExporter:    newTraceExporterFromEnv(http.DefaultClient),
 		provisioner:      provisioner,
@@ -600,6 +606,26 @@ func NewControlPlane(
 	// cp.vms/snapshots/flockMgr (already allocated above) only at scrape time, so
 	// registering here is safe. Do not move this back below RecoverVMs.
 	cp.metrics = newDaemonMetrics(cp)
+
+	// In-process NFQUEUE SNI verdict loop (Task 4/5/6): enforces allow_sni
+	// egress profiles. Bound to a daemon-lifetime context cancelled in
+	// Shutdown. audit path reuses cp.runtimeAuditPath (the same tenant-scoped
+	// RuntimeAuditRecord stream tools.go's auditSuccess/auditFailure append
+	// to) so deny records land in one unified audit trail rather than a
+	// second file. Start's netlink bind needs root + NFQUEUE support, so it
+	// runs in a goroutine and its failure is logged, never fatal —
+	// commandEgressEnforcer.ApplyWithProfile preflight-refuses allow_sni
+	// profiles while Ready()==false, so an unbindable host fails closed
+	// (spawn error) rather than silently forwarding unfiltered TLS traffic.
+	sniCtx, sniCancel := context.WithCancel(context.Background())
+	cp.sniCancel = sniCancel
+	sniLoop := newSNIVerdictLoop(sniQueueNum(), cp.runtimeAuditPath, cp.metrics)
+	go func() {
+		if err := sniLoop.Start(sniCtx); err != nil {
+			slog.Warn("sni verdict loop failed to start; allow_sni egress profiles will be refused (fail-closed)", "err", err)
+		}
+	}()
+	egressEnf.sniLoop = sniLoop
 
 	// Cold-restart any VMs that were running when the previous daemon stopped.
 	// Booted from the same rootfs clone with the same network identity (TAP/IP/
@@ -919,6 +945,9 @@ func (cp *ControlPlane) Shutdown() {
 	// in-flight ticks racing against any cp.vms cleanup that follows.
 	cp.watchdog.Stop()
 	cp.stopMCPGateway()
+	if cp.sniCancel != nil {
+		cp.sniCancel()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cp.srv.Shutdown(ctx)
@@ -1364,7 +1393,7 @@ func (cp *ControlPlane) spawnVMInternal(opts spawnVMOptions) (*VMInfo, string, e
 	}
 	rollback = append(rollback, func() { cp.releaseAllocatedVMNetwork(tapDevice, guestIP) })
 
-	if err := cp.applyEgressPolicy(vmID, tapDevice, guestIP, opts.EgressPolicy, opts.Profile); err != nil {
+	if err := cp.applyEgressPolicy(vmID, tapDevice, guestIP, opts.EgressPolicy, opts.Profile, opts.TenantID); err != nil {
 		return nil, "", fmt.Errorf("egress policy: %w", err)
 	}
 	rollback = append(rollback, func() { cp.cleanupEgressPolicy(vmID) })
@@ -1940,6 +1969,15 @@ type commandEgressEnforcer struct {
 	rules      map[string]egressRule
 	profileDir string
 	run        func(name string, args ...string) error
+	// runOutput runs a command and returns its stdout. Used by flushByComment to
+	// read `iptables -S FORWARD` (the plain run seam discards stdout). Injected in
+	// tests to feed a canned rule dump; defaults to exec .Output() in production.
+	runOutput func(name string, args ...string) ([]byte, error)
+	// sniLoop is the in-process NFQUEUE verdict loop (Task 4) that enforces
+	// allow_sni profiles. nil in tests that don't exercise SNI. Wired once at
+	// daemon init (see NewControlPlane) before any request can reach Apply, so
+	// reading it here needs no lock of its own.
+	sniLoop *sniVerdictLoop
 }
 
 func newCommandEgressEnforcer() *commandEgressEnforcer {
@@ -1949,14 +1987,17 @@ func newCommandEgressEnforcer() *commandEgressEnforcer {
 		run: func(name string, args ...string) error {
 			return exec.Command(name, args...).Run()
 		},
+		runOutput: func(name string, args ...string) ([]byte, error) {
+			return exec.Command(name, args...).Output()
+		},
 	}
 }
 
 func (e *commandEgressEnforcer) Apply(vmID, tapDevice, guestIP, policy string) error {
-	return e.ApplyWithProfile(vmID, tapDevice, guestIP, policy, "")
+	return e.ApplyWithProfile(vmID, tapDevice, guestIP, policy, "", "")
 }
 
-func (e *commandEgressEnforcer) ApplyWithProfile(vmID, tapDevice, guestIP, policy, profileName string) error {
+func (e *commandEgressEnforcer) ApplyWithProfile(vmID, tapDevice, guestIP, policy, profileName, tenantID string) error {
 	_ = tapDevice
 	policy, err := normalizeDaemonEgressPolicy(policy)
 	if err != nil {
@@ -1966,14 +2007,23 @@ func (e *commandEgressEnforcer) ApplyWithProfile(vmID, tapDevice, guestIP, polic
 		return nil
 	}
 	var commands []egressCommand
+	var profile egressProfile
 	comment := "anvil-egress-" + vmID
 	if policy == "profile" {
-		profile, ok, err := loadEgressProfile(e.profileDir, profileName)
+		var ok bool
+		profile, ok, err = loadEgressProfile(e.profileDir, profileName)
 		if err != nil {
 			return err
 		}
 		if !ok {
 			return nil
+		}
+		// Preflight capability check: refuse BEFORE any rule is applied so a
+		// host without the NFQUEUE verdict loop cannot end up half-wired (rules
+		// installed but no inspector to enforce them would fail OPEN, not
+		// closed). No commands executed yet and e.rules is untouched here.
+		if len(profile.AllowSNI) > 0 && (e.sniLoop == nil || !e.sniLoop.Ready()) {
+			return fmt.Errorf("egress profile %q requires SNI verdict loop but host lacks NFQUEUE capability (fail-closed)", profileName)
 		}
 		commands, err = planProfileEgressCommands(vmID, guestIP, profile)
 		if err != nil {
@@ -1996,6 +2046,17 @@ func (e *commandEgressEnforcer) ApplyWithProfile(vmID, tapDevice, guestIP, polic
 		}
 		applied = append(applied, command)
 	}
+	if len(profile.AllowSNI) > 0 {
+		matcher, err := sni.NewMatcher(profile.AllowSNI)
+		if err != nil {
+			matcherErr := fmt.Errorf("build sni matcher: %w", err)
+			if cleanupErr := e.cleanupEgressCommands(applied); cleanupErr != nil {
+				return errors.Join(matcherErr, fmt.Errorf("rollback egress policy: %w", cleanupErr))
+			}
+			return matcherErr
+		}
+		e.sniLoop.Register(guestIP, sniRegistryEntry{VMID: vmID, TenantID: tenantID, Profile: profileName, Matcher: matcher})
+	}
 	e.mu.Lock()
 	if e.rules == nil {
 		e.rules = make(map[string]egressRule)
@@ -2014,6 +2075,13 @@ func (e *commandEgressEnforcer) Cleanup(vmID string) error {
 	e.mu.Unlock()
 	if !ok {
 		return nil
+	}
+	// Deregister first (before attempting kernel-rule teardown below) so a
+	// torn-down VM's guest IP falls back to decide()'s fail-closed
+	// unregistered_source verdict immediately, even if the iptables cleanup
+	// commands below partially fail.
+	if e.sniLoop != nil {
+		e.sniLoop.Deregister(rule.GuestIP)
 	}
 	commands := append([]egressCommand(nil), rule.Commands...)
 	if len(commands) == 0 {
@@ -2047,6 +2115,107 @@ func (e *commandEgressEnforcer) command(name string, args ...string) error {
 		return e.run(name, args...)
 	}
 	return exec.Command(name, args...).Run()
+}
+
+// flushByComment removes every FORWARD rule this daemon previously installed for
+// vmID. On a bare daemon restart (mode-1) the kernel still holds the prior
+// process's per-VM egress rules; re-applying with raw `-I` would stack duplicates
+// that e.rules no longer tracks, so recovery flushes them first, then applies a
+// single clean set. After a host reboot (mode-2) iptables was cleared, so the
+// listing is empty and this is a no-op — both modes converge on one clean apply.
+//
+// A rule is flushed iff its --comment is exactly "anvil-egress-<vmID>" (the bare
+// deny_all rule) or begins with "anvil-egress-<vmID>-" (every profile rule, plus
+// a stale recovery-fence). The trailing dash is load-bearing: it stops vmID "vm-1"
+// from matching vmID "vm-12"'s rules, and the exact-match arm catches the bare
+// deny_all comment the dash-prefix alone would miss. The base-subnet blanket
+// ACCEPT (no --comment) and the control-plane callback ("anvil-cp-callback") carry
+// other comments and are never touched. Best-effort: list/delete failures are
+// logged and swallowed so recovery still proceeds to the fresh apply.
+func (e *commandEgressEnforcer) flushByComment(vmID string) {
+	vmID = strings.TrimSpace(vmID)
+	if vmID == "" {
+		return
+	}
+	listOutput := e.runOutput
+	if listOutput == nil {
+		listOutput = func(name string, args ...string) ([]byte, error) {
+			return exec.Command(name, args...).Output()
+		}
+	}
+	out, err := listOutput("iptables", "-S", "FORWARD")
+	if err != nil {
+		slog.Warn("recovery: egress flush list failed", "vm_id", vmID, "err", err)
+		return
+	}
+	exact := "anvil-egress-" + vmID
+	prefix := exact + "-"
+	for _, line := range strings.Split(string(out), "\n") {
+		tokens := tokenizeIptablesRule(line)
+		if len(tokens) < 2 || tokens[0] != "-A" {
+			continue
+		}
+		comment, ok := iptablesRuleComment(tokens)
+		if !ok || (comment != exact && !strings.HasPrefix(comment, prefix)) {
+			continue
+		}
+		del := append([]string(nil), tokens...)
+		del[0] = "-D"
+		if delErr := e.command("iptables", del...); delErr != nil {
+			slog.Warn("recovery: egress flush delete failed", "vm_id", vmID, "rule", strings.TrimSpace(line), "err", delErr)
+		}
+	}
+}
+
+// fenceGuestEgress installs a best-effort emergency REJECT for a recovered VM
+// whose egress re-apply failed, so it can never fall back to the base-subnet
+// blanket ACCEPT (fail-closed). Its comment shares the "anvil-egress-<vmID>-"
+// prefix so a later successful recovery flushes it before re-applying.
+func (e *commandEgressEnforcer) fenceGuestEgress(vmID, guestIP string) error {
+	return e.command("iptables", "-I", "FORWARD", "-s", guestIP, "-j", "REJECT", "-m", "comment", "--comment", "anvil-egress-"+vmID+"-recovery-fenced")
+}
+
+// tokenizeIptablesRule splits one `iptables -S` line into argv, honoring the
+// double quotes iptables wraps around --comment values (our comments never
+// contain quotes or escapes, so a single-pass toggle is sufficient). The returned
+// tokens are unquoted, so replacing "-A" with "-D" yields a spec exec can replay
+// without any shell involvement.
+func tokenizeIptablesRule(line string) []string {
+	var tokens []string
+	var cur strings.Builder
+	inQuote, started := false, false
+	flush := func() {
+		if started {
+			tokens = append(tokens, cur.String())
+			cur.Reset()
+			started = false
+		}
+	}
+	for _, r := range line {
+		switch {
+		case r == '"':
+			inQuote = !inQuote
+			started = true
+		case (r == ' ' || r == '\t') && !inQuote:
+			flush()
+		default:
+			cur.WriteRune(r)
+			started = true
+		}
+	}
+	flush()
+	return tokens
+}
+
+// iptablesRuleComment returns the value following "--comment" in a tokenized
+// rule, if present.
+func iptablesRuleComment(tokens []string) (string, bool) {
+	for i := 0; i < len(tokens)-1; i++ {
+		if tokens[i] == "--comment" {
+			return tokens[i+1], true
+		}
+	}
+	return "", false
 }
 
 // SnapshotGCRequest is the optional body for POST /snapshots/gc.
@@ -2381,14 +2550,14 @@ func (cp *ControlPlane) ensureTenantStore() *anvilmcp.QuotaStore {
 	return cp.tenantStore
 }
 
-func (cp *ControlPlane) applyEgressPolicy(vmID, tapDevice, guestIP, policy, profile string) error {
+func (cp *ControlPlane) applyEgressPolicy(vmID, tapDevice, guestIP, policy, profile, tenantID string) error {
 	if cp.egress == nil {
 		return nil
 	}
 	if profileEnforcer, ok := cp.egress.(interface {
-		ApplyWithProfile(vmID, tapDevice, guestIP, policy, profile string) error
+		ApplyWithProfile(vmID, tapDevice, guestIP, policy, profile, tenantID string) error
 	}); ok {
-		return profileEnforcer.ApplyWithProfile(vmID, tapDevice, guestIP, policy, profile)
+		return profileEnforcer.ApplyWithProfile(vmID, tapDevice, guestIP, policy, profile, tenantID)
 	}
 	return cp.egress.Apply(vmID, tapDevice, guestIP, policy)
 }
@@ -3487,7 +3656,7 @@ func (cp *ControlPlane) restoreSnapshotWithRequest(w http.ResponseWriter, snapID
 		memFileToUse = mergedMemPath
 	}
 
-	if err := cp.applyEgressPolicy(newVMID, tapDevice, newGuestIP, restoreEgressPolicy, meta.Profile); err != nil {
+	if err := cp.applyEgressPolicy(newVMID, tapDevice, newGuestIP, restoreEgressPolicy, meta.Profile, restoreTenantID); err != nil {
 		cp.restoreMu.Unlock()
 		cp.teardownRestoreDMSnapshot(dmInfo)
 		cp.releaseRestoreNetwork(tapDevice, newGuestIP)
@@ -3667,7 +3836,7 @@ func (cp *ControlPlane) restoreLegacyBindMount(
 		memFileToUse = mergedMemPath
 	}
 
-	if err := cp.applyEgressPolicy(newVMID, tapDevice, newGuestIP, restoreEgressPolicy, meta.Profile); err != nil {
+	if err := cp.applyEgressPolicy(newVMID, tapDevice, newGuestIP, restoreEgressPolicy, meta.Profile, restoreTenantID); err != nil {
 		storage.TeardownBindMount(mountTargetPath, newDiskPath)
 		cp.releaseRestoreNetwork(tapDevice, newGuestIP)
 		writeRestoreError(w, http.StatusInternalServerError, "egress_policy_failed", snapID, fmt.Sprintf("egress policy failed: %v", err))

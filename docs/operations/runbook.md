@@ -222,6 +222,111 @@ curl -H "Authorization: Bearer $TOKEN" \
   "http://127.0.0.1:3000/audit/runtime?tenant_id=$TENANT_ID&limit=50"
 ```
 
+## Egress SNI 필터 운영 (`allow_sni`)
+
+`profile` egress policy의 `allow_sni` 필드는 :443 새 흐름의 실제 ClientHello
+SNI를 강제하는 transparent 필터다(설계·잔여 위험 계약은
+[`docs/adr/0002-egress-sni-transparent-filter.md`](../adr/0002-egress-sni-transparent-filter.md)).
+이 절은 profile 작성·장애 진단·감사 확인 절차만 다룬다.
+
+### (a) profile 작성
+
+```json
+{
+  "allow_sni": ["api.anthropic.com", "*.example.com"],
+  "dns_servers": ["8.8.8.8", "1.1.1.1"]
+}
+```
+
+- `allow_sni`는 exact match가 기본이고 `*.example.com`처럼 leading label
+  wildcard(한 개 이상 라벨)를 지원한다 — `*`를 다른 위치에 두면 profile
+  로드가 거부된다.
+- **`dns_servers`에 `8.8.8.8`/`1.1.1.1`을 반드시 포함한다.** golden image
+  `resolv.conf`가 이 두 서버로 baked-in되어 있으므로(`scripts/build_image.sh`),
+  `dns_servers`가 이 둘을 빼먹으면 SNI 필터와 무관하게 guest DNS 자체가
+  깨진다(:53이 base REJECT로 막힘).
+- `allow_sni`가 비어 있으면 :443용 NFQUEUE dispatch 규칙 자체가 생성되지
+  않는다 — CIDR-only egress를 원하면 `allow_sni`를 아예 넣지 않는다(빈
+  `allow_sni: []`도 동일하게 no-dispatch로 취급됨을 확인하려면
+  `TestPlanProfileEgressCommandsNoSNIWhenEmpty`를 참조).
+- `allow_cidrs`가 있으면 :443 목적지가 CIDR에 매치될 때 SNI 검사보다 먼저
+  ACCEPT된다(additive 계약 — CIDR가 SNI보다 상위). CDN 뒤 도메인은
+  `allow_sni`로, 고정 IP 백엔드는 `allow_cidrs`로 분리한다.
+- **(e) ECH(Encrypted Client Hello) 엔드포인트**는 outer SNI를 신뢰하지
+  않으므로 `allow_sni`로 허용하지 않는다 — 반드시 `allow_cidrs`에 목적지
+  IP를 명시 추가하는 CIDR fallback으로만 opt-in 허용한다. `allow_sni`에
+  올려도 verdict가 outer(cleartext) SNI만 보고 판정하므로 의도한 endpoint를
+  못 잡을 수 있다.
+
+### (b) NFQUEUE 미지원 host — spawn 거부(preflight) 관측·복구
+
+`allow_sni` profile로 spawn했는데 host에 NFQUEUE 커널 기능/권한이 없으면,
+daemon은 규칙을 하나도 깔지 않고 spawn 자체를 거부한다(fail-closed
+preflight). 증상과 원인 확인:
+
+```bash
+# daemon 로그에서 preflight 거부 확인
+journalctl -u ephemera --since "10 min ago" | grep "requires SNI verdict loop"
+# 정확한 에러 문자열:
+#   egress profile "<profile>" requires SNI verdict loop but host lacks NFQUEUE capability (fail-closed)
+
+# host의 NFQUEUE 커널 모듈/iptables 지원 확인
+lsmod | grep nfnetlink_queue
+iptables -j NFQUEUE --help >/dev/null 2>&1 && echo "NFQUEUE target OK"
+```
+
+복구: `nfnetlink_queue` 커널 모듈을 로드하거나(`modprobe nfnetlink_queue`),
+`allow_sni` 없이 `allow_cidrs`/`allow_hosts`만 쓰는 profile로 전환한다.
+`profile` egress를 쓰는 모든 host는 NFQUEUE 사용 가능이 baseline 요구다 —
+스케줄러는 아직 별도 capability 축으로 이를 걸러내지 않으므로, `allow_sni`
+profile을 쓰는 tenant는 대상 host 전체가 NFQUEUE를 지원하는지 운영자가
+사전 확인해야 한다.
+
+### (c) verdict 루프 사망 시 :443 차단(fail-closed) 진단
+
+verdict 루프가 daemon 기동 후 죽거나(패닉/netlink 오류) 재시작 중이면,
+이미 배선된 `allow_sni` VM은 **:443 전체가 차단**된다 — `--queue-bypass`를
+쓰지 않으므로 리스너 없는 큐는 커널이 그냥 DROP한다(의도된 동작, 조용한
+미강제보다 낫다는 게 계약이다).
+
+```bash
+# daemon 로그에서 netlink 오류 확인
+journalctl -u ephemera --since "10 min ago" | grep "sni verdict loop"
+
+# guest에서 :443이 전부 실패하는지(비허용 도메인뿐 아니라 허용 도메인도)로
+# "SNI 매칭 실패"와 "verdict 루프 부재"를 구분한다 — 허용 도메인까지 막히면
+# 후자다.
+```
+
+daemon을 재시작하면 verdict 루프가 다시 bind되고, VM 복구 경로(warm/cold
+restart, snapshot restore)가 per-VM egress를 전체 재적용해 SNI 레지스트리도
+재등록한다(재시작 후 별도 수동 재등록 불필요).
+
+### (d) deny 감사/metric 확인
+
+profile 단위 allowed/denied 카운터(`/metrics`):
+
+```bash
+curl -s http://127.0.0.1:3000/metrics | grep ephemera_egress_sni_verdict_total
+# ephemera_egress_sni_verdict_total{outcome="allowed"} N
+# ephemera_egress_sni_verdict_total{outcome="denied"} N
+```
+
+이 metric은 verdict 루프가 최종 판정(ACCEPT+mark 또는 DROP)을 내린 흐름만
+센다. 판정 전 unmarked로 통과하는 미완결 ClientHello 세그먼트, IPv4 파싱
+실패, 미등록 source IP drop은 이 카운터에 포함되지 않는다(별도 로그로만
+관측 가능 — completeness gap으로 알려진 한계).
+
+개별 deny 도메인은 runtime audit에 남는다(`DaemonOperation:
+"egress_sni_denied"`, tenant가 있는 VM만 기록되고 tenant 없는 VM은 slog
+`"egress sni denied"`로 degrade):
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:3000/audit/runtime?tenant_id=$TENANT_ID&limit=50" \
+  | grep -A2 egress_sni_denied
+```
+
 ## Goosetown flock 점검
 
 live flock 목록과 단일 flock 상태:
