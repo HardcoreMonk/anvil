@@ -227,7 +227,11 @@ per-VM 적용은 기존 `commandEgressEnforcer.ApplyWithProfile`
 
 1. base REJECT + DNS/CIDR 예외: 현행 그대로(`egress_policy.go:104-126`).
 2. **신규 dispatch**: `-I FORWARD -s guestIP -p tcp --dport 443 --ctstate NEW
-   -j NFQUEUE --queue-num N --queue-bypass` (ClientHello 세그먼트를 verdict로).
+   -j NFQUEUE --queue-num N` (ClientHello 세그먼트를 verdict로). **`--queue-bypass`
+   금지** — 그 플래그는 큐 리스너 부재 시 패킷을 통과시키는 **fail-open**이라 확정
+   OQ1(fail-closed)과 모순된다. 리스너 부재는 preflight(OQ1)가 spawn 단계에서
+   차단하므로 정상 운영에서 발생하지 않고, 만에 하나 verdict 루프가 죽으면 큐가
+   막혀 :443이 fail-closed로 차단되는 것이 의도된 동작이다.
 3. **신규 fast-path**: `-I FORWARD -s guestIP -p tcp --dport 443 -m conntrack
    --ctstate ESTABLISHED -m mark --mark <approved> -j ACCEPT` (verdict가 mark 찍은
    흐름만 커널 fast-path). (정확한 mark/규칙 순서는 plan에서 확정.)
