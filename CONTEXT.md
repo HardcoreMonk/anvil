@@ -38,7 +38,7 @@ backlog + open-gate 마감; full KVM e2e 343✓, step 59 실 LLM 포함)이며 �
 (SLIM/FULL tarball + sha256)를 제공한다. 이후 main은 cross-host shared Town
 Wall/gtcall/home 재선출 failover, adapter reconcile loop, bounded relay retry,
 cross-host snapshot replication 자동화에 더해 routed flock 스택 결함 D1~D3 종결
-(D4는 재발로 미해결 — 아래), web major(vite8/svelte5), scheduler 실배포+installer
+(D4는 종결 — upstream KVM/fc resume-race 추적 known limitation, 아래), web major(vite8/svelte5), scheduler 실배포+installer
 검증(PR #19~#47) 등 untagged
 작업을 더 포함한다(요지는 아래 "후속 완료 상태", 상세는 dated handoff).
 
@@ -71,11 +71,12 @@ Gateway(`EPHEMERA_MCP_*`, `internal/mcpgateway`), `v0.7.0` end-user installer
 runtime/operator surface로만 채택해 IronClaw `anvil_*` MCP surface로 노출하지 않으며
 (runtime MCP Gateway는 `cmd/anvil-mcp` IronClaw adapter를 대체하지 않는다), systemd
 service는 canonical `ephemera` 이름을 유지한다(anvil alias wrapper 없음). 남은
-deferred/비목표는 `v0.4.2` default COW 전환(KVM burn-in 후 flip)과 runtime MCP
-Gateway의 IronClaw 표면 승격 금지(비목표 유지)다. `v0.4.4` flock broadcast의 MCP tool
-노출은 기각 확정(2026-07-11, daemon-only 유지), auto-snapshot public support는 env-only
-확정(2026-07-11, 공개 표면 미노출), flock member spawn의 per-profile sizing 존중은
-완료(2026-07-11)로 세 항목 모두 deferred에서 종결됐다. release-gate 코드 항목 4종
+비목표는 runtime MCP Gateway의 IronClaw 표면 승격 금지(비목표 유지)다. `v0.4.4` flock
+broadcast의 MCP tool 노출은 기각 확정(2026-07-11, daemon-only 유지), auto-snapshot
+public support는 env-only 확정(2026-07-11, 공개 표면 미노출), flock member spawn의
+per-profile sizing 존중은 완료(2026-07-11)로 세 항목 모두 deferred에서 종결됐고,
+`v0.4.2` default COW 전환도 종결(2026-07-13 — default plain 무기한 확정·COW opt-in,
+D4가 upstream KVM/fc resume-race로 종결)로 deferred가 모두 정리됐다. release-gate 코드 항목 4종
 (audit-writer sentinel, stdio stderr scrub, `credential_env` reserved names,
 production-mux auth assert)은 2026-07-06 follow-up batch로 닫혔고, 마지막 open gate
 (valid provider key `semantic` run, e2e step 59)도 `18c7559`에서 OpenAI `gpt-4o`로
@@ -389,8 +390,8 @@ daemon으로 보내는 outbound Bearer token이다.
   [`docs/superpowers/specs/2026-07-11-snapshot-replication-automation-design.md`](docs/superpowers/specs/2026-07-11-snapshot-replication-automation-design.md),
   [`docs/operations/2026-07-11-snapshot-replication-automation-handoff.md`](docs/operations/2026-07-11-snapshot-replication-automation-handoff.md),
   [`docs/operations/2026-07-11-replication-multihost-verification-run.md`](docs/operations/2026-07-11-replication-multihost-verification-run.md).
-- routed flock 스택 결함 D1~D3가 종결됐다(2026-07-10~11); **D4는 재발로 미해결**
-  (아래). D1: daemon 재시작
+- routed flock 스택 결함 D1~D3가 종결됐다(2026-07-10~11); **D4도 종결**
+  (2026-07-13 결정, upstream KVM/fc resume-race 추적 known limitation — 아래). D1: daemon 재시작
   시 routed flock 분산 상태 유실 + 재등록 비멱등 `409`(PR #30·#31, hub/relay 토큰
   refill 포함). D2: routed flock delete가 이미 소멸한 VM의 `DELETE` `404`를
   cleanup 실패로 오보고하던 것을 "이미 소멸"로 분류(진짜 실패는 계속
@@ -398,26 +399,33 @@ daemon으로 보내는 outbound Bearer token이다.
   >4K) 파일시스템에서 sparse diff snapshot의 hole이 record 단위로만 보고돼 guest
   메모리를 오염시키던 것을 `ProbeHoleGranularity`(fine=`HoleGranularityFine` 4096B)
   기반 창설측 diff→full 강등 + 판독측 overlay 거부(`refusing overlay ... (see D3)`)
-  로 방어(PR #36). **D4(미해결)**: cow-스폰 VM의 diff-restore가 ZFS+전체 게이트
-  부하에서만 guest kernel panic(GPF `inet_bind2_bucket_find`). 1차 fix(PR #46:
-  `overlaySparseDiff` loop attach 전 `out.Sync()`)는 필요했으나 불충분 — flip
-  재검증에서 재발(그 green은 n=1 우연), host-b도 byte-identical 데몬으로 재현된
-  일반 결함이며 anvil-측 레버·fc CHANGELOG 전부 음성, 잔여 원인은 fc/KVM 계층의
-  부하-경합(위 완료 목록 아래 "D4 후속"·default COW 항목). D1~D3 상세:
+  로 방어(PR #36). **D4(종결, 2026-07-13 — upstream KVM/fc resume-race 추적)**:
+  cow-스폰 VM의 diff-restore가 ZFS+전체 게이트 부하에서만 guest kernel panic(GPF
+  `inet_bind2_bucket_find`). 4라운드 조사로 anvil 코드로는 닫을 수 없음이 확정됐다 —
+  1차 fix(PR #46: `overlaySparseDiff` loop attach 전 `out.Sync()`)는 필요했으나
+  불충분(flip 재검증에서 재발), host-b도 byte-identical 데몬으로 재현된 일반 결함,
+  anvil-측 레버·fc CHANGELOG 전부 음성. fc v1.15.1→v1.16.1 업그레이드가 실패율을
+  100%→~25%로 극감(v1.16.0 vsock RX-race fix #5882가 주 기여)시켰으나 잔여 존속,
+  pre-resume quiescence 지연도 확률만 낮출 뿐 어느 고정값도 양 host n≥2 미달. 근본
+  원인은 anvil 밖 KVM/Firecracker resume-race로 좁혀졌고 anvil-측 소진으로 **종결**
+  (default plain 유지·COW opt-in, fc v1.16.1 최대 완화, fc/KVM 상류 추적). D1~D3 상세:
   [`docs/operations/2026-07-10-cross-host-verification-run-handoff.md`](docs/operations/2026-07-10-cross-host-verification-run-handoff.md),
   D4 상세:
   [`docs/operations/2026-07-11-cow-burnin-run.md`](docs/operations/2026-07-11-cow-burnin-run.md).
-- `v0.4.2` default COW 전환은 **여전히 보류**다(D4 미해결). burn-in run 1이
-  host-a full cow gate에서 FAIL(step 31 diff-restore `500`) → D4 회부 → 1차
-  fix(PR #46, `overlaySparseDiff` `out.Sync()`) 후 green을 근거로 잠시 "조건
-  충족"으로 봤으나, **default-cow-flip 재검증에서 D4가 재발**해 그 green이 n=1
-  우연이었음이 드러났다(D4 REOPENED). 재-RCA에서 host-b도 byte-identical
-  데몬으로 동일 GPF(`inet_bind2_bucket_find`)를 재현 → **일반 결함**(host-a
-  하드웨어 아님) 확정, anvil 저장소·복원-설정 레버(fsync/global sync/direct-io/
-  산출물 경로·unlink 감사·메모리 파일 불가침 가설)는 전부 음성, fc CHANGELOG
-  대조(#5705=v1.15.0 multi-slot 손상 fix — 우리 v1.15.1에 이미 포함, 단일 slot이라
-  조건 미충족)도 음성. 잔여 원인은 heavy 동시-부하 하 diff-restore resume
-  경합(KVM/Firecracker/host 계층). 상세: [`docs/operations/2026-07-11-cow-burnin-run.md`](docs/operations/2026-07-11-cow-burnin-run.md) "D4 — REOPENED (round 2)".
+- `v0.4.2` default COW 전환은 **종결**됐다(2026-07-13 결정 — default plain 무기한
+  유지, COW opt-in, flip 재개는 upstream 해소 시에만). burn-in run 1이 host-a full
+  cow gate에서 FAIL(step 31 diff-restore `500`) → D4 회부 → 1차 fix(PR #46,
+  `overlaySparseDiff` `out.Sync()`)는 필요했으나 불충분(flip 재검증에서 **D4 재발**,
+  그 green은 n=1 우연). host-b도 byte-identical 데몬으로 동일 GPF
+  (`inet_bind2_bucket_find`)를 재현 → **일반 결함**(host-a 하드웨어 아님) 확정,
+  anvil 저장소·복원-설정 레버(fsync/global sync/direct-io/산출물 경로·unlink 감사·
+  메모리 파일 불가침 가설)는 전부 음성, fc CHANGELOG 대조(#5705=v1.15.0 multi-slot
+  손상 fix — 우리 v1.15.1에 이미 포함, 단일 slot이라 조건 미충족)도 음성. fc
+  v1.16.1 업그레이드가 실패율을 100%→~25%로 극감(v1.16.0 vsock RX-race fix #5882
+  주 기여)시켰으나 잔여 존속하고, pre-resume quiescence 지연도 확률만 낮출 뿐 어느
+  고정값도 양 host n≥2 미달. 근본 원인은 anvil 밖 KVM/Firecracker resume-race이며
+  anvil-측 소진으로 default COW flip을 무기한 접고(=종결) fc/KVM 상류에 제보한다
+  (fc v1.16.1이 최대 완화). 상세: [`docs/operations/2026-07-11-cow-burnin-run.md`](docs/operations/2026-07-11-cow-burnin-run.md) round 1~4, 상류 제보문 [`docs/operations/2026-07-13-d4-firecracker-upstream-report.md`](docs/operations/2026-07-13-d4-firecracker-upstream-report.md).
 - web frontend가 vite 8 + svelte 5 major로 업그레이드됐다(legacy-compat 마이그레이션,
   PR #39). `web/package.json`은 `svelte ^5.56`/`vite ^8.1`/`@sveltejs/vite-plugin-svelte
   ^7.2`, embedded `cmd/goose-daemon/uidist/` 번들도 재생성됐다. svelte 5 runes 전환은
@@ -448,23 +456,27 @@ daemon으로 보내는 outbound Bearer token이다.
 
 남은 후속 후보:
 
-- `v0.4.2` default COW flip — **D4 미해결로 보류**(위 "D4 후속" 항목의 fc 업그레이드
-  소거법/anvil 완화 A/B가 host-a·host-b n≥2 green을 통과해야 재개). `feat/default-cow-flip`
-  브랜치(unset→cow flip 코드 + ext4 gate 2종 green)는 미머지 보존 — D4 해소 후
-  ZFS 게이트 재검증만 얹으면 된다. (auto-snapshot env-only 확정·`v0.4.4` broadcast
-  MCP 노출 기각 확정·flock member per-profile sizing 존중 완료는 2026-07-11 종결 —
-  후보 아님.)
+- `v0.4.2` default COW flip — **종결(default plain 확정)**. D4가 upstream KVM/fc
+  resume-race로 종결됨에 따라(위 "D4" 항목) flip은 보류가 아니라 무기한 접었다 —
+  재개는 upstream이 resume-race를 해소하고 host-a·host-b n≥2 green을 재검증할 때에만.
+  `feat/default-cow-flip` 브랜치(unset→cow flip 코드 + ext4 gate 2종 green)는 origin에
+  참조로 미머지 보존(정리하지 않음 — upstream 해소 시 ZFS 게이트 재검증만 얹으면 재사용).
+  (auto-snapshot env-only 확정·`v0.4.4` broadcast MCP 노출 기각 확정·flock member
+  per-profile sizing 존중 완료는 2026-07-11 종결 — 후보 아님.)
 - upstream 기여 후보: proxy agent client keep-alive 비활성화(`64ec57c`, guest IP
   재활용 시 stale pooled connection) — upstream ephemera에 동형 경로가 있으면 같은
   잠재 결함이라 upstream 확인 후 기여 검토. (D4 fsync `out.Sync()`는 필요조건이었으나
   단독으로는 불충분했다 — 위 COW 항목 참조. 근본 원인이 fc/KVM 계층이라 anvil 기여
-  후보가 아니라 **fc/KVM 상류 제보 후보**다.)
-- **D4 후속(미해결)**: default-cow diff-restore가 heavy 부하 하 guest kernel panic —
-  다음 후보(우선순위순): ① fc pin 업그레이드(≥1.16.1/최신) 후 host-b gate n≥2 재검증
-  (값싼 소거법), ② anvil-측 완화 A/B(diff-restore resume 창 축소 — 1GB memory copy
-  가속/제거, restore 동시성 축소, bounded quiescence)를 host-a·host-b 각 n≥2 + ext4
-  회귀로, ③ fc/KVM 상류 제보. 해소 전까지 default COW flip 보류. `feat/default-cow-flip`
-  브랜치(unset→cow flip 코드 + ext4 gate 2종 green)는 미머지 보존.
+  후보가 아니라 **fc/KVM 상류 제보**이며, 제보문
+  [`docs/operations/2026-07-13-d4-firecracker-upstream-report.md`](docs/operations/2026-07-13-d4-firecracker-upstream-report.md)
+  작성 완료.)
+- **D4(종결, upstream-tracked)**: default-cow diff-restore가 heavy 부하 하 guest
+  kernel panic. 4라운드 조사(① fc v1.16.1 업그레이드 = 실패율 100%→~25%, ② anvil-측
+  완화 A/B = 어느 고정 지연값도 양 host n≥2 미달)로 anvil-측 레버가 소진됐고 근본은
+  anvil 밖 KVM/Firecracker resume-race로 확정 → 2026-07-13 종결. fc/KVM 상류 제보문
+  [`docs/operations/2026-07-13-d4-firecracker-upstream-report.md`](docs/operations/2026-07-13-d4-firecracker-upstream-report.md)
+  작성 완료. default COW flip 무기한 보류(=종결), `feat/default-cow-flip` 브랜치는
+  origin에 참조로 미머지 보존. upstream resume-race 해소 관측이 유일한 재개 트리거.
 - runtime MCP Gateway backend 실 operator 배포 검증. 운영 정책(backend→profile
   바인딩, rate-limit/burst, `secrets.yaml` 규율)은 `runbook.md` 문서화 + live
   dry-run까지 완료(PR #40 트랙 C) — 실 backend server를 붙인 operator 배포 검증만 잔여.

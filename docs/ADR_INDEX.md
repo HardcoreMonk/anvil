@@ -64,7 +64,7 @@
 | `v0.3.6` | adapted | autonomous webdev demo, in-VM `gtcall`, multi-line-safe `gtwall`, Goose JSON output parsing은 채택한다. `gtcall`은 peer `agent_token`을 VM 내부에 노출하지 않고 control-plane proxy token injection 경계를 유지한다. |
 | `v0.4.0` | adapted, auto-snapshot env-only 확정 | storage/recovery core(memory auto-snapshot, diff/COW rootfs, spawn-path cold-restart)는 채택한다. `EPHEMERA_AUTOSNAPSHOT=true` auto-snapshot은 opt-in·disk-expensive로 두고 public support로 승격하지 않는다 — env-only 확정(2026-07-11: config API/UI/MCP 공개 표면 미노출, opt-in 운영법은 runbook). |
 | `v0.4.1` | adapted | client identity, daemon access audit(`GET /audit`), per-token TTL/rotation은 채택한다. `ephemera-ctl`은 runtime operator CLI로 유지하고 IronClaw MCP tool을 대체하거나 anvil MCP public surface로 승격하지 않는다. |
-| `v0.4.2` | adapted, default cow deferred(D4 미해결로 flip 보류) | COW probe/fallback과 COW+Diff snapshot은 채택한다. `EPHEMERA_DISK_MODE=cow`는 anvil에서 명시적 opt-in이다. default 전환은 **보류** — burn-in run 1이 diff-restore `500`으로 FAIL→D4 회부→1차 fix(PR #46: `overlaySparseDiff` `out.Sync()`) 후 green을 근거로 잠시 조건 충족으로 봤으나, flip 재검증에서 **D4 재발**(그 green은 n=1 우연). 재-RCA: host-b도 byte-identical 데몬으로 동일 GPF 재현=일반 결함, anvil-측 레버·fc CHANGELOG(#5705 v1.15.0 이미 포함, 조건 미충족) 전부 음성 → 원인은 fc/KVM 계층의 부하-경합. flip 재개는 fc 업그레이드 소거법 또는 anvil 완화 A/B가 host-a·host-b n≥2 green을 통과한 뒤(run 기록 [`operations/2026-07-11-cow-burnin-run.md`](operations/2026-07-11-cow-burnin-run.md) "D4 — REOPENED (round 2)"). |
+| `v0.4.2` | adapted, default plain 확정(D4 upstream-tracked, COW opt-in) | COW probe/fallback과 COW+Diff snapshot은 채택한다. `EPHEMERA_DISK_MODE=cow`는 anvil에서 명시적 opt-in이다. default 전환은 **종결**(2026-07-13, default plain 무기한 유지) — burn-in run 1이 diff-restore `500`으로 FAIL→D4 회부→1차 fix(PR #46: `overlaySparseDiff` `out.Sync()`)는 필요했으나 불충분(flip 재검증에서 **D4 재발**, 그 green은 n=1 우연). 재-RCA: host-b도 byte-identical 데몬으로 동일 GPF 재현=일반 결함, anvil-측 레버·fc CHANGELOG(#5705 v1.15.0 이미 포함, 조건 미충족) 전부 음성. fc v1.16.1 업그레이드가 실패율 100%→~25%(v1.16.0 vsock RX-race fix #5882 주 기여)로 극감시켰으나 잔여 존속, pre-resume quiescence 지연도 어느 고정값도 양 host n≥2 미달 → 근본은 anvil 밖 KVM/Firecracker resume-race, anvil-측 소진으로 종결. flip 재개는 upstream 해소 시에만. fc/KVM 상류 제보문 [`operations/2026-07-13-d4-firecracker-upstream-report.md`](operations/2026-07-13-d4-firecracker-upstream-report.md), run 기록 [`operations/2026-07-11-cow-burnin-run.md`](operations/2026-07-11-cow-burnin-run.md) round 1~4. |
 | `v0.4.3` | adapted | dynamic flock membership, pause/resume, per-flock `max_agents`, Town Wall filter/rotation single-host lifecycle은 채택한다. routed members-only cross-host flock에는 그대로 적용하지 않는다. |
 | `v0.4.4` | adapted, broadcast MCP exposure 기각 확정 | streaming `/tasks`(buffered 기본 계약 유지), nested depth guard(`EPHEMERA_MAX_TASK_DEPTH`, `508`), `GET /watchdog/status`, goose-agent slog는 채택한다. flock broadcast는 daemon API/CLI(`ephemera-ctl`)로만 두고 `anvil_*` MCP tool 노출은 기각 확정이다(2026-07-11: 로컬 host scope 전용이라 routed flock 원격 멤버 미도달·audit 1:1 불변식·adapter rate limit 부재가 근거, guard로 계속 고정). |
 | `v0.4.5` | adapted | snapshot-restore auto-recovery(`recoverRestoredVM`/`reRestoreMachine`)를 채택하고 restore state에 `tenant_id`/`egress_policy`를 persist하되 응답 token redaction은 유지한다. anvil은 live·persisted restored VM이 참조하는 source snapshot의 `DELETE`를 `409`로 막아 upstream e2e 46c의 `200` orphan 동작과 의도적으로 divergent하다(먼저 VM을 삭제한 뒤 snapshot 삭제). |
@@ -128,10 +128,10 @@ stdio stderr scrub, `credential_env` reserved names, production-mux auth sentine
 `18c7559`에서 OpenAI `gpt-4o`로 닫혔다(full e2e `343✓/0✗`) — release-gate open 항목
 없음. 2026-07-11 결정으로 `v0.4.4` broadcast MCP 노출은 기각 확정, auto-snapshot
 public support는 env-only 확정, flock member per-profile sizing 존중은 완료됐다. `v0.4.2`
-default COW 전환은 **D4 미해결로 보류**다(PR #46 fix 후 green은 flip 재검증에서 D4
-재발로 n=1 우연이었음이 드러남; 재개는 fc 업그레이드/anvil 완화가 host-a·host-b n≥2
-green을 통과한 뒤 — 위 v0.4.2 행). 남은 비목표는 runtime MCP Gateway의 IronClaw 표면
-승격 금지다.
+default COW 전환은 **종결**됐다(2026-07-13 — default plain 무기한 확정, COW opt-in; D4는
+upstream KVM/fc resume-race 추적 known limitation, anvil-측 소진, fc v1.16.1 최대 완화;
+재개는 upstream 해소 시에만 — 위 v0.4.2 행). 남은 비목표는 runtime MCP Gateway의 IronClaw
+표면 승격 금지다.
 
 ---
 
