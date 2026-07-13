@@ -159,9 +159,9 @@ CDN 뒤 도메인은 SNI로, 고정 IP 백엔드/비-TLS 엔드포인트는 CIDR
 `dns_servers`로 통제한다.
 
 **위협 모델과 잔여 위험**: anvil guest는 신뢰된 golden-image 워크로드이지,
-루트를 쥔 적대적 사용자가 host를 공격하는 환경이 아니다. 이 필터는 "신뢰
-워크로드의 의도된 :443 egress를 강제·감사"하는 것이 계약이며, **적대적
-in-guest 루트에 대한 완전 봉쇄가 아니다**. 알려진 잔여 위험:
+루트를 쥔 적대적 사용자가 host를 공격하는 환경이 아니다. **핵심 계약 한 줄**:
+SNI 필터는 신뢰 워크로드의 의도된 :443 egress를 강제·감사한다. 적대적 in-guest
+루트에 대한 완전 봉쇄가 아니다. 알려진 잔여 위험:
 
 - **ECH/ESNI**: cleartext SNI가 없거나 decoy outer만 있으면 인식 가능한
   allowlisted SNI가 없어 fail-closed DROP된다. anvil은 ECH를 무력화하지

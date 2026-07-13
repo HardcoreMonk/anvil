@@ -212,7 +212,8 @@ backport(atomic temp+rename 무조건 검증 포함, upstream보다 stricter)가
   스크립트는 operator가 설정한 값만 systemd env 파일에 기록한다(`ANVIL_SCHEDULER_HOSTS_SRC`는
   hosts JSON을 `ANVIL_SCHEDULER_HOSTS_FILE`로 설치하는 설치 스크립트 전용 knob)
 - profile egress policy directory 환경 변수: `EPHEMERA_EGRESS_PROFILE_DIR`,
-  `ANVIL_EGRESS_PROFILE_DIR`
+  `ANVIL_EGRESS_PROFILE_DIR`; SNI verdict NFQUEUE 큐 번호 override
+  `ANVIL_SNI_QUEUE_NUM`(기본 `88`, 범위 `0..65535`, 파싱 실패·범위 밖이면 기본값)
 - optional trace export 환경 변수: `ANVIL_OTEL_EXPORTER_OTLP_ENDPOINT`,
   `OTEL_EXPORTER_OTLP_ENDPOINT`
 
