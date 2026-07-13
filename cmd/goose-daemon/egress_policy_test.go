@@ -96,6 +96,54 @@ func TestLoadEgressProfileParsesAllowSNI(t *testing.T) {
 	}
 }
 
+func TestPlanProfileEgressCommandsEmitsSNIDispatch(t *testing.T) {
+	commands, err := planProfileEgressCommands("vm-1", "10.0.1.10", egressProfile{
+		AllowSNI: []string{"api.anthropic.com", "*.example.com"},
+	})
+	if err != nil {
+		t.Fatalf("planProfileEgressCommands error = %v", err)
+	}
+	joined := joinCommands(commands)
+	for _, want := range []string{
+		"iptables -I FORWARD -s 10.0.1.10 -p tcp --dport 443 -m connmark --mark 0x534e49 -j ACCEPT -m comment --comment anvil-egress-vm-1-sni-fastpath",
+		"iptables -I FORWARD -s 10.0.1.10 -p tcp --dport 443 -m connmark ! --mark 0x534e49 -j NFQUEUE --queue-num 88 -m comment --comment anvil-egress-vm-1-sni-nfqueue",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("commands missing %q:\n%s", want, joined)
+		}
+	}
+}
+
+func TestPlanProfileEgressCommandsNoSNIWhenEmpty(t *testing.T) {
+	commands, err := planProfileEgressCommands("vm-1", "10.0.1.10", egressProfile{
+		AllowCIDRs: []string{"203.0.113.10/32"},
+	})
+	if err != nil {
+		t.Fatalf("error = %v", err)
+	}
+	if strings.Contains(joinCommands(commands), "NFQUEUE") {
+		t.Fatal("allow_sni empty must not emit NFQUEUE dispatch rule")
+	}
+}
+
+func TestPlanProfileEgressCommandsCIDRAboveSNI(t *testing.T) {
+	// Ordering contract: the emitted slice must place CIDR after the SNI block so
+	// that after -I head-insert reversal the CIDR rule sits ABOVE the dispatch.
+	commands, err := planProfileEgressCommands("vm-1", "10.0.1.10", egressProfile{
+		AllowCIDRs: []string{"203.0.113.10/32"},
+		AllowSNI:   []string{"api.anthropic.com"},
+	})
+	if err != nil {
+		t.Fatalf("error = %v", err)
+	}
+	joined := joinCommands(commands)
+	dispatchIdx := strings.Index(joined, "-sni-nfqueue")
+	cidrIdx := strings.Index(joined, "-cidr-0")
+	if dispatchIdx < 0 || cidrIdx < 0 || !(dispatchIdx < cidrIdx) {
+		t.Fatalf("expected sni-nfqueue before cidr-0 in slice order; dispatch=%d cidr=%d\n%s", dispatchIdx, cidrIdx, joined)
+	}
+}
+
 func joinCommands(commands []egressCommand) string {
 	var lines []string
 	for _, command := range commands {

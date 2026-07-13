@@ -340,6 +340,43 @@ func TestCommandEgressEnforcerProfileApplyFailureRollsBackAppliedRules(t *testin
 	}
 }
 
+func TestCommandEgressEnforcerProfileCleanupRemovesSNIRulesInReverse(t *testing.T) {
+	profileDir := t.TempDir()
+	writeEgressProfileFixtureWithSNI(t, profileDir, "sni-profile")
+
+	var commands [][]string
+	enforcer := &commandEgressEnforcer{
+		profileDir: profileDir,
+		run: func(name string, args ...string) error {
+			commands = append(commands, append([]string{name}, args...))
+			return nil
+		},
+	}
+
+	if err := enforcer.ApplyWithProfile("vm-1", "tap-vm-1", "10.0.1.10", "profile", "sni-profile"); err != nil {
+		t.Fatalf("ApplyWithProfile error = %v", err)
+	}
+	applied := len(commands)
+	if err := enforcer.Cleanup("vm-1"); err != nil {
+		t.Fatalf("Cleanup error = %v", err)
+	}
+	cleanup := commands[applied:]
+
+	want := [][]string{
+		{"iptables", "-D", "FORWARD", "-s", "10.0.1.10", "-p", "tcp", "--dport", "443", "-m", "connmark", "--mark", "0x534e49", "-j", "ACCEPT", "-m", "comment", "--comment", "anvil-egress-vm-1-sni-fastpath"},
+		{"iptables", "-D", "FORWARD", "-s", "10.0.1.10", "-p", "tcp", "--dport", "443", "-m", "connmark", "!", "--mark", "0x534e49", "-j", "NFQUEUE", "--queue-num", "88", "-m", "comment", "--comment", "anvil-egress-vm-1-sni-nfqueue"},
+		{"iptables", "-D", "FORWARD", "-s", "10.0.1.10", "-j", "REJECT", "-m", "comment", "--comment", "anvil-egress-vm-1-default"},
+	}
+	if len(cleanup) != len(want) {
+		t.Fatalf("cleanup commands = %#v, want %#v", cleanup, want)
+	}
+	for i := range want {
+		if strings.Join(cleanup[i], " ") != strings.Join(want[i], " ") {
+			t.Fatalf("cleanup[%d] = %#v, want %#v", i, cleanup[i], want[i])
+		}
+	}
+}
+
 func TestCommandEgressEnforcerProfileApplyFailureReportsCleanupFailure(t *testing.T) {
 	profileDir := t.TempDir()
 	writeEgressProfileFixture(t, profileDir, "restricted")
@@ -1142,6 +1179,17 @@ func writeEgressProfileFixture(t *testing.T, baseDir, profileName string) {
 		t.Fatalf("mkdir egress profile dir: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(profileDir, "egress.json"), []byte(`{"allow_cidrs":["203.0.113.10/32"]}`), 0600); err != nil {
+		t.Fatalf("write egress profile: %v", err)
+	}
+}
+
+func writeEgressProfileFixtureWithSNI(t *testing.T, baseDir, profileName string) {
+	t.Helper()
+	profileDir := filepath.Join(baseDir, profileName)
+	if err := os.MkdirAll(profileDir, 0700); err != nil {
+		t.Fatalf("mkdir egress profile dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(profileDir, "egress.json"), []byte(`{"allow_sni":["api.anthropic.com"]}`), 0600); err != nil {
 		t.Fatalf("write egress profile: %v", err)
 	}
 }

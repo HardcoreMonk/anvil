@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -13,7 +14,26 @@ const (
 	envEphemeraEgressProfileDir = "EPHEMERA_EGRESS_PROFILE_DIR"
 	envAnvilEgressProfileDir    = "ANVIL_EGRESS_PROFILE_DIR"
 	defaultEgressProfileDir     = "configs/profiles"
+
+	// sniApprovedConnmark is the connmark iptables/conntrack applies once the
+	// NFQUEUE-side SNI inspector approves a ClientHello for a connection. ASCII "SNI".
+	sniApprovedConnmark = "0x534e49"
+	// sniQueueNumDefault is the NFQUEUE queue number the SNI inspector listens on
+	// unless overridden by ANVIL_SNI_QUEUE_NUM.
+	sniQueueNumDefault = 88
 )
+
+// sniQueueNum returns the NFQUEUE queue number to dispatch unapproved TLS
+// connections to, honoring an ANVIL_SNI_QUEUE_NUM override when it parses as
+// a valid 0..65535 queue number.
+func sniQueueNum() int {
+	if v := strings.TrimSpace(os.Getenv("ANVIL_SNI_QUEUE_NUM")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 && n <= 65535 {
+			return n
+		}
+	}
+	return sniQueueNumDefault
+}
 
 type egressProfile struct {
 	AllowCIDRs []string `json:"allow_cidrs"`
@@ -138,6 +158,14 @@ func planProfileEgressCommands(vmID, guestIP string, profile egressProfile) ([]e
 		commands = append(commands,
 			egressCommand{Name: "iptables", Args: []string{"-I", "FORWARD", "-s", guestIP, "-d", server, "-p", "udp", "--dport", "53", "-j", "ACCEPT", "-m", "comment", "--comment", fmt.Sprintf("%s-dns-%d-udp", prefix, idx)}},
 			egressCommand{Name: "iptables", Args: []string{"-I", "FORWARD", "-s", guestIP, "-d", server, "-p", "tcp", "--dport", "53", "-j", "ACCEPT", "-m", "comment", "--comment", fmt.Sprintf("%s-dns-%d-tcp", prefix, idx)}},
+		)
+	}
+	if len(profile.AllowSNI) > 0 {
+		q := strconv.Itoa(sniQueueNum())
+		commands = append(commands,
+			// dispatch first in slice so it lands BELOW fastpath after -I reversal.
+			egressCommand{Name: "iptables", Args: []string{"-I", "FORWARD", "-s", guestIP, "-p", "tcp", "--dport", "443", "-m", "connmark", "!", "--mark", sniApprovedConnmark, "-j", "NFQUEUE", "--queue-num", q, "-m", "comment", "--comment", prefix + "-sni-nfqueue"}},
+			egressCommand{Name: "iptables", Args: []string{"-I", "FORWARD", "-s", guestIP, "-p", "tcp", "--dport", "443", "-m", "connmark", "--mark", sniApprovedConnmark, "-j", "ACCEPT", "-m", "comment", "--comment", prefix + "-sni-fastpath"}},
 		)
 	}
 	for idx, cidr := range profile.AllowCIDRs {
