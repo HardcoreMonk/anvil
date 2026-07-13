@@ -297,7 +297,13 @@ restore 경로의 direct token exposure는 제거됐다. 새로운 audit record,
 
 - 완전한 multi-tenant runtime 즉시 구현
 - cross-host broadcast fan-out
-- L7 egress proxy 또는 full HTTP CONNECT/SNI gateway
+- **full HTTP CONNECT/forward proxy, TLS 종단(MITM), QUIC L7 SNI 파싱** — :443
+  transparent SNI 필터(`allow_sni`, ADR-0002)는 이제 in-scope이고 구현됐다
+  (신뢰 워크로드의 의도된 :443 egress를 강제·감사; 적대적 in-guest 루트에
+  대한 완전 봉쇄는 아니다 — 잔여 위험 계약은
+  [`docs/adr/0002-egress-sni-transparent-filter.md`](../adr/0002-egress-sni-transparent-filter.md)
+  참조). full L7 forward proxy(임의 프로토콜 CONNECT), TLS 종단/MITM 복호화,
+  QUIC Initial SNI 파싱은 여전히 비목표다.
 - billing
 - UI
 - OpenClaw compatibility layer

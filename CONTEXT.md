@@ -453,6 +453,32 @@ daemon으로 보내는 outbound Bearer token이다.
   wall 손실 계약과 충돌하는 부분-부활 semantics·전달 보장 약화·seq/중복 복잡성을
   재도입한다. 필요 대두 시 대안은 guest-side `gtwall` 지수 backoff 재시도(미등재).
   상세: [`docs/operations/2026-07-11-6b-failover-verification-run.md`](docs/operations/2026-07-11-6b-failover-verification-run.md).
+- **egress L7/SNI hardening이 구현 완료됐다**(2026-07-13/14, `feature/egress-sni-filter`,
+  최소 3개 릴리즈(`v0.2.x`~`v0.3.1`)에서 이월되던 후속 후보를 해소). `egressProfile`에
+  신규 `allow_sni []string` 필드(기존 `allow_hosts` substring 재해석 아님, 하위호환
+  additive, `*.` leading-label wildcard)를 추가하고, :443 새 흐름의 ClientHello를
+  `iptables -j NFQUEUE --queue-num 88`(env `ANVIL_SNI_QUEUE_NUM`)로 goose-daemon
+  **in-process** verdict 루프(`github.com/florianl/go-nfqueue/v2` — 이 slice의 유일한
+  신규 direct 의존)에 dispatch해 실제 파싱된 SNI를 매칭한다. 허용 흐름은 conntrack
+  mark(`0x534e49`)를 찍고 이후 패킷은 커널 fast-path ACCEPT, 비허용/파싱불가는
+  fail-closed DROP(+best-effort RST) — `--queue-bypass`(fail-open)는 명시 배제하고,
+  verdict 루프가 준비 안 된 host의 `allow_sni` profile spawn은 preflight로 거부한다.
+  CIDR allow는 head-insert 순서상 SNI dispatch보다 위라 :443 CIDR 매치가 SNI 검사를
+  우회한다(additive 계약, CIDR가 SNI보다 상위). VM 복구(warm/cold/snapshot restore)가
+  per-VM egress 전체(iptables 재설치 + SNI 레지스트리 재등록)를 재적용해 호스트
+  리부트 후 fail-open과 데몬 재시작 후 SNI fail-closed 갭을 모두 봉쇄한다. **위협
+  모델**: 신뢰 golden-image 워크로드의 의도된 :443 egress 강제·감사가 in-scope이고
+  적대적 in-guest 루트의 spoof/fronting/ECH 완전봉쇄는 out-of-scope — 잔여 위험
+  6항목(ECH는 fail-closed deny, non-TLS/QUIC:443은 SNI 층 밖, SNI는 guest-asserted라
+  CIDR 핀 없이 스푸핑 가능, domain fronting 미탐지, 멀티세그먼트 ClientHello의
+  미완결 세그먼트가 판정 전 unmarked로 통과하되 승인 mark는 완결된 positive
+  match에서만 찍혀 승인 누수는 아님)를 [ADR-0002](docs/adr/0002-egress-sni-transparent-filter.md)가
+  명시 계약한다. 유닛(`internal/network/sni` 파서/매처/fuzz,
+  `cmd/goose-daemon` decide/preflight/rollback/recovery/audit/metric) + KVM e2e
+  `scripts/anvil-egress-sni-e2e.sh`(허용 도메인 도달·비허용 차단(RST 즉시 실패)·감사
+  레코드·fast-path metric delta, exit 0)로 검증됐다. 상세:
+  [`docs/superpowers/specs/2026-07-13-egress-sni-filter-design.md`](docs/superpowers/specs/2026-07-13-egress-sni-filter-design.md),
+  [`docs/operations/2026-07-13-egress-sni-handoff.md`](docs/operations/2026-07-13-egress-sni-handoff.md).
 
 남은 후속 후보:
 
@@ -475,7 +501,13 @@ daemon으로 보내는 outbound Bearer token이다.
 - runtime MCP Gateway backend 실 operator 배포 검증. 운영 정책(backend→profile
   바인딩, rate-limit/burst, `secrets.yaml` 규율)은 `runbook.md` 문서화 + live
   dry-run까지 완료(PR #40 트랙 C) — 실 backend server를 붙인 operator 배포 검증만 잔여.
-- egress allow host rule의 L7 proxy/SNI 기반 강화
+- egress SNI 필터 후속(ADR-0002 잔여 위험/설계 한계에서 파생, 미착수):
+  QUIC/UDP:443 SNI 파싱(v1 비목표로 보류), `allow_hosts`(legacy substring)
+  제거 시점 재검토(OQ8, 고정 런타임 계약 표면이라 즉시 제거하지 않음),
+  multi-queue per-VM NFQUEUE 재검토(현재 단일 queue 88 + src-IP 라우팅),
+  ECH inner 대응 불가 재확인(설계 한계, outer SNI만 관측), pre-decision 부분
+  ClientHello 전달의 hold-then-decide 재설계(수용된 잔여 위험 — 승인 누수는
+  아니지만 완전 봉쇄에는 필요, YAGNI로 v1 미채택).
 - snapshot storage quota dashboard
 - web svelte 5 runes 전환(선택) — PR #39는 legacy-compat 유지, runes 마이그레이션 미착수
 - fc upstream/OpenZFS 참고 보고 검토(D3의 fc diff "sparseness=의미" 상호작용)
