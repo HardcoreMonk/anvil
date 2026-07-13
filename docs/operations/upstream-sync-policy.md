@@ -112,7 +112,7 @@ commit 기준으로 기록한다):
 |---|---|---|
 | `v0.4.0` | 병합됨, `adapted` | storage/recovery core. `EPHEMERA_AUTOSNAPSHOT=true` auto-snapshot은 opt-in·disk-expensive로 두고 public support로 승격하지 않는다. |
 | `v0.4.1` | 병합됨, `adapted` | client identity, `GET /audit`, per-token TTL, `ephemera-ctl` operator CLI(IronClaw MCP 대체 아님). |
-| `v0.4.2` | 병합됨, `adapted`, default cow deferred(**D4 미해결로 보류**) | COW probe/fallback + COW+Diff snapshot. `EPHEMERA_DISK_MODE=cow`는 명시적 opt-in. default 전환은 보류 — PR #46 fix 후 green은 flip 재검증에서 D4 재발로 n=1 우연이었음이 드러남; 재개는 fc 업그레이드/anvil 완화가 host-a·host-b n≥2 green 통과 후(`docs/ADR_INDEX.md` v0.4.2 행). |
+| `v0.4.2` | 병합됨, `adapted`, default plain 확정(**D4 종결, upstream-tracked**) | COW probe/fallback + COW+Diff snapshot. `EPHEMERA_DISK_MODE=cow`는 명시적 opt-in, default plain 무기한 유지. default 전환은 **종결**(2026-07-13) — 4라운드 burn-in으로 anvil-측 소진, 근본은 anvil 밖 KVM/fc resume-race(fc v1.16.1이 실패율 100%→~15–25%로 최대 완화), flip 재개는 upstream 해소 시에만(`docs/ADR_INDEX.md` v0.4.2 행 + `2026-07-13-d4-firecracker-upstream-report.md`). |
 | `v0.4.3` | 병합(`aab3299`), `adapted` | dynamic flock membership, pause/resume, per-flock `max_agents`, Town Wall filter/rotation. |
 | `v0.4.4` | 병합(`7d65c12`)/적응(`2ffd282`), `adapted`, broadcast MCP exposure 기각 확정 | streaming `/tasks`(buffered 기본 계약 유지), `EPHEMERA_MAX_TASK_DEPTH`/`508` depth guard, `GET /watchdog/status`, goose-agent slog. flock broadcast는 daemon API/`ephemera-ctl` CLI로만 채택하고 `anvil_*` MCP tool로 노출하지 않는다(2026-07-11 기각 확정). |
 | `v0.4.5` | 병합(`8bd84ec`)/적응(`8daf6f3`), `adapted` | snapshot-restore auto-recovery(`recoverRestoredVM`/`reRestoreMachine`). restore state에 `tenant_id`/`egress_policy` persist, 응답 token redaction 유지. divergence는 아래 참조. |
@@ -186,10 +186,11 @@ historical analysis로 보존한다. 현재 채택 상태는
    sync에서, `v0.6.0`-`v0.6.4` MCP gateway 변경은 v0.6 MCP gateway sync에서, `v0.7.0`
    installer/transcript/hardening 변경은 v0.7 parity sync에서 각각 병합/적응·검증을
    마쳤다(위 채택 상태 표 참조). 이로써 upstream parity scope 코드 편입이 완료됐다.
-   tag 채택 외 deferred였던 3항목은 2026-07-11 결정으로 정리됐다: flock member spawn의
+   tag 채택 외 deferred였던 3항목은 2026-07-11~13 결정으로 정리됐다: flock member spawn의
    per-profile sizing 존중은 완료(위 sizing 결정), `v0.4.4` flock broadcast의 MCP tool
-   노출은 기각 확정(daemon-only 유지), `v0.4.2` default COW 전환은 **D4 미해결로 보류**
-   (PR #46 fix 후 green은 flip 재검증에서 D4 재발로 n=1 우연이었음이 드러남 — `docs/ADR_INDEX.md`
+   노출은 기각 확정(daemon-only 유지), `v0.4.2` default COW 전환은 **종결**(2026-07-13 —
+   default plain 무기한 확정, COW opt-in; 4라운드 burn-in으로 anvil-측 소진, 근본은 anvil
+   밖 KVM/fc resume-race, fc v1.16.1 최대 완화, D4는 fc/KVM 상류 추적 — `docs/ADR_INDEX.md`
    v0.4.2 행 참조). release-gate는 코드 4종(2026-07-06
    batch)과 마지막 open gate(valid provider key `semantic` run, `18c7559`에서 OpenAI
    `gpt-4o`로 e2e `343✓/0✗`) 모두 닫혔다 — open 항목 없음.

@@ -3,12 +3,16 @@
 - 상태: **run1 FAIL → D4 회부 → fsync fix 불충분 → REOPENED → host-b 재현=일반 결함 →
   fc v1.16.1 업그레이드로도 host-b 재현 = 소거 실패 (D4 open, runtime 계층).** ⚠️ 아래
   "D4 — CLOSED" 서술은 **정정됨**(round-2/3 참조). round-3(아래 "fc 업그레이드 소거법"):
-  fc v1.16.1 이 실패율을 100%→~25% 로 **대폭 낮추나**(v1.16.0 vsock RX race fix 주효)
+  fc v1.16.1 이 실패율을 100%→~15–25% 로 **대폭 낮추나**(v1.16.0 vsock RX race fix 주효)
   **완전 소거 실패**(host-b gate#2 동일 GPF). fc 업그레이드는 순 개선으로 **유지**하되
   **D4 fix 아님**, flip 은 되돌림. round-4(아래 "anvil 완화 A/B"): **pre-resume 지연**은
   v1.15.1(100%) 을 green 으로 만드는 인과 효과가 있으나 고정값(3000·5000ms) 어느 것도
   **양 host n≥2 미달**(위상-이동일 뿐 제거 못함) → **완화 미달, flip·완화 되돌림.**
-  근본 원인 = KVM/Firecracker resume-race(anvil 밖). **default COW flip 은 여전히 보류.**
+  근본 원인 = KVM/Firecracker resume-race(anvil 밖).
+  **→ 2026-07-13 사용자 결정: D4 종결(upstream-tracked known limitation)** — anvil-측
+  소진, fc v1.16.1이 최대 완화(100%→~15–25%), default plain 무기한 유지·COW opt-in,
+  fc/KVM 상류 제보([`2026-07-13-d4-firecracker-upstream-report.md`](2026-07-13-d4-firecracker-upstream-report.md)).
+  아래 round 1~4 기록은 이력으로 보존(삭제·개변 없음).
 - 환경: host-a(192.168.1.19, root-on-ZFS 128K + `rpool/anvil-snapshots` 4K
   dataset → `~/anvil/snapshots`), full KVM gate `e2e_test.sh`, 소스
   `feature/deferred-decisions`(sizing fix 포함, main f43e8e8 + 2 커밋).
@@ -230,6 +234,8 @@ cherry-pick 해 default=cow 로 만든 뒤 host-a·host-b **default-cow full gat
 
 1. ⚠️ **[정정]** round-1 의 "burn-in 재실행 green → flip 가능" 결론은 **무효**.
    D4 는 미해결이며 **default COW flip 은 계속 보류**. (round-1 green 은 n=1 우연.)
+   **→ 2026-07-13 최종: D4 종결(upstream-tracked), default plain 확정 — 상단 상태
+   헤더 및 `docs/ADR_INDEX.md` v0.4.2 행 참조. 이 "후속" 목록은 round-2 시점 기록이다.**
 2. ✅ **[완료] 호스트-특이 vs 일반 분별**: host-b(192.168.1.20)에서 동일 flip 바이너리
    재현 = **일반 결함 확정**(위 "host-b 분별 실험"). host-a 배드램 단일 원인 배제.
    memtest 류(재부팅 필요)는 여전히 잔여 하드웨어 배제용 사용자 옵션이나 우선순위 하락.

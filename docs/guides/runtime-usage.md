@@ -905,6 +905,10 @@ curl 'http://192.168.3.73:8787/api/recording?id=full-kvm-e2e'
   - 기본값: unset
   - `cow`로 설정하면 새 VM 생성 시 golden image full copy 대신 dm-snapshot 기반
     sparse COW disk를 사용한다.
+  - ⚠️ **opt-in COW 주의(D4, 종결·upstream-tracked)**: ZFS 호스트 + heavy 부하에서
+    diff-snapshot restore가 ~15–25% 확률로 guest kernel panic할 수 있다(근본 = anvil 밖
+    KVM/fc resume-race, fc ≥ v1.16.1 권장). 상세는 [`security-and-resilience.md`](security-and-resilience.md#known-limitations)
+    Known Limitations와 [`../operations/2026-07-11-cow-burnin-run.md`](../operations/2026-07-11-cow-burnin-run.md).
 
 - `EPHEMERA_EGRESS_PROFILE_DIR` / `ANVIL_EGRESS_PROFILE_DIR`
   - 기본값: `configs/profiles`
