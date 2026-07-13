@@ -315,7 +315,7 @@ func TestCommandEgressEnforcerProfileApplyFailureRollsBackAppliedRules(t *testin
 		},
 	}
 
-	err := enforcer.ApplyWithProfile("vm-1", "tap-vm-1", "10.0.1.10", "profile", "restricted")
+	err := enforcer.ApplyWithProfile("vm-1", "tap-vm-1", "10.0.1.10", "profile", "restricted", "")
 	if err == nil {
 		t.Fatal("ApplyWithProfile returned nil error, want command failure")
 	}
@@ -344,16 +344,20 @@ func TestCommandEgressEnforcerProfileCleanupRemovesSNIRulesInReverse(t *testing.
 	profileDir := t.TempDir()
 	writeEgressProfileFixtureWithSNI(t, profileDir, "sni-profile")
 
+	loop := newSNIVerdictLoop(88, "", nil)
+	loop.ready = true // simulate a started loop so the allow_sni preflight passes
+
 	var commands [][]string
 	enforcer := &commandEgressEnforcer{
 		profileDir: profileDir,
+		sniLoop:    loop,
 		run: func(name string, args ...string) error {
 			commands = append(commands, append([]string{name}, args...))
 			return nil
 		},
 	}
 
-	if err := enforcer.ApplyWithProfile("vm-1", "tap-vm-1", "10.0.1.10", "profile", "sni-profile"); err != nil {
+	if err := enforcer.ApplyWithProfile("vm-1", "tap-vm-1", "10.0.1.10", "profile", "sni-profile", "t1"); err != nil {
 		t.Fatalf("ApplyWithProfile error = %v", err)
 	}
 	applied := len(commands)
@@ -377,6 +381,47 @@ func TestCommandEgressEnforcerProfileCleanupRemovesSNIRulesInReverse(t *testing.
 	}
 }
 
+func TestApplyWithProfileRefusesSNIWhenLoopNotReady(t *testing.T) {
+	profileDir := t.TempDir()
+	writeEgressProfileFixtureWithSNI(t, profileDir, "sni")
+	loop := newSNIVerdictLoop(88, "", nil) // Ready()==false (never Start()ed)
+	enforcer := &commandEgressEnforcer{
+		profileDir: profileDir,
+		sniLoop:    loop,
+		run:        func(name string, args ...string) error { return nil },
+	}
+	err := enforcer.ApplyWithProfile("vm-1", "tap", "10.0.1.10", "profile", "sni", "t1")
+	if err == nil {
+		t.Fatal("ApplyWithProfile with allow_sni and no ready verdict loop = nil, want fail-closed refusal")
+	}
+	if !strings.Contains(err.Error(), "sni") {
+		t.Fatalf("err = %v, want SNI capability refusal", err)
+	}
+	if _, ok := enforcer.rules["vm-1"]; ok {
+		t.Fatal("refused spawn must not leave egress rule state")
+	}
+}
+
+func TestApplyWithProfileRegistersAndDeregistersSNI(t *testing.T) {
+	profileDir := t.TempDir()
+	writeEgressProfileFixtureWithSNI(t, profileDir, "sni")
+	loop := newSNIVerdictLoop(88, "", nil)
+	loop.ready = true // simulate a started loop for the registry wiring test
+	enforcer := &commandEgressEnforcer{profileDir: profileDir, sniLoop: loop, run: func(string, ...string) error { return nil }}
+	if err := enforcer.ApplyWithProfile("vm-1", "tap", "10.0.1.10", "profile", "sni", "t1"); err != nil {
+		t.Fatalf("apply err = %v", err)
+	}
+	if d := loop.decide("10.0.1.10", nil); d.Action == sniDrop && d.Reason == "unregistered_source" {
+		t.Fatal("apply did not register guest IP in verdict loop")
+	}
+	if err := enforcer.Cleanup("vm-1"); err != nil {
+		t.Fatalf("cleanup err = %v", err)
+	}
+	if d := loop.decide("10.0.1.10", nil); !(d.Action == sniDrop && d.Reason == "unregistered_source") {
+		t.Fatal("cleanup did not deregister guest IP")
+	}
+}
+
 func TestCommandEgressEnforcerProfileApplyFailureReportsCleanupFailure(t *testing.T) {
 	profileDir := t.TempDir()
 	writeEgressProfileFixture(t, profileDir, "restricted")
@@ -394,7 +439,7 @@ func TestCommandEgressEnforcerProfileApplyFailureReportsCleanupFailure(t *testin
 		},
 	}
 
-	err := enforcer.ApplyWithProfile("vm-1", "tap-vm-1", "10.0.1.10", "profile", "restricted")
+	err := enforcer.ApplyWithProfile("vm-1", "tap-vm-1", "10.0.1.10", "profile", "restricted", "")
 	if err == nil {
 		t.Fatal("ApplyWithProfile returned nil error, want apply and cleanup failure")
 	}
