@@ -144,6 +144,31 @@ goose-daemon의 **in-process** verdict 루프에 dispatch된다. 루프
 ClientHello 세그먼트에만 탄다). 비허용/파싱 불가는 **fail-closed
 DROP**(+best-effort TCP RST로 guest 빠른 실패)이다.
 
+**UDP:443(QUIC/HTTP3) 확장 (2026-07-14)**: 같은 queue 88·같은 connmark를
+UDP:443에도 적용한다. 새 QUIC 흐름의 Initial 패킷이
+`iptables -p udp --dport 443 -j NFQUEUE`로 같은 verdict 루프에 dispatch되면,
+루프가 공개 Destination Connection ID에서 파생한 키(HKDF+AES-128-GCM+header
+protection, 자체 구현 `internal/network/quic`, 신규 direct 의존
+`golang.org/x/crypto` 하나)로 Initial을 복호해 CRYPTO 프레임에서 TLS
+ClientHello를 얻고 같은 `allow_sni` 매처와 대조한다. QUICv1
+(`0x00000001`)+QUICv2(`0x6b3343cf`)를 지원하며, 미지원 버전은 fail-closed
+deny다. 현대 브라우저/Go 1.24+가 기본으로 쓰는 post-quantum
+(X25519MLKEM768) ClientHello(~1516B)는 Initial 데이터그램 2개에 걸치므로,
+flow(`srcIP:sport`)별 bounded-LRU reassembler가 CRYPTO를 여러 데이터그램에
+걸쳐 offset 누적한다 — **완결되지 않은 데이터그램은 drop(fail-closed)하되
+CRYPTO는 누적을 유지**한다(완결 데이터그램이 flow의 first-accepted
+패킷이어야 connmark가 conntrack에 깨끗이 confirm된다; 미완결을
+passthrough-accept하면 mark 0으로 엔트리가 먼저 confirm돼 완결 데이터그램의
+connmark 적용이 race에서 진다). 클라는 dropped 데이터그램을 QUIC
+손실복구로 retransmit하며, 재전송이 도달할 때는 이미 flow가 allow+mark라
+fast-path를 탄다. per-flow 바이트 상한(8192B)+flow-count LRU(4096)로 상태를
+bound한다. **UDP엔 RST가 없어 deny 응답은 silent DROP이다** — QUIC
+타임아웃 후 브라우저가 TCP/HTTP2로 fallback하면 그 흐름은 TCP:443 SNI
+필터를 타 `allow_sni`면 허용된다(자연 degrade). 3개 이상 데이터그램에
+걸치는 매우 큰 ClientHello는 v1 미지원(후속 후보). 상세는
+[ADR-0002](../adr/0002-egress-sni-transparent-filter.md)의
+"메커니즘 확장 — UDP:443 QUIC/HTTP3" 절 참조.
+
 **fail-closed 계약**: `--queue-bypass`(fail-open 플래그)는 명시적으로 배제한다
 — verdict 루프가 죽거나 리스너가 없으면 커널이 큐에 들어간 패킷을 그냥
 DROP한다. 이에 더해 daemon은 **preflight**로, `allow_sni` profile인데
@@ -169,7 +194,9 @@ SNI 필터는 신뢰 워크로드의 의도된 :443 egress를 강제·감사한�
   allowlist는 지원 안 함).
 - **non-TLS**(HTTP:80, 임의 TCP): SNI가 없어 NFQUEUE 대상이 아니다 — 기존
   base REJECT + CIDR만 통제한다.
-- **QUIC/UDP:443**: v1은 SNI 파싱 비목표이며 UDP:443은 default-deny다.
+- **QUIC/UDP:443**: 2026-07-14부터 구현됨(위 "UDP:443(QUIC/HTTP3) 확장"
+  절). SNI는 TCP와 동일하게 guest-asserted다. 3개 이상 Initial 데이터그램에
+  걸치는 매우 큰 ClientHello는 v1 미지원 — fail-closed deny(안전측).
 - **SNI spoofing**: SNI는 guest-asserted다. CIDR 핀 없이는 allowed SNI
   값을 제시하며 실제로는 다른 IP로 터널링할 수 있다. `dns_servers` 강제로
   부분 완화하지만 목적지 IP를 DNS 응답에 핀하지는 않는다.

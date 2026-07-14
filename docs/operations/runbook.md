@@ -327,6 +327,63 @@ curl -H "Authorization: Bearer $TOKEN" \
   | grep -A2 egress_sni_denied
 ```
 
+### (e) QUIC/UDP:443(HTTP3) 운영 (2026-07-14)
+
+`allow_sni`는 TCP:443뿐 아니라 **UDP:443(QUIC/HTTP3)**도 같은 queue
+88·같은 connmark(`0x534e49`)로 강제한다(설계는
+[`docs/adr/0002-egress-sni-transparent-filter.md`](../adr/0002-egress-sni-transparent-filter.md)
+"메커니즘 확장" 절). 이 절은 QUIC 고유 운영·진단 절차만 다룬다 — profile
+작성법(a), preflight/fail-closed 진단(b)(c), 감사/metric 확인(d)은 위
+절차와 공유한다.
+
+**dispatch 규칙 확인**: `allow_sni`가 있는 profile은 TCP `-sni-nfqueue`/
+`-sni-fastpath` 규칙과 대칭으로 UDP 규칙도 head-insert된다.
+
+```bash
+iptables -S FORWARD | grep -- "-sni-udp-"
+# -A FORWARD -s <guestIP> -p udp -m udp --dport 443 -m connmark ! --mark 0x534e49 -j NFQUEUE --queue-num 88 ... --comment anvil-egress-<vmID>-sni-udp-nfqueue
+# -A FORWARD -s <guestIP> -p udp -m udp --dport 443 -m connmark --mark 0x534e49 -j ACCEPT ... --comment anvil-egress-<vmID>-sni-udp-fastpath
+```
+
+`allow_sni`가 비어 있으면 TCP와 마찬가지로 UDP 규칙도 생성되지 않는다
+(`-sni-udp-*` 부재 = 기존 UDP:443 default-deny 그대로).
+
+**HTTP/3 e2e 검증**: `sudo -n bash scripts/anvil-quic-sni-e2e.sh`(exit 0)가
+유일한 실 QUIC 왕복 검증이다(netlink/UDP conntrack fast-path는 root+KVM
+필요라 유닛으로 실검 불가). HTTP/3 지원 클라이언트(`curl --http3` 또는 Go
+QUIC 클라이언트)로 허용 도메인에 UDP:443 QUIC로 도달해 `-sni-udp-*` 규칙과
+connmark를 확인하고, 비허용 도메인 QUIC은 타임아웃/미도달로 차단됨을
+확인한다. 수동 diagnostic:
+
+```bash
+# guest에서 QUIC 강제 시도(HTTP/3 지원 도메인)
+curl --http3 -sv https://<allowed-domain>:443/ -o /dev/null 2>&1 | grep -i "http/3\|alpn"
+```
+
+**silent-DROP → TCP fallback 관측**: UDP엔 RST가 없으므로 deny는 항상
+**silent DROP**이다(TCP의 best-effort RST 주입과 다르다). 비허용 도메인에
+QUIC로 접속을 시도하는 클라이언트는 QUIC handshake 타임아웃을 겪은 뒤
+(브라우저 기준 수 초) TCP/HTTP2로 자동 fallback한다 — 그 TCP 흐름이
+TCP:443 SNI 필터를 타 같은 `allow_sni` 판정을 받는다(SNI가 그 profile에
+없으면 TCP도 RST로 차단, 있으면 허용). 즉 QUIC deny는 "즉시 실패"가
+아니라 "타임아웃 후 TCP로 자연 degrade"로 관측된다 — Phase 2 e2e 스모크가
+이 지연을 포함해 판정한다.
+
+**PQ multi-datagram 재조립의 지연 특성**: Go 1.24+/Chrome/Firefox
+default(post-quantum X25519MLKEM768) ClientHello는 Initial 데이터그램
+2개에 걸친다. 첫 데이터그램은 CRYPTO만 누적하고 **drop**(fail-closed,
+connmark race 회피 목적 — ADR-0002 메커니즘 확장 절 참조)되므로, 클라의
+QUIC 손실복구 retransmit 1왕복만큼 handshake가 지연된다(정상 동작, 오탐
+아님). 3개 이상 데이터그램에 걸치는 매우 큰 ClientHello는 v1 미지원이라
+계속 fail-closed deny로 관측된다(허용 도메인이어도 handshake가 끝내
+완결되지 않음 — 후속 후보, ADR-0002 잔여위험 표 참조). 허용 도메인의
+QUIC이 계속 실패하면 먼저 ClientHello 크기(확장 개수, PQ 알고리즘)를
+의심한다.
+
+**metric/audit**: TCP/UDP는 `ephemera_egress_sni_verdict_total`을
+공유한다(proto별 label 분리는 v1 비목표, 후속 후보). `egress_sni_denied`
+audit도 TCP/UDP 동일 스키마를 재사용한다.
+
 ## Goosetown flock 점검
 
 live flock 목록과 단일 flock 상태:

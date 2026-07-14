@@ -6,8 +6,11 @@ bounded relay retry, cross-host snapshot replication 자동화에 더해 routed 
 스택 결함 D1~D3 종결(D4는 upstream KVM/fc 이슈로 종결 — 아래)·web major(vite8/svelte5)·
 scheduler 실배포+installer 검증 (PR #19~#47)·**egress :443 transparent SNI
 필터**(신규 `allow_sni` additive 필드, in-process NFQUEUE verdict + fail-closed
-preflight, [ADR-0002](docs/adr/0002-egress-sni-transparent-filter.md)) 등
-untagged 작업을 더 포함한다.
+preflight, [ADR-0002](docs/adr/0002-egress-sni-transparent-filter.md))·
+**UDP:443(QUIC/HTTP3) SNI 필터 확장**(같은 ADR-0002, 신규 패키지
+`internal/network/quic`로 QUIC Initial을 자체 복호해 같은 `allow_sni` 매처를
+UDP에도 적용, post-quantum multi-datagram ClientHello 재조립, 신규 direct 의존
+`golang.org/x/crypto`) 등 untagged 작업을 더 포함한다.
 (D4 cow diff-restore panic은 4라운드 조사로 anvil-측 소진, 근본은 anvil 밖
 KVM/Firecracker resume-race로 확정 → 2026-07-13 **종결**(default plain 유지·COW
 opt-in, fc v1.16.1이 실패율 100%→~15–25%로 최대 완화) — `docs/ADR_INDEX.md` v0.4.2 행
@@ -747,9 +750,11 @@ PR-A storage/recovery 변경은 포함하지 않는다.
 - scheduler observability metrics/alerts.
 - cross-host snapshot replication.
 - scheduler-aware cross-host flock placement.
-- egress L7 proxy/SNI hardening — **구현 완료**(2026-07-13/14, transparent SNI
+- egress L7 proxy/SNI hardening — **구현 완료**(2026-07-13, transparent SNI
   필터: `allow_sni` additive 필드 + in-process NFQUEUE verdict + fail-closed
-  preflight; [`docs/adr/0002-egress-sni-transparent-filter.md`](docs/adr/0002-egress-sni-transparent-filter.md)
+  preflight; **UDP:443(QUIC/HTTP3)도 2026-07-14부터 같은 `allow_sni` 매처로
+  커버**(신규 `internal/network/quic` 자체 crypto, PQ multi-datagram 재조립);
+  [`docs/adr/0002-egress-sni-transparent-filter.md`](docs/adr/0002-egress-sni-transparent-filter.md)
   참조). full HTTP CONNECT/forward proxy·TLS 종단은 여전히 비목표.
 - snapshot storage quota dashboard.
 - scheduler host registration hardening.
