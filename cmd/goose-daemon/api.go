@@ -2125,8 +2125,10 @@ func (e *commandEgressEnforcer) command(name string, args ...string) error {
 // listing is empty and this is a no-op — both modes converge on one clean apply.
 //
 // A rule is flushed iff its --comment is exactly "anvil-egress-<vmID>" (the bare
-// deny_all rule) or begins with "anvil-egress-<vmID>-" (every profile rule, plus
-// a stale recovery-fence). The trailing dash is load-bearing: it stops vmID "vm-1"
+// deny_all rule) or begins with "anvil-egress-<vmID>-" (every profile rule; also a
+// legacy "…-recovery-fenced" rule left by a pre-egress-before-boot daemon, so an
+// in-place upgrade still reclaims it — current recovery no longer fences).
+// The trailing dash is load-bearing: it stops vmID "vm-1"
 // from matching vmID "vm-12"'s rules, and the exact-match arm catches the bare
 // deny_all comment the dash-prefix alone would miss. The base-subnet blanket
 // ACCEPT (no --comment) and the control-plane callback ("anvil-cp-callback") carry
@@ -2165,14 +2167,6 @@ func (e *commandEgressEnforcer) flushByComment(vmID string) {
 			slog.Warn("recovery: egress flush delete failed", "vm_id", vmID, "rule", strings.TrimSpace(line), "err", delErr)
 		}
 	}
-}
-
-// fenceGuestEgress installs a best-effort emergency REJECT for a recovered VM
-// whose egress re-apply failed, so it can never fall back to the base-subnet
-// blanket ACCEPT (fail-closed). Its comment shares the "anvil-egress-<vmID>-"
-// prefix so a later successful recovery flushes it before re-applying.
-func (e *commandEgressEnforcer) fenceGuestEgress(vmID, guestIP string) error {
-	return e.command("iptables", "-I", "FORWARD", "-s", guestIP, "-j", "REJECT", "-m", "comment", "--comment", "anvil-egress-"+vmID+"-recovery-fenced")
 }
 
 // tokenizeIptablesRule splits one `iptables -S` line into argv, honoring the
