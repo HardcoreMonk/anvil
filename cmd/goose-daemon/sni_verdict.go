@@ -634,11 +634,13 @@ func (l *sniVerdictLoop) applyVerdict(nf *nfqueue.Nfqueue, id uint32, d sniDecis
 	l.recordVerdict(entry, d)
 }
 
-// applyVerdictUDP is applyVerdict's UDP/QUIC counterpart: identical
-// accept/accept+mark/passthrough semantics, but a UDP drop never attempts
-// injectRST — that needs the TCP seq/ackSeq ipv4TCP carries (RFC 793 has no
-// UDP analog), so setDropNoRST issues a plain fail-closed NfDrop instead.
-// recordVerdict (metrics/audit) is shared unchanged with the TCP path.
+// applyVerdictUDP is applyVerdict's UDP/QUIC counterpart: accept+mark or drop,
+// but a UDP drop never attempts injectRST — that needs the TCP seq/ackSeq
+// ipv4TCP carries (RFC 793 has no UDP analog), so setDropNoRST issues a plain
+// fail-closed NfDrop instead. recordVerdict (metrics/audit) is shared unchanged
+// with the TCP path. There is no sniPassthrough case: decideQUIC only ever
+// yields sniAcceptMark or sniDrop (incomplete ClientHellos fail closed as
+// egress_sni_incomplete drops, see the doc below), unlike the TCP path.
 func (l *sniVerdictLoop) applyVerdictUDP(nf *nfqueue.Nfqueue, id uint32, d sniDecision, entry sniRegistryEntry) {
 	// Multi-datagram QUIC Initial reassembly (Task 6c, revised Task 7b): while a
 	// flow's ClientHello is still incomplete, decideQUIC yields a fail-closed
@@ -652,8 +654,6 @@ func (l *sniVerdictLoop) applyVerdictUDP(nf *nfqueue.Nfqueue, id uint32, d sniDe
 		if err := nf.SetVerdictWithConnMark(id, nfqueue.NfAccept, l.connMark); err != nil {
 			slog.Error("sni verdict: set accept+connmark failed", "err", err, "sni", d.SNI)
 		}
-	case sniPassthrough:
-		l.setAccept(nf, id)
 	case sniDrop:
 		l.setDropNoRST(nf, id)
 	}
