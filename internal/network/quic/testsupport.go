@@ -23,6 +23,32 @@ import (
 // files cannot be imported across packages, this lives in a regular .go file so
 // cmd/goose-daemon's tests can reuse it.
 func BuildInitialForTest(dcid []byte, version uint32, handshake []byte) []byte {
+	return buildInitialDatagram(dcid, version, 0, handshake, 0)
+}
+
+// BuildInitialDatagramsForTest builds the Initial datagram(s) carrying handshake,
+// splitting it into two CRYPTO frames — offsets [0,splitAt) and [splitAt,len) — so a
+// caller can exercise InitialReassembler.Feed across datagrams. It returns two valid,
+// independently decryptable Initial datagrams (packet numbers 0 and 1, same DCID, so
+// they share the same client Initial keys). If splitAt is not strictly inside the
+// handshake (splitAt <= 0 or splitAt >= len), the handshake fits in one CRYPTO frame
+// and a single datagram is returned. For tests only; mirrors BuildInitialForTest.
+func BuildInitialDatagramsForTest(dcid []byte, version uint32, handshake []byte, splitAt int) [][]byte {
+	if splitAt <= 0 || splitAt >= len(handshake) {
+		return [][]byte{buildInitialDatagram(dcid, version, 0, handshake, 0)}
+	}
+	d1 := buildInitialDatagram(dcid, version, 0, handshake[:splitAt], 0)
+	d2 := buildInitialDatagram(dcid, version, uint64(splitAt), handshake[splitAt:], 1)
+	return [][]byte{d1, d2}
+}
+
+// buildInitialDatagram constructs a valid QUIC Initial datagram carrying cryptoData
+// in a single CRYPTO frame at stream offset cryptoOffset, with the given 1-byte
+// packet number (pn must be 0..255). It is the general form of BuildInitialForTest:
+// the inverse of decryptInitial, padded to the RFC 9000 §14.1 minimum of 1200 bytes,
+// AES-128-GCM Sealed, with header protection applied. Panics on internal errors
+// (a programming mistake in a test helper should surface loudly).
+func buildInitialDatagram(dcid []byte, version uint32, cryptoOffset uint64, cryptoData []byte, pn uint64) []byte {
 	keyVersion := version
 	if _, supported := initialTypeForVersion(version); !supported {
 		keyVersion = versionV1
@@ -31,23 +57,22 @@ func BuildInitialForTest(dcid []byte, version uint32, handshake []byte) []byte {
 	if err != nil {
 		// keyVersion is always supported here, so derivation cannot fail; a panic
 		// in a test helper surfaces a programming error loudly.
-		panic("quic: BuildInitialForTest key derivation: " + err.Error())
+		panic("quic: buildInitialDatagram key derivation: " + err.Error())
 	}
 	initialType, _ := initialTypeForVersion(keyVersion)
 
-	// Payload: one CRYPTO frame (type 0x06, offset 0, length, data) then PADDING.
+	// Payload: one CRYPTO frame (type 0x06, offset, length, data) then PADDING.
 	payload := []byte{0x06}
-	payload = appendVarint(payload, 0)
-	payload = appendVarint(payload, uint64(len(handshake)))
-	payload = append(payload, handshake...)
+	payload = appendVarint(payload, cryptoOffset)
+	payload = appendVarint(payload, uint64(len(cryptoData)))
+	payload = append(payload, cryptoData...)
 	if len(payload) < 1200 {
 		payload = append(payload, make([]byte, 1200-len(payload))...)
 	}
 
-	// Fixed 1-byte packet number of 0 keeps the encoding trivial; the value is
+	// Fixed 1-byte packet number keeps the encoding trivial; the value is
 	// irrelevant to the round trip as long as build and parse agree.
 	const pnLen = 1
-	const pn uint64 = 0
 
 	// Unprotected long header up to and including the packet number.
 	first := byte(longHeaderBit | fixedBit | (initialType << longTypeShift) | (pnLen - 1))
@@ -60,7 +85,7 @@ func BuildInitialForTest(dcid []byte, version uint32, handshake []byte) []byte {
 	length := uint64(pnLen + len(payload) + aeadTagLen)
 	hdr = appendVarint(hdr, length) // packet number + payload + AEAD tag.
 	pnOffset := len(hdr)
-	hdr = append(hdr, 0x00) // packet number (pn == 0, pnLen == 1).
+	hdr = append(hdr, byte(pn)) // single-byte packet number.
 
 	// AAD is the unprotected header; nonce is iv XOR the left-padded packet number.
 	aad := append([]byte(nil), hdr...)
@@ -71,11 +96,11 @@ func BuildInitialForTest(dcid []byte, version uint32, handshake []byte) []byte {
 
 	aeadBlock, err := aes.NewCipher(key)
 	if err != nil {
-		panic("quic: BuildInitialForTest aead cipher: " + err.Error())
+		panic("quic: buildInitialDatagram aead cipher: " + err.Error())
 	}
 	aead, err := cipher.NewGCM(aeadBlock)
 	if err != nil {
-		panic("quic: BuildInitialForTest gcm: " + err.Error())
+		panic("quic: buildInitialDatagram gcm: " + err.Error())
 	}
 	ciphertext := aead.Seal(nil, nonce, payload, aad)
 
@@ -86,7 +111,7 @@ func BuildInitialForTest(dcid []byte, version uint32, handshake []byte) []byte {
 	sampleStart := pnOffset + hpSampleOffset
 	hpBlock, err := aes.NewCipher(hp)
 	if err != nil {
-		panic("quic: BuildInitialForTest hp cipher: " + err.Error())
+		panic("quic: buildInitialDatagram hp cipher: " + err.Error())
 	}
 	mask := make([]byte, hpSampleLen)
 	hpBlock.Encrypt(mask, datagram[sampleStart:sampleStart+hpSampleLen])

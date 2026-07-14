@@ -23,46 +23,136 @@ var errIncompleteInDatagram = errors.New("quic: clienthello not complete within 
 // reassembly fails closed here. Identical (idempotent) overlaps are still tolerated.
 var errInconsistentOverlap = errors.New("quic: inconsistent overlapping CRYPTO frames")
 
-// ParseInitialSNI decrypts one QUIC Initial datagram, reassembles its CRYPTO
-// frames into the TLS ClientHello, and returns the lowercased SNI. Every failure
-// is terminal (fail-closed): a malformed/unsupported/undecryptable packet, a
-// ClientHello not complete within the datagram, or a ClientHello with no SNI all
-// return an error. It never panics.
-func ParseInitialSNI(datagram []byte) (string, error) {
+// maxQuicClientHelloBytes bounds a single flow's reassembly buffer. A modern
+// post-quantum ClientHello (X25519MLKEM768) is ~1.5 KB and spans two Initial
+// datagrams; this cap leaves generous headroom while a hostile guest cannot grow
+// the per-flow buffer without bound (memory-exhaustion / offset-inflation DoS).
+// Once the accumulation would exceed it, reassembly is terminal (fail-closed).
+const maxQuicClientHelloBytes = 8192
+
+// errOversizeClientHello means a flow's accumulated CRYPTO stream would exceed
+// maxQuicClientHelloBytes. It is terminal: an oversized ClientHello is denied
+// rather than buffered without limit.
+var errOversizeClientHello = errors.New("quic: reassembled ClientHello exceeds per-flow byte cap")
+
+// InitialReassembler accumulates the TLS ClientHello carried by the CRYPTO frames
+// of one QUIC flow's Initial packets, across as many datagrams as the ClientHello
+// spans. A modern post-quantum ClientHello does not fit in one Initial datagram, so
+// the single-datagram parser fails closed on legitimate traffic; this reassembler
+// buffers CRYPTO chunks by flow offset until the ClientHello is complete.
+//
+// The buffer is offset-indexed: buf[i] is flow byte i, and present[i] records
+// whether byte i has been received. Overlapping bytes from different datagrams must
+// agree byte-for-byte — a conflicting overlap is the cross-datagram analog of
+// TCP-overlap evasion and is terminal (errInconsistentOverlap), so datagram arrival
+// order can never change the reassembled bytes (fail-closed against SNI-evasion).
+// A single InitialReassembler is not safe for concurrent use.
+type InitialReassembler struct {
+	buf        []byte // buf[i] is flow byte i once present[i] is true.
+	present    []bool // present[i] reports whether flow byte i has been received.
+	contiguous int    // length of the contiguous, all-present prefix from offset 0.
+}
+
+// Feed decrypts one QUIC Initial datagram, merges its CRYPTO frames into the flow's
+// offset-indexed buffer, and attempts to parse the SNI from the contiguous prefix.
+// Its three-way return is:
+//   - (name, true, nil):   the ClientHello is complete and carried SNI "name".
+//   - ("", false, nil):    more bytes are needed; feed the next Initial datagram.
+//   - ("", false, err):    terminal failure (fail-closed) — the datagram was
+//     undecryptable/unsupported/non-Initial, a CRYPTO frame was malformed, a
+//     cross-datagram overlap conflicted, the ClientHello carried no SNI, or the
+//     accumulation exceeded maxQuicClientHelloBytes.
+//
+// It never panics: every slice access is bounds-checked and the buffer is capped.
+func (r *InitialReassembler) Feed(datagram []byte) (name string, done bool, err error) {
 	payload, err := decryptInitial(datagram)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	hs, err := reassembleCryptoFrames(payload)
+	chunks, err := extractCryptoChunks(payload)
+	if err != nil {
+		return "", false, err
+	}
+	for _, c := range chunks {
+		end := c.offset + uint64(len(c.data))
+		if end > maxQuicClientHelloBytes {
+			// Reject before growing the buffer, so a bogus high offset cannot force
+			// a large allocation. end >= c.offset, so both fit in int below.
+			return "", false, errOversizeClientHello
+		}
+		if uint64(len(r.buf)) < end {
+			grow := int(end) - len(r.buf)
+			r.buf = append(r.buf, make([]byte, grow)...)
+			r.present = append(r.present, make([]bool, grow)...)
+		}
+		base := int(c.offset)
+		for k := 0; k < len(c.data); k++ {
+			idx := base + k
+			if r.present[idx] {
+				if r.buf[idx] != c.data[k] {
+					return "", false, errInconsistentOverlap
+				}
+				continue // idempotent overlap; byte already verified consistent.
+			}
+			r.buf[idx] = c.data[k]
+			r.present[idx] = true
+		}
+	}
+	// Advance the contiguous-from-0 prefix over any bytes newly filled this Feed.
+	for r.contiguous < len(r.present) && r.present[r.contiguous] {
+		r.contiguous++
+	}
+	name, perr := sni.ParseHandshakeSNI(r.buf[:r.contiguous])
+	if perr != nil {
+		if errors.Is(perr, sni.ErrIncomplete) {
+			// The ClientHello is not complete yet; wait for the next datagram.
+			return "", false, nil
+		}
+		// ErrNoSNI and any other parse error are terminal (fail-closed).
+		return "", false, fmt.Errorf("quic clienthello: %w", perr)
+	}
+	return name, true, nil
+}
+
+// ParseInitialSNI decrypts one QUIC Initial datagram, reassembles its CRYPTO
+// frames into the TLS ClientHello, and returns the lowercased SNI. It is the
+// single-datagram convenience over InitialReassembler: it feeds exactly one
+// datagram, so a ClientHello that is not complete within it is terminal
+// (errIncompleteInDatagram). Every failure is terminal (fail-closed): a
+// malformed/unsupported/undecryptable packet, a ClientHello not complete within the
+// datagram, or a ClientHello with no SNI all return an error. It never panics.
+func ParseInitialSNI(datagram []byte) (string, error) {
+	r := &InitialReassembler{}
+	name, done, err := r.Feed(datagram)
 	if err != nil {
 		return "", err
 	}
-	name, err := sni.ParseHandshakeSNI(hs)
-	if err != nil {
-		// Every sni error is terminal here, including sni.ErrIncomplete: anvil does
-		// not reassemble a ClientHello across datagrams, so "need more bytes" is a
-		// deny, not a request for more input.
-		return "", fmt.Errorf("quic clienthello: %w", err)
+	if !done {
+		// Not complete within this single datagram — anvil's single-datagram callers
+		// treat "need more bytes" as a deny, not a request for more input.
+		return "", errIncompleteInDatagram
 	}
 	return name, nil
 }
 
-// reassembleCryptoFrames walks the frames of a decrypted QUIC Initial payload,
-// concatenates the CRYPTO frames (type 0x06) in offset order, and returns the
-// reassembled handshake bytes. PADDING (0x00), PING (0x01), and ACK (0x02/0x03)
-// frames are skipped. Any other frame type — or a truncated/gapped CRYPTO stream —
-// is terminal: an unknown frame type cannot be length-skipped safely, so we fail
-// closed rather than guess. Overlapping CRYPTO frames are tolerated only when their
-// overlapping bytes are identical; a conflicting overlap is terminal
-// (errInconsistentOverlap) so frame ordering can never change the reassembled bytes
-// (fail-closed against SNI-evasion). All slice access is bounds-checked; it never panics.
-func reassembleCryptoFrames(payload []byte) ([]byte, error) {
-	type cryptoChunk struct {
-		offset uint64
-		data   []byte
-	}
-	var chunks []cryptoChunk
+// cryptoChunk is one CRYPTO frame's payload keyed by its stream offset. data
+// aliases the decrypted payload it was parsed from; callers that retain it past the
+// payload's lifetime must copy the bytes.
+type cryptoChunk struct {
+	offset uint64
+	data   []byte
+}
 
+// extractCryptoChunks walks the frames of a decrypted QUIC Initial payload and
+// returns the CRYPTO frames (type 0x06) as offset-keyed chunks, in wire order.
+// PADDING (0x00), PING (0x01), and ACK (0x02/0x03) frames are skipped. Any other
+// frame type — or a truncated CRYPTO frame — is terminal: an unknown frame type
+// cannot be length-skipped safely, so we fail closed rather than guess. It does not
+// order, merge, or gap-check the chunks; callers (reassembleCryptoFrames within one
+// datagram, InitialReassembler.Feed across datagrams) impose their own accumulation
+// policy. All slice access is bounds-checked; it never panics.
+func extractCryptoChunks(payload []byte) ([]cryptoChunk, error) {
+	var chunks []cryptoChunk
 	i := 0
 	for i < len(payload) {
 		switch frameType := payload[i]; {
@@ -98,7 +188,23 @@ func reassembleCryptoFrames(payload []byte) ([]byte, error) {
 			return nil, fmt.Errorf("quic: unexpected frame type 0x%02x in Initial", frameType)
 		}
 	}
+	return chunks, nil
+}
 
+// reassembleCryptoFrames walks the frames of a decrypted QUIC Initial payload,
+// concatenates the CRYPTO frames (type 0x06) in offset order, and returns the
+// reassembled handshake bytes. PADDING (0x00), PING (0x01), and ACK (0x02/0x03)
+// frames are skipped. Any other frame type — or a truncated/gapped CRYPTO stream —
+// is terminal: an unknown frame type cannot be length-skipped safely, so we fail
+// closed rather than guess. Overlapping CRYPTO frames are tolerated only when their
+// overlapping bytes are identical; a conflicting overlap is terminal
+// (errInconsistentOverlap) so frame ordering can never change the reassembled bytes
+// (fail-closed against SNI-evasion). All slice access is bounds-checked; it never panics.
+func reassembleCryptoFrames(payload []byte) ([]byte, error) {
+	chunks, err := extractCryptoChunks(payload)
+	if err != nil {
+		return nil, err
+	}
 	if len(chunks) == 0 {
 		return nil, errIncompleteInDatagram
 	}

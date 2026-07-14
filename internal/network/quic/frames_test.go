@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"testing"
-
-	"ephemera/internal/network/sni"
 )
 
 // --- Round-trip: BuildInitialForTest is the inverse of ParseInitialSNI. ---
@@ -255,9 +253,11 @@ func TestReassemble_InconsistentOverlapTerminal(t *testing.T) {
 	}
 }
 
-// TestParseInitialSNI_IncompleteHandshakeTerminal: a CRYPTO frame carrying a
-// truncated ClientHello yields sni.ErrIncomplete, which must be terminal here
-// (anvil does not reassemble across datagrams).
+// TestParseInitialSNI_IncompleteHandshakeTerminal: a single datagram carrying a
+// truncated ClientHello is terminal for the single-datagram parser. Task 6b routed
+// ParseInitialSNI through InitialReassembler.Feed, which unifies "not complete within
+// the fed datagram" (a truncated ClientHello and a CRYPTO gap alike) under
+// errIncompleteInDatagram; the fail-closed guarantee is unchanged.
 func TestParseInitialSNI_IncompleteHandshakeTerminal(t *testing.T) {
 	full := buildClientHelloHandshake("cdn.example.com")
 	dcid := mustHex("8394c8f03e515708")
@@ -267,8 +267,91 @@ func TestParseInitialSNI_IncompleteHandshakeTerminal(t *testing.T) {
 	if err == nil {
 		t.Fatal("truncated ClientHello must be terminal")
 	}
-	if !errors.Is(err, sni.ErrIncomplete) {
-		t.Fatalf("err = %v, want wrapped sni.ErrIncomplete", err)
+	if !errors.Is(err, errIncompleteInDatagram) {
+		t.Fatalf("err = %v, want errIncompleteInDatagram", err)
+	}
+}
+
+// --- Task 6b: InitialReassembler multi-datagram coverage. ---
+
+// TestInitialReassembler_TwoDatagrams: a ClientHello split across two Initial
+// datagrams — the shape of a modern post-quantum ClientHello — reassembles. The
+// first Feed passes through ("", false, nil); the second completes with the SNI.
+func TestInitialReassembler_TwoDatagrams(t *testing.T) {
+	ch := buildClientHelloHandshake("api.anthropic.com")
+	dcid := mustHex("8394c8f03e515708")
+	dgs := BuildInitialDatagramsForTest(dcid, 0x00000001, ch, len(ch)/2)
+	if len(dgs) != 2 {
+		t.Fatalf("expected 2 datagrams, got %d", len(dgs))
+	}
+	r := &InitialReassembler{}
+	if name, done, err := r.Feed(dgs[0]); err != nil || done || name != "" {
+		t.Fatalf("Feed(d1) = %q, %v, %v; want \"\", false, nil", name, done, err)
+	}
+	if name, done, err := r.Feed(dgs[1]); err != nil || !done || name != "api.anthropic.com" {
+		t.Fatalf("Feed(d2) = %q, %v, %v; want api.anthropic.com, true, nil", name, done, err)
+	}
+}
+
+// TestInitialReassembler_SingleDatagramStillWorks: a small ClientHello completes on
+// the first Feed, ParseInitialSNI's single round trip is unchanged, and splitAt>=len
+// collapses BuildInitialDatagramsForTest to one datagram.
+func TestInitialReassembler_SingleDatagramStillWorks(t *testing.T) {
+	ch := buildClientHelloHandshake("cdn.example.com")
+	dcid := mustHex("8394c8f03e515708")
+	dg := BuildInitialForTest(dcid, 0x00000001, ch)
+
+	r := &InitialReassembler{}
+	if name, done, err := r.Feed(dg); err != nil || !done || name != "cdn.example.com" {
+		t.Fatalf("single Feed = %q, %v, %v; want cdn.example.com, true, nil", name, done, err)
+	}
+	if got, err := ParseInitialSNI(dg); err != nil || got != "cdn.example.com" {
+		t.Fatalf("ParseInitialSNI = %q, %v; want cdn.example.com", got, err)
+	}
+
+	dgs := BuildInitialDatagramsForTest(dcid, 0x00000001, ch, len(ch))
+	if len(dgs) != 1 {
+		t.Fatalf("splitAt>=len: expected 1 datagram, got %d", len(dgs))
+	}
+	r2 := &InitialReassembler{}
+	if name, done, err := r2.Feed(dgs[0]); err != nil || !done || name != "cdn.example.com" {
+		t.Fatalf("collapsed single Feed = %q, %v, %v; want cdn.example.com, true, nil", name, done, err)
+	}
+}
+
+// TestInitialReassembler_OversizeTerminal: a CRYPTO stream that would exceed the
+// per-flow byte cap is terminal (memory-exhaustion guard), never buffered.
+func TestInitialReassembler_OversizeTerminal(t *testing.T) {
+	dcid := mustHex("8394c8f03e515708")
+	oversize := bytes.Repeat([]byte{0x41}, maxQuicClientHelloBytes+1)
+	dg := buildInitialDatagram(dcid, 0x00000001, 0, oversize, 0)
+	r := &InitialReassembler{}
+	if _, _, err := r.Feed(dg); !errors.Is(err, errOversizeClientHello) {
+		t.Fatalf("oversize err = %v, want errOversizeClientHello", err)
+	}
+}
+
+// TestInitialReassembler_InconsistentOverlapAcrossDatagrams: two datagrams cover the
+// same flow offsets with conflicting bytes — the cross-datagram analog of TCP-overlap
+// evasion. The reassembler must fail closed regardless of arrival order.
+func TestInitialReassembler_InconsistentOverlapAcrossDatagrams(t *testing.T) {
+	dcid := mustHex("8394c8f03e515708")
+	full := buildClientHelloHandshake("cdn.example.com")
+	half := len(full) / 2
+
+	// d1 carries a valid ClientHello prefix (parses as ErrIncomplete -> passthrough).
+	d1 := buildInitialDatagram(dcid, 0x00000001, 0, full[:half], 0)
+	// d2 covers offset [0,half) again but flips the last overlapping byte.
+	conflict := append([]byte(nil), full[:half]...)
+	conflict[half-1] ^= 0xff
+	d2 := buildInitialDatagram(dcid, 0x00000001, 0, conflict, 1)
+
+	r := &InitialReassembler{}
+	if name, done, err := r.Feed(d1); err != nil || done || name != "" {
+		t.Fatalf("Feed(d1) = %q, %v, %v; want passthrough \"\", false, nil", name, done, err)
+	}
+	if _, _, err := r.Feed(d2); !errors.Is(err, errInconsistentOverlap) {
+		t.Fatalf("cross-datagram overlap err = %v, want errInconsistentOverlap", err)
 	}
 }
 
