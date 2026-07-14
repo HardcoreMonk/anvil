@@ -77,6 +77,53 @@ dispatch/fast-path 규칙은 기존 `egressCommand`/`commandEgressEnforcer`
 rollback 배관(`-I`↔`-D` 대칭 cleanup)을 그대로 재사용한다 — 신규 규칙 엔진은
 없다.
 
+### 메커니즘 확장 — UDP:443 QUIC/HTTP3 (2026-07-14 개정)
+
+TCP:443 SNI 필터와 **같은 queue(88)·같은 connmark(`0x534e49`)**를 UDP:443에도
+확장한다. 새 :443 UDP(QUIC) 흐름의 Initial 패킷 →
+`iptables(-nft) -I FORWARD -s <guestIP> -p udp --dport 443 -m connmark
+! --mark 0x534e49 -j NFQUEUE --queue-num 88` → goose-daemon **in-process**
+verdict 루프가 QUIC Initial을 **복호**해 TLS ClientHello를 얻고 기존
+`allow_sni` 매처와 대조한다.
+
+- **복호는 자체 구현**(`internal/network/quic`, 신규 패키지): 공개
+  Destination Connection ID(DCID)에서 well-known salt로 파생한 키로
+  HKDF(`golang.org/x/crypto/hkdf` — 이 확장의 유일한 신규 direct 의존)+
+  AES-128-GCM+header protection을 stdlib(`crypto/aes`/`crypto/cipher`)와
+  조합해 CRYPTO 프레임을 복호한다. QUIC 라이브러리(quic-go 등) 도입 없음.
+  DCID 유래 키는 기밀성이 아니라 ossification 방지용 obfuscation이라(RFC
+  9001 §5.2) 누구나 복호 가능 — 우회 없이 SNI를 얻는 유일한 경로다.
+- **QUICv1(`0x00000001`) + QUICv2(`0x6b3343cf`)** 지원. version별
+  salt/label(RFC 9001 §5.2, RFC 9369 §3.3)로 분기하고 RFC golden Initial
+  패킷 벡터(RFC 9001 Appendix A, RFC 9369 Appendix A)로 복호→ClientHello→SNI
+  정확성을 유닛으로 담보한다. **미지원/알 수 없는 버전은 fail-closed
+  deny**(TCP slice와 동일 계약).
+- **멀티-데이터그램 CRYPTO 재조립**: 현대 default post-quantum
+  (X25519MLKEM768) ClientHello(~1516B)는 QUIC Initial 페이로드 1개
+  (~1162B)를 넘어 **Initial 데이터그램 2개에 걸친다**(KVM e2e 실측). flow
+  (`srcIP:sport`)별 bounded-LRU reassembler가 여러 Initial 데이터그램의
+  CRYPTO 프레임을 offset 순 누적한다(각 데이터그램은 같은 DCID→같은 키로
+  독립 복호, packet number만 상이). **완결되지 않은 데이터그램은
+  drop(fail-closed)하되 reassembler는 CRYPTO 누적을 유지한다** — 완결
+  데이터그램이 그 flow의 first-accepted 패킷이 되어야 conntrack 엔트리에
+  connmark가 깨끗이 confirm되기 때문이다(미완결을 passthrough-accept하면
+  그 패킷이 mark 0으로 엔트리를 먼저 confirm해, 뒤에 오는 완결 데이터그램의
+  connmark 적용이 race에서 져 fast-path가 붙지 않는다 — KVM e2e 실측). 클라는
+  dropped 데이터그램을 QUIC 손실복구로 retransmit하며, 그 재전송이 도달할
+  때는 이미 flow가 allow+mark라 fast-path를 탄다. 부분 ClientHello는 서버에
+  전달되지 않으므로 strictly fail-closed. per-flow 바이트 상한(8192B) +
+  flow-count LRU(4096)로 reassembler 상태를 무한 성장 없이 bound한다. **3개
+  이상 데이터그램에 걸치는 ClientHello는 v1 미지원**(후속 후보, 아래
+  잔여위험 표).
+- **deny 응답 = silent DROP** — UDP엔 RST가 없다(TCP의 best-effort RST
+  주입과 다름). QUIC는 타임아웃 후 (브라우저 기준) TCP/HTTP2로 fallback해
+  그 흐름이 TCP:443 SNI 필터를 타면 `allow_sni`에 따라 허용/차단된다 —
+  자연스러운 degrade, 최소 코드.
+
+상세 설계 근거는
+[design spec](../superpowers/specs/2026-07-14-quic-sni-filter-design.md)에
+보존한다.
+
 ### 스키마 확장
 
 `egressProfile`에 신규 `allow_sni []string` 필드를 추가한다(기존
@@ -175,7 +222,7 @@ CIDR로, DNS는 `dns_servers`로 — 세 층은 병렬 additive 계약이다.
 |---|---|---|
 | **ECH/ESNI**(SNI 암호화) | ClientHello에 cleartext SNI가 없거나 decoy outer SNI만 있으면, verdict는 **인식 가능한 allowlisted SNI가 없으므로 DROP**(fail-closed, default-deny와 일관) | anvil은 ECH를 무력화하지 않는다. ECH 필요 엔드포인트는 CIDR fallback으로만 명시 opt-in 허용한다(OQ7) — outer-SNI allowlist는 지원하지 않는다 |
 | **non-TLS**(plain HTTP:80, 임의 TCP) | SNI가 없으므로 NFQUEUE dispatch 대상이 아니다 → base REJECT로 떨어진다(CIDR/포트 allow가 없으면 차단) | HTTP Host 헤더 검사는 L7 proxy 영역(비목표). :80은 CIDR로만 허용/차단된다 |
-| **QUIC/UDP:443** | QUIC Initial SNI 파싱은 v1 비목표. UDP:443은 allow 규칙이 없으면 base REJECT | **UDP:443 기본 차단**을 계약. QUIC SNI 파싱은 후속(Follow-Up) |
+| **QUIC/UDP:443 — 구현 완료 (2026-07-14)** | (과거) QUIC Initial SNI 파싱은 v1 비목표, UDP:443은 allow 규칙이 없으면 base REJECT였다. **QUIC/UDP:443 SNI 필터 slice로 구현**: :443 UDP Initial을 같은 queue 88/connmark로 NFQUEUE dispatch해 자체 구현 crypto(`internal/network/quic`, HKDF+AES-128-GCM+header protection, 신규 direct 의존 `golang.org/x/crypto` 하나)로 CRYPTO 프레임을 복호하고 TLS ClientHello를 추출해 기존 `allow_sni` 매처와 대조한다. QUICv1(`0x00000001`)+QUICv2(`0x6b3343cf`) 지원, RFC 9001/9369 golden 벡터로 crypto 정확성 검증. **미지원/알 수 없는 QUIC 버전, non-Initial 첫 패킷, header protection/AEAD 복호 실패, no-SNI → 전부 fail-closed DROP**. **멀티-데이터그램 재조립**: 현대 default post-quantum(X25519MLKEM768) ClientHello(~1516B)가 Initial 데이터그램 2개에 걸치므로 flow(`srcIP:sport`)별 bounded-LRU reassembler로 CRYPTO를 offset 누적한다. **미완결 데이터그램은 drop(fail-closed)하되 CRYPTO는 누적** — 완결 데이터그램이 flow의 first-accepted 패킷이 되어야 connmark가 conntrack에 깨끗이 confirm되기 때문(미완결을 passthrough-accept하면 mark 0으로 엔트리가 먼저 confirm돼 완결 데이터그램의 connmark가 race에서 져 fast-path가 안 붙는다 — KVM e2e 실측). 클라는 dropped 데이터그램을 QUIC 손실복구로 retransmit해, 재전송 도달 시점엔 이미 flow가 allow+mark라 fast-path를 탄다. per-flow 바이트 상한(8192B) 초과 → DROP, flow-count LRU(4096) | **UDP엔 RST가 없어 deny=silent DROP** — QUIC 타임아웃 후 브라우저가 TCP/HTTP2로 fallback하면 그 흐름은 TCP:443 SNI 필터를 타 `allow_sni`면 허용된다(TCP slice와 동일 계약 재사용, 자연 degrade, 최소 코드). SNI는 TCP와 동일하게 **guest-asserted** 잔여위험을 공유한다(CIDR 핀 없이는 임의 IP 터널 가능). **3개 이상 Initial 데이터그램에 걸치는 매우 큰 ClientHello는 v1 미지원**(후속 후보 — 2 데이터그램까지만 재조립). 새 QUIC 버전 등장 시 salt/label 추가 전까지 fail-closed deny(안전측 유지) |
 | **SNI spoofing**(가짜 SNI로 다른 IP 접속) | verdict는 SNI 문자열만 본다 — guest가 `allow_sni` 값을 제시하며 실제로는 SNI를 무시하는 임의 서버로 갈 수 있다. `dns_servers` 강제 + CIDR 핀으로 부분 완화 | SNI는 **guest-asserted**다. CIDR 핀 없이는 allowed SNI 값으로 임의 IP에 터널링 가능. 신뢰 워크로드 위협 모델상 수용, 계약으로 명시 |
 | **domain fronting**(SNI ≠ 내부 Host) | verdict는 SNI만 본다. TLS 내부 Host는 암호문이라 관측 불가 → 같은 CDN의 fronted 도메인에 도달 가능 | TLS 종단 없이는 탐지 불가(비목표). 잔여 위험 계약 |
 | **pre-decision 부분 ClientHello 전달**(신규 — 구현 세부에서 확인) | 멀티세그먼트 ClientHello에서, 아직 완결되지 않은 세그먼트는 SNI 판정이 나기 **전에** unmarked ACCEPT로 통과한다(`sniVerdictLoop.Start`의 `!done` 분기) — 다음 세그먼트가 같은 큐로 재진입해 판정을 이어간다. 완결/malformed 시점에만 최종 verdict(ACCEPT+mark 또는 DROP)가 나며, 그때만 metric/audit이 기록된다. 재조립 테이블(`sniReassemblerMaxFlows=4096`, per-flow `sni.maxClientHelloBytes=16384`)이 가득 차면 LRU eviction이 발생하고, evict된 흐름의 다음 세그먼트는 **새 reassembler 인스턴스**로 시작해 레코드 경계를 못 잡고 fail-closed DROP한다(never fail-open) | 이 전달은 **승인 누수가 아니다** — conntrack mark(fast-path 자격)는 오직 완결된 ClientHello의 positive SNI 매치에서만 찍힌다. 다만 16 KiB는 흐름당 하드 캡이 아니다: eviction 후 새 인스턴스가 시작되므로, 공격자가 세그먼트를 의도적으로 지연시키며 계속 "미완결" 상태를 유지하면 판정 전 unmarked 세그먼트가 반복 통과할 수 있다(각 세그먼트가 개별 NFQUEUE 판정을 거쳐야 하므로 TCP 자체의 전송 hiccup으로만 자연 rate-limit된다). 완전 봉쇄에는 판정 전 전송을 보류하는 hold-then-decide 재설계가 필요하다 — v1은 채택하지 않는다(YAGNI, 아래 결과·비용 참조) |
@@ -229,11 +276,26 @@ CIDR로, DNS는 `dns_servers`로 — 세 층은 병렬 additive 계약이다.
 - 기존 egress 회귀(`go test ./cmd/goose-daemon/ -run Egress`)와 전체 KVM
   게이트(`sudo bash e2e_test.sh`)가 그대로 PASS해야 한다(egress apply 경로를
   만졌으므로 필수).
+- **QUIC 확장(2026-07-14)**: 유닛 `internal/network/quic`(RFC 9001
+  Appendix A(v1)/RFC 9369 Appendix A(v2) golden Initial 패킷 벡터로
+  복호→ClientHello→SNI, malformed/미지원버전/데이터그램-분할/CRYPTO
+  offset gap → terminal error, fuzz), `cmd/goose-daemon`(UDP decide
+  라우팅, `planProfileEgressCommands`의 UDP:443 dispatch/fastpath 대칭)
+  — 전부 root 없이 PASS. KVM e2e(`sudo -n bash
+  scripts/anvil-quic-sni-e2e.sh`, exit 0): HTTP/3 client로 허용 도메인
+  QUIC 도달(PQ multi-datagram ClientHello 포함) + `-sni-udp-*` 규칙/
+  connmark 확인, 비허용 도메인 QUIC 차단(타임아웃/미도달), audit
+  `egress_sni_denied` 확인. `git diff main -- go.mod`가 신규 direct 의존
+  `golang.org/x/crypto` 하나만 보여야 한다(TCP slice의
+  `github.com/florianl/go-nfqueue`와 합쳐 이 ADR 전체 신규 direct 의존은
+  2개).
 
 상세 근거·경계 사례·테스트 매핑은
-[design spec](../superpowers/specs/2026-07-13-egress-sni-filter-design.md),
-[implementation plan](../superpowers/plans/2026-07-13-egress-sni-filter.md),
-[handoff](../operations/2026-07-13-egress-sni-handoff.md)에 있다.
+[design spec](../superpowers/specs/2026-07-13-egress-sni-filter-design.md)
+(TCP), [implementation plan](../superpowers/plans/2026-07-13-egress-sni-filter.md),
+[handoff](../operations/2026-07-13-egress-sni-handoff.md)(TCP),
+[QUIC design spec](../superpowers/specs/2026-07-14-quic-sni-filter-design.md),
+[QUIC handoff](../operations/2026-07-14-quic-sni-handoff.md)에 있다.
 
 ---
 
@@ -246,4 +308,6 @@ CIDR로, DNS는 `dns_servers`로 — 세 층은 병렬 additive 계약이다.
 - [`docs/PUBLIC_RELEASE_BOUNDARY.md`](../PUBLIC_RELEASE_BOUNDARY.md) — egress 표면에
   `allow_sni`/`ANVIL_SNI_QUEUE_NUM`/connmark 상수를 추가한다.
 - [`docs/operations/runbook.md`](../operations/runbook.md) — profile 작성법, preflight
-  거부 관측, fail-closed 진단, deny 감사/metric 확인 절차.
+  거부 관측, fail-closed 진단, deny 감사/metric 확인 절차(TCP+QUIC).
+- [`docs/operations/2026-07-14-quic-sni-handoff.md`](../operations/2026-07-14-quic-sni-handoff.md) —
+  QUIC/UDP:443 확장 slice의 구현·검증 기록, Follow-Up.

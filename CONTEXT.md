@@ -480,6 +480,44 @@ daemon으로 보내는 outbound Bearer token이다.
   레코드·fast-path metric delta, exit 0)로 검증됐다. 상세:
   [`docs/superpowers/specs/2026-07-13-egress-sni-filter-design.md`](docs/superpowers/specs/2026-07-13-egress-sni-filter-design.md),
   [`docs/operations/2026-07-13-egress-sni-handoff.md`](docs/operations/2026-07-13-egress-sni-handoff.md).
+- **QUIC/UDP:443 SNI 필터가 구현 완료됐다**(2026-07-14, `feature/quic-sni-filter`,
+  위 TCP:443 SNI 필터의 후속 후보였던 항목을 해소, [ADR-0002](docs/adr/0002-egress-sni-transparent-filter.md)
+  확장). 같은 queue 88·같은 connmark(`0x534e49`)를 UDP:443에도 적용해, 새 QUIC
+  흐름의 Initial 패킷을 `iptables -p udp --dport 443 -j NFQUEUE`로 같은 verdict
+  루프에 dispatch한다. 루프가 QUIC Initial을 **자체 구현 crypto**(신규 패키지
+  `internal/network/quic` — 공개 Destination Connection ID 파생 키로
+  HKDF+AES-128-GCM+header protection, 신규 direct 의존은 `golang.org/x/crypto`
+  하나뿐)로 복호해 CRYPTO 프레임에서 TLS ClientHello를 얻고 기존 `allow_sni`
+  매처와 대조한다. **QUICv1(`0x00000001`)+QUICv2(`0x6b3343cf`)** 지원, RFC
+  9001/9369 golden Initial 패킷 벡터로 crypto 정확성을 유닛 검증했다. **멀티-
+  데이터그램 CRYPTO 재조립**(2026-07-14 설계 개정 — 최초 "유닛-데이터그램"
+  전제를 KVM e2e 실측이 뒤집음): Go 1.24+/Chrome/Firefox가 기본으로 쓰는
+  post-quantum(X25519MLKEM768) ClientHello(~1516B)는 QUIC Initial 데이터그램
+  2개에 걸치므로, flow(`srcIP:sport`)별 bounded-LRU reassembler가 여러
+  Initial의 CRYPTO를 offset 순 누적한다. **미완결 데이터그램은 drop(fail-
+  closed)하되 CRYPTO 누적은 유지**한다 — 완결 데이터그램이 flow의
+  first-accepted 패킷이 되어야 connmark가 conntrack 엔트리에 깨끗이
+  confirm되기 때문(미완결을 passthrough-accept하면 그 패킷이 mark 0으로
+  엔트리를 먼저 confirm해, 완결 데이터그램의 connmark 적용이 race에서 져
+  fast-path가 안 붙는다 — KVM e2e 실측). 클라는 dropped 데이터그램을 QUIC
+  손실복구로 retransmit하며, 재전송 도달 시점엔 이미 flow가 allow+mark라
+  fast-path를 탄다. per-flow 바이트 상한(8192B)+flow-count LRU(4096)로 상태를
+  bound한다. **deny = silent DROP**(UDP엔 RST 없음) — QUIC 타임아웃 후
+  브라우저가 TCP/HTTP2로 fallback하면 그 흐름은 TCP:443 SNI 필터를 타
+  `allow_sni`면 허용된다(자연 degrade, 최소 코드). **fail-closed 계약**:
+  미지원/알 수 없는 QUIC 버전, non-Initial 첫 패킷, header protection/AEAD
+  복호 실패, no-SNI, per-flow 바이트 상한 초과, **3개 이상 데이터그램에
+  걸치는 매우 큰 ClientHello(v1 미지원)** → 전부 DROP(TCP slice와 동일
+  guest-asserted SNI 잔여위험을 공유). dispatch는 TCP `-sni-nfqueue`/
+  `-sni-fastpath`와 대칭인 `-sni-udp-nfqueue`/`-sni-udp-fastpath` 규칙으로
+  기존 `egressCommand` rollback 배관을 그대로 재사용한다. 유닛(`internal/network/quic`
+  RFC golden 벡터+malformed+데이터그램-분할 fuzz, `sni` `ParseHandshakeSNI`
+  리팩터 회귀, `cmd/goose-daemon` UDP decide 라우팅/dispatch 대칭) + KVM e2e
+  `scripts/anvil-quic-sni-e2e.sh`(HTTP/3 클라로 허용 도메인 PQ multi-datagram
+  ClientHello 도달, `-sni-udp-*`/connmark 확인, 비허용 도메인 QUIC 차단, audit
+  확인, exit 0)로 검증됐다. 상세:
+  [`docs/superpowers/specs/2026-07-14-quic-sni-filter-design.md`](docs/superpowers/specs/2026-07-14-quic-sni-filter-design.md),
+  [`docs/operations/2026-07-14-quic-sni-handoff.md`](docs/operations/2026-07-14-quic-sni-handoff.md).
 
 남은 후속 후보:
 
@@ -503,12 +541,17 @@ daemon으로 보내는 outbound Bearer token이다.
   바인딩, rate-limit/burst, `secrets.yaml` 규율)은 `runbook.md` 문서화 + live
   dry-run까지 완료(PR #40 트랙 C) — 실 backend server를 붙인 operator 배포 검증만 잔여.
 - egress SNI 필터 후속(ADR-0002 잔여 위험/설계 한계에서 파생, 미착수):
-  QUIC/UDP:443 SNI 파싱(v1 비목표로 보류), `allow_hosts`(legacy substring)
-  제거 시점 재검토(OQ8, 고정 런타임 계약 표면이라 즉시 제거하지 않음),
-  multi-queue per-VM NFQUEUE 재검토(현재 단일 queue 88 + src-IP 라우팅),
-  ECH inner 대응 불가 재확인(설계 한계, outer SNI만 관측), pre-decision 부분
-  ClientHello 전달의 hold-then-decide 재설계(수용된 잔여 위험 — 승인 누수는
-  아니지만 완전 봉쇄에는 필요, YAGNI로 v1 미채택).
+  `allow_hosts`(legacy substring) 제거 시점 재검토(OQ8, 고정 런타임 계약
+  표면이라 즉시 제거하지 않음), multi-queue per-VM NFQUEUE 재검토(현재 단일
+  queue 88 + src-IP 라우팅, TCP/QUIC 공유), ECH inner 대응 불가 재확인(설계
+  한계, outer SNI만 관측), pre-decision 부분 ClientHello 전달의
+  hold-then-decide 재설계(TCP 세그먼트 전달에 한정된 수용된 잔여 위험 —
+  승인 누수는 아니지만 완전 봉쇄에는 필요, YAGNI로 v1 미채택).
+  ~~QUIC/UDP:443 SNI 파싱~~ — **DONE(2026-07-14)**, 위 항목 참조. QUIC
+  확장이 새로 남긴 후속: 3개 이상 Initial 데이터그램에 걸치는 매우 큰
+  ClientHello 지원(현재 fail-closed deny), TCP/UDP proto별
+  `ephemera_egress_sni_verdict_total` metric label 분리(현재 공유), 새 QUIC
+  버전(v1/v2 외) salt/label 추가.
 - snapshot storage quota dashboard
 - web svelte 5 runes 전환(선택) — PR #39는 legacy-compat 유지, runes 마이그레이션 미착수
 - fc upstream/OpenZFS 참고 보고 검토(D3의 fc diff "sparseness=의미" 상호작용)

@@ -29,7 +29,16 @@ func ParseClientHelloSNI(b []byte) (string, error) {
 	if len(b) < 5+recLen {
 		return "", ErrIncomplete
 	}
-	hs := b[5 : 5+recLen]
+	return ParseHandshakeSNI(b[5 : 5+recLen])
+}
+
+// ParseHandshakeSNI parses a TLS handshake message (starting at the ClientHello
+// handshake header, msg_type 0x01) and returns the lowercased server_name.
+// QUIC carries the handshake directly in CRYPTO frames (no TLS record), so the
+// QUIC path calls this after reassembly; ParseClientHelloSNI calls it after
+// stripping the TLS record layer. ErrIncomplete = need more bytes; ErrNoSNI and
+// other errors are terminal.
+func ParseHandshakeSNI(hs []byte) (string, error) {
 	// Handshake header: msg_type(1) length(3)
 	if len(hs) < 4 {
 		return "", ErrIncomplete

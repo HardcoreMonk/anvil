@@ -55,6 +55,21 @@ func buildClientHello(sni string, ech bool) []byte {
 	return rec.Bytes()
 }
 
+// stripRecordHeader strips the 5-byte TLS record header, leaving the raw
+// handshake message (buildClientHello returns a full TLS record).
+func stripRecordHeader(b []byte) []byte { return b[5:] }
+
+func TestParseHandshakeSNI_BareClientHello(t *testing.T) {
+	// buildClientHello is the existing test helper — it returns a full TLS
+	// record, so strip the 5-byte record header to get the bare handshake
+	// message ParseHandshakeSNI expects.
+	hs := buildClientHello("api.anthropic.com", false)
+	got, err := ParseHandshakeSNI(stripRecordHeader(hs))
+	if err != nil || got != "api.anthropic.com" {
+		t.Fatalf("ParseHandshakeSNI = %q, %v", got, err)
+	}
+}
+
 func TestParseClientHelloSNI(t *testing.T) {
 	sni, err := ParseClientHelloSNI(buildClientHello("api.anthropic.com", false))
 	if err != nil || sni != "api.anthropic.com" {

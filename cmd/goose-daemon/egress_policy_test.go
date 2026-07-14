@@ -179,6 +179,26 @@ func TestPlanProfileEgressCommandsCIDRAboveSNI(t *testing.T) {
 	}
 }
 
+func TestPlanProfileEgressCommandsEmitsUDPSNIDispatch(t *testing.T) {
+	commands, _ := planProfileEgressCommands("vm-1", "10.0.1.10", egressProfile{AllowSNI: []string{"api.anthropic.com"}})
+	joined := joinCommands(commands)
+	for _, want := range []string{
+		"iptables -I FORWARD -s 10.0.1.10 -p udp --dport 443 -m connmark --mark 0x534e49 -j ACCEPT -m comment --comment anvil-egress-vm-1-sni-udp-fastpath",
+		"iptables -I FORWARD -s 10.0.1.10 -p udp --dport 443 -m connmark ! --mark 0x534e49 -j NFQUEUE --queue-num 88 -m comment --comment anvil-egress-vm-1-sni-udp-nfqueue",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("missing %q\n%s", want, joined)
+		}
+	}
+}
+
+func TestPlanProfileEgressCommandsNoUDPSNIWhenEmpty(t *testing.T) {
+	commands, _ := planProfileEgressCommands("vm-1", "10.0.1.10", egressProfile{AllowCIDRs: []string{"203.0.113.10/32"}})
+	if strings.Contains(joinCommands(commands), "udp --dport 443") {
+		t.Fatal("empty allow_sni must not emit UDP:443 SNI rules")
+	}
+}
+
 func joinCommands(commands []egressCommand) string {
 	var lines []string
 	for _, command := range commands {

@@ -182,6 +182,10 @@ func planProfileEgressCommands(vmID, guestIP string, profile egressProfile) ([]e
 			// dispatch first in slice so it lands BELOW fastpath after -I reversal.
 			egressCommand{Name: "iptables", Args: []string{"-I", "FORWARD", "-s", guestIP, "-p", "tcp", "--dport", "443", "-m", "connmark", "!", "--mark", sniApprovedConnmark, "-j", "NFQUEUE", "--queue-num", q, "-m", "comment", "--comment", prefix + "-sni-nfqueue"}},
 			egressCommand{Name: "iptables", Args: []string{"-I", "FORWARD", "-s", guestIP, "-p", "tcp", "--dport", "443", "-m", "connmark", "--mark", sniApprovedConnmark, "-j", "ACCEPT", "-m", "comment", "--comment", prefix + "-sni-fastpath"}},
+			// UDP:443 (QUIC) mirrors the TCP dispatch above: same queue, same
+			// connmark, dispatch first in slice so fastpath lands above it too.
+			egressCommand{Name: "iptables", Args: []string{"-I", "FORWARD", "-s", guestIP, "-p", "udp", "--dport", "443", "-m", "connmark", "!", "--mark", sniApprovedConnmark, "-j", "NFQUEUE", "--queue-num", q, "-m", "comment", "--comment", prefix + "-sni-udp-nfqueue"}},
+			egressCommand{Name: "iptables", Args: []string{"-I", "FORWARD", "-s", guestIP, "-p", "udp", "--dport", "443", "-m", "connmark", "--mark", sniApprovedConnmark, "-j", "ACCEPT", "-m", "comment", "--comment", prefix + "-sni-udp-fastpath"}},
 		)
 	}
 	for idx, cidr := range profile.AllowCIDRs {

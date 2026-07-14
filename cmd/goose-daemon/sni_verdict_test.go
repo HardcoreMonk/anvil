@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,7 +13,10 @@ import (
 	"testing"
 
 	"ephemera/internal/anvilmcp"
+	"ephemera/internal/network/quic"
 	"ephemera/internal/network/sni"
+
+	"golang.org/x/sys/unix"
 )
 
 // encodeClientHelloSNI is a SNI-only reduction of Task 2's parser_test.go
@@ -73,6 +77,57 @@ func mustHello(t *testing.T, name string) []byte {
 	return b
 }
 
+// encodeQUICClientHelloHandshake is encodeClientHelloSNI's QUIC-CRYPTO-frame
+// shaped sibling: the identical ClientHello wire layout but WITHOUT the 5-byte
+// TLS record header, because QUIC CRYPTO frames carry the handshake message
+// directly (RFC 9001 §4) rather than a TLS record. Mirrors the quic package's
+// private buildClientHelloHandshake (see internal/network/quic/testsupport.go);
+// kept local here for the same low-coupling reason encodeClientHelloSNI is
+// local (avoids exporting a quic-package test helper across packages).
+func encodeQUICClientHelloHandshake(name string) []byte {
+	host := []byte(name)
+
+	sn := &bytes.Buffer{}
+	sn.WriteByte(0x00) // name_type = host_name
+	binary.Write(sn, binary.BigEndian, uint16(len(host)))
+	sn.Write(host)
+
+	list := &bytes.Buffer{}
+	binary.Write(list, binary.BigEndian, uint16(sn.Len()))
+	list.Write(sn.Bytes())
+
+	ext := &bytes.Buffer{}
+	binary.Write(ext, binary.BigEndian, uint16(0x0000)) // ext_type server_name
+	binary.Write(ext, binary.BigEndian, uint16(list.Len()))
+	ext.Write(list.Bytes())
+
+	body := &bytes.Buffer{}
+	body.Write([]byte{0x03, 0x03})             // client_version TLS1.2
+	body.Write(make([]byte, 32))               // random
+	body.WriteByte(0x00)                       // session_id len 0
+	body.Write([]byte{0x00, 0x02, 0x13, 0x01}) // cipher_suites: len2 + TLS_AES_128_GCM_SHA256
+	body.Write([]byte{0x01, 0x00})             // compression: len1 + null
+	binary.Write(body, binary.BigEndian, uint16(ext.Len()))
+	body.Write(ext.Bytes())
+
+	hs := &bytes.Buffer{}
+	hs.WriteByte(0x01) // handshake type client_hello
+	l := body.Len()
+	hs.Write([]byte{byte(l >> 16), byte(l >> 8), byte(l)}) // uint24 length
+	hs.Write(body.Bytes())
+	return hs.Bytes()
+}
+
+// buildQUICInitialForTest builds a QUIC Initial UDP payload — decideQUIC's
+// input — carrying a ClientHello with SNI=name, via quic.BuildInitialForTest's
+// exported round trip (Task 4). srcIPHint is not part of the QUIC wire format;
+// it exists only to document which registry entry the caller means to exercise
+// the datagram against, matching the brief's literal call shape.
+func buildQUICInitialForTest(srcIPHint, name string) []byte {
+	dcid := []byte{0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08}
+	return quic.BuildInitialForTest(dcid, 0x00000001, encodeQUICClientHelloHandshake(name))
+}
+
 func TestSNIDecideRouting(t *testing.T) {
 	l := newSNIVerdictLoop(88, "", nil)
 	m, _ := sni.NewMatcher([]string{"api.anthropic.com", "*.example.com"})
@@ -112,6 +167,140 @@ func TestSNIDeregisterFailsClosed(t *testing.T) {
 	l.Deregister("10.0.1.10")
 	if d := l.decide("10.0.1.10", mustHello(t, "api.anthropic.com")); d.Action != sniDrop {
 		t.Fatal("deregistered source must fail closed")
+	}
+}
+
+// buildUDPPacket assembles a minimal IPv4/UDP packet (20-byte IP header, no
+// options) for parseIPv4UDP's boundary tests below. udpLen is written verbatim
+// into the UDP header's own Length field, letting tests exercise a mismatch
+// between it and the packet's actual size (parseIPv4UDP must bound the payload
+// by that field, not just by remaining packet bytes — see its doc comment).
+func buildUDPPacket(proto byte, udpLen uint16, payload []byte) []byte {
+	pkt := make([]byte, 20+8+len(payload))
+	pkt[0] = 0x45 // version 4, IHL 5 (20 bytes, no options)
+	pkt[9] = proto
+	copy(pkt[12:16], net.IPv4(10, 0, 1, 10).To4())
+	copy(pkt[16:20], net.IPv4(93, 184, 216, 34).To4())
+	binary.BigEndian.PutUint16(pkt[20:22], 55555) // sport
+	binary.BigEndian.PutUint16(pkt[22:24], 443)   // dport
+	binary.BigEndian.PutUint16(pkt[24:26], udpLen)
+	copy(pkt[28:], payload)
+	return pkt
+}
+
+// TestParseIPv4UDPBoundaries is parseIPv4TCP's boundary-validation coverage
+// extended to parseIPv4UDP — the one piece of the UDP glue that is pure logic
+// and so, unlike the netlink/NFQUEUE wiring in Start (root + netfilter, Task 7
+// e2e only), is fully unit-testable here.
+func TestQUICParseIPv4UDPBoundaries(t *testing.T) {
+	payload := []byte{0xde, 0xad, 0xbe, 0xef}
+	valid := buildUDPPacket(unix.IPPROTO_UDP, uint16(8+len(payload)), payload)
+
+	u, err := parseIPv4UDP(valid)
+	if err != nil {
+		t.Fatalf("valid udp packet: unexpected error %v", err)
+	}
+	if u.sport != 55555 || u.dport != 443 || !bytes.Equal(u.payload, payload) {
+		t.Fatalf("unexpected parse: sport=%d dport=%d payload=%x", u.sport, u.dport, u.payload)
+	}
+	if u.srcIP.String() != "10.0.1.10" || u.dstIP.String() != "93.184.216.34" {
+		t.Fatalf("unexpected addrs: src=%s dst=%s", u.srcIP, u.dstIP)
+	}
+
+	withVersion := func(pkt []byte, version byte) []byte {
+		out := append([]byte(nil), pkt...)
+		out[0] = version<<4 | (out[0] & 0x0f)
+		return out
+	}
+
+	cases := map[string][]byte{
+		"short ip packet":     valid[:19],
+		"not ipv4":            withVersion(valid, 6),
+		"not udp proto":       buildUDPPacket(unix.IPPROTO_TCP, uint16(8+len(payload)), payload),
+		"short udp header":    valid[:20+7],
+		"udp length under 8":  buildUDPPacket(unix.IPPROTO_UDP, 4, payload),
+		"udp length overruns": buildUDPPacket(unix.IPPROTO_UDP, 0xffff, payload),
+	}
+	for name, pkt := range cases {
+		if _, err := parseIPv4UDP(pkt); err == nil {
+			t.Fatalf("%s: expected error, got none", name)
+		}
+	}
+}
+
+// TestSNIDecideQUICRouting is decideQUIC's single-datagram routing-contract
+// test, the UDP/QUIC counterpart of TestSNIDecideRouting above. A single
+// datagram carrying a complete ClientHello reaches the reassembler's "done"
+// branch on the first Feed, so every case here still resolves immediately
+// (allow/deny/unregistered/unparseable) — Task 6c's multi-datagram
+// incomplete/passthrough branch is covered separately by
+// TestSNIDecideQUICMultiDatagram below.
+func TestSNIDecideQUICRouting(t *testing.T) {
+	l := newSNIVerdictLoop(88, "", nil)
+	m, _ := sni.NewMatcher([]string{"api.anthropic.com", "*.example.com"})
+	l.Register("10.0.1.10", sniRegistryEntry{VMID: "vm-1", TenantID: "t1", Matcher: m})
+	const sport = uint16(55555)
+
+	// decideQUIC(srcIP, sport, udpPayload) — flowKey=srcIP:sport feeds the flow's
+	// *quic.InitialReassembler (Task 6c); a single complete datagram completes
+	// on the first Feed and evicts the flow immediately.
+	allow := buildQUICInitialForTest("10.0.1.10", "api.anthropic.com") // test helper: quic 패키지 라운드트립 재사용
+	if d := l.decideQUIC("10.0.1.10", sport, allow); d.Action != sniAcceptMark {
+		t.Fatalf("allowed QUIC SNI -> %v (%s)", d.Action, d.Reason)
+	}
+	deny := buildQUICInitialForTest("10.0.1.10", "evil.test")
+	if d := l.decideQUIC("10.0.1.10", sport, deny); d.Action != sniDrop || d.Reason != "egress_sni_denied" {
+		t.Fatalf("denied QUIC -> %v/%s", d.Action, d.Reason)
+	}
+	if d := l.decideQUIC("10.0.1.99", sport, allow); d.Action != sniDrop { // 미등록
+		t.Fatal("unregistered QUIC must fail closed")
+	}
+	if d := l.decideQUIC("10.0.1.10", sport, []byte{0x40, 0x00}); d.Action != sniDrop { // non-Initial
+		t.Fatal("unparseable QUIC must fail closed")
+	}
+}
+
+// TestSNIDecideQUICMultiDatagram is Task 6c's core coverage (revised Task 7b): a
+// post-quantum-shaped ClientHello split across two Initial datagrams accumulates
+// in the flow's *quic.InitialReassembler across two decideQUIC calls sharing the
+// same flowKey=srcIP:sport (same sport on both datagrams, mirroring a real QUIC
+// flow). The first Feed is incomplete and is DROPPED fail-closed (reason
+// egress_sni_incomplete — the datagram is not forwarded, but the reassembler
+// keeps its buffered CRYPTO so the second datagram still completes the
+// ClientHello); the second Feed completes and classifies.
+func TestSNIDecideQUICMultiDatagram(t *testing.T) {
+	l := newSNIVerdictLoop(88, "", nil)
+	m, _ := sni.NewMatcher([]string{"api.anthropic.com"})
+	l.Register("10.0.1.10", sniRegistryEntry{VMID: "vm-1", TenantID: "t1", Matcher: m})
+
+	dcid := []byte{0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08}
+	const sport = uint16(55555)
+
+	// Allowed SNI split across 2 datagrams.
+	allowHandshake := encodeQUICClientHelloHandshake("api.anthropic.com")
+	allowDgs := quic.BuildInitialDatagramsForTest(dcid, 0x00000001, allowHandshake, len(allowHandshake)/2)
+	if len(allowDgs) != 2 {
+		t.Fatalf("expected allow handshake split into 2 datagrams, got %d", len(allowDgs))
+	}
+	if d := l.decideQUIC("10.0.1.10", sport, allowDgs[0]); d.Action != sniDrop || d.Reason != "egress_sni_incomplete" {
+		t.Fatalf("allow datagram 1 -> %v (%s), want drop/egress_sni_incomplete (fail-closed buffering)", d.Action, d.Reason)
+	}
+	if d := l.decideQUIC("10.0.1.10", sport, allowDgs[1]); d.Action != sniAcceptMark {
+		t.Fatalf("allow datagram 2 -> %v (%s), want accept_mark (complete+allowed)", d.Action, d.Reason)
+	}
+
+	// Denied SNI split across 2 datagrams, same flowKey (same sport) reused
+	// after the prior flow's completion evicted it.
+	denyHandshake := encodeQUICClientHelloHandshake("evil.test")
+	denyDgs := quic.BuildInitialDatagramsForTest(dcid, 0x00000001, denyHandshake, len(denyHandshake)/2)
+	if len(denyDgs) != 2 {
+		t.Fatalf("expected deny handshake split into 2 datagrams, got %d", len(denyDgs))
+	}
+	if d := l.decideQUIC("10.0.1.10", sport, denyDgs[0]); d.Action != sniDrop || d.Reason != "egress_sni_incomplete" {
+		t.Fatalf("deny datagram 1 -> %v (%s), want drop/egress_sni_incomplete (fail-closed buffering)", d.Action, d.Reason)
+	}
+	if d := l.decideQUIC("10.0.1.10", sport, denyDgs[1]); d.Action != sniDrop || d.Reason != "egress_sni_denied" {
+		t.Fatalf("deny datagram 2 -> %v/%s, want drop/egress_sni_denied", d.Action, d.Reason)
 	}
 }
 

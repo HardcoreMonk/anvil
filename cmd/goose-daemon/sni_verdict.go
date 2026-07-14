@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"ephemera/internal/anvilmcp"
+	"ephemera/internal/network/quic"
 	"ephemera/internal/network/sni"
 
 	nfqueue "github.com/florianl/go-nfqueue/v2"
@@ -30,6 +31,12 @@ import (
 // (LRU); the evicted flow degrades to fail-closed (its next segment starts a
 // fresh reassembler mid-stream, fails to parse as a record boundary, and drops)
 // — never to fail-open.
+//
+// The QUIC flow table (reassemblerForQUIC, Task 6c) reuses this same cap for
+// its own, wholly separate table: each live QUIC flow buffers at most
+// quic.maxQuicClientHelloBytes (8 KiB), so that table's worst case adds
+// another 4096 * 8 KiB = 32 MiB per loop, on top of the TCP table above. Same
+// LRU-eviction-degrades-to-fail-closed guarantee applies to both tables.
 const sniReassemblerMaxFlows = 4096
 
 type sniAction int
@@ -72,6 +79,14 @@ type sniFlowEntry struct {
 	r   *sni.Reassembler
 }
 
+// quicFlowEntry is one live multi-datagram QUIC Initial reassembly, keyed by
+// "srcIP:sport" — the QUIC counterpart of sniFlowEntry, holding a
+// *quic.InitialReassembler (Task 6b) instead of a *sni.Reassembler.
+type quicFlowEntry struct {
+	key string
+	r   *quic.InitialReassembler
+}
+
 type sniVerdictLoop struct {
 	queueNum  int
 	auditPath string         // tenant-scoped runtime audit trail; deny records land here via recordVerdict/auditDeny.
@@ -92,6 +107,18 @@ type sniVerdictLoop struct {
 	flowMu  sync.Mutex
 	flows   map[string]*list.Element // key -> element carrying *sniFlowEntry
 	flowLRU *list.List               // front = most recently used
+
+	// QUIC reassembly LRU (multi-datagram Initial CRYPTO reassembly, Task 6c).
+	// Mirrors the flowMu/flows/flowLRU triple above but keyed/typed for
+	// *quic.InitialReassembler, and is a wholly separate bounded table so a burst
+	// of TCP flows can never evict a QUIC flow's reassembler or vice versa. Same
+	// discipline as flowMu: flowMuQUIC guards ONLY this table, not the
+	// reassembler's Feed call in handleUDPQUIC, which runs lock-free and is safe
+	// solely because go-nfqueue dispatches the hook from a single goroutine (see
+	// the flowMu field comment above).
+	flowMuQUIC  sync.Mutex
+	quicFlows   map[string]*list.Element // key -> element carrying *quicFlowEntry
+	quicFlowLRU *list.List               // front = most recently used
 }
 
 func newSNIVerdictLoop(queueNum int, auditPath string, metrics *daemonMetrics) *sniVerdictLoop {
@@ -103,6 +130,9 @@ func newSNIVerdictLoop(queueNum int, auditPath string, metrics *daemonMetrics) *
 		registry:  map[string]sniRegistryEntry{},
 		flows:     map[string]*list.Element{},
 		flowLRU:   list.New(),
+
+		quicFlows:   map[string]*list.Element{},
+		quicFlowLRU: list.New(),
 	}
 }
 
@@ -169,6 +199,75 @@ func (l *sniVerdictLoop) decide(srcIP string, payload []byte) sniDecision {
 	return l.classifyParsedSNI(entry, name)
 }
 
+// decideQUIC is decide's QUIC/UDP:443 counterpart (also unit-tested without
+// root). payload is one UDP datagram believed to carry a QUIC Initial packet;
+// srcIP/sport identify the flow, keying the per-flow *quic.InitialReassembler
+// this function drives via reassemblerForQUIC (Task 6c).
+//
+// A modern post-quantum ClientHello (X25519MLKEM768) does not fit in a single
+// QUIC Initial datagram, so this function feeds each datagram to the flow's
+// InitialReassembler to accumulate the ClientHello across datagrams. Unlike
+// TCP's incomplete-segment passthrough, an incomplete QUIC datagram is DROPPED
+// (fail-closed) — not passed through — because passing it through would confirm
+// the UDP conntrack entry with mark 0 and break the completing datagram's
+// connmark fast-path (see the extended note below):
+//
+//   - unregistered srcIP  -> sniDrop (reason unregistered_source; no
+//     reassembler created)
+//   - Feed error           -> sniDrop (reason egress_sni_unparsed) + flow evict
+//     (malformed/undecryptable/oversized/no-SNI — all terminal, fail-closed)
+//   - Feed incomplete      -> sniDrop (reason egress_sni_incomplete; the datagram
+//     is dropped, NOT forwarded, but the flow's reassembler keeps its buffered
+//     CRYPTO so the ClientHello still completes across datagrams — see below)
+//   - Feed done, in matcher     -> sniAcceptMark (reason egress_sni_allowed) + evict
+//   - Feed done, not in matcher -> sniDrop (reason egress_sni_denied, SNI recorded) + evict
+//
+// Why an incomplete datagram is DROPPED, not passed through (deviation from the
+// TCP branch's incomplete-segment passthrough, and from the original Task 6c
+// design): a passed-through incomplete Initial reaches the server carrying a
+// partial ClientHello AND — being the flow's first accepted packet — confirms
+// the UDP conntrack entry with mark 0. The connmark then set on the *completing*
+// (second) datagram loses the race with that already-confirmed entry, so the
+// -sni-udp-fastpath rule never matches and every later (non-Initial) datagram of
+// an ALLOWED flow re-queues here, fails to decrypt as an Initial, and is dropped
+// — breaking the handshake for every multi-datagram (post-quantum) ClientHello.
+// Dropping the incomplete datagram instead (a) makes the completing, allowed
+// datagram the FIRST accepted packet so its connmark confirms cleanly and the
+// fast path engages, and (b) never leaks a partial ClientHello to the server: the
+// client retransmits the dropped datagram via QUIC loss recovery once the flow is
+// allowed and marked, and that retransmit rides the fast path. It is strictly
+// fail-closed — nothing reaches the server until the whole ClientHello is
+// reassembled and the SNI is allowed. The reassembler still accumulates across
+// datagrams (Feed runs before the drop verdict), bounded by its per-flow byte cap
+// and the QUIC flow LRU; an incomplete datagram can never yield an approved
+// connmark.
+func (l *sniVerdictLoop) decideQUIC(srcIP string, sport uint16, payload []byte) sniDecision {
+	entry, ok := l.resolveEntry(srcIP)
+	if !ok {
+		return sniDecision{Action: sniDrop, Reason: "unregistered_source"}
+	}
+	flowKey := srcIP + ":" + strconv.Itoa(int(sport))
+	r := l.reassemblerForQUIC(flowKey)
+	name, done, ferr := r.Feed(payload)
+	switch {
+	case ferr != nil:
+		// Terminal parse error (malformed / no-SNI / inconsistent overlap /
+		// oversized) -> fail closed.
+		l.evictQUICFlow(flowKey)
+		return sniDecision{Action: sniDrop, Reason: "egress_sni_unparsed"}
+	case !done:
+		// Incomplete ClientHello: fail closed (drop, no RST for UDP) rather than
+		// forward a partial ClientHello to the server. The flow stays cached so
+		// the next Initial datagram accumulates onto the same reassembler; the
+		// client retransmits this dropped datagram once the flow is allowed and
+		// the connmark fast path is in place. See the doc comment above.
+		return sniDecision{Action: sniDrop, Reason: "egress_sni_incomplete"}
+	default:
+		l.evictQUICFlow(flowKey)
+		return l.classifyParsedSNI(entry, name) // shared with TCP: in matcher -> acceptMark, else denied
+	}
+}
+
 // resolveEntry does the locked registry lookup that both decide (single-packet
 // core) and the Start hook's pre-classify stage share, so the RLock/RUnlock dance
 // and the unregistered-source fail-closed contract live in exactly one place. It
@@ -226,6 +325,45 @@ func (l *sniVerdictLoop) evictFlow(key string) {
 	}
 }
 
+// reassemblerForQUIC is reassemblerFor's QUIC counterpart: it returns the
+// flow's *quic.InitialReassembler, creating one if absent and evicting the
+// least-recently-used flow once this (separate) table is at
+// sniReassemblerMaxFlows capacity — the flow-count cap a malicious guest
+// cannot bypass by opening many QUIC flows that each dribble a
+// never-completing Initial (per-flow bytes are separately capped by
+// InitialReassembler itself, at quic.maxQuicClientHelloBytes; see Task 6b).
+// flowMuQUIC is released before the returned reassembler's Feed runs in
+// handleUDPQUIC; that is safe only under single-goroutine hook dispatch (see
+// flowMuQUIC's field comment).
+func (l *sniVerdictLoop) reassemblerForQUIC(key string) *quic.InitialReassembler {
+	l.flowMuQUIC.Lock()
+	defer l.flowMuQUIC.Unlock()
+	if el, ok := l.quicFlows[key]; ok {
+		l.quicFlowLRU.MoveToFront(el)
+		return el.Value.(*quicFlowEntry).r
+	}
+	for l.quicFlowLRU.Len() >= sniReassemblerMaxFlows {
+		back := l.quicFlowLRU.Back()
+		if back == nil {
+			break
+		}
+		l.quicFlowLRU.Remove(back)
+		delete(l.quicFlows, back.Value.(*quicFlowEntry).key)
+	}
+	r := &quic.InitialReassembler{}
+	l.quicFlows[key] = l.quicFlowLRU.PushFront(&quicFlowEntry{key: key, r: r})
+	return r
+}
+
+func (l *sniVerdictLoop) evictQUICFlow(key string) {
+	l.flowMuQUIC.Lock()
+	defer l.flowMuQUIC.Unlock()
+	if el, ok := l.quicFlows[key]; ok {
+		l.quicFlowLRU.Remove(el)
+		delete(l.quicFlows, key)
+	}
+}
+
 // ipv4TCP is the subset of an IPv4/TCP packet the verdict hook needs.
 type ipv4TCP struct {
 	srcIP, dstIP net.IP // srcIP = guest, dstIP = server (dport 443)
@@ -267,6 +405,51 @@ func parseIPv4TCP(pkt []byte) (ipv4TCP, error) {
 	return t, nil
 }
 
+// ipv4UDP is the subset of an IPv4/UDP packet the verdict hook needs. Unlike
+// ipv4TCP it carries no seq/ackSeq: UDP has no sequence numbers, so a UDP drop
+// can never inject a credible RST (see setDropNoRST).
+type ipv4UDP struct {
+	srcIP, dstIP net.IP // srcIP = guest, dstIP = server (dport 443)
+	sport, dport uint16
+	payload      []byte
+}
+
+// parseIPv4UDP parses an IPv4/UDP packet, the UDP counterpart of parseIPv4TCP.
+// It bounds the returned payload by the UDP header's own Length field (not
+// merely by the remaining packet bytes), so IP-level padding or a truncated
+// datagram can never leak trailing garbage into the payload quic.ParseInitialSNI
+// inspects.
+func parseIPv4UDP(pkt []byte) (ipv4UDP, error) {
+	var u ipv4UDP
+	if len(pkt) < 20 {
+		return u, fmt.Errorf("short ip packet (%d bytes)", len(pkt))
+	}
+	if pkt[0]>>4 != 4 {
+		return u, fmt.Errorf("not ipv4 (version %d)", pkt[0]>>4)
+	}
+	ihl := int(pkt[0]&0x0f) * 4
+	if ihl < 20 || len(pkt) < ihl {
+		return u, fmt.Errorf("bad ihl %d", ihl)
+	}
+	if pkt[9] != unix.IPPROTO_UDP {
+		return u, fmt.Errorf("not udp (proto %d)", pkt[9])
+	}
+	u.srcIP = net.IPv4(pkt[12], pkt[13], pkt[14], pkt[15])
+	u.dstIP = net.IPv4(pkt[16], pkt[17], pkt[18], pkt[19])
+	udpHdr := pkt[ihl:]
+	if len(udpHdr) < 8 {
+		return u, fmt.Errorf("short udp header (%d bytes)", len(udpHdr))
+	}
+	u.sport = binary.BigEndian.Uint16(udpHdr[0:2])
+	u.dport = binary.BigEndian.Uint16(udpHdr[2:4])
+	udpLen := int(binary.BigEndian.Uint16(udpHdr[4:6]))
+	if udpLen < 8 || udpLen > len(udpHdr) {
+		return u, fmt.Errorf("bad udp length %d (have %d)", udpLen, len(udpHdr))
+	}
+	u.payload = udpHdr[8:udpLen]
+	return u, nil
+}
+
 // Start binds the NFQUEUE listener and registers the verdict hook. It is a
 // preflight: on nfqueue.Open failure it leaves Ready()==false and returns the
 // error, never silently pretending to have installed a filter. Note the config
@@ -305,7 +488,14 @@ func (l *sniVerdictLoop) Start(ctx context.Context) error {
 			l.metrics.IncSNIVerdict("dropped") // pre-classify infra drop (distinct from policy denial)
 			return 0
 		}
-		t, perr := parseIPv4TCP(*a.Payload)
+		pkt := *a.Payload
+		if len(pkt) > 9 && pkt[9] == unix.IPPROTO_UDP {
+			// QUIC/UDP:443 path: per-flow multi-datagram Initial reassembly via
+			// decideQUIC's flow cache — see handleUDPQUIC.
+			l.handleUDPQUIC(nf, id, pkt)
+			return 0
+		}
+		t, perr := parseIPv4TCP(pkt)
 		if perr != nil {
 			slog.Debug("sni verdict: unparsable packet, fail-closed drop", "err", perr)
 			l.setDrop(nf, id, t)
@@ -377,6 +567,55 @@ func (l *sniVerdictLoop) Start(ctx context.Context) error {
 	return nil
 }
 
+// handleUDPQUIC is the UDP:443 (QUIC) counterpart of the TCP branch of the
+// hook body above. Like TCP's ClientHello, a QUIC Initial's SNI may span more
+// than one datagram (a modern post-quantum ClientHello does not fit in one
+// Initial), so this hook feeds each datagram to the flow's
+// *quic.InitialReassembler via decideQUIC — which owns the flow lookup,
+// eviction, and passthrough/accept/drop routing (Task 6c) — mirroring the TCP
+// branch's reassemblerFor/Feed/evictFlow shape. The hook body itself still
+// reduces to parse -> resolve -> decideQUIC -> apply; the incomplete/re-queue
+// branch now lives inside decideQUIC instead of being absent.
+//
+// Every early-return here (parse failure, wrong dport, unregistered source) is
+// a pre-classify infra drop: it fails closed via setDropNoRST + a "dropped"
+// metric, bypassing recordVerdict, exactly mirroring the TCP branch's
+// pre-classify drops above (see their "distinct from policy denial" comments).
+// Only a resolved decideQUIC verdict goes through applyVerdictUDP/recordVerdict.
+func (l *sniVerdictLoop) handleUDPQUIC(nf *nfqueue.Nfqueue, id uint32, pkt []byte) {
+	u, perr := parseIPv4UDP(pkt)
+	if perr != nil {
+		slog.Debug("sni verdict: unparsable udp packet, fail-closed drop", "err", perr)
+		l.setDropNoRST(nf, id)
+		l.metrics.IncSNIVerdict("dropped")
+		return
+	}
+	if u.dport != 443 {
+		// Defense in depth: the iptables dispatch rule is expected to already
+		// scope this queue to dport 443, but fail closed here too rather than
+		// trust that blindly.
+		l.setDropNoRST(nf, id)
+		l.metrics.IncSNIVerdict("dropped")
+		return
+	}
+	srcIP := u.srcIP.String()
+	entry, ok := l.resolveEntry(srcIP)
+	if !ok {
+		// Defense in depth: the iptables dispatch rule is already scoped by
+		// -s guestIP, but an unregistered source still fails closed here.
+		l.setDropNoRST(nf, id)
+		l.metrics.IncSNIVerdict("dropped")
+		return
+	}
+	d := l.decideQUIC(srcIP, u.sport, u.payload)
+	slog.Debug("sni verdict: quic udp datagram",
+		"flow", srcIP+":"+strconv.Itoa(int(u.sport)),
+		"payload_len", len(u.payload),
+		"action", d.Action.String(),
+		"reason", d.Reason)
+	l.applyVerdictUDP(nf, id, d, entry)
+}
+
 // applyVerdict turns a decision into a kernel verdict. sniAcceptMark is the only
 // path that sets the approved connmark; every drop path is best-effort RST +
 // unconditional DROP. The kernel verdict is issued first and unconditionally;
@@ -393,6 +632,32 @@ func (l *sniVerdictLoop) applyVerdict(nf *nfqueue.Nfqueue, id uint32, d sniDecis
 		l.setAccept(nf, id)
 	case sniDrop:
 		l.setDrop(nf, id, t)
+	}
+	l.recordVerdict(entry, d)
+}
+
+// applyVerdictUDP is applyVerdict's UDP/QUIC counterpart: accept+mark or drop,
+// but a UDP drop never attempts injectRST — that needs the TCP seq/ackSeq
+// ipv4TCP carries (RFC 793 has no UDP analog), so setDropNoRST issues a plain
+// fail-closed NfDrop instead. recordVerdict (metrics/audit) is shared unchanged
+// with the TCP path. There is no sniPassthrough case: decideQUIC only ever
+// yields sniAcceptMark or sniDrop (incomplete ClientHellos fail closed as
+// egress_sni_incomplete drops, see the doc below), unlike the TCP path.
+func (l *sniVerdictLoop) applyVerdictUDP(nf *nfqueue.Nfqueue, id uint32, d sniDecision, entry sniRegistryEntry) {
+	// Multi-datagram QUIC Initial reassembly (Task 6c, revised Task 7b): while a
+	// flow's ClientHello is still incomplete, decideQUIC yields a fail-closed
+	// sniDrop (reason egress_sni_incomplete) — the datagram is dropped, not
+	// forwarded, so no partial ClientHello reaches the server and the completing
+	// datagram becomes the flow's first accepted packet (its connmark then
+	// confirms cleanly onto the conntrack entry). The client retransmits the
+	// dropped datagram once the flow is allowed and the fast path is in place.
+	switch d.Action {
+	case sniAcceptMark:
+		if err := nf.SetVerdictWithConnMark(id, nfqueue.NfAccept, l.connMark); err != nil {
+			slog.Error("sni verdict: set accept+connmark failed", "err", err, "sni", d.SNI)
+		}
+	case sniDrop:
+		l.setDropNoRST(nf, id)
 	}
 	l.recordVerdict(entry, d)
 }
@@ -415,6 +680,14 @@ func (l *sniVerdictLoop) recordVerdict(entry sniRegistryEntry, d sniDecision) {
 	case sniAcceptMark:
 		l.metrics.IncSNIVerdict("allowed")
 	case sniDrop:
+		if d.Reason == "egress_sni_incomplete" {
+			// Fail-closed buffering drop of an incomplete multi-datagram Initial
+			// (see decideQUIC): the ClientHello has not been classified yet, so
+			// this is neither an allow nor a policy deny. The client retransmits
+			// the datagram once the flow completes, so counting it as "denied"
+			// (or auditing it) would double-count a still-in-flight handshake.
+			return
+		}
 		l.metrics.IncSNIVerdict("denied")
 		if d.Reason == "egress_sni_denied" {
 			l.auditDeny(entry, d)
@@ -468,6 +741,18 @@ func (l *sniVerdictLoop) setDrop(nf *nfqueue.Nfqueue, id uint32, t ipv4TCP) {
 	}
 	if err := l.injectRST(t); err != nil {
 		slog.Debug("sni verdict: RST injection failed; guest will time out", "err", err)
+	}
+}
+
+// setDropNoRST issues a fail-closed DROP with no RST attempt — the UDP/QUIC
+// counterpart of setDrop. injectRST is TCP-specific (it spoofs a RST using the
+// guest segment's ack_seq, RFC 793); UDP has no sequence numbers to build a
+// credible RST from, so this path silently drops and lets the guest's own QUIC
+// idle timeout tear the connection down, same fail-closed-never-fail-open
+// guarantee as setDrop, just without the fast-fail courtesy.
+func (l *sniVerdictLoop) setDropNoRST(nf *nfqueue.Nfqueue, id uint32) {
+	if err := nf.SetVerdict(id, nfqueue.NfDrop); err != nil {
+		slog.Error("sni verdict: set drop failed", "err", err)
 	}
 }
 
