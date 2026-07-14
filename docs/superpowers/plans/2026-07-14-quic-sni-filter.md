@@ -622,3 +622,41 @@ git commit -m "docs(quic): ADR-0002 QUIC extension + security-policy/boundary/ru
 - **유닛 vs e2e 분담**: 순수 crypto·파서·decide·dispatch생성은 root 없이 유닛(RFC 골든+라운드트립). netlink/UDP 커널 mark·conntrack fast-path·실 QUIC 왕복은 root+KVM → Task 7 e2e가 유일 실검. Task 3/5 헤더에 이 경계 명시.
 - **Type consistency**: `ParseHandshakeSNI`(T1)↔`ParseInitialSNI`(T4)↔`decideQUIC`/`parseIPv4UDP`(T5)↔UDP dispatch comment `-sni-udp-*`(T6) 시그니처·이름 일치. `BuildInitialForTest`(T4 exported)를 T5 테스트가 재사용. connmark `0x534e49`·queue 88 TCP와 공유.
 - **알려진 리스크**: (a) RFC 상수/Expand-Label/HP offset 정확성 — golden test가 gate. (b) v2 long-header packet-type 인코딩 v1과 상이(RFC 9369 §3.2) — 복호 전 version별 type 판정. (c) golden image HTTP/3 클라 가용성(스펙 미결#2) — Task 7에서 확정. (d) UDP conntrack connmark 지속성 — Task 7 실증.
+
+---
+
+## [2026-07-14 개정 — 멀티-데이터그램 재조립] Task 6b, 6c
+
+**개정 사유**: KVM e2e(Task 7)가 실측 확인 — Go1.24+/Chrome/Firefox default post-quantum(X25519MLKEM768) ClientHello(~1516B)가 2 Initial 데이터그램에 걸쳐, 유닛-데이터그램 v1이 현대 QUIC **허용** 트래픽을 fail-closed로 잘못 DENY. 멀티-데이터그램 재조립을 in-scope로 확장. Tasks 1-6은 그대로(단일-데이터그램 fast path 유지), 6b/6c가 누적 재조립을 얹는다. Task 7 e2e는 PQ 재검, Task 8 docs는 멀티-데이터그램 반영.
+
+### Task 6b: `quic.InitialReassembler` (멀티-데이터그램 CRYPTO 누적)
+
+**Files:** Create/Modify: `internal/network/quic/frames.go`(reassembler + ParseInitialSNI 위임), `internal/network/quic/testsupport.go`(2-datagram split 헬퍼), `internal/network/quic/frames_test.go`.
+
+**Interfaces:**
+- Produces: `type InitialReassembler struct{...}` + `func (r *InitialReassembler) Feed(datagram []byte) (sni string, done bool, err error)`. done=true & sni set → ClientHello 완결·SNI 추출; done=false & err=nil → 더 필요(passthrough); err!=nil → terminal(deny). per-flow 바이트 상한 `maxQuicClientHelloBytes`(예 8192) 초과 → err. `ParseInitialSNI(datagram)`는 `r:=&InitialReassembler{}; sni,done,err:=r.Feed(datagram); done이면 sni, 아니면 errIncompleteInDatagram` 로 **단일-데이터그램 위임**(기존 시그니처·동작 유지, 기존 테스트 회귀 가드).
+- Consumes: `decryptInitial`(Task 3), `sni.ParseHandshakeSNI`(Task 1).
+
+- [ ] **Step 1: 실패 테스트** — 2-datagram 재조립
+  - testsupport에 `BuildInitialDatagramsForTest(dcid, version, handshake []byte, splitAt int) [][]byte` 추가: handshake를 CRYPTO offset [0,splitAt)·[splitAt,len)로 나눠 2개 Initial 데이터그램 생성(각각 유효 복호 가능, pn=0/pn=1). splitAt이 len 이상이면 1개.
+  - `TestInitialReassembler_TwoDatagrams`: 큰 handshake(SNI 포함, splitAt=중간)로 2 데이터그램 생성 → r.Feed(d1)=("",false,nil)[미완결], r.Feed(d2)=(sni,true,nil)[완결]. SNI 일치.
+  - `TestInitialReassembler_SingleDatagramStillWorks`: 작은 ClientHello 1 데이터그램 → Feed 즉시 (sni,true,nil). 그리고 `ParseInitialSNI`(단일) 기존 라운드트립/RFC 골든 회귀.
+  - `TestInitialReassembler_OversizeTerminal`: 바이트 상한 초과 CRYPTO → err(deny).
+  - `TestInitialReassembler_InconsistentOverlapAcrossDatagrams`: 두 데이터그램의 겹치는 offset이 다른 바이트 → err(fail-closed, Task 4 overlap 규율 flow 전체로 확장).
+
+- [ ] **Step 2~4**: 실패확인 → 구현(frames.go에 InitialReassembler: 내부에 offset-indexed 누적 버퍼 + 바이트 상한 + inconsistent-overlap 검사(Task 4 로직 재사용); 각 Feed는 decryptInitial→CRYPTO 청크 추출→누적→sni.ParseHandshakeSNI 시도(ErrIncomplete면 done=false, 완결이면 done=true, 기타 err면 terminal)) → 통과확인 `go test -race ./internal/network/quic/ -v`(신규+기존 전부·fuzz).
+- [ ] **Step 5: Commit** `feat(quic): multi-datagram Initial reassembler (PQ-default ClientHello spanning 2 datagrams)`
+
+### Task 6c: verdict 루프 QUIC flow-cache 배선
+
+**Files:** Modify: `cmd/goose-daemon/sni_verdict.go`, `cmd/goose-daemon/sni_verdict_test.go`.
+
+**Interfaces:**
+- Consumes: `quic.InitialReassembler`/`Feed`(6b). 기존 TCP `reassemblerFor`/flow-cache/`evictFlow`/`sniReassemblerMaxFlows` 패턴.
+- Produces: `decideQUIC`가 flow(srcIP:sport)별 `*quic.InitialReassembler`를 bounded-LRU 캐시로 유지, 데이터그램 Feed → 완결시 classifyParsedSNI(+flow evict), 미완결시 **sniPassthrough**(unmarked ACCEPT, 다음 재큐잉), err시 sniDrop(+evict).
+
+- [ ] **Step 1: 실패 테스트** (`sni_verdict_test.go`)
+  - `TestSNIDecideQUICMultiDatagram`: 등록된 srcIP, allow_sni 매처. `quic.BuildInitialDatagramsForTest`로 허용 SNI를 2 데이터그램으로 → l.decideQUIC(srcIP, d1).Action==sniPassthrough(미완결) → l.decideQUIC(srcIP, d2).Action==sniAcceptMark(완결·허용). deny SNI 2-datagram → 2번째에 sniDrop egress_sni_denied.
+  - 기존 `TestSNIDecideQUICRouting`(단일-데이터그램 allowed/denied/미등록/non-Initial) 회귀 유지 — 단일 데이터그램은 첫 Feed에 즉시 완결.
+- [ ] **Step 2~4**: 구현 — `reassemblerForQUIC(flowKey string) *quic.InitialReassembler`(bounded LRU, TCP `reassemblerFor` 미러); decideQUIC이 flowKey=srcIP:sport로 얻어 Feed; done→classifyParsedSNI+evictQUICFlow; !done&nil err→sniDecision{sniPassthrough}; err→sniDrop egress_sni_unparsed + evict. **applyVerdictUDP에 sniPassthrough 케이스 재추가**(setAccept unmarked — 6c에서 QUIC이 다시 passthrough를 낼 수 있음; Task 5에서 유닛-데이터그램이라 제거했던 것을 복원). handleUDPQUIC hook이 flow 상태를 안전히(단일 goroutine 디스패치 전제 — TCP reassemblerFor와 동일) 접근. → 통과확인 `go test -race ./cmd/goose-daemon/ -run 'SNIDecide|QUIC|Egress'`.
+- [ ] **Step 5: Commit** `feat(egress): QUIC per-flow reassembly cache (multi-datagram Initial passthrough)`

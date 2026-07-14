@@ -33,7 +33,7 @@ QUIC Initial 패킷의 ClientHello는 **암호화**돼 있다. 단 그 키는 �
 
 1. **복호 자체 구현** (stdlib + `x/crypto/hkdf`). 최소-의존 기조 유지, 패킷 파싱만 하고 QUIC 상태머신 불필요라 상대적 소규모(~300줄). crypto 정확성은 RFC golden 벡터 유닛으로 담보.
 2. **QUICv1 + QUICv2 지원.** version별 salt/label 분기, 복호 로직 공통. 미지원/알 수 없는 버전 → fail-closed deny.
-3. **유닛-데이터그램 내 CRYPTO 재조립.** 관측된 Initial 데이터그램(coalesced 패킷 포함) 안의 CRYPTO 프레임을 offset순 재조립. ClientHello가 그 안에 완결되면 파싱, 데이터그램 경계를 넘으면 fail-closed deny. connectionless 상태 캐시 불필요(대다수 ClientHello는 ≥1200B 패딩된 첫 Initial에 들어감).
+3. **멀티-데이터그램 CRYPTO 재조립** (2026-07-14 개정 — 최초 "유닛-데이터그램" 결정을 뒤집음). **개정 사유**: Go 1.24+/Chrome/Firefox가 이제 **기본으로** post-quantum 하이브리드 키교환(X25519MLKEM768)을 쓰는데, 그 ClientHello(~1516B)는 QUIC Initial 1개(payload ~1162B)를 넘어 **2 Initial 데이터그램에 걸친다**. 최초의 "대다수 ClientHello는 첫 데이터그램에 들어감" 전제는 PQ-default 시대에 틀렸고, 유닛-데이터그램 한정은 현대 QUIC 대다수의 **허용** 트래픽을 fail-closed로 잘못 DENY한다(KVM e2e에서 실측 확인). 따라서 flow(srcIP:sport)별로 여러 Initial 데이터그램의 CRYPTO 프레임을 offset순 누적 재조립한다. 각 Initial 데이터그램은 같은 DCID→같은 키로 독립 복호(pn만 상이)되며, CRYPTO 청크를 offset 병합. ClientHello 완결 시 판정, 미완결이면 passthrough(다음 데이터그램 재큐잉). connectionless flow 상태는 **bounded LRU 캐시**(무한 성장 금지)로 유지.
 4. **dispatch/fast-path**: 기존 queue 88 공유 + 프로토콜 분기. UDP conntrack flow에 connmark fast-path.
 5. **deny 응답 = silent DROP.** UDP엔 RST가 없다. QUIC는 타임아웃 후 (브라우저 기준) TCP/HTTP2로 fallback → 그 흐름은 TCP:443 SNI 필터를 타 allow_sni면 허용된다. 자연스러운 degrade, 최소 코드.
 
@@ -87,10 +87,10 @@ coalesced 패킷: 하나의 UDP 데이터그램에 여러 QUIC 패킷이 이어�
 - Start 훅이 IP proto byte(`pkt[9]`)로 분기:
   - TCP → 기존 TLS 경로(`sni.Reassembler`/`ParseClientHelloSNI`).
   - UDP & dport 443 → QUIC 경로: `quic.ParseInitialSNI(udp.payload)`.
-- **QUIC decide**: 미등록 srcIP → drop(`unregistered_source`); `ParseInitialSNI` 성공 & SNI ∈ matcher → `sniAcceptMark`(connmark); ∉ → drop(`egress_sni_denied`, SNI 기록); 파싱/복호 실패·미지원·분할 → drop(`egress_sni_unparsed`). **UDP는 RST 없음 → applyVerdict의 drop이 silent DROP**(injectRST는 TCP 전용, UDP 경로에선 호출 안 함).
+- **QUIC decide**: flow(srcIP:sport)별 `quic.InitialReassembler`를 bounded-LRU 캐시에서 얻어 데이터그램을 Feed. 미등록 srcIP → drop(`unregistered_source`); ClientHello **완결** & SNI ∈ matcher → `sniAcceptMark`(connmark, flow evict); ∉ → drop(`egress_sni_denied`); ClientHello **미완결**(더 필요) → passthrough(unmarked ACCEPT, 다음 Initial 데이터그램 재큐잉); 복호 실패·미지원·오버사이즈·overlap 모순 → drop(`egress_sni_unparsed`, flow evict). **UDP는 RST 없음 → drop이 silent DROP**(injectRST는 TCP 전용).
 - fast-path: `SetVerdictWithConnMark`가 UDP conntrack flow에 mark → 후속 QUIC 패킷은 UDP connmark ACCEPT 규칙이 커널 처리. TCP와 동일 connmark(`0x534e49`).
 - metric/audit: `recordVerdict` 재사용. deny → `egress_sni_denied` audit + metric. (proto 구분은 v1 비목표 — 동일 outcome. 필요 시 후속.)
-- **재조립 없음**: QUIC은 유닛-데이터그램 판정이라 TCP의 `ErrIncomplete→passthrough` 경로가 없다. 분할 = terminal deny.
+- **멀티-데이터그램 재조립**: `quic.InitialReassembler`가 flow별로 여러 Initial 데이터그램의 CRYPTO를 offset 누적. 완결 전 데이터그램은 TCP처럼 `ErrIncomplete→passthrough`(unmarked ACCEPT로 다음 재큐잉). bounded LRU flow cap(예 `quicReassemblerMaxFlows`) + per-flow 바이트 상한(오버사이즈 → drop). 판정/실패 시 flow evict.
 
 ### 4. dispatch (`cmd/goose-daemon/egress_policy.go`)
 
@@ -128,7 +128,7 @@ guest UDP:443 QUIC Initial
 | 미지원/알 수 없는 QUIC 버전 | 키 파생 불가 → **DROP** |
 | non-Initial(Handshake/1-RTT/Retry/VN) 첫 패킷 | ClientHello 없음 → **DROP** |
 | header protection/AEAD 복호 실패 | **DROP** |
-| CRYPTO가 데이터그램 경계 초과(분할) | **DROP**(유닛-데이터그램 범위 계약) |
+| CRYPTO가 여러 Initial 데이터그램에 걸침(PQ ClientHello 등) | flow별 재조립으로 **누적**; 완결 전엔 passthrough. per-flow 바이트 상한 초과 → **DROP** |
 | ClientHello에 SNI 없음 | **DROP** |
 | SNI ∈ allow_sni | ACCEPT + connmark |
 | SNI ∉ allow_sni | **DROP** + audit |
@@ -155,8 +155,8 @@ guest UDP:443 QUIC Initial
 
 ## Scope / 비목표 (YAGNI)
 
-- **비목표**: 멀티-데이터그램 CRYPTO 재조립(분할 ClientHello), 0-RTT 파싱, QUIC 상태머신/handshake 추적, connection migration 추적, QUICv1/v2 외 버전, DNS-over-QUIC(:853) 등 non-:443. 전부 fail-closed deny로 안전 처리.
-- **후속 후보**: proto별 metric label, 멀티-데이터그램 재조립(대형 ClientHello 클라 등장 시), 새 QUIC 버전 salt/label 추가.
+- **비목표**: 0-RTT 파싱, QUIC 상태머신/handshake 추적, connection migration 추적, QUICv1/v2 외 버전, DNS-over-QUIC(:853) 등 non-:443. 전부 fail-closed deny로 안전 처리. (멀티-데이터그램 재조립은 2026-07-14 개정으로 **in-scope** — PQ-default 대응.)
+- **후속 후보**: proto별 metric label, 새 QUIC 버전 salt/label 추가, 매우 큰 ClientHello(3+ 데이터그램) 한계 재검토.
 
 ---
 
