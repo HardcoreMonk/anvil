@@ -71,6 +71,18 @@ servers:
     # tools_allow: [read_wiki_structure, ask_question]   # expose only these tools
     # tools_deny:  [dangerous_tool]                       # hide these (if no allow-list)
 
+  # DeepWiki (public, no-auth Streamable HTTP MCP) — a real, copy-pasteable backend.
+  # Verified end-to-end on 2026-07-13 (docs/operations/2026-07-13-mcp-gateway-deployment-
+  # verification-run.md): the daemon aggregates it, a worker-profile VM reaches it through
+  # the gateway, and read_wiki_structure/read_wiki_contents/ask_question round-trip live.
+  # No `credential:` (and no secrets.yaml entry) is needed because DeepWiki is unauthenticated.
+  # - id: deepwiki
+  #   namespace: deepwiki
+  #   transport: http
+  #   url: https://mcp.deepwiki.com/mcp
+  #   profiles: [worker]
+  #   # tools_allow: [read_wiki_structure, read_wiki_contents, ask_question]
+
   # A local stdio backend (v0.6.4): the gateway runs the MCP server itself.
   # - id: localtools
   #   transport: stdio

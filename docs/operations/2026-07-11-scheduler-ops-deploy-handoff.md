@@ -73,6 +73,11 @@ mount·goose-br0·purecvisor 전부 불변.
 
 ## Sub-track (iii) — runtime MCP Gateway 운영 정책 + dry-run: PASS (문서 + dry-run)
 
+> **Update 2026-07-13**: 여기서 남긴 "실 backend operator 배포 검증 잔여"는 **종결**. DeepWiki
+> (public no-auth http MCP)로 host-b 실 배포 검증 PASS — 실 backend `up:true`, VM 내부 왕복,
+> 경계 3종(미등록 source-IP `403`, audit metadata-only, `/config` leak guard). 신규 gateway
+> 결함 없음. 상세: [`docs/operations/2026-07-13-mcp-gateway-deployment-verification-run.md`](2026-07-13-mcp-gateway-deployment-verification-run.md).
+
 - 문서: `runbook.md`에 "runtime MCP Gateway 운영 정책" 절 추가(backend→profile 바인딩 기준, rate-limit/burst 권고, secrets.yaml 운영 규율, 배포 체크리스트).
 - 테스트 레벨 leak guard: `go test ./cmd/goose-daemon -run 'TestHandleConfigMCPServers_NeverLeaksArgsOrCredential|TestConfigMCP...'` 6개 PASS.
 - **live dry-run** (host-b `~/anvil` 수동 daemon, 소스 존재로 기동 가능): 임시 `configs/mcp/servers.yaml`(credential 있는 http backend) + `secrets.yaml` 배치 후 `EPHEMERA_MCP_ENABLED=1`로 기동 → 로그 `mcp gateway configured endpoint=http://ephemera-gw:3001/mcp bind=10.0.1.1:3001 servers=1`, `/config/mcp` → `{"enabled":true,"server_count":1}`, `/config/mcp/servers` → `has_credential:true`·url 노출·`up:false`(fake backend), **credential 토큰 문자열 응답에 0회 등장**. dry-run 후 임시 config·log 제거, daemon 정지.
