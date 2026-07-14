@@ -227,6 +227,34 @@ func TestReassemble_DuplicateCryptoTolerated(t *testing.T) {
 	}
 }
 
+// TestReassemble_InconsistentOverlapTerminal: two CRYPTO frames that cover the same
+// bytes with different contents are the QUIC analog of TCP-overlap evasion. They must
+// deny (fail-closed), and — because sort.Slice is not stable — the verdict must not
+// depend on frame ordering.
+func TestReassemble_InconsistentOverlapTerminal(t *testing.T) {
+	// Same offset, different bytes. sort.Slice may keep either frame first, so a
+	// correct reassembler denies regardless of the order they appear in the payload.
+	same := [2][]byte{cryptoFrame(0, []byte("hello")), cryptoFrame(0, []byte("world"))}
+	for _, order := range [][2]int{{0, 1}, {1, 0}} {
+		var p []byte
+		p = append(p, same[order[0]]...)
+		p = append(p, same[order[1]]...)
+		if _, err := reassembleCryptoFrames(p); !errors.Is(err, errInconsistentOverlap) {
+			t.Fatalf("same-offset conflict order %v: err = %v, want errInconsistentOverlap", order, err)
+		}
+	}
+	// Partial overlap: [0,5)="abcde" and [3,7)="XYfg" disagree on bytes [3,5).
+	a, b := cryptoFrame(0, []byte("abcde")), cryptoFrame(3, []byte("XYfg"))
+	for _, order := range [][2][]byte{{a, b}, {b, a}} {
+		var p []byte
+		p = append(p, order[0]...)
+		p = append(p, order[1]...)
+		if _, err := reassembleCryptoFrames(p); !errors.Is(err, errInconsistentOverlap) {
+			t.Fatalf("partial-overlap conflict: err = %v, want errInconsistentOverlap", err)
+		}
+	}
+}
+
 // TestParseInitialSNI_IncompleteHandshakeTerminal: a CRYPTO frame carrying a
 // truncated ClientHello yields sni.ErrIncomplete, which must be terminal here
 // (anvil does not reassemble across datagrams).

@@ -1,6 +1,7 @@
 package quic
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"sort"
@@ -14,6 +15,13 @@ import (
 // that spans several datagrams is treated as terminal — the verdict loop fails
 // closed (deny) rather than buffering across packets.
 var errIncompleteInDatagram = errors.New("quic: clienthello not complete within datagram")
+
+// errInconsistentOverlap means two CRYPTO frames cover an overlapping byte range
+// with conflicting contents. Letting frame ordering decide which bytes win is the
+// QUIC analog of TCP-overlap evasion — a malicious guest could arrange overlapping
+// CRYPTO chunks so anvil reads a different SNI than the destination server does — so
+// reassembly fails closed here. Identical (idempotent) overlaps are still tolerated.
+var errInconsistentOverlap = errors.New("quic: inconsistent overlapping CRYPTO frames")
 
 // ParseInitialSNI decrypts one QUIC Initial datagram, reassembles its CRYPTO
 // frames into the TLS ClientHello, and returns the lowercased SNI. Every failure
@@ -44,7 +52,10 @@ func ParseInitialSNI(datagram []byte) (string, error) {
 // reassembled handshake bytes. PADDING (0x00), PING (0x01), and ACK (0x02/0x03)
 // frames are skipped. Any other frame type — or a truncated/gapped CRYPTO stream —
 // is terminal: an unknown frame type cannot be length-skipped safely, so we fail
-// closed rather than guess. All slice access is bounds-checked; it never panics.
+// closed rather than guess. Overlapping CRYPTO frames are tolerated only when their
+// overlapping bytes are identical; a conflicting overlap is terminal
+// (errInconsistentOverlap) so frame ordering can never change the reassembled bytes
+// (fail-closed against SNI-evasion). All slice access is bounds-checked; it never panics.
 func reassembleCryptoFrames(payload []byte) ([]byte, error) {
 	type cryptoChunk struct {
 		offset uint64
@@ -100,8 +111,20 @@ func reassembleCryptoFrames(payload []byte) ([]byte, error) {
 		if c.offset > next {
 			return nil, errIncompleteInDatagram // gap: bytes [next, offset) are missing.
 		}
+		// This chunk overlaps the already-reassembled region [0,next) on
+		// [c.offset, min(end,next)). The overlapping bytes must match byte-for-byte;
+		// a conflicting overlap is an SNI-evasion attempt, so fail closed. Slice
+		// bounds are safe: c.offset <= next == len(out), and the overlap length is
+		// at most len(c.data).
+		overlapEnd := end
+		if next < overlapEnd {
+			overlapEnd = next
+		}
+		if overlapEnd > c.offset && !bytes.Equal(out[c.offset:overlapEnd], c.data[:overlapEnd-c.offset]) {
+			return nil, errInconsistentOverlap
+		}
 		if end <= next {
-			continue // fully overlapping/duplicate chunk already reassembled.
+			continue // fully overlapping duplicate; already verified consistent.
 		}
 		out = append(out, c.data[next-c.offset:]...) // append only the new tail.
 		next = end
