@@ -1,26 +1,41 @@
 #!/usr/bin/env bash
 #
-# anvil-quic-sni-e2e.sh — KVM end-to-end gate for the QUIC/UDP:443 SNI filter.
+# anvil-quic-sni-e2e.sh — KVM end-to-end gate for the QUIC/UDP:443 SNI filter,
+# exercising the POST-QUANTUM multi-datagram Initial path (Tasks 6b/6c).
 #
 # WHAT THIS PROVES (real kernel, real VM, real public domains — the first live
-# execution of the QUIC verdict path from Tasks 1-6: Initial key derivation,
-# header/AES-GCM decrypt, CRYPTO reassembly, ParseInitialSNI, the UDP branch of
-# the NFQUEUE verdict loop, and the UDP:443 dispatch/fast-path iptables rules):
+# execution of the cross-datagram QUIC reassembly path added in Tasks 6b/6c on
+# top of Tasks 1-6: Initial key derivation, header/AES-GCM decrypt, per-flow
+# InitialReassembler CRYPTO accumulation across >1 datagram, ParseHandshakeSNI,
+# the UDP branch of the NFQUEUE verdict loop, and the UDP:443 dispatch/fast-path
+# iptables rules):
 #   Phase 0  daemon + verdict loop bind NFQUEUE; allow_sni profile VM spawns
 #            (spawn only succeeds when sniLoop.Ready()), and the VM's
 #            -sni-udp-nfqueue / -sni-udp-fastpath FORWARD rules exist.
-#   Phase 1  guest completes a real HTTP/3 (QUIC) GET to <allow>:443 — the
-#            client Initial's SNI is decrypted + parsed + matched, accepted with
-#            connmark 0x534e49, and the -sni-udp-fastpath rule (match --mark
-#            0x534e49) then carries the rest of the flow (its packet counter
-#            climbs past zero — connmark fast-path proven effective, verdict loop
-#            stays per-flow not per-packet).
-#   Phase 2  guest CANNOT complete an HTTP/3 GET to <deny>:443 — <deny> DOES
-#            speak HTTP/3 (so the ONLY reason it fails is our filter, not a
-#            server that refuses QUIC), its Initial is silently dropped (no RST
-#            for UDP), the client burns its whole deadline and returns non-zero.
-#            The probe is HTTP/3-only (quic-go http3.Transport never falls back
-#            to TCP), so this measures pure QUIC blocking, not a TCP:443 catch.
+#   Phase 1  guest completes a real HTTP/3 (QUIC) GET to <allow>:443 using the
+#            DEFAULT post-quantum key exchange (X25519MLKEM768). Its ~1.5 KB TLS
+#            ClientHello does NOT fit one QUIC Initial datagram and spans TWO, so
+#            reaching <allow> at all is impossible without cross-datagram
+#            reassembly: the FIRST Initial datagram is incomplete -> passthrough
+#            (ACCEPT unmarked, re-queued), and only the SECOND completes the
+#            ClientHello -> SNI parsed + matched -> accepted with connmark
+#            0x534e49. This is proven by (a) the allowed GET succeeding, AND
+#            (b) the -sni-udp-nfqueue counter climbing to >=2 (multi-datagram:
+#            single-datagram would be exactly 1) while the -sni-udp-fastpath
+#            counter then carries the flow tail via connmark.
+#   Phase 1b classical single-datagram REGRESSION (env-gated, default on): the
+#            same probe pinned to X25519 sends a ~300-byte one-datagram
+#            ClientHello to <allow>; it still reaches, and its nfqueue delta is
+#            ~1 (single datagram) — the contrast vs Phase 1's >=2 confirms the
+#            PQ path genuinely spans multiple datagrams, not a retransmission.
+#   Phase 2  guest CANNOT complete a DEFAULT-PQ HTTP/3 GET to <deny>:443 — <deny>
+#            DOES speak HTTP/3 (so the ONLY reason it fails is our filter). The
+#            deny verdict lands on the SECOND (completing) Initial datagram after
+#            the SNI is reassembled, is silently dropped (no RST for UDP), and
+#            stays dropped across the client's retransmits so the server never
+#            reassembles a complete ClientHello. The client burns its whole
+#            deadline and returns non-zero. HTTP/3-only (quic-go never falls back
+#            to TCP), so this is pure QUIC blocking, not a TCP:443 catch.
 #   Phase 3  the deny is recorded in the daemon runtime audit trail
 #            (egress_sni_denied + sni=<deny>) and a redaction spot-check confirms
 #            no bearer/API-key material leaked into audit or SNI log lines.
@@ -32,7 +47,10 @@
 # linux/amd64), split it under the agent's 4 MiB workspace-upload cap, upload the
 # chunks, and reassemble+exec it in the guest. This modifies NOTHING in the
 # golden image (no staleness rebuild) and sends a REAL QUIC v1 Initial with a
-# real TLS ClientHello, so a valid allow domain actually completes the handshake.
+# real TLS ClientHello. By default it offers the post-quantum X25519MLKEM768
+# group (Go 1.24+/quic-go default), so an allowed domain's handshake completes
+# across a genuine two-datagram ClientHello; a "classical" argument pins X25519
+# for the single-datagram regression.
 #
 # WHAT THIS DOES NOT COVER: QUIC v2, IPv6, 0-RTT, wildcard SNI breadth, CRYPTO
 # fragmentation edge cases (all unit-tested in internal/network/quic). Verdict =
@@ -59,6 +77,9 @@ API="${ANVIL_QUIC_E2E_API:-http://127.0.0.1:3000}"
 API_ADDR="${ANVIL_QUIC_E2E_API_ADDR:-127.0.0.1:3000}"
 QUICGO_VERSION="${ANVIL_QUIC_E2E_QUICGO_VERSION:-v0.60.0}"
 PROBE_TIMEOUT="${ANVIL_QUIC_E2E_PROBE_TIMEOUT:-15}"
+# Phase 1b: also run a classical (X25519) single-datagram probe so the report
+# can contrast its ~1-packet nfqueue delta against Phase 1's >=2. Set to 0 to skip.
+CLASSICAL_REGRESSION="${ANVIL_QUIC_E2E_CLASSICAL_REGRESSION:-1}"
 PROFILE_NAME="quic-sni-e2e"
 TENANT_ID="quic-sni-e2e-tenant"
 ARTIFACT_DIR="${ANVIL_QUIC_E2E_ARTIFACT_DIR:-/tmp/anvil-quic-sni-e2e-$(date +%Y%m%d-%H%M%S)}"
@@ -230,6 +251,17 @@ cat > "$PROBE_DIR/main.go" <<'GOEOF'
 // quic-probe: perform one HTTP/3 (QUIC) GET and report OK/FAIL + exit code.
 // HTTP/3 ONLY — never falls back to TCP, so a drop of the QUIC Initial surfaces
 // as a full-deadline failure rather than a silent TCP:443 success.
+//
+// usage: quic-probe <url> [timeout_secs] [classical]
+//
+// Key exchange (the whole point of the PQ multi-datagram e2e):
+//   default: CurvePreferences left unset -> Go 1.24+/quic-go offer the
+//     post-quantum X25519MLKEM768 hybrid group. Its ~1.2 KB key_share inflates
+//     the TLS ClientHello past a single QUIC Initial datagram, so it SPANS TWO
+//     Initial datagrams and exercises anvil's cross-datagram InitialReassembler
+//     (Tasks 6b/6c). This is the modern-client default.
+//   "classical": pin X25519 -> ~300-byte ClientHello in ONE Initial datagram,
+//     the single-datagram path the original Task 7 e2e proved (regression).
 package main
 
 import (
@@ -246,7 +278,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("usage: quic-probe <url> [timeout_secs]")
+		fmt.Println("usage: quic-probe <url> [timeout_secs] [classical]")
 		os.Exit(2)
 	}
 	url := os.Args[1]
@@ -254,15 +286,22 @@ func main() {
 	if len(os.Args) > 2 {
 		fmt.Sscanf(os.Args[2], "%d", &secs)
 	}
-	// Pin classical X25519 key exchange. Go 1.24+ / quic-go default to the
-	// post-quantum X25519MLKEM768 group, whose ~1200-byte key_share inflates the
-	// TLS ClientHello past a single QUIC Initial datagram, so it spans two
-	// datagrams. anvil inspects only the FIRST Initial datagram (fail-closed by
-	// design), so a PQ ClientHello is denied even for an allowed SNI. X25519 keeps
-	// the ClientHello ~300 bytes (one datagram), inside anvil's parse envelope, so
-	// this probe exercises the real decrypt/reassembly/verdict chain. (The PQ
-	// multi-datagram limitation is a separately-reported finding.)
-	tr := &http3.Transport{TLSClientConfig: &tls.Config{CurvePreferences: []tls.CurveID{tls.X25519}}}
+	classical := false
+	for _, a := range os.Args[3:] {
+		if a == "classical" {
+			classical = true
+		}
+	}
+	tlsCfg := &tls.Config{}
+	mode := "pq"
+	if classical {
+		// Single-datagram regression: X25519 keeps the ClientHello ~300 bytes.
+		tlsCfg.CurvePreferences = []tls.CurveID{tls.X25519}
+		mode = "classical"
+	}
+	// mode=="pq": CurvePreferences unset -> default X25519MLKEM768 -> ~1.5 KB
+	// ClientHello -> two QUIC Initial datagrams -> cross-datagram reassembly.
+	tr := &http3.Transport{TLSClientConfig: tlsCfg}
 	defer tr.Close()
 	// Do NOT follow redirects: a cross-host 3xx (e.g. cloudflare.com -> www.
 	// cloudflare.com) would open a SECOND QUIC connection to a DIFFERENT SNI than
@@ -274,19 +313,19 @@ func main() {
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		fmt.Printf("QUIC_HTTP3_FAIL err=%v\n", err)
+		fmt.Printf("QUIC_HTTP3_FAIL kx=%s err=%v\n", mode, err)
 		os.Exit(1)
 	}
 	start := time.Now()
 	resp, err := client.Do(req)
 	dur := time.Since(start).Seconds()
 	if err != nil {
-		fmt.Printf("QUIC_HTTP3_FAIL dur=%.1fs err=%v\n", dur, err)
+		fmt.Printf("QUIC_HTTP3_FAIL kx=%s dur=%.1fs err=%v\n", mode, dur, err)
 		os.Exit(1)
 	}
 	defer resp.Body.Close()
 	io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-	fmt.Printf("QUIC_HTTP3_OK status=%d proto=%s dur=%.1fs\n", resp.StatusCode, resp.Proto, dur)
+	fmt.Printf("QUIC_HTTP3_OK kx=%s status=%d proto=%s dur=%.1fs\n", mode, resp.StatusCode, resp.Proto, dur)
 	os.Exit(0)
 }
 GOEOF
@@ -327,6 +366,7 @@ EPHEMERA_HOME="$HOME_DIR" \
 EPHEMERA_API_ADDR="$API_ADDR" \
 ANVIL_EGRESS_PROFILE_DIR="$EGRESS_PROFILE_DIR" \
 EPHEMERA_DISK_MODE=plain \
+EPHEMERA_LOG_LEVEL="${ANVIL_QUIC_E2E_LOG_LEVEL:-warn}" \
   "$DAEMON_BIN" >"$DAEMON_LOG" 2>&1 &
 DAEMON_PID=$!
 ok "Daemon PID $DAEMON_PID"
@@ -397,9 +437,16 @@ else
   fail "phase0_failed: probe chunk upload failed"; exit 1
 fi
 
-# ---- Phase 1: allow domain reaches :443 over HTTP/3 --------------------------
-step "Phase 1: guest completes HTTP/3 GET to $ALLOW_DOMAIN:443"
+# ---- Phase 1: allow domain reaches :443 over post-quantum HTTP/3 --------------
+# The DEFAULT (post-quantum, X25519MLKEM768) ClientHello spans TWO QUIC Initial
+# datagrams. Reaching an allowed SNI at all therefore proves cross-datagram
+# reassembly: the first Initial datagram is incomplete (passthrough, unmarked),
+# and only the second completes the ClientHello -> SNI parsed + matched -> accept
+# with connmark 0x534e49. Baseline the nfqueue counter first so its delta over
+# just this flow (>=2 datagrams) is the multi-datagram evidence.
+step "Phase 1: guest completes post-quantum HTTP/3 GET to $ALLOW_DOMAIN:443"
 before_allowed="$(read_metric allowed)"
+nfq_before="$(rule_pkts "anvil-egress-${VM_ID}-sni-udp-nfqueue")"
 cat > "$ARTIFACT_DIR/quic-allow.sh" <<EOF
 #!/usr/bin/env bash
 set -u
@@ -421,48 +468,105 @@ allow_exit="$(printf '%s' "$allow_run" | jq -r '.exit_code // "err"' 2>/dev/null
 allow_out="$(printf '%s' "$allow_run" | jq -r '.stdout // ""' 2>/dev/null || echo '')"
 printf '  guest: %s\n' "$(printf '%s' "$allow_out" | tr '\n' ' ')"
 if [ "$allow_exit" = "0" ] && printf '%s' "$allow_out" | grep -q QUIC_ALLOW_OK \
-   && printf '%s' "$allow_out" | grep -q QUIC_HTTP3_OK; then
-  ok "Guest completed a real HTTP/3 handshake+GET to $ALLOW_DOMAIN:443 (allowed SNI reached over QUIC)"
+   && printf '%s' "$allow_out" | grep -q "QUIC_HTTP3_OK kx=pq"; then
+  ok "Guest completed a real post-quantum HTTP/3 handshake+GET to $ALLOW_DOMAIN:443 (allowed SNI reached over multi-datagram QUIC)"
 else
-  fail "phase1_failed: guest could not reach $ALLOW_DOMAIN over HTTP/3 (exit=$allow_exit)"
+  fail "phase1_failed: guest could not reach $ALLOW_DOMAIN over post-quantum HTTP/3 (exit=$allow_exit)"
 fi
 
-# Fast-path proof: the -sni-udp-fastpath rule (match --mark 0x534e49) only counts
-# packets AFTER the verdict loop stamped the connmark, i.e. the handshake+data
-# tail of the flow. A non-zero counter proves connmark 0x534e49 was applied and
-# the fast path carried the flow (verdict loop stayed off the per-packet path).
-step "Phase 1: connmark 0x534e49 fast-path effective"
+# Multi-datagram + fast-path proof. The -sni-udp-nfqueue counter's delta over
+# just this flow is >=2 when the PQ ClientHello spanned two Initial datagrams
+# (the incomplete-passthrough datagram + the completing datagram); a
+# single-datagram ClientHello would be exactly 1. The -sni-udp-fastpath rule
+# (match --mark 0x534e49) then counts packets AFTER the connmark was stamped, so
+# a non-zero counter proves the flow tail rode the fast path, not the per-packet
+# verdict loop.
+step "Phase 1: two-datagram reassembly + connmark 0x534e49 fast-path"
 sleep 1
 fp_pkts="$(rule_pkts "anvil-egress-${VM_ID}-sni-udp-fastpath")"
-nfq_pkts="$(rule_pkts "anvil-egress-${VM_ID}-sni-udp-nfqueue")"
+nfq_after="$(rule_pkts "anvil-egress-${VM_ID}-sni-udp-nfqueue")"
+nfq_delta=$(( ${nfq_after:-0} - ${nfq_before:-0} ))
 after_allowed="$(read_metric allowed)"
 allowed_delta=$(( after_allowed - before_allowed ))
-printf '  udp-fastpath pkts=%s | udp-nfqueue pkts=%s | allowed metric %s -> %s (delta=%s)\n' \
-  "${fp_pkts:-0}" "${nfq_pkts:-0}" "$before_allowed" "$after_allowed" "$allowed_delta"
-if [ "${fp_pkts:-0}" -ge 1 ]; then
-  ok "sni-udp-fastpath carried ${fp_pkts} packet(s) (connmark 0x534e49 set + fast path effective)"
+printf '  udp-nfqueue %s -> %s (delta=%s) | udp-fastpath pkts=%s | allowed metric %s -> %s (delta=%s)\n' \
+  "${nfq_before:-0}" "${nfq_after:-0}" "$nfq_delta" "${fp_pkts:-0}" "$before_allowed" "$after_allowed" "$allowed_delta"
+if [ "$nfq_delta" -ge 2 ]; then
+  ok "sni-udp-nfqueue took $nfq_delta datagram(s) for this flow — multi-datagram PQ ClientHello reassembled ($((nfq_delta - 1)) incomplete fail-closed drop(s) + 1 completing datagram)"
 else
-  fail "phase1_failed: sni-udp-fastpath counter is 0 (connmark not applied? fast path not effective)"
+  fail "phase1_failed: sni-udp-nfqueue delta=$nfq_delta (<2) — PQ ClientHello did NOT span multiple datagrams (classical pin still in place? PQ not default?)"
 fi
-if [ "${nfq_pkts:-0}" -ge 1 ]; then
-  ok "sni-udp-nfqueue dispatched ${nfq_pkts} Initial packet(s) to the verdict loop"
+if [ "${fp_pkts:-0}" -ge 1 ]; then
+  ok "sni-udp-fastpath carried ${fp_pkts} packet(s) (connmark 0x534e49 confirmed on the completing datagram; retransmit of the dropped datagram + flow tail ride the fast path)"
 else
-  fail "phase1_failed: sni-udp-nfqueue counter is 0 (no QUIC Initial reached the verdict loop)"
+  fail "phase1_failed: sni-udp-fastpath counter is 0 (connmark on the completing datagram did not stick? fast path not effective)"
 fi
 if [ "$allowed_delta" -ge 1 ] && [ "$allowed_delta" -le 8 ]; then
-  ok "Allow flow added $allowed_delta allowed verdict(s) — per-flow, not per-packet"
+  ok "Allow flow added $allowed_delta allowed verdict(s) — per-flow (one completing datagram), not per-packet"
 elif [ "$allowed_delta" -gt 8 ]; then
   fail "phase1_failed: allow flow added $allowed_delta verdicts (per-packet? fast path not effective)"
 else
   fail "phase1_failed: allow flow added no allowed verdict (delta=$allowed_delta)"
 fi
 
-# ---- Phase 2: deny domain blocked over HTTP/3 (QUIC-only) --------------------
-# $DENY_DOMAIN speaks HTTP/3, so the ONLY reason this can fail is our filter
-# dropping its QUIC Initial. The probe never falls back to TCP, so this is a pure
-# QUIC block, and (unlike TCP RST) a UDP drop is silent -> the client burns its
-# whole deadline before giving up (dur ~= PROBE_TIMEOUT).
-step "Phase 2: guest blocked from $DENY_DOMAIN:443 over HTTP/3"
+# ---- Phase 1b: classical single-datagram regression --------------------------
+# The same probe pinned to X25519 sends a ~300-byte ClientHello in ONE Initial
+# datagram to the SAME allowed domain over a fresh QUIC connection (new source
+# port -> new conntrack flow -> not yet connmarked -> its Initial re-queues). It
+# still reaches, and its nfqueue delta is ~1 — the contrast against Phase 1's
+# >=2 confirms the PQ path's extra datagram is genuine reassembly, not a stray
+# retransmission. Env-gated (ANVIL_QUIC_E2E_CLASSICAL_REGRESSION=0 to skip).
+if [ "$CLASSICAL_REGRESSION" = "1" ]; then
+  step "Phase 1b: classical (X25519) single-datagram GET to $ALLOW_DOMAIN:443"
+  nfq_before_cl="$(rule_pkts "anvil-egress-${VM_ID}-sni-udp-nfqueue")"
+  cat > "$ARTIFACT_DIR/quic-allow-classical.sh" <<EOF
+#!/usr/bin/env bash
+set -u
+cat bin/probe.part.* > /tmp/quic-probe
+chmod +x /tmp/quic-probe
+set +e
+out=\$(/tmp/quic-probe "https://${ALLOW_DOMAIN}/" ${PROBE_TIMEOUT} classical 2>&1)
+rc=\$?
+set -e
+echo "\$out"
+echo "ALLOW_CLASSICAL_RC=\$rc"
+if [ "\$rc" -eq 0 ]; then echo "QUIC_ALLOW_CLASSICAL_OK"; exit 0; else echo "QUIC_ALLOW_CLASSICAL_FAIL"; exit 1; fi
+EOF
+  cl_run="$(run_guest "$ARTIFACT_DIR/quic-allow-classical.sh" "workloads/quic-allow-classical.sh" $((PROBE_TIMEOUT + 25)))"
+  printf '%s' "$cl_run" > "$ARTIFACT_DIR/allow-classical-run.json"
+  cl_exit="$(printf '%s' "$cl_run" | jq -r '.exit_code // "err"' 2>/dev/null || echo err)"
+  cl_out="$(printf '%s' "$cl_run" | jq -r '.stdout // ""' 2>/dev/null || echo '')"
+  sleep 1
+  nfq_after_cl="$(rule_pkts "anvil-egress-${VM_ID}-sni-udp-nfqueue")"
+  cl_delta=$(( ${nfq_after_cl:-0} - ${nfq_before_cl:-0} ))
+  printf '  guest: %s\n' "$(printf '%s' "$cl_out" | tr '\n' ' ')"
+  printf '  udp-nfqueue %s -> %s (classical delta=%s vs pq delta=%s)\n' \
+    "${nfq_before_cl:-0}" "${nfq_after_cl:-0}" "$cl_delta" "$nfq_delta"
+  if [ "$cl_exit" = "0" ] && printf '%s' "$cl_out" | grep -q "QUIC_HTTP3_OK kx=classical"; then
+    ok "Classical single-datagram path still reaches $ALLOW_DOMAIN (regression green)"
+  else
+    fail "phase1b_failed: classical single-datagram probe could not reach $ALLOW_DOMAIN (exit=$cl_exit)"
+  fi
+  if [ "$cl_delta" -ge 1 ] && [ "$nfq_delta" -gt "$cl_delta" ]; then
+    ok "Classical flow used $cl_delta nfqueue datagram(s) < PQ's $nfq_delta — PQ genuinely spans more datagrams (not retransmission)"
+  elif [ "$cl_delta" -ge 1 ]; then
+    printf '  ! classical delta=%s not < pq delta=%s (retransmission noise?); single-datagram path still green\n' "$cl_delta" "$nfq_delta"
+  else
+    fail "phase1b_failed: classical flow produced no nfqueue datagram (delta=$cl_delta)"
+  fi
+else
+  step "Phase 1b: classical regression SKIPPED (ANVIL_QUIC_E2E_CLASSICAL_REGRESSION=0)"
+fi
+
+# ---- Phase 2: deny domain blocked over post-quantum HTTP/3 (QUIC-only) --------
+# $DENY_DOMAIN speaks HTTP/3, so the ONLY reason this can fail is our filter. The
+# default-PQ ClientHello spans two Initial datagrams: the first passes through
+# incomplete, but the SNI is reassembled on the SECOND (completing) datagram,
+# which is denied + dropped. The deny must STAY dropped across the client's
+# retransmits (else the server reassembles a complete ClientHello and the
+# handshake leaks). The probe never falls back to TCP, so this is a pure QUIC
+# block, and (unlike TCP RST) a UDP drop is silent -> the client burns its whole
+# deadline before giving up (dur ~= PROBE_TIMEOUT).
+step "Phase 2: guest blocked from $DENY_DOMAIN:443 over post-quantum HTTP/3"
 before_denied="$(read_metric denied)"
 cat > "$ARTIFACT_DIR/quic-deny.sh" <<EOF
 #!/usr/bin/env bash
