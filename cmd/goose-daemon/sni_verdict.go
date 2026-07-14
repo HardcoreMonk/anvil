@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"ephemera/internal/anvilmcp"
+	"ephemera/internal/network/quic"
 	"ephemera/internal/network/sni"
 
 	nfqueue "github.com/florianl/go-nfqueue/v2"
@@ -169,6 +170,36 @@ func (l *sniVerdictLoop) decide(srcIP string, payload []byte) sniDecision {
 	return l.classifyParsedSNI(entry, name)
 }
 
+// decideQUIC is decide's QUIC/UDP:443 counterpart (also unit-tested without
+// root). payload is one whole UDP datagram believed to carry a QUIC Initial
+// packet.
+//
+// Unlike TCP's decide, there is no passthrough/incomplete case: a QUIC
+// Initial's CRYPTO frame(s) either fully decrypt and reassemble to a
+// ClientHello with an SNI within *this one datagram*, or they don't.
+// quic.ParseInitialSNI already reassembles CRYPTO frames split across multiple
+// QUIC packets coalesced into the same datagram (Task 4); a ClientHello that
+// spans multiple UDP datagrams is out of scope for that reassembly and so is a
+// terminal deny here, never a "wait for more" passthrough — there is no
+// per-flow QUIC reassembly loop the way there is a TCP sni.Reassembler.
+//
+// Fail-closed contract:
+//   - unregistered srcIP -> sniDrop (reason unregistered_source)
+//   - any parse error    -> sniDrop (reason egress_sni_unparsed)
+//   - SNI in matcher     -> sniAcceptMark (reason egress_sni_allowed)
+//   - SNI not in matcher -> sniDrop (reason egress_sni_denied, SNI recorded)
+func (l *sniVerdictLoop) decideQUIC(srcIP string, payload []byte) sniDecision {
+	entry, ok := l.resolveEntry(srcIP)
+	if !ok {
+		return sniDecision{Action: sniDrop, Reason: "unregistered_source"}
+	}
+	name, err := quic.ParseInitialSNI(payload)
+	if err != nil {
+		return sniDecision{Action: sniDrop, Reason: "egress_sni_unparsed"} // fail-closed
+	}
+	return l.classifyParsedSNI(entry, name) // shared with TCP: in matcher -> acceptMark, else denied
+}
+
 // resolveEntry does the locked registry lookup that both decide (single-packet
 // core) and the Start hook's pre-classify stage share, so the RLock/RUnlock dance
 // and the unregistered-source fail-closed contract live in exactly one place. It
@@ -267,6 +298,51 @@ func parseIPv4TCP(pkt []byte) (ipv4TCP, error) {
 	return t, nil
 }
 
+// ipv4UDP is the subset of an IPv4/UDP packet the verdict hook needs. Unlike
+// ipv4TCP it carries no seq/ackSeq: UDP has no sequence numbers, so a UDP drop
+// can never inject a credible RST (see setDropNoRST).
+type ipv4UDP struct {
+	srcIP, dstIP net.IP // srcIP = guest, dstIP = server (dport 443)
+	sport, dport uint16
+	payload      []byte
+}
+
+// parseIPv4UDP parses an IPv4/UDP packet, the UDP counterpart of parseIPv4TCP.
+// It bounds the returned payload by the UDP header's own Length field (not
+// merely by the remaining packet bytes), so IP-level padding or a truncated
+// datagram can never leak trailing garbage into the payload quic.ParseInitialSNI
+// inspects.
+func parseIPv4UDP(pkt []byte) (ipv4UDP, error) {
+	var u ipv4UDP
+	if len(pkt) < 20 {
+		return u, fmt.Errorf("short ip packet (%d bytes)", len(pkt))
+	}
+	if pkt[0]>>4 != 4 {
+		return u, fmt.Errorf("not ipv4 (version %d)", pkt[0]>>4)
+	}
+	ihl := int(pkt[0]&0x0f) * 4
+	if ihl < 20 || len(pkt) < ihl {
+		return u, fmt.Errorf("bad ihl %d", ihl)
+	}
+	if pkt[9] != unix.IPPROTO_UDP {
+		return u, fmt.Errorf("not udp (proto %d)", pkt[9])
+	}
+	u.srcIP = net.IPv4(pkt[12], pkt[13], pkt[14], pkt[15])
+	u.dstIP = net.IPv4(pkt[16], pkt[17], pkt[18], pkt[19])
+	udpHdr := pkt[ihl:]
+	if len(udpHdr) < 8 {
+		return u, fmt.Errorf("short udp header (%d bytes)", len(udpHdr))
+	}
+	u.sport = binary.BigEndian.Uint16(udpHdr[0:2])
+	u.dport = binary.BigEndian.Uint16(udpHdr[2:4])
+	udpLen := int(binary.BigEndian.Uint16(udpHdr[4:6]))
+	if udpLen < 8 || udpLen > len(udpHdr) {
+		return u, fmt.Errorf("bad udp length %d (have %d)", udpLen, len(udpHdr))
+	}
+	u.payload = udpHdr[8:udpLen]
+	return u, nil
+}
+
 // Start binds the NFQUEUE listener and registers the verdict hook. It is a
 // preflight: on nfqueue.Open failure it leaves Ready()==false and returns the
 // error, never silently pretending to have installed a filter. Note the config
@@ -305,7 +381,14 @@ func (l *sniVerdictLoop) Start(ctx context.Context) error {
 			l.metrics.IncSNIVerdict("dropped") // pre-classify infra drop (distinct from policy denial)
 			return 0
 		}
-		t, perr := parseIPv4TCP(*a.Payload)
+		pkt := *a.Payload
+		if len(pkt) > 9 && pkt[9] == unix.IPPROTO_UDP {
+			// QUIC/UDP:443 path: unit-datagram decision, no reassembly loop —
+			// see handleUDPQUIC.
+			l.handleUDPQUIC(nf, id, pkt)
+			return 0
+		}
+		t, perr := parseIPv4TCP(pkt)
 		if perr != nil {
 			slog.Debug("sni verdict: unparsable packet, fail-closed drop", "err", perr)
 			l.setDrop(nf, id, t)
@@ -377,6 +460,45 @@ func (l *sniVerdictLoop) Start(ctx context.Context) error {
 	return nil
 }
 
+// handleUDPQUIC is the UDP:443 (QUIC) counterpart of the TCP branch of the
+// hook body above. Unlike TCP's ClientHello, a QUIC Initial's SNI is decided
+// from a single UDP datagram — there is no per-flow reassembly loop the way
+// there is a TCP sni.Reassembler (see decideQUIC) — so the hook body reduces to
+// parse -> resolve -> decide -> apply, with no incomplete/re-queue branch.
+//
+// Every early-return here (parse failure, wrong dport, unregistered source) is
+// a pre-classify infra drop: it fails closed via setDropNoRST + a "dropped"
+// metric, bypassing recordVerdict, exactly mirroring the TCP branch's
+// pre-classify drops above (see their "distinct from policy denial" comments).
+// Only a resolved decideQUIC verdict goes through applyVerdictUDP/recordVerdict.
+func (l *sniVerdictLoop) handleUDPQUIC(nf *nfqueue.Nfqueue, id uint32, pkt []byte) {
+	u, perr := parseIPv4UDP(pkt)
+	if perr != nil {
+		slog.Debug("sni verdict: unparsable udp packet, fail-closed drop", "err", perr)
+		l.setDropNoRST(nf, id)
+		l.metrics.IncSNIVerdict("dropped")
+		return
+	}
+	if u.dport != 443 {
+		// Defense in depth: the iptables dispatch rule is expected to already
+		// scope this queue to dport 443, but fail closed here too rather than
+		// trust that blindly.
+		l.setDropNoRST(nf, id)
+		l.metrics.IncSNIVerdict("dropped")
+		return
+	}
+	srcIP := u.srcIP.String()
+	entry, ok := l.resolveEntry(srcIP)
+	if !ok {
+		// Defense in depth: the iptables dispatch rule is already scoped by
+		// -s guestIP, but an unregistered source still fails closed here.
+		l.setDropNoRST(nf, id)
+		l.metrics.IncSNIVerdict("dropped")
+		return
+	}
+	l.applyVerdictUDP(nf, id, l.decideQUIC(srcIP, u.payload), entry)
+}
+
 // applyVerdict turns a decision into a kernel verdict. sniAcceptMark is the only
 // path that sets the approved connmark; every drop path is best-effort RST +
 // unconditional DROP. The kernel verdict is issued first and unconditionally;
@@ -393,6 +515,25 @@ func (l *sniVerdictLoop) applyVerdict(nf *nfqueue.Nfqueue, id uint32, d sniDecis
 		l.setAccept(nf, id)
 	case sniDrop:
 		l.setDrop(nf, id, t)
+	}
+	l.recordVerdict(entry, d)
+}
+
+// applyVerdictUDP is applyVerdict's UDP/QUIC counterpart: identical
+// accept/accept+mark semantics, but a UDP drop never attempts injectRST — that
+// needs the TCP seq/ackSeq ipv4TCP carries (RFC 793 has no UDP analog), so
+// setDropNoRST issues a plain fail-closed NfDrop instead. recordVerdict
+// (metrics/audit) is shared unchanged with the TCP path.
+func (l *sniVerdictLoop) applyVerdictUDP(nf *nfqueue.Nfqueue, id uint32, d sniDecision, entry sniRegistryEntry) {
+	switch d.Action {
+	case sniAcceptMark:
+		if err := nf.SetVerdictWithConnMark(id, nfqueue.NfAccept, l.connMark); err != nil {
+			slog.Error("sni verdict: set accept+connmark failed", "err", err, "sni", d.SNI)
+		}
+	case sniPassthrough:
+		l.setAccept(nf, id)
+	case sniDrop:
+		l.setDropNoRST(nf, id)
 	}
 	l.recordVerdict(entry, d)
 }
@@ -468,6 +609,18 @@ func (l *sniVerdictLoop) setDrop(nf *nfqueue.Nfqueue, id uint32, t ipv4TCP) {
 	}
 	if err := l.injectRST(t); err != nil {
 		slog.Debug("sni verdict: RST injection failed; guest will time out", "err", err)
+	}
+}
+
+// setDropNoRST issues a fail-closed DROP with no RST attempt — the UDP/QUIC
+// counterpart of setDrop. injectRST is TCP-specific (it spoofs a RST using the
+// guest segment's ack_seq, RFC 793); UDP has no sequence numbers to build a
+// credible RST from, so this path silently drops and lets the guest's own QUIC
+// idle timeout tear the connection down, same fail-closed-never-fail-open
+// guarantee as setDrop, just without the fast-fail courtesy.
+func (l *sniVerdictLoop) setDropNoRST(nf *nfqueue.Nfqueue, id uint32) {
+	if err := nf.SetVerdict(id, nfqueue.NfDrop); err != nil {
+		slog.Error("sni verdict: set drop failed", "err", err)
 	}
 }
 
