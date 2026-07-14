@@ -367,6 +367,8 @@ func TestCommandEgressEnforcerProfileCleanupRemovesSNIRulesInReverse(t *testing.
 	cleanup := commands[applied:]
 
 	want := [][]string{
+		{"iptables", "-D", "FORWARD", "-s", "10.0.1.10", "-p", "udp", "--dport", "443", "-m", "connmark", "--mark", "0x534e49", "-j", "ACCEPT", "-m", "comment", "--comment", "anvil-egress-vm-1-sni-udp-fastpath"},
+		{"iptables", "-D", "FORWARD", "-s", "10.0.1.10", "-p", "udp", "--dport", "443", "-m", "connmark", "!", "--mark", "0x534e49", "-j", "NFQUEUE", "--queue-num", "88", "-m", "comment", "--comment", "anvil-egress-vm-1-sni-udp-nfqueue"},
 		{"iptables", "-D", "FORWARD", "-s", "10.0.1.10", "-p", "tcp", "--dport", "443", "-m", "connmark", "--mark", "0x534e49", "-j", "ACCEPT", "-m", "comment", "--comment", "anvil-egress-vm-1-sni-fastpath"},
 		{"iptables", "-D", "FORWARD", "-s", "10.0.1.10", "-p", "tcp", "--dport", "443", "-m", "connmark", "!", "--mark", "0x534e49", "-j", "NFQUEUE", "--queue-num", "88", "-m", "comment", "--comment", "anvil-egress-vm-1-sni-nfqueue"},
 		{"iptables", "-D", "FORWARD", "-s", "10.0.1.10", "-j", "REJECT", "-m", "comment", "--comment", "anvil-egress-vm-1-default"},
