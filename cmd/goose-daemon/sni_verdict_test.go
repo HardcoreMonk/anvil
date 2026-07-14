@@ -192,7 +192,7 @@ func buildUDPPacket(proto byte, udpLen uint16, payload []byte) []byte {
 // extended to parseIPv4UDP — the one piece of the UDP glue that is pure logic
 // and so, unlike the netlink/NFQUEUE wiring in Start (root + netfilter, Task 7
 // e2e only), is fully unit-testable here.
-func TestParseIPv4UDPBoundaries(t *testing.T) {
+func TestQUICParseIPv4UDPBoundaries(t *testing.T) {
 	payload := []byte{0xde, 0xad, 0xbe, 0xef}
 	valid := buildUDPPacket(unix.IPPROTO_UDP, uint16(8+len(payload)), payload)
 

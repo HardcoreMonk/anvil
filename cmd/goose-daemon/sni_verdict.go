@@ -525,13 +525,15 @@ func (l *sniVerdictLoop) applyVerdict(nf *nfqueue.Nfqueue, id uint32, d sniDecis
 // setDropNoRST issues a plain fail-closed NfDrop instead. recordVerdict
 // (metrics/audit) is shared unchanged with the TCP path.
 func (l *sniVerdictLoop) applyVerdictUDP(nf *nfqueue.Nfqueue, id uint32, d sniDecision, entry sniRegistryEntry) {
+	// QUIC is a unit-datagram decision: decideQUIC only ever yields sniAcceptMark
+	// or sniDrop (there is no ErrIncomplete->passthrough path as with TCP), so this
+	// switch has no sniPassthrough case — an unexpected action issues no verdict,
+	// leaving the packet queued for the kernel to drop (fail-closed).
 	switch d.Action {
 	case sniAcceptMark:
 		if err := nf.SetVerdictWithConnMark(id, nfqueue.NfAccept, l.connMark); err != nil {
 			slog.Error("sni verdict: set accept+connmark failed", "err", err, "sni", d.SNI)
 		}
-	case sniPassthrough:
-		l.setAccept(nf, id)
 	case sniDrop:
 		l.setDropNoRST(nf, id)
 	}
