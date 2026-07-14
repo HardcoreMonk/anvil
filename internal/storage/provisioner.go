@@ -73,31 +73,56 @@ func (p *Provisioner) EnsureGoldenImage() error {
 			slog.Warn("golden image up to date", "path", p.GoldenImagePath)
 			return nil
 		}
+		// Stale: rebuild, but keep the existing golden image on disk. It is
+		// replaced only by the atomic os.Rename below, after the new image is
+		// built and verified — so a failed rebuild never destroys the last good
+		// image (the old bug: os.Remove here lost the golden on any build error).
 		slog.Warn("golden image stale (build inputs newer), rebuilding", "path", p.GoldenImagePath)
-		if err := os.Remove(p.GoldenImagePath); err != nil {
-			return fmt.Errorf("remove stale golden image: %w", err)
-		}
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("error checking golden image: %w", err)
+	} else {
+		slog.Warn("golden image not found, starting automated build", "path", p.GoldenImagePath)
 	}
-
-	slog.Warn("golden image not found, starting automated build", "path", p.GoldenImagePath)
 	slog.Warn("this may take a few minutes")
 
-	// Execute the build script
-	cmd := exec.Command("bash", p.BuildScriptPath)
+	// Build into a sibling temp file, then atomically rename it onto the final
+	// path. This keeps any existing golden image intact if the build fails, and
+	// guarantees the provisioner never observes a partial image: a crashed build
+	// leaves only the ".building" temp, cleaned up before the next build.
+	tmpPath := p.GoldenImagePath + ".building"
+	_ = os.Remove(tmpPath) // clear residue from a previously interrupted build
 
-	// Pipe the script's output to the daemon's standard output for visibility
+	// Execute the build script.
+	cmd := exec.Command("bash", p.BuildScriptPath)
+	// Run with cwd at the workdir that holds scripts/ and artifacts/ (the parent
+	// of the build script's directory) so the script's cwd-relative paths resolve
+	// to the same location as p.GoldenImagePath, regardless of the daemon's OS cwd
+	// (EPHEMERA_HOME may differ from the process launch cwd under systemd / e2e).
+	cmd.Dir = filepath.Dir(filepath.Dir(p.BuildScriptPath))
+	// Tell the build script exactly where to write the image — the temp path.
+	cmd.Env = append(os.Environ(), "EPHEMERA_GOLDEN_IMAGE_PATH="+tmpPath)
+	// Pipe the script's output to the daemon's standard output for visibility.
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
+		_ = os.Remove(tmpPath) // discard the partial image; existing golden preserved
 		return fmt.Errorf("failed to execute build script: %w", err)
 	}
 
-	// Verify the image was actually created by the script
-	if _, err := os.Stat(p.GoldenImagePath); os.IsNotExist(err) {
-		return fmt.Errorf("build script completed, but golden image was not found at expected path")
+	// Verify the script actually produced the image at the temp path.
+	if _, err := os.Stat(tmpPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("build script completed, but golden image not found at expected temp path %q", tmpPath)
+	}
+
+	// Atomically replace the golden image. A same-directory rename is atomic and
+	// swaps the freshly built temp for the real image without a window where the
+	// image is missing; in e2e it replaces the symlink with a real file, leaving
+	// the SRC checkout untouched.
+	if err := os.Rename(tmpPath, p.GoldenImagePath); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("install golden image: %w", err)
 	}
 
 	slog.Warn("golden image built and verified", "path", p.GoldenImagePath)

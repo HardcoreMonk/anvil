@@ -102,6 +102,202 @@ func TestPrepareVM_WritesAgentToken(t *testing.T) {
 	}
 }
 
+// writeGoldenBuildScript writes an executable fake build script at path with the
+// given body. The body runs under `bash` exactly like the real build_image.sh, so
+// it can exercise EnsureGoldenImage's cwd (cmd.Dir) and EPHEMERA_GOLDEN_IMAGE_PATH
+// env wiring without a real debootstrap build.
+func writeGoldenBuildScript(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0755); err != nil {
+		t.Fatalf("write build script: %v", err)
+	}
+}
+
+// goldenTestLayout creates the conventional workdir layout (artifacts/ + scripts/)
+// under a fresh temp dir and returns the golden image path and build script path.
+func goldenTestLayout(t *testing.T) (golden, script string) {
+	t.Helper()
+	tmp := t.TempDir()
+	artifactsDir := filepath.Join(tmp, "artifacts")
+	scriptsDir := filepath.Join(tmp, "scripts")
+	if err := os.MkdirAll(artifactsDir, 0755); err != nil {
+		t.Fatalf("mkdir artifacts: %v", err)
+	}
+	if err := os.MkdirAll(scriptsDir, 0755); err != nil {
+		t.Fatalf("mkdir scripts: %v", err)
+	}
+	return filepath.Join(artifactsDir, "golden-image.ext4"), filepath.Join(scriptsDir, "build_image.sh")
+}
+
+// TestEnsureGoldenImage_BuildSuccessAtomicRename verifies the happy path: a build
+// script that writes the image to EPHEMERA_GOLDEN_IMAGE_PATH (the .building temp)
+// results in that temp being atomically renamed onto GoldenImagePath, with the
+// exact content the script produced and no leftover temp.
+func TestEnsureGoldenImage_BuildSuccessAtomicRename(t *testing.T) {
+	golden, script := goldenTestLayout(t)
+	writeGoldenBuildScript(t, script, `#!/bin/bash
+set -euo pipefail
+printf 'GOLDEN_CONTENT' > "$EPHEMERA_GOLDEN_IMAGE_PATH"
+`)
+
+	p := &Provisioner{GoldenImagePath: golden, BuildScriptPath: script}
+	if err := p.EnsureGoldenImage(); err != nil {
+		t.Fatalf("EnsureGoldenImage: %v", err)
+	}
+
+	got, err := os.ReadFile(golden)
+	if err != nil {
+		t.Fatalf("read golden after build: %v", err)
+	}
+	if string(got) != "GOLDEN_CONTENT" {
+		t.Fatalf("golden content = %q, want GOLDEN_CONTENT", string(got))
+	}
+	if _, err := os.Stat(golden + ".building"); !os.IsNotExist(err) {
+		t.Fatalf("expected no leftover .building temp, stat err = %v", err)
+	}
+}
+
+// TestEnsureGoldenImage_PassesCmdDirAndEnv proves the two wiring fixes: the build
+// runs with cwd set to the workdir (parent of scripts/, i.e. where artifacts/
+// lives), and EPHEMERA_GOLDEN_IMAGE_PATH is the .building temp beside the golden.
+// The script records both via a cwd-relative side file, so the side file landing
+// in the workdir is itself evidence that cmd.Dir resolved to the workdir.
+func TestEnsureGoldenImage_PassesCmdDirAndEnv(t *testing.T) {
+	golden, script := goldenTestLayout(t)
+	// The workdir is the parent of scripts/ — the directory EnsureGoldenImage must
+	// use as cmd.Dir. filepath.EvalSymlinks normalizes it to match `pwd -P` output.
+	workdir := filepath.Dir(filepath.Dir(script))
+	wantCwd, err := filepath.EvalSymlinks(workdir)
+	if err != nil {
+		t.Fatalf("evalsymlinks workdir: %v", err)
+	}
+
+	writeGoldenBuildScript(t, script, `#!/bin/bash
+set -euo pipefail
+pwd -P > build-cwd.txt
+printf '%s' "$EPHEMERA_GOLDEN_IMAGE_PATH" > build-env.txt
+printf 'X' > "$EPHEMERA_GOLDEN_IMAGE_PATH"
+`)
+
+	p := &Provisioner{GoldenImagePath: golden, BuildScriptPath: script}
+	if err := p.EnsureGoldenImage(); err != nil {
+		t.Fatalf("EnsureGoldenImage: %v", err)
+	}
+
+	// The cwd-relative side files must have landed in the workdir, proving cmd.Dir.
+	gotCwd, err := os.ReadFile(filepath.Join(workdir, "build-cwd.txt"))
+	if err != nil {
+		t.Fatalf("read build-cwd.txt (should be in workdir): %v", err)
+	}
+	if strings.TrimSpace(string(gotCwd)) != wantCwd {
+		t.Fatalf("build cwd = %q, want %q", strings.TrimSpace(string(gotCwd)), wantCwd)
+	}
+
+	gotEnv, err := os.ReadFile(filepath.Join(workdir, "build-env.txt"))
+	if err != nil {
+		t.Fatalf("read build-env.txt: %v", err)
+	}
+	if wantEnv := golden + ".building"; string(gotEnv) != wantEnv {
+		t.Fatalf("EPHEMERA_GOLDEN_IMAGE_PATH = %q, want %q", string(gotEnv), wantEnv)
+	}
+}
+
+// TestEnsureGoldenImage_BuildFailurePreservesExistingGolden verifies that a failed
+// rebuild (script exits non-zero) leaves the existing golden image untouched and
+// removes the .building temp — the core robustness fix. The pre-existing golden is
+// aged so the build-input freshness check flags it stale and forces a rebuild.
+func TestEnsureGoldenImage_BuildFailurePreservesExistingGolden(t *testing.T) {
+	golden, script := goldenTestLayout(t)
+	if err := os.WriteFile(golden, []byte("EXISTING_GOLDEN_A"), 0644); err != nil {
+		t.Fatalf("write existing golden: %v", err)
+	}
+	// Age the golden so pathsNewerThan sees the (freshly written) build script as
+	// newer, marking the image stale and forcing the rebuild path.
+	past := time.Now().Add(-1 * time.Hour)
+	if err := os.Chtimes(golden, past, past); err != nil {
+		t.Fatalf("chtimes golden: %v", err)
+	}
+
+	writeGoldenBuildScript(t, script, `#!/bin/bash
+set -euo pipefail
+echo "build failed" >&2
+exit 1
+`)
+
+	p := &Provisioner{GoldenImagePath: golden, BuildScriptPath: script}
+	err := p.EnsureGoldenImage()
+	if err == nil {
+		t.Fatal("EnsureGoldenImage should error when build script fails")
+	}
+
+	got, err := os.ReadFile(golden)
+	if err != nil {
+		t.Fatalf("existing golden should be preserved after failed rebuild: %v", err)
+	}
+	if string(got) != "EXISTING_GOLDEN_A" {
+		t.Fatalf("golden content = %q, want EXISTING_GOLDEN_A (must not be destroyed)", string(got))
+	}
+	if _, err := os.Stat(golden + ".building"); !os.IsNotExist(err) {
+		t.Fatalf("expected .building temp cleaned up, stat err = %v", err)
+	}
+}
+
+// TestEnsureGoldenImage_PartialBuildCleanedUp verifies that when a build writes a
+// partial image to the temp path and then fails, the partial image never becomes
+// the golden (it is not renamed), the temp is cleaned up, and any pre-existing
+// golden is preserved. Covers both the pre-existing-golden and no-golden cases.
+func TestEnsureGoldenImage_PartialBuildCleanedUp(t *testing.T) {
+	partialScript := `#!/bin/bash
+set -euo pipefail
+printf 'PARTIAL_IMAGE_BYTES' > "$EPHEMERA_GOLDEN_IMAGE_PATH"
+exit 1
+`
+
+	t.Run("with existing golden preserved", func(t *testing.T) {
+		golden, script := goldenTestLayout(t)
+		if err := os.WriteFile(golden, []byte("EXISTING_GOLDEN_A"), 0644); err != nil {
+			t.Fatalf("write existing golden: %v", err)
+		}
+		past := time.Now().Add(-1 * time.Hour)
+		if err := os.Chtimes(golden, past, past); err != nil {
+			t.Fatalf("chtimes golden: %v", err)
+		}
+		writeGoldenBuildScript(t, script, partialScript)
+
+		p := &Provisioner{GoldenImagePath: golden, BuildScriptPath: script}
+		if err := p.EnsureGoldenImage(); err == nil {
+			t.Fatal("EnsureGoldenImage should error when build fails after partial write")
+		}
+
+		got, err := os.ReadFile(golden)
+		if err != nil {
+			t.Fatalf("existing golden should survive partial failed build: %v", err)
+		}
+		if string(got) != "EXISTING_GOLDEN_A" {
+			t.Fatalf("golden = %q, want EXISTING_GOLDEN_A (partial must not replace it)", string(got))
+		}
+		if _, err := os.Stat(golden + ".building"); !os.IsNotExist(err) {
+			t.Fatalf("expected partial .building temp cleaned up, stat err = %v", err)
+		}
+	})
+
+	t.Run("no golden left behind", func(t *testing.T) {
+		golden, script := goldenTestLayout(t)
+		writeGoldenBuildScript(t, script, partialScript)
+
+		p := &Provisioner{GoldenImagePath: golden, BuildScriptPath: script}
+		if err := p.EnsureGoldenImage(); err == nil {
+			t.Fatal("EnsureGoldenImage should error when build fails after partial write")
+		}
+		if _, err := os.Stat(golden); !os.IsNotExist(err) {
+			t.Fatalf("expected no golden image after failed first build, stat err = %v", err)
+		}
+		if _, err := os.Stat(golden + ".building"); !os.IsNotExist(err) {
+			t.Fatalf("expected partial .building temp cleaned up, stat err = %v", err)
+		}
+	})
+}
+
 func TestPathsNewerThan(t *testing.T) {
 	tmp := t.TempDir()
 
