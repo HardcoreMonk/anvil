@@ -205,10 +205,12 @@ func (l *sniVerdictLoop) decide(srcIP string, payload []byte) sniDecision {
 // this function drives via reassemblerForQUIC (Task 6c).
 //
 // A modern post-quantum ClientHello (X25519MLKEM768) does not fit in a single
-// QUIC Initial datagram, so — mirroring TCP's decide/Start split — this
-// function feeds each datagram to the flow's InitialReassembler and mirrors
-// TCP's incomplete-segment passthrough rather than terminally denying a
-// ClientHello that merely hasn't finished arriving yet:
+// QUIC Initial datagram, so this function feeds each datagram to the flow's
+// InitialReassembler to accumulate the ClientHello across datagrams. Unlike
+// TCP's incomplete-segment passthrough, an incomplete QUIC datagram is DROPPED
+// (fail-closed) — not passed through — because passing it through would confirm
+// the UDP conntrack entry with mark 0 and break the completing datagram's
+// connmark fast-path (see the extended note below):
 //
 //   - unregistered srcIP  -> sniDrop (reason unregistered_source; no
 //     reassembler created)
