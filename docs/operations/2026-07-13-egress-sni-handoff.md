@@ -8,14 +8,14 @@ egress `profile` policy의 도메인 통제를 packet-string substring 매치에
 결정 원문은 [ADR-0002](../adr/0002-egress-sni-transparent-filter.md)에 있다 —
 이 handoff는 그 셋을 압축 요약하고 검증 증거·Follow-Up만 추가한다.
 
-## 무엇이 main에 있나 (PR 대기, main 아님 — feature 브랜치)
+## 무엇이 main에 있나 (PR #59로 병합됨; 후속 정리 #60~#64는 아래 병합 이력·Follow-Up 참조)
 
 - **신규 스키마 필드**: `egressProfile.AllowSNI []string`(`allow_sni` json
   key). `allow_cidrs`/`allow_hosts`/`dns_servers`와 병렬 additive, 기존
   profile 무변경 하위호환. `*.example.com` leading-label wildcard(한 개 이상
-  라벨) + exact match. 검증은 `validateEgressHost`(ASCII 영숫자/`.`/`-`)를
-  재사용한다(알려진 cosmetic 부작용: 에러 메시지가 `allow_sni` 항목에도
-  `allow_hosts`라는 문자열을 씀).
+  라벨) + exact match. 도메인 charset 검사(ASCII 영숫자/`.`/`-`)를
+  `allow_hosts`와 공유한다 — PR #61에서 `validateDomainCharset(field, host)`로
+  분리해 에러 메시지가 이제 `allow_sni` 항목을 정확히 명명한다.
 - **dispatch**: `allow_sni`가 비어 있지 않은 profile만 :443 새 흐름에
   `iptables -I FORWARD -s <guestIP> -p tcp --dport 443 -m connmark
   ! --mark 0x534e49 -j NFQUEUE --queue-num 88`(env `ANVIL_SNI_QUEUE_NUM`로
@@ -47,10 +47,10 @@ egress `profile` policy의 도메인 통제를 packet-string substring 매치에
 - **감사/metric**: deny는 tenant가 있는 VM에 한해 `RuntimeAuditRecord`
   (`ToolName: "egress_sni_filter"`, `DaemonOperation: "egress_sni_denied"`,
   `SNI: <domain>`)로 기록되고, tenant 없는 VM은 redaction-safe slog로
-  degrade한다. `ephemera_egress_sni_verdict_total{outcome="allowed"|"denied"}`
-  카운터는 최종 판정이 난 흐름만(완결 ClientHello) 무조건 증가한다 — 판정
-  전 unmarked passthrough, IPv4 파싱 실패, 미등록 source drop은 포함하지
-  않는다(completeness gap, runbook에 명시).
+  degrade한다. `ephemera_egress_sni_verdict_total{outcome="allowed"|"denied"|"dropped"}`
+  카운터는 판정 흐름(allowed/denied)과 pre-classify infra drop(no-payload/
+  IPv4 파싱실패/미등록 source — PR #61에서 `outcome="dropped"`로 추가)을 모두
+  반영한다. 판정 전 unmarked passthrough는 verdict가 아니라 미포함.
 - **복구 무결성**: VM 복구(warm/cold restart, snapshot restore)가 per-VM
   egress 전체(iptables 규칙 재설치 + SNI 레지스트리 재등록)를 **부팅 전**에
   재적용한다 — 호스트 리부트 후 fail-open 창과, 데몬 재시작 후 SNI 레지스트리만
@@ -124,15 +124,15 @@ in-guest 루트에 대한 완전 봉쇄가 아니다.
   증가 — conntrack mark fast-path가 슬로우패스를 우회함을 증명(steady-state
   성능 스모크).
 
-## Next Action
+## 병합 이력 (post-merge)
 
-1. "최종 검증(전체 슬라이스)" 수행: `go build ./... && go vet ./... &&
-   gofmt -l . | grep -v '^web/'`, `go test -race ./internal/... ./cmd/...`,
-   `git diff main -- go.mod`(신규 direct 의존 1개만), 기존 egress 회귀
-   (`go test ./cmd/goose-daemon/ -run Egress`) + 전체 KVM 게이트
-   (`sudo bash e2e_test.sh`), `bash scripts/secret-scan.sh`.
-2. PR 생성(`feature/egress-sni-filter` → `main`). **자체 머지 금지** —
-   머지는 사용자 승인으로만.
+- **#59** — 슬라이스 본체 병합(2026-07-13). 최종 검증(유닛 `-race`, `go.mod`
+  신규 direct 의존 1개, 전체 KVM 게이트 334✓, egress KVM e2e, secret-scan) 통과.
+- **#60** — flaky `TestDistributedTokens_ConcurrentRefill` 안정화(무관 pre-existing 스케줄링 race).
+- **#61** — 코드품질 Minor 배치(아래 Follow-Up #6 대부분·#7 해소).
+- **#62** — golden-image 재빌드 견고화(Follow-Up #8 해소).
+- **#63** — 복구 egress-before-boot 리팩터(Follow-Up #9 해소, emergency fence 제거).
+- **#64** — transient-recovery-창 문서 정합(ADR-0002 해당 행 RESOLVED).
 
 ## Follow-Up Tasks
 
@@ -150,20 +150,18 @@ in-guest 루트에 대한 완전 봉쇄가 아니다.
 5. **pre-decision 부분 ClientHello 전달의 hold-then-decide 재설계** —
    수용된 잔여 위험(승인 누수는 아님)이지만, 완전 봉쇄가 필요해지면 판정
    전 세그먼트를 보류하는 재설계를 검토한다(v1은 YAGNI로 미채택).
-6. **코드 품질 Minor**(최종 리뷰 triage 대상, 비차단):
-   fastpath↔nfqueue 규칙의 상호 slice 순서를 고정하는 테스트 부재(동작
-   중립); Task 5b의 bare-comment flush arm 테스트 미검; egress fence
-   이중실패 시 teardown 경로 없음; fenced VM이 recovered count에
-   집계됨; `decide`/`Start`의 pre-parse 라우팅 중복; `reassemblerFor`
-   lock 사용 주석의 footgun 여지; `validateEgressHost` 에러 메시지가
-   `allow_sni` entry에도 `allow_hosts`로 표기됨.
-7. **metric completeness 재검토** — `ephemera_egress_sni_verdict_total`은
-   classify 경로(allowed/denied/unparsed) drop만 카운트하고, no-payload/
-   IPv4 파싱실패/미등록 source drop은 포함하지 않는다(현재는 runbook에
-   caveat로만 명시).
-8. **golden-image staleness robustness**(pre-existing, 이 slice가 새로
-   만든 문제 아님) — `build_image.sh`가 중단됐을 때 부분 이미지가 재사용될
-   수 있는 known limitation.
+6. ~~**코드 품질 Minor**~~ — **DONE/OBSOLETE (PR #61·#63)**. #61에서 수정:
+   fastpath↔nfqueue slice-순서 테스트, Task 5b bare-comment flush arm 테스트,
+   `decide`/`Start` pre-parse dedup(`resolveEntry`), `reassemblerFor` lock
+   주석, `validateEgressHost` 메시지(`validateDomainCharset`). #63의
+   egress-before-boot로 obsolete: egress fence 이중실패 teardown·fenced VM
+   recovered 카운트 — 부팅 전 실패로 대체돼 fenced running VM 자체가 없음.
+7. ~~**metric completeness 재검토**~~ — **DONE (PR #61)**. no-payload/IPv4
+   파싱실패/미등록 source drop이 이제 `outcome="dropped"`로 카운트된다.
+8. ~~**golden-image staleness robustness**~~ — **DONE (PR #62)**. golden
+   재빌드를 temp+atomic rename + 올바른 cwd/env로 견고화 — 중단된 빌드가 부분
+   이미지를 real path에 남기지 않고, EPHEMERA_HOME≠launch-cwd 배포에서도 산출
+   경로 발산 없음.
 9. ~~**복구 경로 egress-before-boot 검토**(transient 창 제거)~~ — **DONE
    (2026-07-14, egress-before-boot 리팩터)**. 복구가 세 경로 모두 egress를
    부팅 전에 적용하고 실패 시 부팅하지 않으므로 transient fail-open 창이
