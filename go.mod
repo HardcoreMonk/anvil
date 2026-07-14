@@ -5,9 +5,11 @@ go 1.25.0
 require (
 	github.com/firecracker-microvm/firecracker-go-sdk v1.0.0
 	github.com/florianl/go-nfqueue/v2 v2.1.0
+	github.com/google/jsonschema-go v0.4.3
 	github.com/modelcontextprotocol/go-sdk v1.6.0
 	github.com/sirupsen/logrus v1.9.4
-	golang.org/x/sys v0.41.0
+	golang.org/x/crypto v0.54.0
+	golang.org/x/sys v0.47.0
 	gopkg.in/yaml.v2 v2.4.0
 )
 
@@ -30,7 +32,6 @@ require (
 	github.com/go-openapi/validate v0.22.0 // indirect
 	github.com/go-stack/stack v1.8.1 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
-	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/google/uuid v1.3.0 // indirect
 	github.com/hashicorp/errwrap v1.0.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
@@ -48,8 +49,8 @@ require (
 	github.com/vishvananda/netns v0.0.0-20210104183010-2eb08e3e575f // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	go.mongodb.org/mongo-driver v1.8.3 // indirect
-	golang.org/x/net v0.50.0 // indirect
+	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/oauth2 v0.35.0 // indirect
-	golang.org/x/sync v0.19.0 // indirect
-	golang.org/x/text v0.34.0 // indirect
+	golang.org/x/sync v0.22.0 // indirect
+	golang.org/x/text v0.40.0 // indirect
 )
