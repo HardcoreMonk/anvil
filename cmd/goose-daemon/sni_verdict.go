@@ -31,6 +31,12 @@ import (
 // (LRU); the evicted flow degrades to fail-closed (its next segment starts a
 // fresh reassembler mid-stream, fails to parse as a record boundary, and drops)
 // — never to fail-open.
+//
+// The QUIC flow table (reassemblerForQUIC, Task 6c) reuses this same cap for
+// its own, wholly separate table: each live QUIC flow buffers at most
+// quic.maxQuicClientHelloBytes (8 KiB), so that table's worst case adds
+// another 4096 * 8 KiB = 32 MiB per loop, on top of the TCP table above. Same
+// LRU-eviction-degrades-to-fail-closed guarantee applies to both tables.
 const sniReassemblerMaxFlows = 4096
 
 type sniAction int
@@ -73,6 +79,14 @@ type sniFlowEntry struct {
 	r   *sni.Reassembler
 }
 
+// quicFlowEntry is one live multi-datagram QUIC Initial reassembly, keyed by
+// "srcIP:sport" — the QUIC counterpart of sniFlowEntry, holding a
+// *quic.InitialReassembler (Task 6b) instead of a *sni.Reassembler.
+type quicFlowEntry struct {
+	key string
+	r   *quic.InitialReassembler
+}
+
 type sniVerdictLoop struct {
 	queueNum  int
 	auditPath string         // tenant-scoped runtime audit trail; deny records land here via recordVerdict/auditDeny.
@@ -93,6 +107,18 @@ type sniVerdictLoop struct {
 	flowMu  sync.Mutex
 	flows   map[string]*list.Element // key -> element carrying *sniFlowEntry
 	flowLRU *list.List               // front = most recently used
+
+	// QUIC reassembly LRU (multi-datagram Initial CRYPTO reassembly, Task 6c).
+	// Mirrors the flowMu/flows/flowLRU triple above but keyed/typed for
+	// *quic.InitialReassembler, and is a wholly separate bounded table so a burst
+	// of TCP flows can never evict a QUIC flow's reassembler or vice versa. Same
+	// discipline as flowMu: flowMuQUIC guards ONLY this table, not the
+	// reassembler's Feed call in handleUDPQUIC, which runs lock-free and is safe
+	// solely because go-nfqueue dispatches the hook from a single goroutine (see
+	// the flowMu field comment above).
+	flowMuQUIC  sync.Mutex
+	quicFlows   map[string]*list.Element // key -> element carrying *quicFlowEntry
+	quicFlowLRU *list.List               // front = most recently used
 }
 
 func newSNIVerdictLoop(queueNum int, auditPath string, metrics *daemonMetrics) *sniVerdictLoop {
@@ -104,6 +130,9 @@ func newSNIVerdictLoop(queueNum int, auditPath string, metrics *daemonMetrics) *
 		registry:  map[string]sniRegistryEntry{},
 		flows:     map[string]*list.Element{},
 		flowLRU:   list.New(),
+
+		quicFlows:   map[string]*list.Element{},
+		quicFlowLRU: list.New(),
 	}
 }
 
@@ -171,33 +200,48 @@ func (l *sniVerdictLoop) decide(srcIP string, payload []byte) sniDecision {
 }
 
 // decideQUIC is decide's QUIC/UDP:443 counterpart (also unit-tested without
-// root). payload is one whole UDP datagram believed to carry a QUIC Initial
-// packet.
+// root). payload is one UDP datagram believed to carry a QUIC Initial packet;
+// srcIP/sport identify the flow, keying the per-flow *quic.InitialReassembler
+// this function drives via reassemblerForQUIC (Task 6c).
 //
-// Unlike TCP's decide, there is no passthrough/incomplete case: a QUIC
-// Initial's CRYPTO frame(s) either fully decrypt and reassemble to a
-// ClientHello with an SNI within *this one datagram*, or they don't.
-// quic.ParseInitialSNI already reassembles CRYPTO frames split across multiple
-// QUIC packets coalesced into the same datagram (Task 4); a ClientHello that
-// spans multiple UDP datagrams is out of scope for that reassembly and so is a
-// terminal deny here, never a "wait for more" passthrough — there is no
-// per-flow QUIC reassembly loop the way there is a TCP sni.Reassembler.
+// A modern post-quantum ClientHello (X25519MLKEM768) does not fit in a single
+// QUIC Initial datagram, so — mirroring TCP's decide/Start split — this
+// function feeds each datagram to the flow's InitialReassembler and mirrors
+// TCP's incomplete-segment passthrough rather than terminally denying a
+// ClientHello that merely hasn't finished arriving yet:
 //
-// Fail-closed contract:
-//   - unregistered srcIP -> sniDrop (reason unregistered_source)
-//   - any parse error    -> sniDrop (reason egress_sni_unparsed)
-//   - SNI in matcher     -> sniAcceptMark (reason egress_sni_allowed)
-//   - SNI not in matcher -> sniDrop (reason egress_sni_denied, SNI recorded)
-func (l *sniVerdictLoop) decideQUIC(srcIP string, payload []byte) sniDecision {
+//   - unregistered srcIP  -> sniDrop (reason unregistered_source; no
+//     reassembler created)
+//   - Feed error           -> sniDrop (reason egress_sni_unparsed) + flow evict
+//     (malformed/undecryptable/oversized/no-SNI — all terminal, fail-closed)
+//   - Feed incomplete      -> sniPassthrough (ACCEPT, no mark; ready for the
+//     next Initial datagram of this flow, same flow left cached)
+//   - Feed done, in matcher     -> sniAcceptMark (reason egress_sni_allowed) + evict
+//   - Feed done, not in matcher -> sniDrop (reason egress_sni_denied, SNI recorded) + evict
+func (l *sniVerdictLoop) decideQUIC(srcIP string, sport uint16, payload []byte) sniDecision {
 	entry, ok := l.resolveEntry(srcIP)
 	if !ok {
 		return sniDecision{Action: sniDrop, Reason: "unregistered_source"}
 	}
-	name, err := quic.ParseInitialSNI(payload)
-	if err != nil {
-		return sniDecision{Action: sniDrop, Reason: "egress_sni_unparsed"} // fail-closed
+	flowKey := srcIP + ":" + strconv.Itoa(int(sport))
+	r := l.reassemblerForQUIC(flowKey)
+	name, done, ferr := r.Feed(payload)
+	switch {
+	case ferr != nil:
+		// Terminal parse error (malformed / no-SNI / inconsistent overlap /
+		// oversized) -> fail closed.
+		l.evictQUICFlow(flowKey)
+		return sniDecision{Action: sniDrop, Reason: "egress_sni_unparsed"}
+	case !done:
+		// Incomplete ClientHello: pass this datagram through unmarked so the
+		// next Initial datagram of this flow re-queues here. Bounded by the
+		// reassembler's per-flow byte cap and the QUIC flow LRU; it can never
+		// yield an approved connmark.
+		return sniDecision{Action: sniPassthrough}
+	default:
+		l.evictQUICFlow(flowKey)
+		return l.classifyParsedSNI(entry, name) // shared with TCP: in matcher -> acceptMark, else denied
 	}
-	return l.classifyParsedSNI(entry, name) // shared with TCP: in matcher -> acceptMark, else denied
 }
 
 // resolveEntry does the locked registry lookup that both decide (single-packet
@@ -254,6 +298,45 @@ func (l *sniVerdictLoop) evictFlow(key string) {
 	if el, ok := l.flows[key]; ok {
 		l.flowLRU.Remove(el)
 		delete(l.flows, key)
+	}
+}
+
+// reassemblerForQUIC is reassemblerFor's QUIC counterpart: it returns the
+// flow's *quic.InitialReassembler, creating one if absent and evicting the
+// least-recently-used flow once this (separate) table is at
+// sniReassemblerMaxFlows capacity — the flow-count cap a malicious guest
+// cannot bypass by opening many QUIC flows that each dribble a
+// never-completing Initial (per-flow bytes are separately capped by
+// InitialReassembler itself, at quic.maxQuicClientHelloBytes; see Task 6b).
+// flowMuQUIC is released before the returned reassembler's Feed runs in
+// handleUDPQUIC; that is safe only under single-goroutine hook dispatch (see
+// flowMuQUIC's field comment).
+func (l *sniVerdictLoop) reassemblerForQUIC(key string) *quic.InitialReassembler {
+	l.flowMuQUIC.Lock()
+	defer l.flowMuQUIC.Unlock()
+	if el, ok := l.quicFlows[key]; ok {
+		l.quicFlowLRU.MoveToFront(el)
+		return el.Value.(*quicFlowEntry).r
+	}
+	for l.quicFlowLRU.Len() >= sniReassemblerMaxFlows {
+		back := l.quicFlowLRU.Back()
+		if back == nil {
+			break
+		}
+		l.quicFlowLRU.Remove(back)
+		delete(l.quicFlows, back.Value.(*quicFlowEntry).key)
+	}
+	r := &quic.InitialReassembler{}
+	l.quicFlows[key] = l.quicFlowLRU.PushFront(&quicFlowEntry{key: key, r: r})
+	return r
+}
+
+func (l *sniVerdictLoop) evictQUICFlow(key string) {
+	l.flowMuQUIC.Lock()
+	defer l.flowMuQUIC.Unlock()
+	if el, ok := l.quicFlows[key]; ok {
+		l.quicFlowLRU.Remove(el)
+		delete(l.quicFlows, key)
 	}
 }
 
@@ -383,8 +466,8 @@ func (l *sniVerdictLoop) Start(ctx context.Context) error {
 		}
 		pkt := *a.Payload
 		if len(pkt) > 9 && pkt[9] == unix.IPPROTO_UDP {
-			// QUIC/UDP:443 path: unit-datagram decision, no reassembly loop —
-			// see handleUDPQUIC.
+			// QUIC/UDP:443 path: per-flow multi-datagram Initial reassembly via
+			// decideQUIC's flow cache — see handleUDPQUIC.
 			l.handleUDPQUIC(nf, id, pkt)
 			return 0
 		}
@@ -461,10 +544,14 @@ func (l *sniVerdictLoop) Start(ctx context.Context) error {
 }
 
 // handleUDPQUIC is the UDP:443 (QUIC) counterpart of the TCP branch of the
-// hook body above. Unlike TCP's ClientHello, a QUIC Initial's SNI is decided
-// from a single UDP datagram — there is no per-flow reassembly loop the way
-// there is a TCP sni.Reassembler (see decideQUIC) — so the hook body reduces to
-// parse -> resolve -> decide -> apply, with no incomplete/re-queue branch.
+// hook body above. Like TCP's ClientHello, a QUIC Initial's SNI may span more
+// than one datagram (a modern post-quantum ClientHello does not fit in one
+// Initial), so this hook feeds each datagram to the flow's
+// *quic.InitialReassembler via decideQUIC — which owns the flow lookup,
+// eviction, and passthrough/accept/drop routing (Task 6c) — mirroring the TCP
+// branch's reassemblerFor/Feed/evictFlow shape. The hook body itself still
+// reduces to parse -> resolve -> decideQUIC -> apply; the incomplete/re-queue
+// branch now lives inside decideQUIC instead of being absent.
 //
 // Every early-return here (parse failure, wrong dport, unregistered source) is
 // a pre-classify infra drop: it fails closed via setDropNoRST + a "dropped"
@@ -496,7 +583,7 @@ func (l *sniVerdictLoop) handleUDPQUIC(nf *nfqueue.Nfqueue, id uint32, pkt []byt
 		l.metrics.IncSNIVerdict("dropped")
 		return
 	}
-	l.applyVerdictUDP(nf, id, l.decideQUIC(srcIP, u.payload), entry)
+	l.applyVerdictUDP(nf, id, l.decideQUIC(srcIP, u.sport, u.payload), entry)
 }
 
 // applyVerdict turns a decision into a kernel verdict. sniAcceptMark is the only
@@ -520,20 +607,22 @@ func (l *sniVerdictLoop) applyVerdict(nf *nfqueue.Nfqueue, id uint32, d sniDecis
 }
 
 // applyVerdictUDP is applyVerdict's UDP/QUIC counterpart: identical
-// accept/accept+mark semantics, but a UDP drop never attempts injectRST — that
-// needs the TCP seq/ackSeq ipv4TCP carries (RFC 793 has no UDP analog), so
-// setDropNoRST issues a plain fail-closed NfDrop instead. recordVerdict
-// (metrics/audit) is shared unchanged with the TCP path.
+// accept/accept+mark/passthrough semantics, but a UDP drop never attempts
+// injectRST — that needs the TCP seq/ackSeq ipv4TCP carries (RFC 793 has no
+// UDP analog), so setDropNoRST issues a plain fail-closed NfDrop instead.
+// recordVerdict (metrics/audit) is shared unchanged with the TCP path.
 func (l *sniVerdictLoop) applyVerdictUDP(nf *nfqueue.Nfqueue, id uint32, d sniDecision, entry sniRegistryEntry) {
-	// QUIC is a unit-datagram decision: decideQUIC only ever yields sniAcceptMark
-	// or sniDrop (there is no ErrIncomplete->passthrough path as with TCP), so this
-	// switch has no sniPassthrough case — an unexpected action issues no verdict,
-	// leaving the packet queued for the kernel to drop (fail-closed).
+	// Multi-datagram QUIC Initial reassembly (Task 6c): decideQUIC yields
+	// sniPassthrough while a flow's ClientHello is still incomplete, the QUIC
+	// analog of TCP's incomplete-segment passthrough — ACCEPT unmarked so the
+	// next Initial datagram of this flow re-queues here.
 	switch d.Action {
 	case sniAcceptMark:
 		if err := nf.SetVerdictWithConnMark(id, nfqueue.NfAccept, l.connMark); err != nil {
 			slog.Error("sni verdict: set accept+connmark failed", "err", err, "sni", d.SNI)
 		}
+	case sniPassthrough:
+		l.setAccept(nf, id)
 	case sniDrop:
 		l.setDropNoRST(nf, id)
 	}

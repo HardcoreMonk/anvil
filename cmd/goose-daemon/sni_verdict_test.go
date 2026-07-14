@@ -228,29 +228,77 @@ func TestQUICParseIPv4UDPBoundaries(t *testing.T) {
 	}
 }
 
-// TestSNIDecideQUICRouting is decideQUIC's routing-contract test, the UDP/QUIC
-// counterpart of TestSNIDecideRouting above. Unlike TCP's decide, there is no
-// passthrough case (a QUIC Initial datagram is judged whole, never mid-handshake)
-// and no ErrIncomplete-style retry — every failure is terminal deny.
+// TestSNIDecideQUICRouting is decideQUIC's single-datagram routing-contract
+// test, the UDP/QUIC counterpart of TestSNIDecideRouting above. A single
+// datagram carrying a complete ClientHello reaches the reassembler's "done"
+// branch on the first Feed, so every case here still resolves immediately
+// (allow/deny/unregistered/unparseable) — Task 6c's multi-datagram
+// incomplete/passthrough branch is covered separately by
+// TestSNIDecideQUICMultiDatagram below.
 func TestSNIDecideQUICRouting(t *testing.T) {
 	l := newSNIVerdictLoop(88, "", nil)
 	m, _ := sni.NewMatcher([]string{"api.anthropic.com", "*.example.com"})
 	l.Register("10.0.1.10", sniRegistryEntry{VMID: "vm-1", TenantID: "t1", Matcher: m})
+	const sport = uint16(55555)
 
-	// decideQUIC(srcIP, udpPayload) — QUIC Initial payload를 quic.ParseInitialSNI로 판정.
+	// decideQUIC(srcIP, sport, udpPayload) — flowKey=srcIP:sport feeds the flow's
+	// *quic.InitialReassembler (Task 6c); a single complete datagram completes
+	// on the first Feed and evicts the flow immediately.
 	allow := buildQUICInitialForTest("10.0.1.10", "api.anthropic.com") // test helper: quic 패키지 라운드트립 재사용
-	if d := l.decideQUIC("10.0.1.10", allow); d.Action != sniAcceptMark {
+	if d := l.decideQUIC("10.0.1.10", sport, allow); d.Action != sniAcceptMark {
 		t.Fatalf("allowed QUIC SNI -> %v (%s)", d.Action, d.Reason)
 	}
 	deny := buildQUICInitialForTest("10.0.1.10", "evil.test")
-	if d := l.decideQUIC("10.0.1.10", deny); d.Action != sniDrop || d.Reason != "egress_sni_denied" {
+	if d := l.decideQUIC("10.0.1.10", sport, deny); d.Action != sniDrop || d.Reason != "egress_sni_denied" {
 		t.Fatalf("denied QUIC -> %v/%s", d.Action, d.Reason)
 	}
-	if d := l.decideQUIC("10.0.1.99", allow); d.Action != sniDrop { // 미등록
+	if d := l.decideQUIC("10.0.1.99", sport, allow); d.Action != sniDrop { // 미등록
 		t.Fatal("unregistered QUIC must fail closed")
 	}
-	if d := l.decideQUIC("10.0.1.10", []byte{0x40, 0x00}); d.Action != sniDrop { // non-Initial
+	if d := l.decideQUIC("10.0.1.10", sport, []byte{0x40, 0x00}); d.Action != sniDrop { // non-Initial
 		t.Fatal("unparseable QUIC must fail closed")
+	}
+}
+
+// TestSNIDecideQUICMultiDatagram is Task 6c's core coverage: a post-quantum-shaped
+// ClientHello split across two Initial datagrams accumulates in the flow's
+// *quic.InitialReassembler across two decideQUIC calls sharing the same
+// flowKey=srcIP:sport (same sport on both datagrams, mirroring a real QUIC
+// flow). The first Feed is incomplete (sniPassthrough, unmarked ACCEPT so the
+// second datagram re-queues here); the second Feed completes and classifies.
+func TestSNIDecideQUICMultiDatagram(t *testing.T) {
+	l := newSNIVerdictLoop(88, "", nil)
+	m, _ := sni.NewMatcher([]string{"api.anthropic.com"})
+	l.Register("10.0.1.10", sniRegistryEntry{VMID: "vm-1", TenantID: "t1", Matcher: m})
+
+	dcid := []byte{0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08}
+	const sport = uint16(55555)
+
+	// Allowed SNI split across 2 datagrams.
+	allowHandshake := encodeQUICClientHelloHandshake("api.anthropic.com")
+	allowDgs := quic.BuildInitialDatagramsForTest(dcid, 0x00000001, allowHandshake, len(allowHandshake)/2)
+	if len(allowDgs) != 2 {
+		t.Fatalf("expected allow handshake split into 2 datagrams, got %d", len(allowDgs))
+	}
+	if d := l.decideQUIC("10.0.1.10", sport, allowDgs[0]); d.Action != sniPassthrough {
+		t.Fatalf("allow datagram 1 -> %v (%s), want passthrough (incomplete)", d.Action, d.Reason)
+	}
+	if d := l.decideQUIC("10.0.1.10", sport, allowDgs[1]); d.Action != sniAcceptMark {
+		t.Fatalf("allow datagram 2 -> %v (%s), want accept_mark (complete+allowed)", d.Action, d.Reason)
+	}
+
+	// Denied SNI split across 2 datagrams, same flowKey (same sport) reused
+	// after the prior flow's completion evicted it.
+	denyHandshake := encodeQUICClientHelloHandshake("evil.test")
+	denyDgs := quic.BuildInitialDatagramsForTest(dcid, 0x00000001, denyHandshake, len(denyHandshake)/2)
+	if len(denyDgs) != 2 {
+		t.Fatalf("expected deny handshake split into 2 datagrams, got %d", len(denyDgs))
+	}
+	if d := l.decideQUIC("10.0.1.10", sport, denyDgs[0]); d.Action != sniPassthrough {
+		t.Fatalf("deny datagram 1 -> %v (%s), want passthrough (incomplete)", d.Action, d.Reason)
+	}
+	if d := l.decideQUIC("10.0.1.10", sport, denyDgs[1]); d.Action != sniDrop || d.Reason != "egress_sni_denied" {
+		t.Fatalf("deny datagram 2 -> %v/%s, want drop/egress_sni_denied", d.Action, d.Reason)
 	}
 }
 
