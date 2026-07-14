@@ -52,10 +52,12 @@ egress `profile` policy의 도메인 통제를 packet-string substring 매치에
   전 unmarked passthrough, IPv4 파싱 실패, 미등록 source drop은 포함하지
   않는다(completeness gap, runbook에 명시).
 - **복구 무결성**: VM 복구(warm/cold restart, snapshot restore)가 per-VM
-  egress 전체(iptables 규칙 재설치 + SNI 레지스트리 재등록)를 재적용한다 —
-  호스트 리부트 후 fail-open 창과, 데몬 재시작 후 SNI 레지스트리만 비어
-  규칙은 있는데 verdict가 안 걸리는 갭을 둘 다 봉쇄한다. 실패 시 비상
-  REJECT fence로 fail-closed 유지.
+  egress 전체(iptables 규칙 재설치 + SNI 레지스트리 재등록)를 **부팅 전**에
+  재적용한다 — 호스트 리부트 후 fail-open 창과, 데몬 재시작 후 SNI 레지스트리만
+  비어 규칙은 있는데 verdict가 안 걸리는 갭을 둘 다 봉쇄한다. 적용 실패 시
+  VM을 부팅하지 않고 복구 실패로 처리하며(don't-boot, fail-closed), 모든
+  give-up 경로가 적용된 egress 규칙을 `dropRecoveryState`에서 회수한다. (초기
+  구현의 부팅-후-적용 + 비상 fence 방식은 egress-before-boot 리팩터로 대체됨.)
 - **`go.mod`**: 신규 direct 의존 `github.com/florianl/go-nfqueue/v2 v2.1.0`
   하나뿐(`git diff main -- go.mod`로 확인됨). indirect로 `mdlayher/netlink`,
   `mdlayher/socket`가 전이 도입되고 `golang.org/x/net`/`x/sync`/`x/text`가
