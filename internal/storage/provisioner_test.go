@@ -298,6 +298,33 @@ exit 1
 	})
 }
 
+// TestEnsureGoldenImage_BuildLiesProducesNoImage covers the branch where the build
+// script exits 0 but wrote nothing to the temp path (a "successful" build that
+// silently produced no image). EnsureGoldenImage must surface a clear error naming
+// the temp path and must NOT promote a nonexistent image to the golden path.
+func TestEnsureGoldenImage_BuildLiesProducesNoImage(t *testing.T) {
+	golden, script := goldenTestLayout(t)
+	writeGoldenBuildScript(t, script, `#!/bin/bash
+set -euo pipefail
+exit 0
+`)
+
+	p := &Provisioner{GoldenImagePath: golden, BuildScriptPath: script}
+	err := p.EnsureGoldenImage()
+	if err == nil {
+		t.Fatal("EnsureGoldenImage should error when the build produced no image")
+	}
+	if !strings.Contains(err.Error(), "temp path") {
+		t.Fatalf("error should name the temp path, got: %v", err)
+	}
+	if _, statErr := os.Stat(golden); !os.IsNotExist(statErr) {
+		t.Fatalf("golden must not exist after a no-output build, stat err = %v", statErr)
+	}
+	if _, statErr := os.Stat(golden + ".building"); !os.IsNotExist(statErr) {
+		t.Fatalf("expected no leftover .building temp, stat err = %v", statErr)
+	}
+}
+
 func TestPathsNewerThan(t *testing.T) {
 	tmp := t.TempDir()
 
