@@ -2167,14 +2167,6 @@ func (e *commandEgressEnforcer) flushByComment(vmID string) {
 	}
 }
 
-// fenceGuestEgress installs a best-effort emergency REJECT for a recovered VM
-// whose egress re-apply failed, so it can never fall back to the base-subnet
-// blanket ACCEPT (fail-closed). Its comment shares the "anvil-egress-<vmID>-"
-// prefix so a later successful recovery flushes it before re-applying.
-func (e *commandEgressEnforcer) fenceGuestEgress(vmID, guestIP string) error {
-	return e.command("iptables", "-I", "FORWARD", "-s", guestIP, "-j", "REJECT", "-m", "comment", "--comment", "anvil-egress-"+vmID+"-recovery-fenced")
-}
-
 // tokenizeIptablesRule splits one `iptables -S` line into argv, honoring the
 // double quotes iptables wraps around --comment values (our comments never
 // contain quotes or escapes, so a single-pass toggle is sufficient). The returned

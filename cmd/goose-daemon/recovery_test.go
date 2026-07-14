@@ -2,12 +2,12 @@ package main
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"ephemera/internal/network"
-	"ephemera/internal/orchestrator"
 	"ephemera/internal/storage"
 )
 
@@ -189,20 +189,15 @@ func TestFlushByCommentDeletesBareDenyAllComment(t *testing.T) {
 	}
 }
 
-// TestReapplyRecoveredEgressFailClosedOnApplyError proves invariant 1: when the
-// re-apply fails, the VM is fenced with an emergency REJECT (never left behind the
-// blanket ACCEPT), the error propagates, and the flock agent is marked dead.
-func TestReapplyRecoveredEgressFailClosedOnApplyError(t *testing.T) {
+// TestReapplyRecoveredEgressReturnsErrorOnApplyFailure proves the before-boot
+// contract: when applyEgressPolicy fails, reapplyRecoveredEgress simply returns
+// the error so its caller refuses to boot the VM (fail-closed by not booting).
+// The obsolete emergency-fence mechanism is gone — NO fence command is issued,
+// and no ACCEPT rule for the VM may survive the failed apply.
+func TestReapplyRecoveredEgressReturnsErrorOnApplyFailure(t *testing.T) {
 	cp := newTestCP(t)
 	profileDir := t.TempDir()
 	writeEgressProfileFixture(t, profileDir, "restricted")
-
-	f, err := cp.flockMgr.NewUnregistered("flock-fc", "test", "tenant", "profile", filepath.Join(cp.workDir, "tw-fc.log"))
-	if err != nil {
-		t.Fatalf("NewUnregistered: %v", err)
-	}
-	cp.flockMgr.Register(f)
-	f.AddAgent(&orchestrator.AgentInfo{AgentID: "worker-1", Role: "worker", VMID: "vm-fc", AgentURL: "http://10.0.1.13:8080", Status: orchestrator.AgentStatusReady})
 
 	var cmds [][]string
 	cp.egress = &commandEgressEnforcer{
@@ -210,7 +205,7 @@ func TestReapplyRecoveredEgressFailClosedOnApplyError(t *testing.T) {
 		profileDir: profileDir,
 		run: func(name string, args ...string) error {
 			cmds = append(cmds, append([]string{name}, args...))
-			// Fail the apply's base REJECT insert; the fence -I still succeeds.
+			// Fail the apply's base REJECT insert.
 			if len(args) >= 1 && args[0] == "-I" && commandHasComment(args, "anvil-egress-vm-fc-default") {
 				return errors.New("apply insert failed")
 			}
@@ -218,14 +213,18 @@ func TestReapplyRecoveredEgressFailClosedOnApplyError(t *testing.T) {
 		},
 		runOutput: func(string, ...string) ([]byte, error) { return nil, nil }, // mode-2: nothing to flush
 	}
-	s := storage.VMState{VMID: "vm-fc", GuestIP: "10.0.1.13", TapDevice: "tap-fc", EgressPolicy: "profile", Profile: "restricted", FlockID: "flock-fc", AgentID: "worker-1"}
+	s := storage.VMState{VMID: "vm-fc", GuestIP: "10.0.1.13", TapDevice: "tap-fc", EgressPolicy: "profile", Profile: "restricted"}
 
 	if err := cp.reapplyRecoveredEgress(s); err == nil {
 		t.Fatal("reapply returned nil, want fail-closed apply error")
 	}
-	wantFence := "iptables -I FORWARD -s 10.0.1.13 -j REJECT -m comment --comment anvil-egress-vm-fc-recovery-fenced"
-	if !containsCommand(cmds, wantFence) {
-		t.Fatalf("emergency fence REJECT not issued: cmds = %v", cmds)
+	// The obsolete emergency fence must never be issued (fence mechanism removed);
+	// its rules carried a "...-fenced" comment, so no emitted command may mention it.
+	for _, c := range cmds {
+		j := strings.Join(c, " ")
+		if strings.Contains(j, "fenced") {
+			t.Fatalf("emergency fence command issued after fence removal: %q", j)
+		}
 	}
 	// No ACCEPT for this VM may survive the failed apply (no blanket-ACCEPT leak).
 	for _, c := range cmds {
@@ -234,8 +233,165 @@ func TestReapplyRecoveredEgressFailClosedOnApplyError(t *testing.T) {
 			t.Fatalf("recovered VM left with an ACCEPT rule after failed apply: %q", j)
 		}
 	}
-	if st := f.AgentStatus("worker-1"); st != orchestrator.AgentStatusDead {
-		t.Fatalf("flock agent status = %q, want dead (degraded marking on fence)", st)
+}
+
+// TestDropRecoveryStateFlushesEgress locks invariant 2: every boot-failure
+// give-up path funnels through dropRecoveryState, which must reclaim this VM's
+// per-VM egress rules so a failed recovery never leaks orphan iptables rules.
+func TestDropRecoveryStateFlushesEgress(t *testing.T) {
+	cp := newTestCP(t)
+	// A stale per-VM rule a before-boot apply installed; the give-up flush -D's it.
+	dump := strings.Join([]string{
+		"-P FORWARD ACCEPT",
+		"-A FORWARD -i goose-br0 -s 10.0.1.0/24 -j ACCEPT",
+		`-A FORWARD -s 10.0.1.40/32 -j REJECT --reject-with icmp-port-unreachable -m comment --comment "anvil-egress-vm-drop-default"`,
+		"",
+	}, "\n")
+	var cmds [][]string
+	cp.egress = &commandEgressEnforcer{
+		run: func(name string, args ...string) error {
+			cmds = append(cmds, append([]string{name}, args...))
+			return nil
+		},
+		runOutput: func(string, ...string) ([]byte, error) { return []byte(dump), nil },
+	}
+	s := storage.VMState{VMID: "vm-drop", GuestIP: "10.0.1.40", TapDevice: "tap-drop"}
+
+	cp.dropRecoveryState(s)
+
+	wantDel := "iptables -D FORWARD -s 10.0.1.40/32 -j REJECT --reject-with icmp-port-unreachable -m comment --comment anvil-egress-vm-drop-default"
+	if !containsCommand(cmds, wantDel) {
+		t.Fatalf("dropRecoveryState did not flush the VM's egress rule (orphan leak): cmds = %v", cmds)
+	}
+	// It must not delete the base-subnet blanket ACCEPT.
+	for _, c := range cmds {
+		j := strings.Join(c, " ")
+		if len(c) >= 2 && c[1] == "-D" && strings.Contains(j, "10.0.1.0/24") {
+			t.Fatalf("dropRecoveryState deleted the base-subnet ACCEPT: %q", j)
+		}
+	}
+}
+
+// TestRecoverVMsEgressApplyFailRefusesBoot proves invariant 1 on the cold path:
+// when the before-boot egress apply fails, RecoverVMs refuses to boot the VM
+// (StartMachine is never reached, so no KVM is needed to exercise this leg),
+// surfaces the VM via failed[], releases its network, drops its state, and never
+// registers it in cp.vms. Only the failure leg is unit-testable here; the
+// success→boot leg is verified by the full-KVM orchestrator gate.
+func TestRecoverVMsEgressApplyFailRefusesBoot(t *testing.T) {
+	cp := newTestCP(t)
+	// A real rootfs file so the disk-missing branch is skipped and control reaches
+	// the before-boot egress apply. Plain disk mode skips all COW/provisioner work.
+	disk := filepath.Join(t.TempDir(), "vm-cold.ext4")
+	if err := os.WriteFile(disk, []byte("x"), 0644); err != nil {
+		t.Fatalf("seed disk: %v", err)
+	}
+	released := false
+	cp.reclaimNetwork = func(tap, ip, mac string) error { return nil }
+	cp.releaseVMNetwork = func(tap, ip string) error { released = true; return nil }
+
+	applied := false
+	cp.egress = &commandEgressEnforcer{
+		rules: map[string]egressRule{},
+		run: func(name string, args ...string) error {
+			if len(args) >= 1 && args[0] == "-I" { // deny_all base REJECT insert == the apply
+				applied = true
+				return errors.New("apply insert failed")
+			}
+			return nil
+		},
+		runOutput: func(string, ...string) ([]byte, error) { return nil, nil },
+	}
+	s := storage.VMState{
+		VMID: "vm-cold", GuestIP: "10.0.1.60", TapDevice: "tap-cold", MacAddr: "AA:FC:00:00:00:60",
+		SocketPath: filepath.Join(t.TempDir(), "vm-cold.sock"),
+		DiskPath:   disk, DiskMode: storage.DiskModePlain, EgressPolicy: "deny_all",
+	}
+	if err := storage.SaveVMState(cp.workDir, s); err != nil {
+		t.Fatalf("seed SaveVMState: %v", err)
+	}
+
+	recovered, failed, err := cp.RecoverVMs()
+	if err != nil {
+		t.Fatalf("RecoverVMs err = %v", err)
+	}
+	if !applied {
+		t.Fatal("before-boot egress apply was never attempted")
+	}
+	if recovered != 0 {
+		t.Fatalf("recovered = %d, want 0 (egress failed → no boot)", recovered)
+	}
+	if len(failed) != 1 || failed[0] != "vm-cold" {
+		t.Fatalf("failed = %v, want [vm-cold]", failed)
+	}
+	if !released {
+		t.Fatal("network not released on egress-fail give-up (leak)")
+	}
+	if _, ok := cp.vms["vm-cold"]; ok {
+		t.Fatal("VM registered in cp.vms despite egress-fail (would boot fail-OPEN)")
+	}
+	if _, err := storage.LoadVMState(cp.workDir, "vm-cold"); err == nil {
+		t.Fatal("state.json not dropped after egress-fail give-up")
+	}
+}
+
+// TestRecoverRestoredVMEgressApplyFailRefusesReRestore proves invariant 1 on the
+// snapshot path: a before-boot egress apply failure short-circuits BEFORE
+// reRestoreMachine (no KVM reached), surfaces the VM via failed[], releases its
+// network, drops its state, and never registers it in cp.vms.
+func TestRecoverRestoredVMEgressApplyFailRefusesReRestore(t *testing.T) {
+	cp := newTestCP(t)
+	cp.provisioner = &storage.Provisioner{WorkspaceDir: t.TempDir()}
+	cp.snapshots = map[string]storage.SnapshotMetadata{"snap-1": {SnapshotID: "snap-1"}}
+
+	// Keep the COW-device reclaim hermetic (avoid dmsetup/umount on the test host);
+	// this refactor does not change that helper.
+	origCOW := removeRestoredCOWDevice
+	removeRestoredCOWDevice = func(workspaceDir, vmID string) {}
+	defer func() { removeRestoredCOWDevice = origCOW }()
+
+	released := false
+	cp.reclaimNetwork = func(tap, ip, mac string) error { return nil }
+	cp.releaseVMNetwork = func(tap, ip string) error { released = true; return nil }
+
+	cp.egress = &commandEgressEnforcer{
+		rules: map[string]egressRule{},
+		run: func(name string, args ...string) error {
+			if len(args) >= 1 && args[0] == "-I" {
+				return errors.New("apply insert failed")
+			}
+			return nil
+		},
+		runOutput: func(string, ...string) ([]byte, error) { return nil, nil },
+	}
+	s := storage.VMState{
+		VMID: "vm-restored-2", GuestIP: "10.0.1.61", TapDevice: "tap-restored-2", MacAddr: "AA:FC:00:00:00:61",
+		SocketPath: filepath.Join(t.TempDir(), "vm-restored-2.sock"),
+		DiskPath:   filepath.Join(t.TempDir(), "vm-restored-2.cow"),
+		DiskMode:   storage.DiskModeCOW, EgressPolicy: "deny_all", SourceSnapshotID: "snap-1",
+	}
+	if err := storage.SaveVMState(cp.workDir, s); err != nil {
+		t.Fatalf("seed SaveVMState: %v", err)
+	}
+
+	recovered := 0
+	var failed []string
+	cp.recoverRestoredVM(s, &recovered, &failed)
+
+	if recovered != 0 {
+		t.Fatalf("recovered = %d, want 0", recovered)
+	}
+	if len(failed) != 1 || failed[0] != "vm-restored-2" {
+		t.Fatalf("failed = %v, want [vm-restored-2]", failed)
+	}
+	if !released {
+		t.Fatal("network not released on egress-fail give-up (leak)")
+	}
+	if _, ok := cp.vms["vm-restored-2"]; ok {
+		t.Fatal("VM registered despite egress-fail (would re-restore fail-OPEN)")
+	}
+	if _, err := storage.LoadVMState(cp.workDir, "vm-restored-2"); err == nil {
+		t.Fatal("state.json not dropped after egress-fail give-up")
 	}
 }
 
