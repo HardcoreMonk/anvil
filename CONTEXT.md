@@ -470,7 +470,7 @@ daemon으로 보내는 outbound Bearer token이다.
   리부트 후 fail-open과 데몬 재시작 후 SNI fail-closed 갭을 모두 봉쇄한다. **위협
   모델**: 신뢰 golden-image 워크로드의 의도된 :443 egress 강제·감사가 in-scope이고
   적대적 in-guest 루트의 spoof/fronting/ECH 완전봉쇄는 out-of-scope — 잔여 위험
-  6항목(ECH는 fail-closed deny, non-TLS/QUIC:443은 SNI 층 밖, SNI는 guest-asserted라
+  6항목(ECH는 fail-closed deny, non-TLS는 SNI 층 밖(QUIC:443은 후속 QUIC 필터가 별도 처리 — 아래 항목), SNI는 guest-asserted라
   CIDR 핀 없이 스푸핑 가능, domain fronting 미탐지, 멀티세그먼트 ClientHello의
   미완결 세그먼트가 판정 전 unmarked로 통과하되 승인 mark는 완결된 positive
   match에서만 찍혀 승인 누수는 아님)를 [ADR-0002](docs/adr/0002-egress-sni-transparent-filter.md)가
