@@ -6,7 +6,7 @@ set -euo pipefail
 # Supports host OS: Ubuntu 22.04 and 24.04
 # Host dependencies: curl, debootstrap, e2fsprogs, util-linux
 
-IMAGE_NAME="artifacts/golden-image.ext4"
+IMAGE_NAME="${EPHEMERA_GOLDEN_IMAGE_PATH:-artifacts/golden-image.ext4}"
 MNT_DIR="/tmp/goose-rootfs"
 DEBIAN_SUITE="trixie"
 
