@@ -260,12 +260,14 @@ func TestSNIDecideQUICRouting(t *testing.T) {
 	}
 }
 
-// TestSNIDecideQUICMultiDatagram is Task 6c's core coverage: a post-quantum-shaped
-// ClientHello split across two Initial datagrams accumulates in the flow's
-// *quic.InitialReassembler across two decideQUIC calls sharing the same
-// flowKey=srcIP:sport (same sport on both datagrams, mirroring a real QUIC
-// flow). The first Feed is incomplete (sniPassthrough, unmarked ACCEPT so the
-// second datagram re-queues here); the second Feed completes and classifies.
+// TestSNIDecideQUICMultiDatagram is Task 6c's core coverage (revised Task 7b): a
+// post-quantum-shaped ClientHello split across two Initial datagrams accumulates
+// in the flow's *quic.InitialReassembler across two decideQUIC calls sharing the
+// same flowKey=srcIP:sport (same sport on both datagrams, mirroring a real QUIC
+// flow). The first Feed is incomplete and is DROPPED fail-closed (reason
+// egress_sni_incomplete — the datagram is not forwarded, but the reassembler
+// keeps its buffered CRYPTO so the second datagram still completes the
+// ClientHello); the second Feed completes and classifies.
 func TestSNIDecideQUICMultiDatagram(t *testing.T) {
 	l := newSNIVerdictLoop(88, "", nil)
 	m, _ := sni.NewMatcher([]string{"api.anthropic.com"})
@@ -280,8 +282,8 @@ func TestSNIDecideQUICMultiDatagram(t *testing.T) {
 	if len(allowDgs) != 2 {
 		t.Fatalf("expected allow handshake split into 2 datagrams, got %d", len(allowDgs))
 	}
-	if d := l.decideQUIC("10.0.1.10", sport, allowDgs[0]); d.Action != sniPassthrough {
-		t.Fatalf("allow datagram 1 -> %v (%s), want passthrough (incomplete)", d.Action, d.Reason)
+	if d := l.decideQUIC("10.0.1.10", sport, allowDgs[0]); d.Action != sniDrop || d.Reason != "egress_sni_incomplete" {
+		t.Fatalf("allow datagram 1 -> %v (%s), want drop/egress_sni_incomplete (fail-closed buffering)", d.Action, d.Reason)
 	}
 	if d := l.decideQUIC("10.0.1.10", sport, allowDgs[1]); d.Action != sniAcceptMark {
 		t.Fatalf("allow datagram 2 -> %v (%s), want accept_mark (complete+allowed)", d.Action, d.Reason)
@@ -294,8 +296,8 @@ func TestSNIDecideQUICMultiDatagram(t *testing.T) {
 	if len(denyDgs) != 2 {
 		t.Fatalf("expected deny handshake split into 2 datagrams, got %d", len(denyDgs))
 	}
-	if d := l.decideQUIC("10.0.1.10", sport, denyDgs[0]); d.Action != sniPassthrough {
-		t.Fatalf("deny datagram 1 -> %v (%s), want passthrough (incomplete)", d.Action, d.Reason)
+	if d := l.decideQUIC("10.0.1.10", sport, denyDgs[0]); d.Action != sniDrop || d.Reason != "egress_sni_incomplete" {
+		t.Fatalf("deny datagram 1 -> %v (%s), want drop/egress_sni_incomplete (fail-closed buffering)", d.Action, d.Reason)
 	}
 	if d := l.decideQUIC("10.0.1.10", sport, denyDgs[1]); d.Action != sniDrop || d.Reason != "egress_sni_denied" {
 		t.Fatalf("deny datagram 2 -> %v/%s, want drop/egress_sni_denied", d.Action, d.Reason)

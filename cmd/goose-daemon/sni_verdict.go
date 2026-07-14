@@ -214,10 +214,31 @@ func (l *sniVerdictLoop) decide(srcIP string, payload []byte) sniDecision {
 //     reassembler created)
 //   - Feed error           -> sniDrop (reason egress_sni_unparsed) + flow evict
 //     (malformed/undecryptable/oversized/no-SNI — all terminal, fail-closed)
-//   - Feed incomplete      -> sniPassthrough (ACCEPT, no mark; ready for the
-//     next Initial datagram of this flow, same flow left cached)
+//   - Feed incomplete      -> sniDrop (reason egress_sni_incomplete; the datagram
+//     is dropped, NOT forwarded, but the flow's reassembler keeps its buffered
+//     CRYPTO so the ClientHello still completes across datagrams — see below)
 //   - Feed done, in matcher     -> sniAcceptMark (reason egress_sni_allowed) + evict
 //   - Feed done, not in matcher -> sniDrop (reason egress_sni_denied, SNI recorded) + evict
+//
+// Why an incomplete datagram is DROPPED, not passed through (deviation from the
+// TCP branch's incomplete-segment passthrough, and from the original Task 6c
+// design): a passed-through incomplete Initial reaches the server carrying a
+// partial ClientHello AND — being the flow's first accepted packet — confirms
+// the UDP conntrack entry with mark 0. The connmark then set on the *completing*
+// (second) datagram loses the race with that already-confirmed entry, so the
+// -sni-udp-fastpath rule never matches and every later (non-Initial) datagram of
+// an ALLOWED flow re-queues here, fails to decrypt as an Initial, and is dropped
+// — breaking the handshake for every multi-datagram (post-quantum) ClientHello.
+// Dropping the incomplete datagram instead (a) makes the completing, allowed
+// datagram the FIRST accepted packet so its connmark confirms cleanly and the
+// fast path engages, and (b) never leaks a partial ClientHello to the server: the
+// client retransmits the dropped datagram via QUIC loss recovery once the flow is
+// allowed and marked, and that retransmit rides the fast path. It is strictly
+// fail-closed — nothing reaches the server until the whole ClientHello is
+// reassembled and the SNI is allowed. The reassembler still accumulates across
+// datagrams (Feed runs before the drop verdict), bounded by its per-flow byte cap
+// and the QUIC flow LRU; an incomplete datagram can never yield an approved
+// connmark.
 func (l *sniVerdictLoop) decideQUIC(srcIP string, sport uint16, payload []byte) sniDecision {
 	entry, ok := l.resolveEntry(srcIP)
 	if !ok {
@@ -233,11 +254,12 @@ func (l *sniVerdictLoop) decideQUIC(srcIP string, sport uint16, payload []byte) 
 		l.evictQUICFlow(flowKey)
 		return sniDecision{Action: sniDrop, Reason: "egress_sni_unparsed"}
 	case !done:
-		// Incomplete ClientHello: pass this datagram through unmarked so the
-		// next Initial datagram of this flow re-queues here. Bounded by the
-		// reassembler's per-flow byte cap and the QUIC flow LRU; it can never
-		// yield an approved connmark.
-		return sniDecision{Action: sniPassthrough}
+		// Incomplete ClientHello: fail closed (drop, no RST for UDP) rather than
+		// forward a partial ClientHello to the server. The flow stays cached so
+		// the next Initial datagram accumulates onto the same reassembler; the
+		// client retransmits this dropped datagram once the flow is allowed and
+		// the connmark fast path is in place. See the doc comment above.
+		return sniDecision{Action: sniDrop, Reason: "egress_sni_incomplete"}
 	default:
 		l.evictQUICFlow(flowKey)
 		return l.classifyParsedSNI(entry, name) // shared with TCP: in matcher -> acceptMark, else denied
@@ -583,7 +605,13 @@ func (l *sniVerdictLoop) handleUDPQUIC(nf *nfqueue.Nfqueue, id uint32, pkt []byt
 		l.metrics.IncSNIVerdict("dropped")
 		return
 	}
-	l.applyVerdictUDP(nf, id, l.decideQUIC(srcIP, u.sport, u.payload), entry)
+	d := l.decideQUIC(srcIP, u.sport, u.payload)
+	slog.Debug("sni verdict: quic udp datagram",
+		"flow", srcIP+":"+strconv.Itoa(int(u.sport)),
+		"payload_len", len(u.payload),
+		"action", d.Action.String(),
+		"reason", d.Reason)
+	l.applyVerdictUDP(nf, id, d, entry)
 }
 
 // applyVerdict turns a decision into a kernel verdict. sniAcceptMark is the only
@@ -612,10 +640,13 @@ func (l *sniVerdictLoop) applyVerdict(nf *nfqueue.Nfqueue, id uint32, d sniDecis
 // UDP analog), so setDropNoRST issues a plain fail-closed NfDrop instead.
 // recordVerdict (metrics/audit) is shared unchanged with the TCP path.
 func (l *sniVerdictLoop) applyVerdictUDP(nf *nfqueue.Nfqueue, id uint32, d sniDecision, entry sniRegistryEntry) {
-	// Multi-datagram QUIC Initial reassembly (Task 6c): decideQUIC yields
-	// sniPassthrough while a flow's ClientHello is still incomplete, the QUIC
-	// analog of TCP's incomplete-segment passthrough — ACCEPT unmarked so the
-	// next Initial datagram of this flow re-queues here.
+	// Multi-datagram QUIC Initial reassembly (Task 6c, revised Task 7b): while a
+	// flow's ClientHello is still incomplete, decideQUIC yields a fail-closed
+	// sniDrop (reason egress_sni_incomplete) — the datagram is dropped, not
+	// forwarded, so no partial ClientHello reaches the server and the completing
+	// datagram becomes the flow's first accepted packet (its connmark then
+	// confirms cleanly onto the conntrack entry). The client retransmits the
+	// dropped datagram once the flow is allowed and the fast path is in place.
 	switch d.Action {
 	case sniAcceptMark:
 		if err := nf.SetVerdictWithConnMark(id, nfqueue.NfAccept, l.connMark); err != nil {
@@ -647,6 +678,14 @@ func (l *sniVerdictLoop) recordVerdict(entry sniRegistryEntry, d sniDecision) {
 	case sniAcceptMark:
 		l.metrics.IncSNIVerdict("allowed")
 	case sniDrop:
+		if d.Reason == "egress_sni_incomplete" {
+			// Fail-closed buffering drop of an incomplete multi-datagram Initial
+			// (see decideQUIC): the ClientHello has not been classified yet, so
+			// this is neither an allow nor a policy deny. The client retransmits
+			// the datagram once the flow completes, so counting it as "denied"
+			// (or auditing it) would double-count a still-in-flight handshake.
+			return
+		}
 		l.metrics.IncSNIVerdict("denied")
 		if d.Reason == "egress_sni_denied" {
 			l.auditDeny(entry, d)
