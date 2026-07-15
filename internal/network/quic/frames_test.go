@@ -331,6 +331,59 @@ func TestInitialReassembler_OversizeTerminal(t *testing.T) {
 	}
 }
 
+// TestInitialReassembler_NDatagrams: a ClientHello split across THREE or FOUR
+// Initial datagrams reassembles regardless of arrival order. The reassembler has no
+// hard datagram-count limit — it accumulates CRYPTO across as many datagrams as the
+// ClientHello spans, bounded only by the per-flow byte cap — so a large ClientHello
+// spanning more than two datagrams is handled, not denied. Each non-final Feed
+// returns ("", false, nil) (still accumulating; ParseHandshakeSNI needs the whole
+// handshake body length before it yields an SNI), and only the datagram that fills
+// the last gap completes with the SNI.
+func TestInitialReassembler_NDatagrams(t *testing.T) {
+	const sni = "api.anthropic.com"
+	dcid := mustHex("8394c8f03e515708")
+	ch := buildClientHelloHandshake(sni)
+	n := len(ch)
+	if n < 8 {
+		t.Fatalf("clienthello too small to split into 3/4: %d bytes", n)
+	}
+	three := BuildInitialDatagramsForTestN(dcid, 0x00000001, ch, n/3, 2*n/3)
+	four := BuildInitialDatagramsForTestN(dcid, 0x00000001, ch, n/4, n/2, 3*n/4)
+
+	cases := []struct {
+		name  string
+		dgs   [][]byte
+		order []int // indices into dgs, giving arrival order (last one completes)
+	}{
+		{"3-datagram in-order", three, []int{0, 1, 2}},
+		{"3-datagram out-of-order", three, []int{0, 2, 1}},
+		{"4-datagram in-order", four, []int{0, 1, 2, 3}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if len(tc.dgs) != len(tc.order) {
+				t.Fatalf("built %d datagrams, order lists %d", len(tc.dgs), len(tc.order))
+			}
+			r := &InitialReassembler{}
+			for i, idx := range tc.order {
+				name, done, err := r.Feed(tc.dgs[idx])
+				if err != nil {
+					t.Fatalf("Feed #%d (datagram %d): unexpected err %v", i, idx, err)
+				}
+				if last := i == len(tc.order)-1; !last {
+					if done || name != "" {
+						t.Fatalf("Feed #%d (datagram %d) = %q, %v; want \"\", false (accumulating)", i, idx, name, done)
+					}
+					continue
+				}
+				if !done || name != sni {
+					t.Fatalf("final Feed #%d (datagram %d) = %q, %v; want %q, true", i, idx, name, done, sni)
+				}
+			}
+		})
+	}
+}
+
 // TestInitialReassembler_InconsistentOverlapAcrossDatagrams: two datagrams cover the
 // same flow offsets with conflicting bytes — the cross-datagram analog of TCP-overlap
 // evasion. The reassembler must fail closed regardless of arrival order.

@@ -9,11 +9,15 @@ import (
 	"ephemera/internal/network/sni"
 )
 
-// errIncompleteInDatagram means the ClientHello was not fully carried within this
+// errIncompleteInDatagram means the ClientHello was not fully carried within a
 // single Initial datagram (a CRYPTO offset gap, a truncated frame, or no CRYPTO
-// data at all). anvil inspects only the first Initial datagram, so a ClientHello
-// that spans several datagrams is treated as terminal — the verdict loop fails
-// closed (deny) rather than buffering across packets.
+// data at all). It is returned by the single-datagram convenience ParseInitialSNI
+// (and by reassembleCryptoFrames, which reassembles within one datagram): those
+// callers treat "not complete within this datagram" as terminal and fail closed. The
+// multi-datagram InitialReassembler.Feed does NOT — it accumulates CRYPTO across as
+// many datagrams as the ClientHello spans (see InitialReassembler), so a ClientHello
+// spanning several datagrams reassembles rather than being denied, bounded only by
+// the per-flow byte cap.
 var errIncompleteInDatagram = errors.New("quic: clienthello not complete within datagram")
 
 // errInconsistentOverlap means two CRYPTO frames cover an overlapping byte range

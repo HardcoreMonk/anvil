@@ -164,8 +164,9 @@ connmark 적용이 race에서 진다). 클라는 dropped 데이터그램을 QUIC
 fast-path를 탄다. per-flow 바이트 상한(8192B)+flow-count LRU(4096)로 상태를
 bound한다. **UDP엔 RST가 없어 deny 응답은 silent DROP이다** — QUIC
 타임아웃 후 브라우저가 TCP/HTTP2로 fallback하면 그 흐름은 TCP:443 SNI
-필터를 타 `allow_sni`면 허용된다(자연 degrade). 3개 이상 데이터그램에
-걸치는 매우 큰 ClientHello는 v1 미지원(후속 후보). 상세는
+필터를 타 `allow_sni`면 허용된다(자연 degrade). 재조립은 데이터그램 수에
+하드 제한이 없다 — 실질 상한은 per-flow 8192B 캡(≈7 데이터그램)이며 이를
+초과하는 ClientHello만 fail-closed deny(주류 클라 미해당). 상세는
 [ADR-0002](../adr/0002-egress-sni-transparent-filter.md)의
 "메커니즘 확장 — UDP:443 QUIC/HTTP3" 절 참조.
 
@@ -195,8 +196,9 @@ SNI 필터는 신뢰 워크로드의 의도된 :443 egress를 강제·감사한�
 - **non-TLS**(HTTP:80, 임의 TCP): SNI가 없어 NFQUEUE 대상이 아니다 — 기존
   base REJECT + CIDR만 통제한다.
 - **QUIC/UDP:443**: 2026-07-14부터 구현됨(위 "UDP:443(QUIC/HTTP3) 확장"
-  절). SNI는 TCP와 동일하게 guest-asserted다. 3개 이상 Initial 데이터그램에
-  걸치는 매우 큰 ClientHello는 v1 미지원 — fail-closed deny(안전측).
+  절). SNI는 TCP와 동일하게 guest-asserted다. 재조립은 데이터그램 수에 하드
+  제한이 없다 — 실질 상한은 per-flow 8192B 캡(≈7 데이터그램)이며, 이를 초과하는
+  ClientHello만 fail-closed deny(안전측, 주류 클라 미해당).
 - **SNI spoofing**: SNI는 guest-asserted다. CIDR 핀 없이는 allowed SNI
   값을 제시하며 실제로는 다른 IP로 터널링할 수 있다. `dns_servers` 강제로
   부분 완화하지만 목적지 IP를 DNS 응답에 핀하지는 않는다.

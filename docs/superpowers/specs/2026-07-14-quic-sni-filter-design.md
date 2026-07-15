@@ -156,7 +156,7 @@ guest UDP:443 QUIC Initial
 ## Scope / 비목표 (YAGNI)
 
 - **비목표**: 0-RTT 파싱, QUIC 상태머신/handshake 추적, connection migration 추적, QUICv1/v2 외 버전, DNS-over-QUIC(:853) 등 non-:443. 전부 fail-closed deny로 안전 처리. (멀티-데이터그램 재조립은 2026-07-14 개정으로 **in-scope** — PQ-default 대응.)
-- **후속 후보**: proto별 metric label, 새 QUIC 버전 salt/label 추가, 매우 큰 ClientHello(3+ 데이터그램) 한계 재검토.
+- **후속 후보**: proto별 metric label, 새 QUIC 버전 salt/label 추가. (정정 2026-07-15: "3+ 데이터그램 한계"는 오기재였다 — 재조립은 데이터그램 수 무제한이고 실질 상한은 8192B 캡뿐이다. 상세 `docs/superpowers/specs/2026-07-15-quic-ndatagram-verify-design.md`.)
 
 ---
 

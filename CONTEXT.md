@@ -506,12 +506,13 @@ daemon으로 보내는 outbound Bearer token이다.
   fast-path가 안 붙는다 — KVM e2e 실측). 클라는 dropped 데이터그램을 QUIC
   손실복구로 retransmit하며, 재전송 도달 시점엔 이미 flow가 allow+mark라
   fast-path를 탄다. per-flow 바이트 상한(8192B)+flow-count LRU(4096)로 상태를
-  bound한다. **deny = silent DROP**(UDP엔 RST 없음) — QUIC 타임아웃 후
+  bound한다. 재조립은 데이터그램 수에 하드 제한이 없다(3개 이상 데이터그램에
+  걸치는 ClientHello도 지원); 실질 상한은 8192B 캡뿐이다. **deny = silent
+  DROP**(UDP엔 RST 없음) — QUIC 타임아웃 후
   브라우저가 TCP/HTTP2로 fallback하면 그 흐름은 TCP:443 SNI 필터를 타
   `allow_sni`면 허용된다(자연 degrade, 최소 코드). **fail-closed 계약**:
   미지원/알 수 없는 QUIC 버전, non-Initial 첫 패킷, header protection/AEAD
-  복호 실패, no-SNI, per-flow 바이트 상한 초과, **3개 이상 데이터그램에
-  걸치는 매우 큰 ClientHello(v1 미지원)** → 전부 DROP(TCP slice와 동일
+  복호 실패, no-SNI, per-flow 바이트 상한(8192B) 초과 → 전부 DROP(TCP slice와 동일
   guest-asserted SNI 잔여위험을 공유). dispatch는 TCP `-sni-nfqueue`/
   `-sni-fastpath`와 대칭인 `-sni-udp-nfqueue`/`-sni-udp-fastpath` 규칙으로
   기존 `egressCommand` rollback 배관을 그대로 재사용한다. 유닛(`internal/network/quic`
@@ -554,10 +555,11 @@ daemon으로 보내는 outbound Bearer token이다.
   hold-then-decide 재설계(TCP 세그먼트 전달에 한정된 수용된 잔여 위험 —
   승인 누수는 아니지만 완전 봉쇄에는 필요, YAGNI로 v1 미채택).
   ~~QUIC/UDP:443 SNI 파싱~~ — **DONE(2026-07-14)**, 위 항목 참조. QUIC
-  확장이 새로 남긴 후속: 3개 이상 Initial 데이터그램에 걸치는 매우 큰
-  ClientHello 지원(현재 fail-closed deny), TCP/UDP proto별
+  확장이 새로 남긴 후속: TCP/UDP proto별
   `ephemera_egress_sni_verdict_total` metric label 분리(현재 공유), 새 QUIC
-  버전(v1/v2 외) salt/label 추가.
+  버전(v1/v2 외) salt/label 추가, 3-데이터그램 kernel 경로 KVM e2e 실증.
+  (3+ 데이터그램 ClientHello 지원은 2026-07-15 증명·문서교정으로 종결 —
+  이미 지원되며 >8192B만 잔여, 주류 클라 미해당.)
 - snapshot storage quota dashboard
 - web svelte 5 runes 전환(선택) — PR #39는 legacy-compat 유지, runes 마이그레이션 미착수
 - fc upstream/OpenZFS 참고 보고 검토(D3의 fc diff "sparseness=의미" 상호작용)
