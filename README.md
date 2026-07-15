@@ -4,7 +4,7 @@
 [![Latest Tag](https://img.shields.io/github/v/tag/HardcoreMonk/anvil?sort=semver&label=tag)](https://github.com/HardcoreMonk/anvil/tags)
 [![Go](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Firecracker](https://img.shields.io/badge/Firecracker-v1.15.1-FF4500?logo=amazonaws&logoColor=white)](https://github.com/firecracker-microvm/firecracker)
+[![Firecracker](https://img.shields.io/badge/Firecracker-v1.16.1-FF4500?logo=amazonaws&logoColor=white)](https://github.com/firecracker-microvm/firecracker)
 
 **IronClaw의 tool call을 Firecracker MicroVM 격리 실행으로 변환하는 execution layer.**
 
@@ -66,6 +66,11 @@ Web UI 사용법은 [`docs/guides/runtime-usage.md`](docs/guides/runtime-usage.m
 - **분리된 두 MCP 표면** — IronClaw용 `cmd/anvil-mcp` adapter(`ANVIL_MCP_*`)와, VM 내부
   agent용 runtime MCP Gateway(`EPHEMERA_MCP_*`, `internal/mcpgateway`)는 별개 개념이다.
   runtime Gateway는 IronClaw adapter를 대체하지 않는다.
+- **도메인 정밀 egress 필터** — profile egress policy의 `allow_sni`로 :443 egress를
+  도메인 단위로 강제한다. TCP는 파싱된 TLS ClientHello SNI, QUIC/UDP:443은 자체 구현
+  QUIC Initial 복호(HKDF+AES-128-GCM+header protection, QUICv1/v2)로 SNI를 추출해
+  goose-daemon in-process NFQUEUE verdict 루프가 fail-closed로 판정한다(허용=conntrack
+  connmark 커널 fast-path, 비허용=DROP). CIDR allow가 SNI보다 상위 계약이다.
 - **운영 표면** — Operator CLI `ephemera-ctl`, 브라우저 Web UI(`/ui/`, EN/KO),
   control-plane 인증(named token·per-token TTL·SIGHUP hot rotation), Prometheus
   `/metrics`, access audit log, end-user installer(`install.sh`/`uninstall.sh`).
@@ -128,8 +133,8 @@ rewrite 없음). ephemera runtime release tag는 `v*`, anvil product release tag
 
 최신 공개 tag는 `anvil-v0.7.0`이다(upstream ephemera 버전과 정렬 — 계보와 tag별 내용은
 [`CONTEXT.md`](CONTEXT.md)). 이후 main은 cross-host routed flock(공유 Town Wall·gtcall·
-home 재선출 failover), snapshot replication 자동화 등 untagged 작업(PR #19~#47)을 더
-포함한다. 첫 공개 tag는 `anvil-v0.1.0`이다.
+home 재선출 failover), snapshot replication 자동화, egress SNI/L7 필터(TCP+QUIC)와 복구
+무결성 하드닝 등 untagged 작업(PR #19~#69)을 더 포함한다. 첫 공개 tag는 `anvil-v0.1.0`이다.
 
 remote 설정과 upstream sync 절차 전체는
 [`docs/operations/upstream-sync-policy.md`](docs/operations/upstream-sync-policy.md)에 있다.
@@ -157,8 +162,10 @@ systemd 서비스로 설치·업그레이드·제거하려면 [`INSTALL.md`](INS
 ## 보안
 
 anvil control plane은 named token 인증에 per-token TTL과 SIGHUP hot rotation을 적용하고,
-Prometheus `/metrics`와 access audit log로 운영 가시성을 남긴다. 보안 모델, 알려진 제약,
-Resilience·Observability 전체는
+Prometheus `/metrics`와 access audit log로 운영 가시성을 남긴다. guest egress는 profile
+`allow_sni`로 :443을 도메인 단위 fail-closed로 강제한다(TCP ClientHello + QUIC Initial 자체
+복호, [`docs/adr/0002-egress-sni-transparent-filter.md`](docs/adr/0002-egress-sni-transparent-filter.md)).
+보안 모델, 알려진 제약, Resilience·Observability 전체는
 [`docs/guides/security-and-resilience.md`](docs/guides/security-and-resilience.md)에 있다.
 공개 노출, 제어 평면 token, guest agent token, snapshot metadata 반출 정책은
 [`docs/operations/security-policy.md`](docs/operations/security-policy.md)에 있다.
