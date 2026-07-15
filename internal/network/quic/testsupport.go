@@ -26,20 +26,42 @@ func BuildInitialForTest(dcid []byte, version uint32, handshake []byte) []byte {
 	return buildInitialDatagram(dcid, version, 0, handshake, 0)
 }
 
-// BuildInitialDatagramsForTest builds the Initial datagram(s) carrying handshake,
+// BuildInitialDatagramsForTest builds the QUIC Initial datagrams carrying handshake,
 // splitting it into two CRYPTO frames — offsets [0,splitAt) and [splitAt,len) — so a
-// caller can exercise InitialReassembler.Feed across datagrams. It returns two valid,
-// independently decryptable Initial datagrams (packet numbers 0 and 1, same DCID, so
-// they share the same client Initial keys). If splitAt is not strictly inside the
+// caller can exercise cross-datagram reassembly. Both datagrams share dcid (so they
+// share the same client Initial keys). If splitAt is not strictly inside the
 // handshake (splitAt <= 0 or splitAt >= len), the handshake fits in one CRYPTO frame
-// and a single datagram is returned. For tests only; mirrors BuildInitialForTest.
+// and a single datagram is returned. It delegates to BuildInitialDatagramsForTestN.
 func BuildInitialDatagramsForTest(dcid []byte, version uint32, handshake []byte, splitAt int) [][]byte {
 	if splitAt <= 0 || splitAt >= len(handshake) {
-		return [][]byte{buildInitialDatagram(dcid, version, 0, handshake, 0)}
+		return BuildInitialDatagramsForTestN(dcid, version, handshake)
 	}
-	d1 := buildInitialDatagram(dcid, version, 0, handshake[:splitAt], 0)
-	d2 := buildInitialDatagram(dcid, version, uint64(splitAt), handshake[splitAt:], 1)
-	return [][]byte{d1, d2}
+	return BuildInitialDatagramsForTestN(dcid, version, handshake, splitAt)
+}
+
+// BuildInitialDatagramsForTestN builds len(cuts)+1 QUIC Initial datagrams that
+// together carry handshake, cut at the ascending byte offsets in cuts. Datagram i
+// carries CRYPTO bytes [start_i, end_i) at that stream offset with packet number i,
+// all under the same dcid (so they share the client Initial keys). Each cut must be
+// strictly ascending and strictly inside (0, len(handshake)); a cut out of that range
+// or out of order panics (a test helper should fail loudly). With no cuts it returns a
+// single datagram carrying the whole handshake at offset 0.
+func BuildInitialDatagramsForTestN(dcid []byte, version uint32, handshake []byte, cuts ...int) [][]byte {
+	bounds := []int{0}
+	for _, c := range cuts {
+		if c <= bounds[len(bounds)-1] || c >= len(handshake) {
+			panic("quic: BuildInitialDatagramsForTestN cut out of range or not strictly ascending")
+		}
+		bounds = append(bounds, c)
+	}
+	bounds = append(bounds, len(handshake))
+
+	dgs := make([][]byte, 0, len(bounds)-1)
+	for i := 0; i < len(bounds)-1; i++ {
+		start, end := bounds[i], bounds[i+1]
+		dgs = append(dgs, buildInitialDatagram(dcid, version, uint64(start), handshake[start:end], uint64(i)))
+	}
+	return dgs
 }
 
 // buildInitialDatagram constructs a valid QUIC Initial datagram carrying cryptoData
