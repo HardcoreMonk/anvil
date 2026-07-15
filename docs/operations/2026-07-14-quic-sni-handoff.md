@@ -48,8 +48,9 @@ handoff는 그 둘을 압축 요약하고 검증 증거·Follow-Up만 추가한�
   루프)에 완결 전달되지 않으므로 strictly fail-closed다. per-flow 바이트
   상한(`maxQuicClientHelloBytes = 8192`) 초과 → DROP, flow-count는 TCP
   reassembler와 같은 상수 `sniReassemblerMaxFlows`(4096)를 공유하는 별도
-  LRU(`quicFlowLRU`)로 bound한다. **3개 이상 데이터그램에 걸치는 매우 큰
-  ClientHello는 v1 미지원**(fail-closed deny, 후속 후보).
+  LRU(`quicFlowLRU`)로 bound한다. 재조립은 데이터그램 수에 하드 제한이 없다
+  (3개 이상 데이터그램 ClientHello 지원); 실질 상한은 per-flow 8192B 캡이며 이를
+  초과하는 ClientHello만 fail-closed deny(주류 클라 미해당 — 2026-07-15 증명·문서교정).
 - **verdict 루프 UDP 확장(`cmd/goose-daemon/sni_verdict.go`)**:
   `parseIPv4UDP`가 IPv4 proto byte(`pkt[9]`)로 UDP를 식별해 srcIP/sport/
   dport/payload를 추출한다. Start 훅이 proto로 분기: TCP → 기존 TLS 경로,
@@ -90,7 +91,7 @@ TCP:443 SNI 필터의 **핵심 계약 한 줄**을 그대로 계승한다: SNI �
 | non-Initial(Handshake/1-RTT/Retry/VN) 첫 패킷 | ClientHello 없음 → DROP |
 | header protection/AEAD 복호 실패 | DROP |
 | 멀티-데이터그램(PQ ClientHello 등) | flow별 재조립으로 CRYPTO 누적, 완결 전 데이터그램은 drop(fail-closed, connmark-race 회피), 클라 retransmit이 완결 후 fast-path를 탐 |
-| 3개 이상 데이터그램에 걸치는 ClientHello | **v1 미지원** — fail-closed deny(후속 후보) |
+| >8192B ClientHello (per-flow 바이트 캡 초과) | fail-closed deny(주류 클라 미해당; 3+ 데이터그램 재조립 자체는 지원) |
 | per-flow 바이트 상한(8192B) 초과 | DROP |
 | SNI spoofing/domain fronting | TCP와 동일 — guest-asserted, 완전 봉쇄 비목표 |
 | ECH/non-TLS | QUIC Initial에 인식 가능한 SNI가 없으면 DROP(TCP와 동일 계약) |
@@ -151,10 +152,11 @@ TCP:443 SNI 필터의 **핵심 계약 한 줄**을 그대로 계승한다: SNI �
 
 ## Follow-Up Tasks
 
-1. **3개 이상 Initial 데이터그램에 걸치는 ClientHello 지원** — 현재 v1은
-   2-데이터그램 재조립만 지원한다. 매우 큰 확장(예: 다중 인증서 체인 힌트,
-   대형 ALPN 목록)을 쓰는 클라이언트는 계속 fail-closed deny로 관측될 수
-   있다. 실사용 빈도를 관찰한 뒤 3+ 지원 여부를 재검토한다.
+1. **3+ 데이터그램 ClientHello — 이미 지원(2026-07-15 증명)** — 재조립은
+   데이터그램 수에 하드 제한이 없다(N-데이터그램 회귀 테스트로 증명). 잔여는
+   per-flow 8192B 캡을 초과하는 ClientHello뿐이며 주류 클라(PQ ~1.5KB)는
+   해당 없다 — 캡 상향은 YAGNI. 3-데이터그램 kernel connmark 경로 KVM e2e
+   실증은 별도 follow-up(로직은 2-데이터그램 e2e로 이미 실증).
 2. **proto별(`tcp`/`udp`) `ephemera_egress_sni_verdict_total` metric label
    분리** — 현재 TCP/QUIC이 같은 outcome label(`allowed`/`denied`)을
    공유해 운영자가 QUIC 채택률/차단률을 TCP와 구분해 볼 수 없다.

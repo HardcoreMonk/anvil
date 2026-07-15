@@ -374,9 +374,10 @@ default(post-quantum X25519MLKEM768) ClientHello는 Initial 데이터그램
 2개에 걸친다. 첫 데이터그램은 CRYPTO만 누적하고 **drop**(fail-closed,
 connmark race 회피 목적 — ADR-0002 메커니즘 확장 절 참조)되므로, 클라의
 QUIC 손실복구 retransmit 1왕복만큼 handshake가 지연된다(정상 동작, 오탐
-아님). 3개 이상 데이터그램에 걸치는 매우 큰 ClientHello는 v1 미지원이라
-계속 fail-closed deny로 관측된다(허용 도메인이어도 handshake가 끝내
-완결되지 않음 — 후속 후보, ADR-0002 잔여위험 표 참조). 허용 도메인의
+아님). 재조립은 데이터그램 수에 하드 제한이 없어 3개 이상에 걸치는
+ClientHello도 허용된다(실질 상한은 per-flow 8192B 캡, ≈7 데이터그램) —
+8192B를 초과하는 ClientHello만 fail-closed deny로 관측된다(주류 클라
+PQ ~1.5KB 미해당, ADR-0002 잔여위험 표 참조). 허용 도메인의
 QUIC이 계속 실패하면 먼저 ClientHello 크기(확장 개수, PQ 알고리즘)를
 의심한다.
 
