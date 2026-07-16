@@ -121,9 +121,9 @@ func TestMetrics_HandlerReflectsCounterUpdates(t *testing.T) {
 
 func TestMetrics_HandlerExposesSNIVerdictTotal(t *testing.T) {
 	cp := newMetricsTestCP(t)
-	cp.metrics.IncSNIVerdict("allowed")
-	cp.metrics.IncSNIVerdict("allowed")
-	cp.metrics.IncSNIVerdict("denied")
+	cp.metrics.IncSNIVerdict(protoTCP, "allowed")
+	cp.metrics.IncSNIVerdict(protoTCP, "allowed")
+	cp.metrics.IncSNIVerdict(protoTCP, "denied")
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
@@ -132,8 +132,34 @@ func TestMetrics_HandlerExposesSNIVerdictTotal(t *testing.T) {
 	out := string(body)
 
 	wantLines := []string{
-		`ephemera_egress_sni_verdict_total{outcome="allowed"} 2`,
-		`ephemera_egress_sni_verdict_total{outcome="denied"} 1`,
+		`ephemera_egress_sni_verdict_total{proto="tcp",outcome="allowed"} 2`,
+		`ephemera_egress_sni_verdict_total{proto="tcp",outcome="denied"} 1`,
+	}
+	for _, w := range wantLines {
+		if !strings.Contains(out, w) {
+			t.Errorf("missing line %q in:\n%s", w, out)
+		}
+	}
+}
+
+func TestMetrics_SNIVerdictSeparatesByProto(t *testing.T) {
+	cp := newMetricsTestCP(t)
+	cp.metrics.IncSNIVerdict(protoTCP, "denied")
+	cp.metrics.IncSNIVerdict(protoUDP, "denied")
+	cp.metrics.IncSNIVerdict(protoUDP, "denied")
+	cp.metrics.IncSNIVerdict(protoUnknown, "dropped")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	cp.handleMetrics(rec, req)
+	body, _ := io.ReadAll(rec.Body)
+	out := string(body)
+
+	// proto is registered first, so it renders first: {proto="...",outcome="..."}.
+	wantLines := []string{
+		`ephemera_egress_sni_verdict_total{proto="tcp",outcome="denied"} 1`,
+		`ephemera_egress_sni_verdict_total{proto="udp",outcome="denied"} 2`,
+		`ephemera_egress_sni_verdict_total{proto="unknown",outcome="dropped"} 1`,
 	}
 	for _, w := range wantLines {
 		if !strings.Contains(out, w) {
@@ -144,5 +170,5 @@ func TestMetrics_HandlerExposesSNIVerdictTotal(t *testing.T) {
 
 func TestMetrics_IncSNIVerdictNilMetricsSafe(t *testing.T) {
 	var m *daemonMetrics
-	m.IncSNIVerdict("allowed") // must not panic on nil receiver
+	m.IncSNIVerdict(protoTCP, "allowed") // must not panic on nil receiver
 }

@@ -317,7 +317,7 @@ func TestSNIRecordVerdictAuditsDenyWithTenant(t *testing.T) {
 	l := newSNIVerdictLoop(88, auditPath, nil)
 	entry := sniRegistryEntry{VMID: "vm-1", TenantID: "t1", Profile: "p"}
 
-	l.recordVerdict(entry, sniDecision{Action: sniDrop, Reason: "egress_sni_denied", SNI: "evil.test"})
+	l.recordVerdict(entry, sniDecision{Action: sniDrop, Reason: "egress_sni_denied", SNI: "evil.test"}, protoTCP)
 
 	recs, err := anvilmcp.ReadRuntimeAudit(auditPath)
 	if err != nil || len(recs) != 1 {
@@ -342,7 +342,7 @@ func TestSNIRecordVerdictNoAuditWithoutTenant(t *testing.T) {
 	l := newSNIVerdictLoop(88, auditPath, nil)
 	entry := sniRegistryEntry{VMID: "vm-2", Profile: "p"} // no TenantID
 
-	l.recordVerdict(entry, sniDecision{Action: sniDrop, Reason: "egress_sni_denied", SNI: "evil.test"})
+	l.recordVerdict(entry, sniDecision{Action: sniDrop, Reason: "egress_sni_denied", SNI: "evil.test"}, protoTCP)
 
 	if _, err := os.Stat(auditPath); !os.IsNotExist(err) {
 		t.Fatalf("expected no audit file written without tenant (must degrade to slog), stat err=%v", err)
@@ -354,7 +354,7 @@ func TestSNIRecordVerdictDegradesOnEmptyAuditPath(t *testing.T) {
 	entry := sniRegistryEntry{VMID: "vm-3", TenantID: "t3"}
 
 	// AppendRuntimeAudit rejects an empty path; must degrade to slog, not panic.
-	l.recordVerdict(entry, sniDecision{Action: sniDrop, Reason: "egress_sni_denied", SNI: "evil.test"})
+	l.recordVerdict(entry, sniDecision{Action: sniDrop, Reason: "egress_sni_denied", SNI: "evil.test"}, protoTCP)
 }
 
 func TestSNIRecordVerdictUnparsedNoAudit(t *testing.T) {
@@ -364,7 +364,7 @@ func TestSNIRecordVerdictUnparsedNoAudit(t *testing.T) {
 	entry := sniRegistryEntry{VMID: "vm-5", TenantID: "t5"}
 
 	// No SNI was parsed, so there is nothing worth auditing — only the metric fires.
-	l.recordVerdict(entry, sniDecision{Action: sniDrop, Reason: "egress_sni_unparsed"})
+	l.recordVerdict(entry, sniDecision{Action: sniDrop, Reason: "egress_sni_unparsed"}, protoTCP)
 
 	if _, err := os.Stat(auditPath); !os.IsNotExist(err) {
 		t.Fatalf("expected no audit record for unparsed (no SNI) deny, stat err=%v", err)
@@ -376,8 +376,8 @@ func TestSNIRecordVerdictNilMetricsSafe(t *testing.T) {
 	entry := sniRegistryEntry{VMID: "vm-4", TenantID: "t4"}
 
 	// Must not panic on a nil *daemonMetrics receiver.
-	l.recordVerdict(entry, sniDecision{Action: sniAcceptMark, SNI: "ok.test"})
-	l.recordVerdict(entry, sniDecision{Action: sniDrop, Reason: "egress_sni_unparsed"})
+	l.recordVerdict(entry, sniDecision{Action: sniAcceptMark, SNI: "ok.test"}, protoTCP)
+	l.recordVerdict(entry, sniDecision{Action: sniDrop, Reason: "egress_sni_unparsed"}, protoTCP)
 }
 
 func TestSNIRecordVerdictMetricAlwaysIncrements(t *testing.T) {
@@ -388,9 +388,9 @@ func TestSNIRecordVerdictMetricAlwaysIncrements(t *testing.T) {
 
 	// One deny with a tenant (audit succeeds) and one without (degrades to
 	// slog) — the metric must increment identically in both cases.
-	l.recordVerdict(sniRegistryEntry{VMID: "vm-a", TenantID: "ta"}, sniDecision{Action: sniDrop, Reason: "egress_sni_denied", SNI: "evil.test"})
-	l.recordVerdict(sniRegistryEntry{VMID: "vm-b"}, sniDecision{Action: sniDrop, Reason: "egress_sni_denied", SNI: "evil2.test"})
-	l.recordVerdict(sniRegistryEntry{VMID: "vm-c", TenantID: "tc"}, sniDecision{Action: sniAcceptMark, SNI: "ok.test"})
+	l.recordVerdict(sniRegistryEntry{VMID: "vm-a", TenantID: "ta"}, sniDecision{Action: sniDrop, Reason: "egress_sni_denied", SNI: "evil.test"}, protoTCP)
+	l.recordVerdict(sniRegistryEntry{VMID: "vm-b"}, sniDecision{Action: sniDrop, Reason: "egress_sni_denied", SNI: "evil2.test"}, protoTCP)
+	l.recordVerdict(sniRegistryEntry{VMID: "vm-c", TenantID: "tc"}, sniDecision{Action: sniAcceptMark, SNI: "ok.test"}, protoTCP)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
@@ -398,10 +398,10 @@ func TestSNIRecordVerdictMetricAlwaysIncrements(t *testing.T) {
 	body, _ := io.ReadAll(rec.Body)
 	out := string(body)
 
-	if !strings.Contains(out, `ephemera_egress_sni_verdict_total{outcome="denied"} 2`) {
+	if !strings.Contains(out, `ephemera_egress_sni_verdict_total{proto="tcp",outcome="denied"} 2`) {
 		t.Fatalf("expected denied=2 regardless of tenant/audit outcome, got:\n%s", out)
 	}
-	if !strings.Contains(out, `ephemera_egress_sni_verdict_total{outcome="allowed"} 1`) {
+	if !strings.Contains(out, `ephemera_egress_sni_verdict_total{proto="tcp",outcome="allowed"} 1`) {
 		t.Fatalf("expected allowed=1, got:\n%s", out)
 	}
 }
