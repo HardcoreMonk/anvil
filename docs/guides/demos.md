@@ -22,7 +22,7 @@
 sudo WEBDEV_MIN_MEM_MIB=5000 bash webdev_demo.sh
 ```
 
-Requirements: a Google Gemini API key **and** a `GROQ_API_KEY` in `configs/goose-secrets.yaml`, `/dev/kvm` + root, and enough free RAM for three 2 GiB VMs (`WEBDEV_MIN_MEM_MIB` sets the preflight floor; Firecracker allocates guest RAM lazily and host swap cushions the peak). Open `http://localhost:5173` to see the generated site; `GET /flocks/{id}/wall/history` shows the four `<<<FILE:>>>` posts authored by `orchestrator-1`.
+Requirements: a Google Gemini API key **and** a `GROQ_API_KEY` in `configs/goose-secrets.yaml`, `/dev/kvm` + root, and enough free RAM for the three role VMs (orchestrator 1024 MiB + worker/reviewer 512 MiB each, ~2 GiB total; `WEBDEV_MIN_MEM_MIB` sets the preflight floor; Firecracker allocates guest RAM lazily and host swap cushions the peak). Open `http://localhost:5173` to see the generated site; `GET /flocks/{id}/wall/history` shows the four `<<<FILE:>>>` posts authored by `orchestrator-1`.
 
 ### Notes
 
