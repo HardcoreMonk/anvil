@@ -678,10 +678,10 @@ func (l *sniVerdictLoop) applyVerdictUDP(nf *nfqueue.Nfqueue, id uint32, d sniDe
 // applyVerdict's caller), so it is pure enough to unit test without root or a
 // live nfqueue socket.
 //
-// Metric: outcome-only counter, incremented unconditionally for both
-// accept and drop verdicts, independent of tenant availability or the audit
-// write's success/failure — a content-free signal never gated on redaction
-// concerns.
+// Metric: proto+outcome counter (proto threaded in by the caller —
+// protoTCP/protoUDP), incremented unconditionally for both accept and drop
+// verdicts, independent of tenant availability or the audit write's
+// success/failure — a content-free signal never gated on redaction concerns.
 //
 // Audit: only the sniDrop / "egress_sni_denied" case carries a domain worth
 // recording (unregistered_source and egress_sni_unparsed drops have no SNI to
