@@ -25,6 +25,8 @@
   `cmd/goose-daemon/orchestrator_api.go`, `configs/profiles/*`
 - 게스트 구성 요소: `cmd/goose-agent`, `cmd/micro-init`
 - IronClaw 연동 MCP 어댑터: `cmd/anvil-mcp`, `internal/anvilmcp`
+- 게스트 내부 런타임 MCP Gateway(`EPHEMERA_MCP_*`, adapter와 별개 표면):
+  `internal/mcpgateway`
 - 런타임 스케줄러 서비스: `cmd/anvil-scheduler`, `internal/anvilmcp`
 - 설정 예시: `configs/*.example`, `configs/profiles/*`
 - 런타임 산출물: `artifacts/`, `snapshots/`, `/tmp/goose-workspaces/`
@@ -98,7 +100,7 @@ LLM API 키가 들어 있는 로컬 `configs/goose-secrets.yaml`이 필요하다
 ## Lifecycle Control Plane
 
 - 표준 lifecycle contract는 zone 상대 경로
-  `codex-project-mgmt/docs/codex-lifecycle-control-plane.md`를 따른다.
+  `docs/governance/codex-lifecycle-control-plane.md`를 따른다.
 - 기본 순서: `intake -> superpowers:brainstorming -> domain-architecture -> grill-me -> plan-design-review -> superpowers:writing-plans -> plan-eng-review -> implement -> code-review -> release -> operate`.
 - ADR lifecycle은 project pipeline과 별도다. ADR 상태는
   `Draft -> Review -> Approved -> Implemented -> Verified -> Archived`를 사용하며,

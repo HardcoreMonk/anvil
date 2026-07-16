@@ -172,14 +172,20 @@ Exposed series (additive — never breaks the wire format on minor bumps):
 | `ephemera_vm_destroy_total` | counter | `outcome=ok` | `destroyVM` after teardown |
 | `ephemera_snapshot_create_total` | counter | `type=full\|diff` | success path of `createSnapshot` |
 | `ephemera_snapshot_restore_total` | counter | `outcome` | dm-snapshot and bind-mount fallback both contribute |
+| `ephemera_snapshot_gc_total` | counter | — | successful `POST /snapshots/gc` applications |
 | `ephemera_auto_snapshot_total` | counter | `outcome=ok\|fail` | graceful-shutdown memory auto-snapshot (`EPHEMERA_AUTOSNAPSHOT`, v0.4.0) |
 | `ephemera_auto_restore_total` | counter | `outcome=ok\|fail` | recovery warm-restore attempt (v0.4.0) |
 | `ephemera_auth_total` | counter | `outcome=ok\|denied\|expired` | per-request API auth decision (v0.4.1) |
+| `ephemera_auth_failure_total` | counter | — | failed API Bearer-token authentication attempts |
+| `ephemera_cleanup_failure_total` | counter | — | cleanup failures while releasing VM resources |
 | `ephemera_flock_spawn_total` / `_destroy_total` | counter | — | success path of `createFlock` / `deleteFlock` |
 | `ephemera_watchdog_dead_total` / `_heal_total` | counter | — | dyingThreshold and autoHeal transitions |
 | `ephemera_sighup_reload_total` | counter | — | after `ReloadClients` completes |
 | `ephemera_cp_token_propagated_total` | counter | `outcome` | per-VM vsock fan-out result |
+| `ephemera_mcp_tool_calls_total` | counter | `server`, `outcome=ok\|fail\|forbidden\|rate_limited` | MCP gateway tool calls by backend server (v0.6.0) |
+| `ephemera_egress_sni_verdict_total` | counter | `proto=tcp\|udp\|unknown`, `outcome=allowed\|denied\|dropped` | :443 egress SNI filter verdicts; `unknown` is the pre-classify no-payload drop (ADR-0002) |
 | `ephemera_vm_count` / `_flock_count` / `_snapshot_count` / `_api_clients_count` | gauge | — | re-read on each scrape (GaugeFunc) |
+| `ephemera_lifecycle_queue_depth` | gauge | — | current in-flight lifecycle operations |
 | `ephemera_vm_spawn_duration_seconds` | histogram | — | wall-clock spawn time |
 | `ephemera_snapshot_restore_duration_seconds` | histogram | — | wall-clock restore time |
 | `ephemera_watchdog_probe_duration_seconds` | histogram | — | per-probe `/health` duration |

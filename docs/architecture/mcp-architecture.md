@@ -66,7 +66,20 @@ MicroVM runtime
 
 adapter는 optional `session_name` alias를 제외하면 process-local stateless
 component로 동작한다. `session_store_path`가 비어 있으면 alias도 process-local
-memory에만 남는다.
+memory에만 남는다. 이 설명은 router config가 없는 기본 구성 기준이며, routed
+(`ANVIL_MCP_CROSS_HOST_FLOCK_CREATE=members_only`) 구성에서는 아래 reconcile
+루프가 지속적인 stateful background 동작을 추가한다.
+
+routed 구성에서 adapter는 `RuntimeRouter.StartReconcileLoop`(`cmd/anvil-mcp/main.go`)로
+`ReconcilePlacements`를 백그라운드 goroutine에서 주기 실행한다
+(`internal/anvilmcp/runtime_router.go`). tick마다 (1) routed flock의 공유 Town
+Wall hub/relay 등록을 재확인해 daemon 재시작으로 소실된 in-memory 등록을
+치유하고(`reconcileRoutedFlockWalls`), (2) snapshot마다 상수 replica factor
+N=2(원본+복제 1)를 향해 best-effort eventual 수렴하는 자동 cross-host snapshot
+replication을 수행한다(`reconcileSnapshotReplication`,
+`internal/anvilmcp/snapshot_replication.go`). 연속 3회 dial 실패 시 해당
+(snapshot, target) 쌍은 giving-up 상태로 넘어가고, 대상이 다시 reachable해지면
+재시도가 재개된다.
 
 ## 구성 요소 책임
 
@@ -140,6 +153,7 @@ Validation:
 | `anvil_list_snapshots` | `GET /snapshots` | 저장된 snapshot 목록 조회 |
 | `anvil_restore_snapshot` | `POST /snapshots/{snapshot_id}/restore` | snapshot에서 새 VM restore 및 optional alias binding |
 | `anvil_delete_snapshot` | `DELETE /snapshots/{snapshot_id}` | snapshot 삭제 |
+| `anvil_replicate_snapshot` | `POST /snapshots/{snapshot_id}/export` → `POST /snapshots/import` via `RuntimeRouter` | snapshot을 한 scheduler runtime host에서 다른 host로 복제하고 snapshot locality를 갱신 |
 | `anvil_spawn_flock` | `POST /flocks` | 역할 목록으로 Goosetown flock 생성 |
 | `anvil_create_routed_flock_members` | `POST /vms` routed members + `POST /flocks/{id}/distributed`/`relay` | experimental members-only routed flock 생성, home-host hub + member relay 공유 Town Wall 등록 포함 |
 | `anvil_list_flocks` | `GET /flocks` + routed registry | live Goosetown flock과 visible routed flock 목록 조회 |

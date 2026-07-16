@@ -85,6 +85,12 @@ curl http://127.0.0.1:3010/metrics
 - `anvil_scheduler_flock_placement_latency_seconds{phase}`
 - `anvil_scheduler_flock_placement_last_success_timestamp_seconds`
 - `anvil_scheduler_flock_placement_last_failure_timestamp_seconds`
+- `anvil_scheduler_snapshot_replication_attempts_total{outcome,reason}`
+- `anvil_scheduler_snapshot_replication_latency_seconds{phase}`
+- `anvil_scheduler_snapshot_replication_queue_depth`
+- `anvil_scheduler_snapshot_replication_giving_up`
+- `anvil_scheduler_snapshot_replication_last_success_timestamp_seconds`
+- `anvil_scheduler_snapshot_replication_last_failure_timestamp_seconds`
 
 metric label에는 host name, endpoint, raw daemon response, authorization header,
 `agent_token`을 넣지 않는다. scheduler service에는 자체 인증 계층이 없으므로
@@ -137,18 +143,23 @@ curl -H "Authorization: Bearer $TOKEN" \
 Town Wall SSE stream은 실시간 관찰에 사용할 수 있지만 MCP smoke에서는 history
 endpoint를 사용한다.
 
-현재 runtime baseline은 upstream ephemera `v0.3.6`이며, `v0.3.2` 이후 spawn-path
-VM은 `vms/<vm_id>/state.json`을 기반으로 daemon restart 뒤 cold-restart된다. 이때
-VM ID, IP, TAP, MAC, agent token, agent URL은 유지되지만 memory state와 진행 중인
-task는 보존되지 않는다.
+현재 runtime baseline은 upstream ephemera `v0.7.0`이다(상세 채택 이력은
+[`upstream-sync-policy.md`](upstream-sync-policy.md#현재-runtime-baseline) 참조).
+`v0.3.2` 이후 spawn-path VM은 `vms/<vm_id>/state.json`을 기반으로 daemon restart 뒤
+cold-restart된다. 이때 VM ID, IP, TAP, MAC, agent token, agent URL은 유지되지만
+memory state와 진행 중인 task는 보존되지 않는다.
 
 watchdog은 flock member health 실패를 `status=dead`와 Town Wall notice로 드러내며,
 `v0.3.3` 이후 dead status는 `flocks/<flock_id>/metadata.json`에 persist된다.
 `EPHEMERA_WATCHDOG_AUTO_HEAL=true`가 아닌 기본 설정에서는 once-dead agent를 자동으로
 `ready`로 되돌리지 않는다.
 
-COW-mode VM과 snapshot-restored VM은 daemon restart 뒤 자동 복구 범위가 아니다.
-이 경우에는 snapshot에서 다시 restore하거나 해당 workload를 재생성한다.
+COW-mode VM(v0.4.0)과 snapshot-restored VM(v0.4.5)도 daemon restart 뒤
+`RecoverVMs`가 자동 cold-recover한다 — COW VM은 dm-snapshot을 golden image 위에
+재구성하고, snapshot-restored VM은 source snapshot에서 다시 re-restore한다(수동
+re-restore와 동일하게, 원래 restore 이후의 memory state·진행 중 task는 보존되지
+않는다). source snapshot이 삭제됐거나 재구성이 실패한 경우에만 해당 VM은 실패로
+떨어져 수동 조치가 필요하다.
 
 ## Snapshot GC audit
 

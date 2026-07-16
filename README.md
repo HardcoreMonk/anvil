@@ -6,10 +6,10 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Firecracker](https://img.shields.io/badge/Firecracker-v1.16.1-FF4500?logo=amazonaws&logoColor=white)](https://github.com/firecracker-microvm/firecracker)
 
-**IronClaw의 tool call을 Firecracker MicroVM 격리 실행으로 변환하는 execution layer.**
+**IronClaw의 tool call을 Firecracker MicroVM 안의 격리 실행으로 변환하는 실행 계층(execution layer).**
 
-VM 생성, 작업 실행, health 확인, graceful stop/delete, snapshot/restore lifecycle을
-하나의 실행 계약으로 관리한다.
+VM 생성·작업 실행·health 확인·graceful stop/delete·snapshot/restore lifecycle을 단일 실행
+계약으로 통합해, IronClaw가 host runtime 세부를 다루지 않고도 격리 agent를 제어하게 한다.
 
 <p align="center">
   <img src="docs/assets/ironclaw-e2e.gif" alt="IronClaw anvil MCP agent-driven VM lifecycle E2E terminal replay" width="900">
@@ -110,7 +110,7 @@ OpenClaw용 compatibility layer나 운영 계약은 제공하지 않는다.
   구현 위치는 `cmd/goose-agent`, `cmd/micro-init`이다.
 
 anvil은 ephemera를 이름만 바꾼 프로젝트가 아니다. anvil은 IronClaw와 ephemera를
-연결하는 통합 실행 layer이고, ephemera는 독립적인 runtime 구현과 API 계약을
+연결하는 통합 실행 계층이고, ephemera는 독립적인 runtime 구현과 API 계약을
 가진다. 따라서 runtime API와 환경 변수는 호환성을 위해 ephemera/goose 이름을
 유지하고, IronClaw가 직접 사용하는 표면은 `anvil_*` MCP tool로 노출한다.
 
@@ -119,9 +119,9 @@ anvil은 ephemera를 이름만 바꾼 프로젝트가 아니다. anvil은 IronCl
 이 저장소(`HardcoreMonk/anvil`, `https://github.com/HardcoreMonk/anvil/`)는
 `steve-seungeui/ephemera`(`https://github.com/steve-seungeui/ephemera`)의 fork network를
 의도적으로 유지한다. ephemera는 계속 버전업되는 runtime engine upstream이고, anvil은 그
-runtime을 IronClaw 실행 계층으로 통합하는 downstream product fork다. ephemera가 계속
-버전업되므로, anvil은 upstream runtime 변경을 merge로 받아들이고 IronClaw 통합 계층을 그
-위에 적응시킨다. 따라서 Go 모듈 경로·daemon 이름·HTTP API·일부 환경 변수에는 `ephemera`
+runtime을 IronClaw 실행 계층으로 통합하는 downstream product fork다. anvil은 upstream
+runtime 변경을 merge로 받아들이고 그 위에 IronClaw 통합 계층을 적응시킨다. 따라서 Go 모듈
+경로·daemon 이름·HTTP API·일부 환경 변수에는 `ephemera`
 또는 `goose` 이름이 남아 있다. 문서에서는 `anvil`을 IronClaw 통합 프로젝트로, `ephemera`를
 분리된 기반 runtime으로 구분한다.
 
@@ -134,7 +134,7 @@ rewrite 없음). ephemera runtime release tag는 `v*`, anvil product release tag
 최신 공개 tag는 `anvil-v0.7.0`이다(upstream ephemera 버전과 정렬 — 계보와 tag별 내용은
 [`CONTEXT.md`](CONTEXT.md)). 이후 main은 cross-host routed flock(공유 Town Wall·gtcall·
 home 재선출 failover), snapshot replication 자동화, egress SNI/L7 필터(TCP+QUIC)와 복구
-무결성 하드닝 등 untagged 작업(PR #19~#69)을 더 포함한다. 첫 공개 tag는 `anvil-v0.1.0`이다.
+무결성 하드닝 등 untagged 작업(PR #19 이후)을 더 포함한다. 첫 공개 tag는 `anvil-v0.1.0`이다.
 
 remote 설정과 upstream sync 절차 전체는
 [`docs/operations/upstream-sync-policy.md`](docs/operations/upstream-sync-policy.md)에 있다.
