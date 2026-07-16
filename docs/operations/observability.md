@@ -210,6 +210,10 @@ runtime baseline의 canonical metric namespace는 `ephemera_*`다. anvil 기존 
 - `ephemera_watchdog_heal_total`
 - `ephemera_sighup_reload_total`
 - `ephemera_cp_token_propagated_total{outcome="ok|fail"}`
+- `ephemera_egress_sni_verdict_total{proto="tcp|udp|unknown",outcome="allowed|denied|dropped"}` —
+  egress SNI 필터의 :443 판정. `proto`로 TCP:443과 QUIC/UDP:443을 구분한다(`unknown`은
+  proto 분기 이전 no-payload drop 전용). additive label이라 `sum without(proto)(...)`가
+  기존 total과 같다 — 단일 outcome series를 그리던 패널은 이제 proto별로 분리된다.
 - `ephemera_cleanup_failure_total`
 - `ephemera_auth_failure_total`
 - `ephemera_auth_total{outcome="ok|denied|expired|relay|call"}` — `relay`는
