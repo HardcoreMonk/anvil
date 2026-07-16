@@ -308,8 +308,8 @@ profile 단위 allowed/denied 카운터(`/metrics`):
 
 ```bash
 curl -s http://127.0.0.1:3000/metrics | grep ephemera_egress_sni_verdict_total
-# ephemera_egress_sni_verdict_total{outcome="allowed"} N
-# ephemera_egress_sni_verdict_total{outcome="denied"} N
+# ephemera_egress_sni_verdict_total{proto="tcp",outcome="allowed"} N
+# ephemera_egress_sni_verdict_total{proto="udp",outcome="denied"} N
 ```
 
 이 metric은 verdict 루프가 최종 판정(ACCEPT+mark 또는 DROP)을 내린 흐름만
@@ -382,8 +382,8 @@ QUIC이 계속 실패하면 먼저 ClientHello 크기(확장 개수, PQ 알고�
 의심한다.
 
 **metric/audit**: TCP/UDP는 `ephemera_egress_sni_verdict_total`을
-공유한다(proto별 label 분리는 v1 비목표, 후속 후보). `egress_sni_denied`
-audit도 TCP/UDP 동일 스키마를 재사용한다.
+`proto="tcp|udp"` label로 구분한다(`unknown`은 proto 판별 전 no-payload
+drop 전용). `egress_sni_denied` audit도 TCP/UDP 동일 스키마를 재사용한다.
 
 ## Goosetown flock 점검
 

@@ -39,6 +39,16 @@ import (
 // LRU-eviction-degrades-to-fail-closed guarantee applies to both tables.
 const sniReassemblerMaxFlows = 4096
 
+// proto label values for the egress SNI verdict metric
+// (ephemera_egress_sni_verdict_total). tcp/udp mark the two dispatch branches;
+// unknown is only the pre-branch no-payload drop, where the transport cannot be
+// determined (NFQUEUE delivered no packet bytes).
+const (
+	protoTCP     = "tcp"
+	protoUDP     = "udp"
+	protoUnknown = "unknown"
+)
+
 type sniAction int
 
 const (
@@ -483,9 +493,10 @@ func (l *sniVerdictLoop) Start(ctx context.Context) error {
 		}
 		id := *a.PacketID
 		if a.Payload == nil {
-			// No packet bytes to inspect -> cannot verify -> fail closed.
+			// No packet bytes to inspect -> cannot verify -> fail closed. Proto is
+			// unknown here: this precedes the tcp/udp branch, so we cannot tell which.
 			l.setDrop(nf, id, ipv4TCP{})
-			l.metrics.IncSNIVerdict("dropped") // pre-classify infra drop (distinct from policy denial)
+			l.metrics.IncSNIVerdict(protoUnknown, "dropped") // pre-classify infra drop (distinct from policy denial)
 			return 0
 		}
 		pkt := *a.Payload
@@ -499,7 +510,7 @@ func (l *sniVerdictLoop) Start(ctx context.Context) error {
 		if perr != nil {
 			slog.Debug("sni verdict: unparsable packet, fail-closed drop", "err", perr)
 			l.setDrop(nf, id, t)
-			l.metrics.IncSNIVerdict("dropped") // pre-classify infra drop (distinct from policy denial)
+			l.metrics.IncSNIVerdict(protoTCP, "dropped") // pre-classify infra drop (distinct from policy denial)
 			return 0
 		}
 		srcIP := t.srcIP.String()
@@ -509,7 +520,7 @@ func (l *sniVerdictLoop) Start(ctx context.Context) error {
 			// Defense in depth: the iptables dispatch rule is already scoped by
 			// -s guestIP, but an unregistered source still fails closed here.
 			l.setDrop(nf, id, t)
-			l.metrics.IncSNIVerdict("dropped") // pre-classify infra drop (distinct from policy denial)
+			l.metrics.IncSNIVerdict(protoTCP, "dropped") // pre-classify infra drop (distinct from policy denial)
 			return 0
 		}
 		if len(t.payload) == 0 {
@@ -587,7 +598,7 @@ func (l *sniVerdictLoop) handleUDPQUIC(nf *nfqueue.Nfqueue, id uint32, pkt []byt
 	if perr != nil {
 		slog.Debug("sni verdict: unparsable udp packet, fail-closed drop", "err", perr)
 		l.setDropNoRST(nf, id)
-		l.metrics.IncSNIVerdict("dropped")
+		l.metrics.IncSNIVerdict(protoUDP, "dropped")
 		return
 	}
 	if u.dport != 443 {
@@ -595,7 +606,7 @@ func (l *sniVerdictLoop) handleUDPQUIC(nf *nfqueue.Nfqueue, id uint32, pkt []byt
 		// scope this queue to dport 443, but fail closed here too rather than
 		// trust that blindly.
 		l.setDropNoRST(nf, id)
-		l.metrics.IncSNIVerdict("dropped")
+		l.metrics.IncSNIVerdict(protoUDP, "dropped")
 		return
 	}
 	srcIP := u.srcIP.String()
@@ -604,7 +615,7 @@ func (l *sniVerdictLoop) handleUDPQUIC(nf *nfqueue.Nfqueue, id uint32, pkt []byt
 		// Defense in depth: the iptables dispatch rule is already scoped by
 		// -s guestIP, but an unregistered source still fails closed here.
 		l.setDropNoRST(nf, id)
-		l.metrics.IncSNIVerdict("dropped")
+		l.metrics.IncSNIVerdict(protoUDP, "dropped")
 		return
 	}
 	d := l.decideQUIC(srcIP, u.sport, u.payload)
@@ -633,7 +644,7 @@ func (l *sniVerdictLoop) applyVerdict(nf *nfqueue.Nfqueue, id uint32, d sniDecis
 	case sniDrop:
 		l.setDrop(nf, id, t)
 	}
-	l.recordVerdict(entry, d)
+	l.recordVerdict(entry, d, protoTCP)
 }
 
 // applyVerdictUDP is applyVerdict's UDP/QUIC counterpart: accept+mark or drop,
@@ -659,7 +670,7 @@ func (l *sniVerdictLoop) applyVerdictUDP(nf *nfqueue.Nfqueue, id uint32, d sniDe
 	case sniDrop:
 		l.setDropNoRST(nf, id)
 	}
-	l.recordVerdict(entry, d)
+	l.recordVerdict(entry, d, protoUDP)
 }
 
 // recordVerdict emits the audit/metric side effects for a completed SNI
@@ -667,18 +678,18 @@ func (l *sniVerdictLoop) applyVerdictUDP(nf *nfqueue.Nfqueue, id uint32, d sniDe
 // applyVerdict's caller), so it is pure enough to unit test without root or a
 // live nfqueue socket.
 //
-// Metric: outcome-only counter, incremented unconditionally for both
-// accept and drop verdicts, independent of tenant availability or the audit
-// write's success/failure — a content-free signal never gated on redaction
-// concerns.
+// Metric: proto+outcome counter (proto threaded in by the caller —
+// protoTCP/protoUDP), incremented unconditionally for both accept and drop
+// verdicts, independent of tenant availability or the audit write's
+// success/failure — a content-free signal never gated on redaction concerns.
 //
 // Audit: only the sniDrop / "egress_sni_denied" case carries a domain worth
 // recording (unregistered_source and egress_sni_unparsed drops have no SNI to
 // audit). See auditDeny for the tenant seam.
-func (l *sniVerdictLoop) recordVerdict(entry sniRegistryEntry, d sniDecision) {
+func (l *sniVerdictLoop) recordVerdict(entry sniRegistryEntry, d sniDecision, proto string) {
 	switch d.Action {
 	case sniAcceptMark:
-		l.metrics.IncSNIVerdict("allowed")
+		l.metrics.IncSNIVerdict(proto, "allowed")
 	case sniDrop:
 		if d.Reason == "egress_sni_incomplete" {
 			// Fail-closed buffering drop of an incomplete multi-datagram Initial
@@ -688,7 +699,7 @@ func (l *sniVerdictLoop) recordVerdict(entry sniRegistryEntry, d sniDecision) {
 			// (or auditing it) would double-count a still-in-flight handshake.
 			return
 		}
-		l.metrics.IncSNIVerdict("denied")
+		l.metrics.IncSNIVerdict(proto, "denied")
 		if d.Reason == "egress_sni_denied" {
 			l.auditDeny(entry, d)
 		}
