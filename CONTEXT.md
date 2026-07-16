@@ -550,10 +550,14 @@ daemon으로 보내는 outbound Bearer token이다.
 - egress SNI 필터 후속(ADR-0002 잔여 위험/설계 한계에서 파생, 미착수):
   `allow_hosts`(legacy substring) 제거 시점 재검토(OQ8, 고정 런타임 계약
   표면이라 즉시 제거하지 않음), multi-queue per-VM NFQUEUE 재검토(현재 단일
-  queue 88 + src-IP 라우팅, TCP/QUIC 공유), ECH inner 대응 불가 재확인(설계
-  한계, outer SNI만 관측), pre-decision 부분 ClientHello 전달의
+  queue 88 + src-IP 라우팅, TCP/QUIC 공유), pre-decision 부분 ClientHello 전달의
   hold-then-decide 재설계(TCP 세그먼트 전달에 한정된 수용된 잔여 위험 —
   승인 누수는 아니지만 완전 봉쇄에는 필요, YAGNI로 v1 미채택).
+  ECH inner 재확인 완료(2026-07-16): 파서는 outer(공개) SNI만 관측 —
+  allowlisted outer/공개 이름 ECH는 flow 허용+inner 은닉(guest-asserted SNI
+  동일 신뢰등급, CIDR 핀이 유일 완화; ADR-0002 잔여위험 행 정밀화). 신규
+  follow-up: ECH 확장(`0xfe0d`) 탐지+fail-closed deny 하드닝(allowlisted CDN의
+  정상 ECH도 차단하는 트레이드오프, 별도 결정).
   ~~QUIC/UDP:443 SNI 파싱~~ — **DONE(2026-07-14)**, 위 항목 참조. QUIC
   확장이 새로 남긴 후속: 새 QUIC 버전(v1/v2 외) salt/label 추가,
   3-데이터그램 kernel 경로 KVM e2e 실증.
@@ -564,5 +568,9 @@ daemon으로 보내는 outbound Bearer token이다.
 - snapshot storage quota dashboard
 - web svelte 5 runes 전환(선택) — PR #39는 legacy-compat 유지, runes 마이그레이션 미착수
 - fc upstream/OpenZFS 참고 보고 검토(D3의 fc diff "sparseness=의미" 상호작용)
-- e2e 포트 공유 특성 — cross-host wall/gtcall/failover e2e 스크립트가 기본 포트를
-  공유해 동시 실행 불가(각 handoff Follow-Up 기록, 소소한 잔여)
+- e2e 단일-host 동시 실행 불가 — cross-host wall/gtcall/failover e2e는 게스트가
+  하드코딩된 gateway `10.0.1.1:3000`(`cmd/goose-agent/main.go`)로 daemon에 도달하므로,
+  한 host에서 두 daemon이 공유 브릿지 게이트웨이·`:3000`에 충돌한다("기본 포트 공유"가
+  아니라 이것이 근본 직렬화 요인 — loopback stub 포트는 env override 가능하나 부차적).
+  실 동시성은 물리 2-host 또는 per-run 브릿지 격리 필요(각 스크립트 헤더 명시,
+  cross-host 수동 runbook으로 검증). 소소한 잔여

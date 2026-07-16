@@ -189,10 +189,12 @@ CDN 뒤 도메인은 SNI로, 고정 IP 백엔드/비-TLS 엔드포인트는 CIDR
 SNI 필터는 신뢰 워크로드의 의도된 :443 egress를 강제·감사한다. 적대적 in-guest
 루트에 대한 완전 봉쇄가 아니다. 알려진 잔여 위험:
 
-- **ECH/ESNI**: cleartext SNI가 없거나 decoy outer만 있으면 인식 가능한
-  allowlisted SNI가 없어 fail-closed DROP된다. anvil은 ECH를 무력화하지
-  않는다. ECH 엔드포인트는 CIDR fallback으로만 명시 opt-in 허용한다(outer-SNI
-  allowlist는 지원 안 함).
+- **ECH/ESNI**: anvil은 outer(공개/cover) SNI만 관측한다. outer가 없거나
+  비허용 decoy면 allowlisted SNI가 없어 fail-closed DROP된다. **단 outer가
+  allowlisted 도메인(ECH 공개 이름)이면 flow는 허용되고 암호화된 inner
+  목적지는 은닉된다** — guest-asserted SNI와 동일 신뢰등급 잔여다. anvil은
+  ECH를 무력화하지 않으며(inner는 서버 키 없이 복호 불가), 완화는 해당
+  엔드포인트 CIDR fallback 핀뿐이다(outer-SNI allowlist는 신뢰 근거 아님).
 - **non-TLS**(HTTP:80, 임의 TCP): SNI가 없어 NFQUEUE 대상이 아니다 — 기존
   base REJECT + CIDR만 통제한다.
 - **QUIC/UDP:443**: 2026-07-14부터 구현됨(위 "UDP:443(QUIC/HTTP3) 확장"
