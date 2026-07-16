@@ -255,6 +255,14 @@ DELETE /vms/{id}
 - **Outbound NAT**:
   `goose-br0`와 iptables MASQUERADE로 guest의 LLM API outbound를 지원한다.
 
+- **Egress SNI 필터** (ADR-0002):
+  `profile` egress policy의 `allow_sni` 필드는 CIDR/host allowlist에 더해
+  도메인-정밀 :443 필터를 강제한다. TCP:443은 파싱된 TLS ClientHello SNI를,
+  QUIC/UDP:443은 자체 구현 Initial 복호로 얻은 SNI를 같은 in-process NFQUEUE
+  verdict 루프가 검사하며, 비허용/verdict 루프 미준비는 fail-closed로
+  차단한다. 상세는
+  [security-and-resilience.md](security-and-resilience.md)를 참고한다.
+
 - **Control-plane 인증**:
   named Bearer token, timing-safe compare, audit log, `SIGHUP` hot reload를 지원한다.
 
@@ -278,6 +286,12 @@ DELETE /vms/{id}
   `vms/<vm_id>/state.json` 기반으로 cold-restart되고, snapshot-restored member VM은
   `v0.4.5` 이후 source snapshot에서 re-restore로 auto-recovery된다. 두 경우 모두
   memory state와 in-flight task는 보존되지 않는다.
+
+- **복구 시 egress 재적용 (recovery-integrity hardening)**:
+  daemon restart 복구는 warm-restore/cold-restart/snapshot re-restore 세 경로
+  모두 VM을 다시 띄우기 **전에** per-VM egress policy를 재적용한다. 재적용에
+  실패하면 부팅 자체를 거부한다(fail-closed, don't-boot) — 호스트 리부트
+  직후 egress가 아직 강제되지 않는 창을 봉쇄한다.
 
 - **Town Wall sequence**:
   Town Wall message는 per-flock monotonic `seq`를 포함해 subscriber가 gap을
@@ -614,6 +628,18 @@ rate limit에 따라 보통 15-30분 이상 걸릴 수 있다.
 | 81 | **SSE stream survives the audit wrapper** (v0.4.1) — `GET /flocks/{id}/wall` still streams (200) through the audit `statusRecorder`, proving `http.Flusher` is preserved. |
 | 82 | **`ephemera-ctl` drives the daemon** (v0.4.1) — `ephemera-ctl vm spawn` / `ls` / `rm` against the live daemon (spawned VM appears then disappears); a bogus `--token` exits non-zero. |
 | 83 | **`ephemera-ctl audit`** (v0.4.1) — `ephemera-ctl audit --method GET` returns the access-log entries for the calls just made. |
+| 84 | **MCP gateway relaunch** (v0.6.0) — daemon relaunched with `EPHEMERA_MCP_ENABLED=1` and a DeepWiki (`transport: http`) backend in `configs/mcp/servers.yaml`. |
+| 84a–c | **Gateway config + health + log** (v0.6.0) — `GET /config/mcp` reports `enabled=true` with an `ephemera-gw` endpoint; `GET /config/mcp/servers` lists the DeepWiki backend and its reachability; daemon log carries `mcp gateway configured`. |
+| 84d | **Anti-spoof chain present** (v0.6.1) — `ebtables -t filter -L EPHEMERA_AS` exists (skipped if `ebtables` is not installed — anti-spoof auto-disables). |
+| 85 | **MCP tool-call round-trip** (v0.6.0, LLM-gated) — skipped without `GOOGLE_API_KEY`/`ANTHROPIC_API_KEY` or a reachable DeepWiki backend. |
+| 85a–d | **Gateway tool call + audit/metric + cleanup** — spawn a researcher flock under the gateway; drive one DeepWiki tool call via `/tasks`; verify `audit/mcp.jsonl` records the call and `ephemera_mcp_tool_calls_total{deepwiki,ok}` increments; delete the flock and restore the global goose config. |
+| 86 | **Stop MCP gateway daemon** — daemon killed, `configs/mcp/servers.yaml` restored from backup. |
+| 87 | **stdio MCP backend relaunch** (v0.6.4) — daemon relaunched with a `transport: stdio` backend (a minimal newline-delimited JSON-RPC fixture in `/tmp`). |
+| 87a | **stdio child spawn + handshake** — `GET /config/mcp/servers` spawns the child, completes `initialize`/`ping`, reports `up=true`; `args` is never exposed in the API response. |
+| 87b | **stdio child de-privileged with rlimits** — child runs as `EPHEMERA_MCP_STDIO_USER` (default `nobody`) with `RLIMIT_NOFILE=256` and `RLIMIT_NPROC=512`. |
+| 88 | **stdio MCP tool-call round-trip** (v0.6.4, LLM-gated) — skipped without a real LLM key. |
+| 88a–d | **stdio tool call + audit/metric + cleanup** — spawn a researcher flock under the stdio-backed gateway; drive one echoer tool call; verify `audit/mcp.jsonl` + `ephemera_mcp_tool_calls_total{echoer,ok}`; delete the flock and restore configs. |
+| 89 | **Daemon shutdown reaps the stdio subprocess** (v0.6.4) — `Registry.Close` on daemon shutdown kills the stdio child; the fixture process is gone within 5 s. |
 
 **Example output (passing run excerpt, steps 54b–83):**
 

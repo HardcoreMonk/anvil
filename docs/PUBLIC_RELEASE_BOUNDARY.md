@@ -1,7 +1,7 @@
 # anvil 공개 릴리즈 경계
 
 > **대상:** anvil downstream repository
-> **현행화 기준:** 2026-07-08
+> **현행화 기준:** 2026-07-16
 > **목적:** anvil이 공개적으로 책임지는 기능 표면과, upstream ephemera에서 가져오더라도 anvil 정책상 수정하거나 제외해야 하는 표면을 구분한다.
 
 ---

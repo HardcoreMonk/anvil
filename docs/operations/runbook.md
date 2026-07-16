@@ -302,6 +302,13 @@ daemon을 재시작하면 verdict 루프가 다시 bind되고, VM 복구 경로(
 restart, snapshot restore)가 per-VM egress를 전체 재적용해 SNI 레지스트리도
 재등록한다(재시작 후 별도 수동 재등록 불필요).
 
+**복구 무결성 하드닝**: 이 egress 재적용은 VM이 boot(또는 re-restore)되기
+*전에* 실행된다 — 재적용이 실패하면 daemon은 해당 VM의 boot을 거부한다
+(fail-closed, don't-boot). 이전의 emergency fence(blanket ACCEPT) 메커니즘은
+제거됐다. 즉 daemon 재시작 뒤 복구되지 않는 VM은 crash가 아니라 egress 적용
+실패로 boot을 거부당했을 수 있다 — daemon 로그에서 `egress apply failed
+before boot` / `egress apply failed before re-restore`를 확인한다.
+
 ### (d) deny 감사/metric 확인
 
 profile 단위 allowed/denied 카운터(`/metrics`):
@@ -418,8 +425,11 @@ Town Wall message body는 `flocks/<flock_id>/TOWN_WALL.log`와 history 응답에
 `metadata.json`이 있는 flock은 daemon restart 뒤 registry와 Town Wall log가 복구된다.
 spawn-path member VM은 `vms/<vm_id>/state.json` 기반으로 cold-restart되어 같은 VM ID,
 IP, TAP, MAC, agent token, agent URL을 유지한다. memory state와 진행 중인 task는
-보존되지 않는다. COW-mode VM과 snapshot-restored VM은 자동 복구 대상이 아니다.
-agent `status=dead`는 watchdog이 연속 health probe 실패를 감지했을 때 표시된다.
+보존되지 않는다. COW-mode VM과 snapshot-restored VM도 `RecoverVMs`가 자동
+cold-recover한다(COW는 dm-snapshot 재구성, snapshot-restored VM은 source snapshot에서
+re-restore) — source snapshot이 삭제됐거나 재구성이 실패한 경우에만 수동 개입이
+필요하다. agent `status=dead`는 watchdog이 연속 health probe 실패를 감지했을 때
+표시된다.
 
 daemon 재시작으로 hub/relay flock 등록과 relay-token admission이 사라진 경우,
 `members_only` 모드 adapter가 `ANVIL_MCP_RECONCILE_INTERVAL`(기본 60s) 주기로

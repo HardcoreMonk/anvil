@@ -52,6 +52,13 @@ curl -H "Authorization: Bearer $TOKEN" \
 daemon 재시작 후 API 목록과 host 상태가 불일치하면 수동 파일 삭제를 하지 말고 먼저
 해당 VM에 `DELETE /vms/{vm_id}`를 호출해 daemon cleanup path를 실행한다.
 
+daemon 재시작 뒤 일부 VM이 복구되지 않았다면 crash가 아니라 boot 거부일 수 있다:
+복구 경로(`RecoverVMs`)는 per-VM egress를 boot 전에 재적용하며, 적용이 실패하면
+해당 VM의 boot을 거부한다(fail-closed, don't-boot — 이전의 emergency fence 메커니즘은
+제거됐다). daemon 로그에서 `egress apply failed before boot`(cold/warm 경로) 또는
+`egress apply failed before re-restore`(snapshot-restored VM 경로)를 확인해 egress
+enforcer(iptables/NFQUEUE) 상태부터 점검한다.
+
 runtime scheduler service를 별도로 운영한다면 scheduler도 확인한다.
 
 ```bash

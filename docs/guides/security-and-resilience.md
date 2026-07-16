@@ -18,6 +18,16 @@
 - **guest network**:
   host-only `10.0.1.0/24` network와 `goose-br0` bridge를 사용한다.
 
+- **egress SNI 필터** (ADR-0002):
+  `profile` egress policy는 CIDR/host allowlist에 더해 `allow_sni` 도메인-정밀
+  :443 transparent SNI 필터를 강제한다. TCP:443은 파싱된 TLS ClientHello SNI,
+  QUIC/UDP:443은 자체 구현 Initial 복호(HKDF+AES-128-GCM+header protection)로
+  얻은 SNI를 같은 in-process NFQUEUE verdict 루프(queue 88)가 검사해 승인
+  흐름에 connmark를 찍는다. verdict 루프가 준비되지 않은 host는 규칙을 깔지
+  않고 spawn 자체를 fail-closed로 거부한다(`--queue-bypass` 배제). CIDR
+  allowlist가 SNI 검사보다 상위(additive)다. 상세는
+  [ADR-0002](../adr/0002-egress-sni-transparent-filter.md)를 참고한다.
+
 - **외부 공개**:
   TLS 종료 reverse proxy 뒤에서 운영하고 운영 환경에서는 `EPHEMERA_API_TOKENS`를
   설정한다. 자세한 정책은
@@ -38,10 +48,12 @@
 - daemon restart 후 spawn-path VM은 `vms/<vm_id>/state.json` 기반으로 cold-restart된다.
   같은 VM ID, IP, TAP, MAC, agent token, agent URL을 유지하지만 memory state와
   in-flight task는 보존하지 않는다.
-- snapshot-restored VM은 daemon restart 후 자동 복구 대상이 아니다. 단,
-  `EPHEMERA_DISK_MODE=cow`로 생성된 COW spawn VM은 v0.4.0부터 `state.json`과
-  `.cow` exception store가 남아 있으면 자동 복구된다. restored COW의 stale
-  state는 복구하지 않고 정리한다.
+- snapshot-restored VM(비어 있지 않은 `SourceSnapshotID`)은 daemon restart 후
+  source snapshot에서 자동 re-restore된다(v0.4.5) — memory state는 보존하지 않아
+  수동 re-restore와 동일하며, source snapshot이 이미 삭제됐으면 복구하지 않고
+  drop한다. `EPHEMERA_DISK_MODE=cow`로 생성된 COW spawn VM도 v0.4.0부터
+  `state.json`과 `.cow` exception store가 남아 있으면 dm-snapshot을 재구성해
+  자동 복구된다.
 - watchdog이 표시한 `dead` status는 `flocks/<flock_id>/metadata.json`에
   persist된다. per-agent restart 또는 watchdog auto-heal opt-in이 상태를 다시
   `ready`로 바꾸는 명시 경로다.
@@ -446,3 +458,4 @@ The daemon, Prometheus, and Grafana remain running until you press `Ctrl-C`; the
 | **Metrics retention is external** (v0.3.5) | `/metrics` exposes raw counters and gauges only — the daemon does not aggregate, store, or rotate history. Operators are expected to wire an external Prometheus (or any text-exposition-compatible) scraper. |
 | **Web UI conversation is in-memory** (v0.5.0) | The conversation panel holds its transcript in the browser tab; a page reload starts a fresh `session`, so prior turns are no longer shown (the underlying goose session persists in the VM but is not re-loaded into the UI). Snapshot-restored / cold-recovered VMs may also show an empty model, since `provider`/`model` is recorded only at spawn time. |
 | **COW diff-restore guest panic under heavy ZFS load** (D4 — concluded, upstream-tracked; opt-in COW only) | With `EPHEMERA_DISK_MODE=cow` (opt-in; the default disk mode is **plain**), restoring a **diff snapshot** onto a COW-spawned VM can panic the guest kernel — a general-protection fault in `inet_bind2_bucket_find` shortly after resume — but only on ZFS hosts under concurrent full-gate load; ext4 hosts and full-snapshot restores pass. Four rounds of investigation traced the root cause to a KVM/Firecracker **resume-race outside anvil**: every anvil-side storage/restore lever (fsync, global sync, direct-I/O, merged-artifact path, unlink audit, memory-file immutability) came back negative, and both hosts reproduced it with a byte-identical daemon, so it is a general defect rather than host-specific hardware. Firecracker **v1.16.1** is the strongest mitigation, cutting the failure rate from ~100% to ~15–25% (its v1.16.0 vsock RX-race fix #5882 is the main contributor) but does not eliminate it; a pre-resume quiescence delay only lowers the probability (no fixed value cleared n≥2 on both hosts). **Status: concluded on 2026-07-13 as an upstream-tracked known limitation** — the default disk mode stays **plain**, COW remains opt-in, and the flip is deferred indefinitely (reopened only if upstream resolves the resume-race). Operators using opt-in COW on ZFS under heavy load should expect ~15–25% diff-restore failures and run Firecracker ≥ v1.16.1. Detail: `docs/operations/2026-07-11-cow-burnin-run.md` (rounds 1–4) and the upstream report `docs/operations/2026-07-13-d4-firecracker-upstream-report.md`. |
+| **Egress SNI filter sees only the outer (ECH) SNI** (ADR-0002, PR #73) | anvil's transparent SNI filter observes only the ClientHello's **outer/cover SNI** — it skips the ECH `encrypted_client_hello` extension rather than decrypting it. If the outer name is missing or an unlisted decoy, the flow fail-closed DROPs. But if the outer name **is** on `allow_sni`, the flow is allowed and the encrypted **inner** destination stays hidden — the same trust level as a guest-asserted SNI (an allowlisted outer can tunnel an arbitrary inner destination). anvil does not defeat ECH (the inner name is not decryptable without the server's key); the only mitigation is a **CIDR pin** on the endpoint (an outer-SNI allowlist is not itself a trust anchor). Detail: the "잔여 위험 계약" table in [`docs/adr/0002-egress-sni-transparent-filter.md`](../adr/0002-egress-sni-transparent-filter.md). |

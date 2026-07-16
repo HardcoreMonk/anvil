@@ -106,7 +106,8 @@ Multi-tenant runtime의 설계 범위는 다음이다.
 이 문서는 위 구성 요소의 책임 경계를 정의한다. 현재 구현은 in-process scheduler
 decision helper, host inventory polling, runtime router, scheduler service binary,
 tenant API, `deny_all`/`profile` host enforcement, scheduler smoke harness,
-systemd installer `--verify`, manual cross-host snapshot replication,
+systemd installer `--verify`, manual + automatic(reconcile 루프, 상수 replica
+factor N=2, best-effort eventual 수렴) cross-host snapshot replication,
 `POST /schedule/flock` dry-run planner, members-only routed flock create/delete,
 2026-07-06 cross-host shared Town Wall(home-host hub + relay), 2026-07-08
 cross-host `gtcall`까지 포함한다. multi-node HA, migration, cross-host

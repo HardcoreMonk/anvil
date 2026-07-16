@@ -279,16 +279,22 @@ loopback/private network 또는 reverse proxy policy 뒤에서만 노출한다.
 `deny_all` egress policy는 host `iptables` reject rule로 강제한다. `profile` policy는
 `configs/profiles/{profile}/egress.json`,
 `EPHEMERA_EGRESS_PROFILE_DIR`, `ANVIL_EGRESS_PROFILE_DIR` 아래의 profile별
-`egress.json`이 있을 때 allow CIDR/host/DNS rule을 적용하고, policy 파일이 없으면
-기존 profile 호환성을 위해 no-op이다. 예시:
+`egress.json`이 있을 때 allow CIDR/host/SNI/DNS rule을 적용하고, policy 파일이
+없으면 기존 profile 호환성을 위해 no-op이다. 예시:
 
 ```json
 {
   "allow_cidrs": ["203.0.113.10/32"],
   "allow_hosts": ["api.anthropic.com"],
+  "allow_sni": ["api.anthropic.com"],
   "dns_servers": ["1.1.1.1"]
 }
 ```
+
+`allow_sni`는 파싱된 ClientHello SNI 기준 :443 도메인 allowlist다(TCP+QUIC/UDP
+모두 적용). `allow_hosts`의 packet-string 매치보다 정밀하며, 신규 profile은
+`allow_sni`를 쓴다. 상세는 [security-and-resilience.md](security-and-resilience.md)와
+[ADR-0002](../adr/0002-egress-sni-transparent-filter.md)를 참고한다.
 
 Optional trace export는 `ANVIL_OTEL_EXPORTER_OTLP_ENDPOINT` 또는
 `OTEL_EXPORTER_OTLP_ENDPOINT`를 설정하면 lifecycle span을 `{endpoint}/v1/traces`로

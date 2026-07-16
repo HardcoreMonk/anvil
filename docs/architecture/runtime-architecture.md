@@ -408,6 +408,7 @@ mutating guest endpoint는 token file이 없을 때를 제외하면 VM별 agent 
 - `cmd/goose-daemon/recovery.go`
 - `cmd/goose-daemon/orchestrator_api.go`
 - `cmd/goose-daemon/egress_policy.go`
+- `cmd/goose-daemon/sni_verdict.go`
 - `cmd/goose-daemon/otel.go`
 - `cmd/anvil-scheduler/main.go`
 - `cmd/goose-agent/main.go`
@@ -422,6 +423,8 @@ mutating guest endpoint는 token file이 없을 때를 제외하면 VM별 agent 
 - `internal/storage/provisioner.go`
 - `internal/storage/snapshot.go`
 - `internal/network/manager.go`
+- `internal/network/sni/`
+- `internal/network/quic/`
 - `internal/vm/machine.go`
 - `README.md`
 - `CONTEXT.md`
