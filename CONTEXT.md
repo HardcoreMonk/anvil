@@ -555,10 +555,11 @@ daemon으로 보내는 outbound Bearer token이다.
   hold-then-decide 재설계(TCP 세그먼트 전달에 한정된 수용된 잔여 위험 —
   승인 누수는 아니지만 완전 봉쇄에는 필요, YAGNI로 v1 미채택).
   ~~QUIC/UDP:443 SNI 파싱~~ — **DONE(2026-07-14)**, 위 항목 참조. QUIC
-  확장이 새로 남긴 후속: TCP/UDP proto별
-  `ephemera_egress_sni_verdict_total` metric label 분리(현재 공유), 새 QUIC
-  버전(v1/v2 외) salt/label 추가, 3-데이터그램 kernel 경로 KVM e2e 실증.
-  (3+ 데이터그램 ClientHello 지원은 2026-07-15 증명·문서교정으로 종결 —
+  확장이 새로 남긴 후속: 새 QUIC 버전(v1/v2 외) salt/label 추가,
+  3-데이터그램 kernel 경로 KVM e2e 실증.
+  (TCP/UDP proto별 `ephemera_egress_sni_verdict_total` metric label 분리는
+  **2026-07-16 종결** — PR #71로 `proto=tcp|udp|unknown` label 추가.
+  3+ 데이터그램 ClientHello 지원은 2026-07-15 증명·문서교정으로 종결 —
   이미 지원되며 >8192B만 잔여, 주류 클라 미해당.)
 - snapshot storage quota dashboard
 - web svelte 5 runes 전환(선택) — PR #39는 legacy-compat 유지, runes 마이그레이션 미착수
