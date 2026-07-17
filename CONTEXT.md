@@ -559,12 +559,14 @@ daemon으로 보내는 outbound Bearer token이다.
   follow-up: ECH 확장(`0xfe0d`) 탐지+fail-closed deny 하드닝(allowlisted CDN의
   정상 ECH도 차단하는 트레이드오프, 별도 결정).
   ~~QUIC/UDP:443 SNI 파싱~~ — **DONE(2026-07-14)**, 위 항목 참조. QUIC
-  확장이 새로 남긴 후속: 새 QUIC 버전(v1/v2 외) salt/label 추가,
-  3-데이터그램 kernel 경로 KVM e2e 실증.
+  확장이 새로 남긴 후속: 새 QUIC 버전(v1/v2 외) salt/label 추가.
   (TCP/UDP proto별 `ephemera_egress_sni_verdict_total` metric label 분리는
-  **2026-07-16 종결** — PR #71로 `proto=tcp|udp|unknown` label 추가.
-  3+ 데이터그램 ClientHello 지원은 2026-07-15 증명·문서교정으로 종결 —
-  이미 지원되며 >8192B만 잔여, 주류 클라 미해당.)
+  **2026-07-16 종결**(PR #71로 `proto=tcp|udp|unknown` label 추가). 3-데이터그램
+  kernel 경로 KVM e2e 실증은 **2026-07-17 종결**(PR #76 — 합성 padding ALPN으로
+  ClientHello를 3 Initial 데이터그램에 걸쳐 delta=3 실-커널 실증; 이 실행이 PR #71의
+  e2e `read_metric` 회귀를 잡아 동반 수정 — QUIC e2e가 게이트/CI 밖이라 escape,
+  게이트 편입 재검토는 소소한 후속). 3+ 데이터그램 ClientHello 지원은 2026-07-15
+  증명·문서교정으로 종결 — 이미 지원되며 >8192B만 잔여, 주류 클라 미해당.)
 - snapshot storage quota dashboard
 - web svelte 5 runes 전환(선택) — PR #39는 legacy-compat 유지, runes 마이그레이션 미착수
 - fc upstream/OpenZFS 참고 보고 검토(D3의 fc diff "sparseness=의미" 상호작용)
