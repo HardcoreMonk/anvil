@@ -80,6 +80,11 @@ PROBE_TIMEOUT="${ANVIL_QUIC_E2E_PROBE_TIMEOUT:-15}"
 # Phase 1b: also run a classical (X25519) single-datagram probe so the report
 # can contrast its ~1-packet nfqueue delta against Phase 1's >=2. Set to 0 to skip.
 CLASSICAL_REGRESSION="${ANVIL_QUIC_E2E_CLASSICAL_REGRESSION:-1}"
+# Phase 1c: also run a 3-datagram probe (default PQ ClientHello inflated with
+# padding ALPN protocols past TWO Initial datagrams) so the report can show a
+# nfqueue delta >=3 — the reassembler + connmark fast-path over >2 datagrams. Set
+# to 0 to skip.
+THREE_DATAGRAM="${ANVIL_QUIC_E2E_THREE_DATAGRAM:-1}"
 PROFILE_NAME="quic-sni-e2e"
 TENANT_ID="quic-sni-e2e-tenant"
 ARTIFACT_DIR="${ANVIL_QUIC_E2E_ARTIFACT_DIR:-/tmp/anvil-quic-sni-e2e-$(date +%Y%m%d-%H%M%S)}"
@@ -127,11 +132,15 @@ sweep_egress_rules() {
 }
 
 read_metric() {
-  # $1 = outcome label value. Prints the counter (0 when the series is absent).
+  # $1 = outcome label value. Sums the verdict counter across proto labels and
+  # prints the total (0 when no matching series is present). The metric carries a
+  # {proto="tcp|udp|unknown",outcome="..."} label set since the proto-label split,
+  # so an exact single-label match would silently read 0; matching on the outcome
+  # label and summing is robust to the proto dimension (all e2e flows are udp).
   local outcome="$1" v
   v="$(curl -sS --max-time 5 "$API/metrics" 2>/dev/null \
-        | awk -v o="ephemera_egress_sni_verdict_total{outcome=\"$outcome\"}" \
-              '$1==o {print $2}' | tail -1)"
+        | grep -E "^ephemera_egress_sni_verdict_total\{.*outcome=\"$outcome\"\} " \
+        | awk '{s+=$2} END {print s+0}')"
   printf '%s' "${v:-0}"
 }
 
@@ -248,20 +257,25 @@ go 1.25.0
 require github.com/quic-go/quic-go $QUICGO_VERSION
 MODEOF
 cat > "$PROBE_DIR/main.go" <<'GOEOF'
-// quic-probe: perform one HTTP/3 (QUIC) GET and report OK/FAIL + exit code.
-// HTTP/3 ONLY — never falls back to TCP, so a drop of the QUIC Initial surfaces
-// as a full-deadline failure rather than a silent TCP:443 success.
+// quic-probe: perform one HTTP/3 (QUIC) GET (pq/classical) or one raw QUIC
+// handshake (pad3) and report OK/FAIL + exit code. The HTTP/3 modes NEVER fall
+// back to TCP, so a drop of the QUIC Initial surfaces as a full-deadline failure
+// rather than a silent TCP:443 success.
 //
-// usage: quic-probe <url> [timeout_secs] [classical]
+// usage: quic-probe <url> [timeout_secs] [classical|pad3]
 //
-// Key exchange (the whole point of the PQ multi-datagram e2e):
-//   default: CurvePreferences left unset -> Go 1.24+/quic-go offer the
+// Key exchange / datagram spread (the whole point of the multi-datagram e2e):
+//   default (pq): CurvePreferences unset -> Go 1.24+/quic-go offer the
 //     post-quantum X25519MLKEM768 hybrid group. Its ~1.2 KB key_share inflates
 //     the TLS ClientHello past a single QUIC Initial datagram, so it SPANS TWO
-//     Initial datagrams and exercises anvil's cross-datagram InitialReassembler
-//     (Tasks 6b/6c). This is the modern-client default.
+//     Initial datagrams and exercises anvil's cross-datagram InitialReassembler.
 //   "classical": pin X25519 -> ~300-byte ClientHello in ONE Initial datagram,
-//     the single-datagram path the original Task 7 e2e proved (regression).
+//     the single-datagram regression.
+//   "pad3": default PQ PLUS padding ALPN protocols that push the ClientHello past
+//     TWO Initial datagrams into THREE (Go's tls encodes every NextProtos entry).
+//     A raw QUIC handshake is used because http3.Transport resets NextProtos to
+//     just "h3"; a completed handshake proves the >2-datagram ClientHello was
+//     reassembled + the SNI matched + allowed.
 package main
 
 import (
@@ -270,34 +284,73 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 )
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("usage: quic-probe <url> [timeout_secs] [classical]")
+		fmt.Println("usage: quic-probe <url> [timeout_secs] [classical|pad3]")
 		os.Exit(2)
 	}
-	url := os.Args[1]
+	target := os.Args[1]
 	secs := 15
 	if len(os.Args) > 2 {
 		fmt.Sscanf(os.Args[2], "%d", &secs)
 	}
-	classical := false
+	mode := "pq"
 	for _, a := range os.Args[3:] {
-		if a == "classical" {
-			classical = true
+		if a == "classical" || a == "pad3" {
+			mode = a
 		}
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(secs)*time.Second)
+	defer cancel()
+
+	if mode == "pad3" {
+		// Three-datagram path: inflate the default-PQ ClientHello past TWO Initial
+		// datagrams with padding ALPN protocols. Raw QUIC (not HTTP/3) so we keep
+		// control of NextProtos, which http3.Transport would reset to just "h3".
+		u, err := url.Parse(target)
+		if err != nil {
+			fmt.Printf("QUIC_HANDSHAKE_FAIL kx=pad3 err=%v\n", err)
+			os.Exit(1)
+		}
+		host := u.Hostname()
+		port := u.Port()
+		if port == "" {
+			port = "443"
+		}
+		// "h3" first so the server negotiates it; the rest are ignored padding that
+		// only grows the ClientHello. 6 x 250 B pushes the PQ ClientHello to ~2.7 KB
+		// -> THREE QUIC Initial datagrams (measured; two without the padding).
+		alpn := []string{"h3"}
+		for i := 0; i < 6; i++ {
+			alpn = append(alpn, strings.Repeat(string(rune('a'+i)), 250))
+		}
+		tlsCfg := &tls.Config{ServerName: host, NextProtos: alpn} // CurvePreferences unset -> default PQ
+		start := time.Now()
+		conn, err := quic.DialAddr(ctx, host+":"+port, tlsCfg, &quic.Config{})
+		dur := time.Since(start).Seconds()
+		if err != nil {
+			fmt.Printf("QUIC_HANDSHAKE_FAIL kx=pad3 dur=%.1fs err=%v\n", dur, err)
+			os.Exit(1)
+		}
+		np := conn.ConnectionState().TLS.NegotiatedProtocol
+		_ = conn.CloseWithError(0, "done")
+		fmt.Printf("QUIC_HANDSHAKE_OK kx=pad3 alpn=%q dur=%.1fs\n", np, dur)
+		os.Exit(0)
+	}
+
 	tlsCfg := &tls.Config{}
-	mode := "pq"
-	if classical {
+	if mode == "classical" {
 		// Single-datagram regression: X25519 keeps the ClientHello ~300 bytes.
 		tlsCfg.CurvePreferences = []tls.CurveID{tls.X25519}
-		mode = "classical"
 	}
 	// mode=="pq": CurvePreferences unset -> default X25519MLKEM768 -> ~1.5 KB
 	// ClientHello -> two QUIC Initial datagrams -> cross-datagram reassembly.
@@ -309,9 +362,7 @@ func main() {
 	// the 3xx as-is keeps the probe scoped to exactly the SNI it was asked to reach;
 	// any HTTP response (2xx or 3xx) proves the QUIC handshake to that SNI completed.
 	client := &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(secs)*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		fmt.Printf("QUIC_HTTP3_FAIL kx=%s err=%v\n", mode, err)
 		os.Exit(1)
@@ -555,6 +606,66 @@ EOF
   fi
 else
   step "Phase 1b: classical regression SKIPPED (ANVIL_QUIC_E2E_CLASSICAL_REGRESSION=0)"
+fi
+
+# ---- Phase 1c: three-datagram reassembly + connmark fast-path -----------------
+# The default-PQ ClientHello, inflated with padding ALPN protocols, spans THREE
+# QUIC Initial datagrams to the SAME allowed domain over a fresh QUIC connection
+# (new source port -> new conntrack flow -> not connmarked -> its Initial
+# re-queues). Reaching the allowed SNI proves the InitialReassembler accumulated
+# CRYPTO across >2 datagrams: the FIRST TWO Initial datagrams are incomplete
+# (fail-closed drop, accumulate) and only the THIRD completes the ClientHello ->
+# SNI matched -> accept + connmark 0x534e49. The nfqueue delta is therefore >=3
+# (vs Phase 1's >=2), and the fast-path counter climbs as the client retransmits
+# the two dropped datagrams + the handshake tail over the now-marked flow. This is
+# a raw QUIC handshake (no HTTP/3 GET), so a completed handshake is the allow
+# proof. Env-gated (ANVIL_QUIC_E2E_THREE_DATAGRAM=0 to skip).
+if [ "$THREE_DATAGRAM" = "1" ]; then
+  step "Phase 1c: three-datagram (padded PQ) QUIC handshake to $ALLOW_DOMAIN:443"
+  nfq_before_3="$(rule_pkts "anvil-egress-${VM_ID}-sni-udp-nfqueue")"
+  fp_before_3="$(rule_pkts "anvil-egress-${VM_ID}-sni-udp-fastpath")"
+  cat > "$ARTIFACT_DIR/quic-allow-pad3.sh" <<EOF
+#!/usr/bin/env bash
+set -u
+cat bin/probe.part.* > /tmp/quic-probe
+chmod +x /tmp/quic-probe
+set +e
+out=\$(/tmp/quic-probe "https://${ALLOW_DOMAIN}/" ${PROBE_TIMEOUT} pad3 2>&1)
+rc=\$?
+set -e
+echo "\$out"
+echo "ALLOW_PAD3_RC=\$rc"
+if [ "\$rc" -eq 0 ]; then echo "QUIC_ALLOW_PAD3_OK"; exit 0; else echo "QUIC_ALLOW_PAD3_FAIL"; exit 1; fi
+EOF
+  pad3_run="$(run_guest "$ARTIFACT_DIR/quic-allow-pad3.sh" "workloads/quic-allow-pad3.sh" $((PROBE_TIMEOUT + 25)))"
+  printf '%s' "$pad3_run" > "$ARTIFACT_DIR/allow-pad3-run.json"
+  pad3_exit="$(printf '%s' "$pad3_run" | jq -r '.exit_code // "err"' 2>/dev/null || echo err)"
+  pad3_out="$(printf '%s' "$pad3_run" | jq -r '.stdout // ""' 2>/dev/null || echo '')"
+  sleep 1
+  nfq_after_3="$(rule_pkts "anvil-egress-${VM_ID}-sni-udp-nfqueue")"
+  fp_after_3="$(rule_pkts "anvil-egress-${VM_ID}-sni-udp-fastpath")"
+  pad3_delta=$(( ${nfq_after_3:-0} - ${nfq_before_3:-0} ))
+  fp_delta_3=$(( ${fp_after_3:-0} - ${fp_before_3:-0} ))
+  printf '  guest: %s\n' "$(printf '%s' "$pad3_out" | tr '\n' ' ')"
+  printf '  udp-nfqueue %s -> %s (pad3 delta=%s vs pq delta=%s) | fastpath +%s\n' \
+    "${nfq_before_3:-0}" "${nfq_after_3:-0}" "$pad3_delta" "$nfq_delta" "$fp_delta_3"
+  if [ "$pad3_exit" = "0" ] && printf '%s' "$pad3_out" | grep -q "QUIC_HANDSHAKE_OK kx=pad3"; then
+    ok "Guest completed a three-datagram (padded PQ) QUIC handshake to $ALLOW_DOMAIN:443 (allowed SNI reached across >2 Initial datagrams)"
+  else
+    fail "phase1c_failed: guest could not complete the padded three-datagram QUIC handshake to $ALLOW_DOMAIN (exit=$pad3_exit)"
+  fi
+  if [ "$pad3_delta" -ge 3 ]; then
+    ok "sni-udp-nfqueue took $pad3_delta datagram(s) — ClientHello spanned >2 Initial datagrams ($((pad3_delta - 1)) incomplete fail-closed drop(s) + 1 completing datagram)"
+  else
+    fail "phase1c_failed: sni-udp-nfqueue pad3 delta=$pad3_delta (<3) — padded ClientHello did NOT span three datagrams (padding too small? PQ not default?)"
+  fi
+  if [ "$fp_delta_3" -ge 1 ]; then
+    ok "sni-udp-fastpath carried $fp_delta_3 more packet(s) — connmark 0x534e49 stuck on the completing (3rd) datagram; the two dropped datagrams' retransmit + handshake tail rode the fast path"
+  else
+    fail "phase1c_failed: sni-udp-fastpath did not climb (delta=$fp_delta_3) — connmark on the completing datagram did not stick over three datagrams"
+  fi
+else
+  step "Phase 1c: three-datagram probe SKIPPED (ANVIL_QUIC_E2E_THREE_DATAGRAM=0)"
 fi
 
 # ---- Phase 2: deny domain blocked over post-quantum HTTP/3 (QUIC-only) --------
