@@ -132,11 +132,15 @@ sweep_egress_rules() {
 }
 
 read_metric() {
-  # $1 = outcome label value. Prints the counter (0 when the series is absent).
+  # $1 = outcome label value. Sums the verdict counter across proto labels and
+  # prints the total (0 when no matching series is present). The metric carries a
+  # {proto="tcp|udp|unknown",outcome="..."} label set since the proto-label split,
+  # so an exact single-label match would silently read 0; matching on the outcome
+  # label and summing is robust to the proto dimension (all e2e flows are udp).
   local outcome="$1" v
   v="$(curl -sS --max-time 5 "$API/metrics" 2>/dev/null \
-        | awk -v o="ephemera_egress_sni_verdict_total{outcome=\"$outcome\"}" \
-              '$1==o {print $2}' | tail -1)"
+        | grep -E "^ephemera_egress_sni_verdict_total\{.*outcome=\"$outcome\"\} " \
+        | awk '{s+=$2} END {print s+0}')"
   printf '%s' "${v:-0}"
 }
 
