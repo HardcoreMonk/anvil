@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -71,6 +72,16 @@ func loadEgressProfile(baseDir, profile string) (egressProfile, bool, error) {
 	}
 	if err := validateEgressProfile(profileConfig); err != nil {
 		return egressProfile{}, false, err
+	}
+	if len(profileConfig.AllowHosts) > 0 {
+		// allow_hosts is a deprecated coarse substring matcher superseded by
+		// allow_sni (parsed ClientHello SNI) + allow_cidrs. Warn on every load so
+		// the docs-only deprecation becomes a runtime signal; the field is still
+		// applied (behavior unchanged) and is scheduled for removal in the next
+		// tagged anvil release (ADR-0002 OQ8). Content-free: profile name + count
+		// only, never the host values.
+		slog.Warn("egress profile uses deprecated allow_hosts (coarse packet substring match, fragmentation-evadable); migrate to allow_sni (parsed ClientHello SNI) for domains + allow_cidrs for IPs — allow_hosts will be removed in the next tagged anvil release",
+			"profile", profile, "allow_hosts_count", len(profileConfig.AllowHosts))
 	}
 	return profileConfig, true, nil
 }
