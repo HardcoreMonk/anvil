@@ -71,7 +71,7 @@ func mustHello(t *testing.T, name string) []byte {
 	// encoder mirroring Task 2's buildClientHello (kept local to avoid exporting
 	// test helpers). Implementation copies the byte layout from parser_test.go.
 	b := encodeClientHelloSNI(name) // small local encoder in this _test.go file
-	if got, err := sni.ParseClientHelloSNI(b); err != nil || got != name {
+	if got, _, err := sni.ParseClientHelloSNI(b); err != nil || got != name {
 		t.Fatalf("oracle: built hello for %q parsed as %q err=%v", name, got, err)
 	}
 	return b

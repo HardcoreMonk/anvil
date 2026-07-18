@@ -64,25 +64,122 @@ func TestParseHandshakeSNI_BareClientHello(t *testing.T) {
 	// record, so strip the 5-byte record header to get the bare handshake
 	// message ParseHandshakeSNI expects.
 	hs := buildClientHello("api.anthropic.com", false)
-	got, err := ParseHandshakeSNI(stripRecordHeader(hs))
+	got, _, err := ParseHandshakeSNI(stripRecordHeader(hs))
 	if err != nil || got != "api.anthropic.com" {
 		t.Fatalf("ParseHandshakeSNI = %q, %v", got, err)
 	}
 }
 
+func TestParseHandshakeSNI_ECHDetected(t *testing.T) {
+	// ECH extension sits AFTER server_name; the authoritative SNI walk early-returns
+	// at server_name, so detecting ECH here proves scanForECH walks the whole block.
+	hs := buildClientHello("cloudflare-ech.com", true)
+	name, ech, err := ParseHandshakeSNI(stripRecordHeader(hs))
+	if err != nil || name != "cloudflare-ech.com" {
+		t.Fatalf("ParseHandshakeSNI = %q, %v; want cloudflare-ech.com", name, err)
+	}
+	if !ech {
+		t.Fatalf("echPresent = false, want true (0xfe0d extension present)")
+	}
+}
+
+func TestParseHandshakeSNI_NoECH(t *testing.T) {
+	hs := buildClientHello("api.anthropic.com", false)
+	name, ech, err := ParseHandshakeSNI(stripRecordHeader(hs))
+	if err != nil || name != "api.anthropic.com" {
+		t.Fatalf("ParseHandshakeSNI = %q, %v", name, err)
+	}
+	if ech {
+		t.Fatalf("echPresent = true, want false (no 0xfe0d extension)")
+	}
+}
+
+func TestParseClientHelloSNI_ECHFlag(t *testing.T) {
+	name, ech, err := ParseClientHelloSNI(buildClientHello("cloudflare-ech.com", true))
+	if err != nil || name != "cloudflare-ech.com" || !ech {
+		t.Fatalf("ech clienthello: name=%q ech=%v err=%v; want cloudflare-ech.com,true,nil", name, ech, err)
+	}
+	name, ech, err = ParseClientHelloSNI(buildClientHello("cloudflare-ech.com", false))
+	if err != nil || name != "cloudflare-ech.com" || ech {
+		t.Fatalf("non-ech clienthello: name=%q ech=%v err=%v; want cloudflare-ech.com,false,nil", name, ech, err)
+	}
+}
+
+// buildClientHelloTruncatedTrailingExt builds a wire-valid ClientHello whose
+// extensions are [server_name(sni), <trailing NON-ECH ext whose declared length
+// overruns the block>]. extensions_len exactly covers the bytes actually present
+// (so record/handshake framing is valid and the SNI walk runs), but the final
+// extension's internal length points past the end. The authoritative SNI walk
+// returns at server_name before reaching it, so SNI must still parse; scanForECH
+// must stop best-effort without error. Returns a full TLS record.
+func buildClientHelloTruncatedTrailingExt(sni string) []byte {
+	name := []byte(sni)
+	sn := &bytes.Buffer{}
+	sn.WriteByte(0x00) // name_type host_name
+	binary.Write(sn, binary.BigEndian, uint16(len(name)))
+	sn.Write(name)
+	list := &bytes.Buffer{}
+	binary.Write(list, binary.BigEndian, uint16(sn.Len()))
+	list.Write(sn.Bytes())
+
+	ext := &bytes.Buffer{}
+	binary.Write(ext, binary.BigEndian, uint16(0x0000)) // server_name
+	binary.Write(ext, binary.BigEndian, uint16(list.Len()))
+	ext.Write(list.Bytes())
+	// Trailing extension: non-ECH type, declared length 255, zero body present.
+	binary.Write(ext, binary.BigEndian, uint16(0x1234)) // arbitrary non-ECH type
+	binary.Write(ext, binary.BigEndian, uint16(255))    // overruns the block (no body follows)
+
+	body := &bytes.Buffer{}
+	body.Write([]byte{0x03, 0x03})
+	body.Write(make([]byte, 32))
+	body.WriteByte(0x00)
+	body.Write([]byte{0x00, 0x02, 0x13, 0x01})
+	body.Write([]byte{0x01, 0x00})
+	binary.Write(body, binary.BigEndian, uint16(ext.Len())) // extensions_len covers present bytes only
+	body.Write(ext.Bytes())
+
+	hs := &bytes.Buffer{}
+	hs.WriteByte(0x01)
+	l := body.Len()
+	hs.Write([]byte{byte(l >> 16), byte(l >> 8), byte(l)})
+	hs.Write(body.Bytes())
+
+	rec := &bytes.Buffer{}
+	rec.WriteByte(0x16)
+	rec.Write([]byte{0x03, 0x01})
+	binary.Write(rec, binary.BigEndian, uint16(hs.Len()))
+	rec.Write(hs.Bytes())
+	return rec.Bytes()
+}
+
+func TestParseHandshakeSNI_TruncatedTrailingExtInvariant(t *testing.T) {
+	// A truncated trailing extension after server_name must NOT change SNI
+	// semantics: the SNI walk returns at server_name (before the truncation), so
+	// SNI still parses with no error, and best-effort ECH scan stops without error.
+	rec := buildClientHelloTruncatedTrailingExt("api.anthropic.com")
+	name, ech, err := ParseClientHelloSNI(rec)
+	if err != nil || name != "api.anthropic.com" {
+		t.Fatalf("SNI must be unchanged by truncated trailing ext: name=%q err=%v", name, err)
+	}
+	if ech {
+		t.Fatalf("ech = true, want false (trailing ext is non-ECH and truncated)")
+	}
+}
+
 func TestParseClientHelloSNI(t *testing.T) {
-	sni, err := ParseClientHelloSNI(buildClientHello("api.anthropic.com", false))
+	sni, _, err := ParseClientHelloSNI(buildClientHello("api.anthropic.com", false))
 	if err != nil || sni != "api.anthropic.com" {
 		t.Fatalf("normal: sni=%q err=%v", sni, err)
 	}
-	sni, err = ParseClientHelloSNI(buildClientHello("API.Example.COM", false))
+	sni, _, err = ParseClientHelloSNI(buildClientHello("API.Example.COM", false))
 	if err != nil || sni != "api.example.com" {
 		t.Fatalf("case-fold: sni=%q err=%v", sni, err)
 	}
 }
 
 func TestParseClientHelloNoSNI(t *testing.T) {
-	if _, err := ParseClientHelloSNI(buildClientHello("", false)); !errors.Is(err, ErrNoSNI) {
+	if _, _, err := ParseClientHelloSNI(buildClientHello("", false)); !errors.Is(err, ErrNoSNI) {
 		t.Fatalf("no-SNI err = %v, want ErrNoSNI", err)
 	}
 }
@@ -90,7 +187,7 @@ func TestParseClientHelloNoSNI(t *testing.T) {
 func TestParseClientHelloECHOuterExtracted(t *testing.T) {
 	// ECH decoy: cleartext outer SNI still present; parser returns it so the
 	// matcher can deny it. (anvil does not defeat ECH — unparseable SNI = deny.)
-	sni, err := ParseClientHelloSNI(buildClientHello("cloudflare-ech.com", true))
+	sni, _, err := ParseClientHelloSNI(buildClientHello("cloudflare-ech.com", true))
 	if err != nil || sni != "cloudflare-ech.com" {
 		t.Fatalf("ech outer: sni=%q err=%v", sni, err)
 	}
@@ -101,11 +198,11 @@ func TestParseClientHelloMalformed(t *testing.T) {
 	// Not a handshake record.
 	bad := append([]byte(nil), full...)
 	bad[0] = 0x17 // application_data
-	if _, err := ParseClientHelloSNI(bad); err == nil || errors.Is(err, ErrIncomplete) {
+	if _, _, err := ParseClientHelloSNI(bad); err == nil || errors.Is(err, ErrIncomplete) {
 		t.Fatalf("non-handshake err = %v, want hard error", err)
 	}
 	// Truncated mid-record -> incomplete.
-	if _, err := ParseClientHelloSNI(full[:12]); !errors.Is(err, ErrIncomplete) {
+	if _, _, err := ParseClientHelloSNI(full[:12]); !errors.Is(err, ErrIncomplete) {
 		t.Fatalf("truncated err = %v, want ErrIncomplete", err)
 	}
 }
@@ -117,7 +214,7 @@ func TestReassemblerMultiSegment(t *testing.T) {
 	chunks := [][]byte{full[:5], full[5 : len(full)-3], full[len(full)-3:]}
 	var got string
 	for i, c := range chunks {
-		sni, done, err := r.Feed(c)
+		sni, done, _, err := r.Feed(c)
 		if err != nil {
 			t.Fatalf("chunk %d Feed err = %v", i, err)
 		}
@@ -138,7 +235,7 @@ func TestReassemblerMultiSegment(t *testing.T) {
 // as "host". (Strip, not reject — see report; no under-block risk because the
 // matcher default-denies.)
 func TestParseClientHelloTrailingDot(t *testing.T) {
-	sni, err := ParseClientHelloSNI(buildClientHello("api.anthropic.com.", false))
+	sni, _, err := ParseClientHelloSNI(buildClientHello("api.anthropic.com.", false))
 	if err != nil || sni != "api.anthropic.com" {
 		t.Fatalf("trailing-dot: sni=%q err=%v, want api.anthropic.com", sni, err)
 	}
@@ -150,7 +247,7 @@ func TestParseClientHelloTrailingDot(t *testing.T) {
 // nothing exotic reaches the matcher or the logs.
 func TestParseClientHelloRejectsNonASCII(t *testing.T) {
 	for _, bad := range []string{"api\x00.com", "api\x1f.com", "ex\xffample.com", "\x7f.com"} {
-		_, err := ParseClientHelloSNI(buildClientHello(bad, false))
+		_, _, err := ParseClientHelloSNI(buildClientHello(bad, false))
 		if err == nil || errors.Is(err, ErrNoSNI) || errors.Is(err, ErrIncomplete) {
 			t.Fatalf("non-ascii %q: err=%v, want terminal hard error", bad, err)
 		}
@@ -163,7 +260,7 @@ func TestParseClientHelloRejectsNonASCII(t *testing.T) {
 // stripping a single trailing dot must not silently leave a dangling dot.)
 func TestParseClientHelloEmptyHostName(t *testing.T) {
 	for _, bad := range []string{".", "api.anthropic.com..", "host.."} {
-		_, err := ParseClientHelloSNI(buildClientHello(bad, false))
+		_, _, err := ParseClientHelloSNI(buildClientHello(bad, false))
 		if err == nil || errors.Is(err, ErrIncomplete) {
 			t.Fatalf("malformed host_name %q: err=%v, want terminal hard error", bad, err)
 		}
@@ -174,7 +271,7 @@ func TestParseClientHelloEmptyHostName(t *testing.T) {
 // cannot make anvil buffer forever by never completing the ClientHello.
 func TestReassemblerRejectsOversized(t *testing.T) {
 	r := &Reassembler{}
-	_, done, err := r.Feed(make([]byte, maxClientHelloBytes+1))
+	_, done, _, err := r.Feed(make([]byte, maxClientHelloBytes+1))
 	if err == nil || done {
 		t.Fatalf("oversized Feed: done=%v err=%v, want error", done, err)
 	}
@@ -186,7 +283,7 @@ func TestReassemblerHardErrorPropagates(t *testing.T) {
 	full := buildClientHello("api.anthropic.com", false)
 	full[0] = 0x17 // application_data, not handshake
 	r := &Reassembler{}
-	_, done, err := r.Feed(full)
+	_, done, _, err := r.Feed(full)
 	if err == nil || done {
 		t.Fatalf("hard error via Feed: done=%v err=%v, want terminal error", done, err)
 	}
@@ -204,7 +301,7 @@ func FuzzParseClientHelloSNI(f *testing.F) {
 	f.Add([]byte{0x16, 0x03, 0x01, 0xff, 0xff})
 	f.Add([]byte{})
 	f.Fuzz(func(t *testing.T, data []byte) {
-		sni, err := ParseClientHelloSNI(data) // must never panic
+		sni, _, err := ParseClientHelloSNI(data) // must never panic
 		if err != nil {
 			return
 		}
