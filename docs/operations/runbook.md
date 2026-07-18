@@ -276,11 +276,20 @@ iptables -j NFQUEUE --help >/dev/null 2>&1 && echo "NFQUEUE target OK"
 ```
 
 복구: `nfnetlink_queue` 커널 모듈을 로드하거나(`modprobe nfnetlink_queue`),
-`allow_sni` 없이 `allow_cidrs`/`allow_hosts`만 쓰는 profile로 전환한다.
+`allow_sni` 없이 `allow_cidrs`만 쓰는 profile로 전환한다(`allow_hosts`는 deprecated —
+아래).
 `profile` egress를 쓰는 모든 host는 NFQUEUE 사용 가능이 baseline 요구다 —
 스케줄러는 아직 별도 capability 축으로 이를 걸러내지 않으므로, `allow_sni`
 profile을 쓰는 tenant는 대상 host 전체가 NFQUEUE를 지원하는지 운영자가
 사전 확인해야 한다.
+
+**`allow_hosts` deprecation(마이그레이션)**: `allow_hosts`(packet substring match)는
+deprecated다 — profile 로드 시 daemon이 런타임 경고를 남기고(`loadEgressProfile`),
+**다음 tagged anvil 릴리즈에서 제거**된다(제거 후 잔존 `allow_hosts` profile은 loud
+fail-closed로 거부, ADR-0002 OQ8). 마이그레이션: 도메인(`api.example.com`) →
+`allow_sni`(exact 또는 `*.` wildcard — 파싱된 ClientHello SNI 강제), 고정 IP/CIDR
+백엔드 → `allow_cidrs`. substring match와 달리 `allow_sni`는 정확 SNI 매치라 부분
+문자열 매치가 없으니 도메인 목록을 명시화한다.
 
 ### (c) verdict 루프 사망 시 :443 차단(fail-closed) 진단
 

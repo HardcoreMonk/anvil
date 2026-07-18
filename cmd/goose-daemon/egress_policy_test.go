@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -205,4 +207,55 @@ func joinCommands(commands []egressCommand) string {
 		lines = append(lines, command.Name+" "+strings.Join(command.Args, " "))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func TestLoadEgressProfileWarnsOnDeprecatedAllowHosts(t *testing.T) {
+	dir := t.TempDir()
+	pd := filepath.Join(dir, "legacy")
+	if err := os.MkdirAll(pd, 0700); err != nil {
+		t.Fatalf("mkdir profile dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pd, "egress.json"),
+		[]byte(`{"allow_hosts": ["api.anthropic.com"]}`), 0600); err != nil {
+		t.Fatalf("write egress profile: %v", err)
+	}
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(old)
+
+	profile, ok, err := loadEgressProfile(dir, "legacy")
+	if err != nil || !ok {
+		t.Fatalf("loadEgressProfile ok=%v err=%v", ok, err)
+	}
+	// Behavior unchanged: allow_hosts is still parsed/applied.
+	if len(profile.AllowHosts) != 1 || profile.AllowHosts[0] != "api.anthropic.com" {
+		t.Fatalf("allow_hosts must still be parsed unchanged, got %+v", profile.AllowHosts)
+	}
+	if out := buf.String(); !strings.Contains(out, "deprecated allow_hosts") || !strings.Contains(out, "allow_sni") {
+		t.Fatalf("expected a deprecation warning naming the allow_sni migration, got: %q", out)
+	}
+}
+
+func TestLoadEgressProfileNoWarnWithoutAllowHosts(t *testing.T) {
+	dir := t.TempDir()
+	pd := filepath.Join(dir, "sni")
+	if err := os.MkdirAll(pd, 0700); err != nil {
+		t.Fatalf("mkdir profile dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pd, "egress.json"),
+		[]byte(`{"allow_sni": ["api.anthropic.com"]}`), 0600); err != nil {
+		t.Fatalf("write egress profile: %v", err)
+	}
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(old)
+
+	if _, ok, err := loadEgressProfile(dir, "sni"); err != nil || !ok {
+		t.Fatalf("loadEgressProfile ok=%v err=%v", ok, err)
+	}
+	if strings.Contains(buf.String(), "deprecated allow_hosts") {
+		t.Fatalf("no allow_hosts warning expected for an allow_sni-only profile, got: %q", buf.String())
+	}
 }

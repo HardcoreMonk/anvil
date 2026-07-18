@@ -548,9 +548,9 @@ daemon으로 보내는 outbound Bearer token이다.
   live dry-run(PR #40 트랙 C)에 이어, DeepWiki(no-auth http)를 붙인 host-b 실 배포 검증까지
   PASS(왕복+경계 3종, 신규 결함 없음).
   [`docs/operations/2026-07-13-mcp-gateway-deployment-verification-run.md`](docs/operations/2026-07-13-mcp-gateway-deployment-verification-run.md).
-- egress SNI 필터 후속(ADR-0002 잔여 위험/설계 한계에서 파생, 미착수):
-  `allow_hosts`(legacy substring) 제거 시점 재검토(OQ8, 고정 런타임 계약
-  표면이라 즉시 제거하지 않음).
+- egress SNI 필터 후속(ADR-0002 잔여 위험/설계 한계에서 파생):
+  `allow_hosts` 제거 시점은 **2026-07-18 deprecation cycle 확정**(release N 런타임
+  경고 추가 + release N+1(다음 tagged anvil 릴리즈) 제거·loud fail-closed — OQ8).
   multi-queue per-VM NFQUEUE는 **2026-07-18 분석 후 YAGNI 확정**(단일 queue 88 +
   connmark fast-path가 새 flow ClientHello만 처리해 병목 아님; 공유 reassembler
   LRU 4096은 신뢰-워크로드 모델·실 스케일에 headroom 충분; 재개 트리거 = untrusted
