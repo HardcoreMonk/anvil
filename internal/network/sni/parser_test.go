@@ -167,6 +167,79 @@ func TestParseHandshakeSNI_TruncatedTrailingExtInvariant(t *testing.T) {
 	}
 }
 
+// buildClientHelloECHThenTruncatedExt builds a wire-valid ClientHello whose
+// extensions block is [encrypted_client_hello (0xfe0d, well-formed), <non-server_name
+// ext whose declared length overruns the block>] with NO server_name. The
+// extensions_len field exactly covers the present bytes (so record/handshake framing
+// is valid and the SNI walk runs), but the second extension's internal length points
+// past the block end — so the SNI walk itself reaches its "truncated extension" error
+// branch (not a pre-extension length guard, and not an early return at server_name,
+// since there is none). The ECH extension precedes the truncation, so scanForECH
+// observes it independently of the walk's failure. Returns a full TLS record.
+func buildClientHelloECHThenTruncatedExt() []byte {
+	ext := &bytes.Buffer{}
+	// Well-formed ECH extension first.
+	binary.Write(ext, binary.BigEndian, uint16(0xfe0d)) // encrypted_client_hello
+	binary.Write(ext, binary.BigEndian, uint16(4))
+	ext.Write([]byte{0x00, 0x01, 0x02, 0x03})
+	// Truncated non-server_name extension: declared length 255, zero body present.
+	binary.Write(ext, binary.BigEndian, uint16(0x1234)) // arbitrary non-ECH, non-server_name type
+	binary.Write(ext, binary.BigEndian, uint16(255))    // overruns the block (no body follows)
+
+	body := &bytes.Buffer{}
+	body.Write([]byte{0x03, 0x03})                          // client_version TLS 1.2
+	body.Write(make([]byte, 32))                            // random
+	body.WriteByte(0x00)                                    // session_id len 0
+	body.Write([]byte{0x00, 0x02, 0x13, 0x01})              // cipher_suites
+	body.Write([]byte{0x01, 0x00})                          // compression
+	binary.Write(body, binary.BigEndian, uint16(ext.Len())) // extensions_len covers present bytes only
+	body.Write(ext.Bytes())
+
+	hs := &bytes.Buffer{}
+	hs.WriteByte(0x01) // handshake type client_hello
+	l := body.Len()
+	hs.Write([]byte{byte(l >> 16), byte(l >> 8), byte(l)}) // uint24 length
+	hs.Write(body.Bytes())
+
+	rec := &bytes.Buffer{}
+	rec.WriteByte(0x16) // content_type handshake
+	rec.Write([]byte{0x03, 0x01})
+	binary.Write(rec, binary.BigEndian, uint16(hs.Len()))
+	rec.Write(hs.Bytes())
+	return rec.Bytes()
+}
+
+func TestParseHandshakeSNI_TruncatedExtInWalkWithECH(t *testing.T) {
+	// The SNI walk itself hits its "truncated extension" error branch (an extension
+	// whose declared length overruns the block, encountered before any server_name),
+	// with an ECH extension present earlier in the block. The error must be the same
+	// terminal (fail-closed) error the pre-ECH parser returned — NOT ErrIncomplete and
+	// NOT ErrNoSNI — and must not leak an SNI. And because scanForECH is a separate
+	// whole-block pass, echPresent must be true even though the walk errors (its value
+	// is discarded by callers on any error path, but this pins that the added ech slot
+	// is threaded through this error branch and reflects the block, not the walk).
+	rec := buildClientHelloECHThenTruncatedExt()
+	name, ech, err := ParseClientHelloSNI(rec)
+	if err == nil {
+		t.Fatalf("expected terminal error from truncated extension, got name=%q nil err", name)
+	}
+	if errors.Is(err, ErrIncomplete) {
+		t.Fatalf("truncated extension must be terminal, not ErrIncomplete: %v", err)
+	}
+	if errors.Is(err, ErrNoSNI) {
+		t.Fatalf("truncated extension must be its own error, not ErrNoSNI: %v", err)
+	}
+	if name != "" {
+		t.Fatalf("no SNI must be returned on truncated extension: got %q", name)
+	}
+	if !strings.Contains(err.Error(), "truncated extension") {
+		t.Fatalf("want 'truncated extension' error (SNI-walk branch), got: %v", err)
+	}
+	if !ech {
+		t.Fatalf("scanForECH must observe the 0xfe0d ext even when the SNI walk errors; got ech=false")
+	}
+}
+
 func TestParseClientHelloSNI(t *testing.T) {
 	sni, _, err := ParseClientHelloSNI(buildClientHello("api.anthropic.com", false))
 	if err != nil || sni != "api.anthropic.com" {
