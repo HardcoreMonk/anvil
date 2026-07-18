@@ -358,12 +358,13 @@ daemon으로 보내는 outbound Bearer token이다.
   [`docs/operations/2026-07-11-home-failover-handoff.md`](docs/operations/2026-07-11-home-failover-handoff.md),
   [`docs/operations/2026-07-11-6b-failover-verification-run.md`](docs/operations/2026-07-11-6b-failover-verification-run.md).
 - `scripts/anvil-mcp-e2e.sh flock`, 전체 KVM `sudo bash e2e_test.sh`, script-only
-  workload runner E2E, cross-host wall relay E2E
-  (`scripts/anvil-cross-host-wall-e2e.sh`), cross-host gtcall relay E2E
+  workload runner E2E, egress SNI 필터 E2E(TCP `scripts/anvil-egress-sni-e2e.sh`,
+  QUIC/UDP:443 `scripts/anvil-quic-sni-e2e.sh` — 2026-07-18 게이트 편입), cross-host
+  wall relay E2E (`scripts/anvil-cross-host-wall-e2e.sh`), cross-host gtcall relay E2E
   (`scripts/anvil-cross-host-gtcall-e2e.sh`), cross-host home failover E2E
   (`scripts/anvil-cross-host-failover-e2e.sh`)가 Goosetown MCP surface, daemon
-  flock lifecycle, deterministic workload, cross-host relay/call/failover 검증
-  경로에 포함된다.
+  flock lifecycle, deterministic workload, egress SNI 필터(TCP+QUIC), cross-host
+  relay/call/failover 검증 경로에 포함된다.
 - cross-host snapshot replication 자동화가 구현됐다. adapter(`RuntimeRouter`)
   reconcile 루프가 매 주기 desired replica factor(**상수 N=2**, 원본+복제 1)
   미달 스냅샷을 discover(probe-reachable daemon `ListSnapshots` add-only union)
@@ -568,8 +569,9 @@ daemon으로 보내는 outbound Bearer token이다.
   **2026-07-16 종결**(PR #71로 `proto=tcp|udp|unknown` label 추가). 3-데이터그램
   kernel 경로 KVM e2e 실증은 **2026-07-17 종결**(PR #76 — 합성 padding ALPN으로
   ClientHello를 3 Initial 데이터그램에 걸쳐 delta=3 실-커널 실증; 이 실행이 PR #71의
-  e2e `read_metric` 회귀를 잡아 동반 수정 — QUIC e2e가 게이트/CI 밖이라 escape,
-  게이트 편입 재검토는 소소한 후속). 3+ 데이터그램 ClientHello 지원은 2026-07-15
+  e2e `read_metric` 회귀를 잡아 동반 수정 — QUIC e2e가 게이트/CI 밖이라 escape했고,
+  이에 **2026-07-18 egress SNI(TCP+QUIC) e2e를 release-checklist KVM 게이트에 편입**).
+  3+ 데이터그램 ClientHello 지원은 2026-07-15
   증명·문서교정으로 종결 — 이미 지원되며 >8192B만 잔여, 주류 클라 미해당.)
 - snapshot storage quota dashboard
 - web svelte 5 runes 전환(선택) — PR #39는 legacy-compat 유지, runes 마이그레이션 미착수
