@@ -237,8 +237,8 @@ const (
 	flockMetaPath          = "/root/.ephemera-flock"
 	systemPromptPath       = "/root/.goose-system-prompt"
 	cpTokenPath            = "/root/.ephemera-cp-token"
-	mcpConfigPath          = "/root/.ephemera-mcp"                // host MCP gateway URL; added as a goose streamable-HTTP extension
-	gooseConfigPath        = "/root/.config/goose/config.yaml"    // provider/model; read to detect reasoning models
+	mcpConfigPath          = "/root/.ephemera-mcp"             // host MCP gateway URL; added as a goose streamable-HTTP extension
+	gooseConfigPath        = "/root/.config/goose/config.yaml" // provider/model; read to detect reasoning models
 	maxWorkspaceFileBytes  = 4 << 20
 	townWallPostTimeout    = 10 * time.Second
 	workloadDirName        = "workloads"

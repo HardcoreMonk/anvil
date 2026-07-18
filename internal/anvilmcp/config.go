@@ -32,16 +32,16 @@ const (
 )
 
 type Config struct {
-	DaemonURL                string        `yaml:"daemon_url"`
-	APIToken                 string        `yaml:"api_token"`
-	DefaultTimeoutSeconds    int           `yaml:"default_timeout_seconds"`
-	SessionStorePath         string        `yaml:"session_store_path"`
-	DefaultTenantID          string        `yaml:"default_tenant_id"`
-	AuditLogPath             string        `yaml:"audit_log_path"`
-	SchedulerStatePath       string        `yaml:"scheduler_state_path"`
-	SchedulerHostsFile       string        `yaml:"scheduler_hosts_file"`
-	SchedulerQuotaStorePath  string        `yaml:"scheduler_quota_store_path"`
-	CrossHostFlockCreateMode string        `yaml:"cross_host_flock_create_mode"`
+	DaemonURL                string `yaml:"daemon_url"`
+	APIToken                 string `yaml:"api_token"`
+	DefaultTimeoutSeconds    int    `yaml:"default_timeout_seconds"`
+	SessionStorePath         string `yaml:"session_store_path"`
+	DefaultTenantID          string `yaml:"default_tenant_id"`
+	AuditLogPath             string `yaml:"audit_log_path"`
+	SchedulerStatePath       string `yaml:"scheduler_state_path"`
+	SchedulerHostsFile       string `yaml:"scheduler_hosts_file"`
+	SchedulerQuotaStorePath  string `yaml:"scheduler_quota_store_path"`
+	CrossHostFlockCreateMode string `yaml:"cross_host_flock_create_mode"`
 	// ReconcileInterval is the raw reconcile-loop interval (time.ParseDuration
 	// format). ReconcileIntervalParsed is the validated value LoadConfig fills:
 	// 60s default when unset, 0 disables the loop entirely.

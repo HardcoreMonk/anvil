@@ -17,6 +17,19 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # Static format gate. Runs after setup-go so it uses the go.mod-pinned
+      # toolchain's gofmt (not the runner default), keeping the canonical format
+      # tied to the same Go version that builds/tests the code.
+      - name: Gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-formatted:"
+            echo "$unformatted"
+            echo "Run: gofmt -w ."
+            exit 1
+          fi
+
       - name: Build
         run: go build ./...
 
