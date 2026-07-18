@@ -550,8 +550,11 @@ daemon으로 보내는 outbound Bearer token이다.
   [`docs/operations/2026-07-13-mcp-gateway-deployment-verification-run.md`](docs/operations/2026-07-13-mcp-gateway-deployment-verification-run.md).
 - egress SNI 필터 후속(ADR-0002 잔여 위험/설계 한계에서 파생, 미착수):
   `allow_hosts`(legacy substring) 제거 시점 재검토(OQ8, 고정 런타임 계약
-  표면이라 즉시 제거하지 않음), multi-queue per-VM NFQUEUE 재검토(현재 단일
-  queue 88 + src-IP 라우팅, TCP/QUIC 공유).
+  표면이라 즉시 제거하지 않음).
+  multi-queue per-VM NFQUEUE는 **2026-07-18 분석 후 YAGNI 확정**(단일 queue 88 +
+  connmark fast-path가 새 flow ClientHello만 처리해 병목 아님; 공유 reassembler
+  LRU 4096은 신뢰-워크로드 모델·실 스케일에 headroom 충분; 재개 트리거 = untrusted
+  multi-tenant at scale, 그땐 per-VM LRU 파티셔닝이 멀티 큐보다 먼저 — ADR-0002 OQ9).
   pre-decision 부분 ClientHello 전달의 hold-then-decide 재설계는 **2026-07-18
   분석 후 YAGNI 확정 기각**: 잔여가 무해(deny 시 부분 ClientHello 바이트만
   서버 도달·핸드셰이크 미완결·exfil 불가·승인 누수 없음)한데, 재설계는 TCP

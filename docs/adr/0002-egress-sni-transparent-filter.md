@@ -201,6 +201,17 @@ verdict 루프를 갖춰야 한다"는 **baseline 요구**로 문서화한다(�
   표기 후 유지**하고 신규 profile은 `allow_sni`로 유도한다. 고정 런타임
   계약 표면(`docs/operations/runbook.md`, `docs/PUBLIC_RELEASE_BOUNDARY.md`)이라
   제거는 별도 결정이 필요하다.
+- **OQ9 (single vs per-VM multi-queue)**: 단일 NFQUEUE(queue 88) + src-IP
+  라우팅을 유지한다(per-VM 멀티 큐 아님). **재검토 결과(2026-07-18): YAGNI.**
+  established flow는 connmark(`0x534e49`) fast-path로 커널이 바로 ACCEPT하므로
+  큐엔 새 flow의 ClientHello 세그먼트만 오고, 신뢰 golden-image 워크로드의 modest한
+  신규 :443 연결은 단일 verdict goroutine으로 여유가 있다(병목 근거 없음).
+  reassembler LRU(`sniReassemblerMaxFlows=4096`, flow `srcIP:sport` 키)는 전 VM이
+  공유하나, 재조립 flow는 첫~완결 세그먼트의 짧은 창에만 슬롯을 점유해 4096 소진엔
+  동시 in-flight 미완결 ClientHello 4096+가 필요하다 — 신뢰 워크로드 위협 모델상
+  out-of-scope이고 실 동시성엔 막대한 headroom이다. 재개 트리거: untrusted
+  multi-tenant at scale. 그 경우에도 per-VM LRU 파티셔닝(단일 큐 유지)이 멀티 큐
+  (per-VM 큐 번호 관리·N dispatch 규칙·bind·cleanup)보다 먼저다.
 
 ### Additive 계약 — CIDR가 SNI보다 상위
 
