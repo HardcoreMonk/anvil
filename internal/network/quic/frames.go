@@ -59,30 +59,31 @@ type InitialReassembler struct {
 
 // Feed decrypts one QUIC Initial datagram, merges its CRYPTO frames into the flow's
 // offset-indexed buffer, and attempts to parse the SNI from the contiguous prefix.
-// Its three-way return is:
-//   - (name, true, nil):   the ClientHello is complete and carried SNI "name".
-//   - ("", false, nil):    more bytes are needed; feed the next Initial datagram.
-//   - ("", false, err):    terminal failure (fail-closed) — the datagram was
+// Its four-way return is:
+//   - (name, true, echObserved, nil): the ClientHello is complete and carried SNI
+//     "name"; echObserved reports whether it also carried an ECH extension.
+//   - ("", false, false, nil):        more bytes are needed; feed the next Initial datagram.
+//   - ("", false, false, err):        terminal failure (fail-closed) — the datagram was
 //     undecryptable/unsupported/non-Initial, a CRYPTO frame was malformed, a
 //     cross-datagram overlap conflicted, the ClientHello carried no SNI, or the
 //     accumulation exceeded maxQuicClientHelloBytes.
 //
 // It never panics: every slice access is bounds-checked and the buffer is capped.
-func (r *InitialReassembler) Feed(datagram []byte) (name string, done bool, err error) {
+func (r *InitialReassembler) Feed(datagram []byte) (name string, done bool, echObserved bool, err error) {
 	payload, err := decryptInitial(datagram)
 	if err != nil {
-		return "", false, err
+		return "", false, false, err
 	}
 	chunks, err := extractCryptoChunks(payload)
 	if err != nil {
-		return "", false, err
+		return "", false, false, err
 	}
 	for _, c := range chunks {
 		end := c.offset + uint64(len(c.data))
 		if end > maxQuicClientHelloBytes {
 			// Reject before growing the buffer, so a bogus high offset cannot force
 			// a large allocation. end >= c.offset, so both fit in int below.
-			return "", false, errOversizeClientHello
+			return "", false, false, errOversizeClientHello
 		}
 		if uint64(len(r.buf)) < end {
 			grow := int(end) - len(r.buf)
@@ -94,7 +95,7 @@ func (r *InitialReassembler) Feed(datagram []byte) (name string, done bool, err 
 			idx := base + k
 			if r.present[idx] {
 				if r.buf[idx] != c.data[k] {
-					return "", false, errInconsistentOverlap
+					return "", false, false, errInconsistentOverlap
 				}
 				continue // idempotent overlap; byte already verified consistent.
 			}
@@ -106,16 +107,16 @@ func (r *InitialReassembler) Feed(datagram []byte) (name string, done bool, err 
 	for r.contiguous < len(r.present) && r.present[r.contiguous] {
 		r.contiguous++
 	}
-	name, perr := sni.ParseHandshakeSNI(r.buf[:r.contiguous])
+	name, ech, perr := sni.ParseHandshakeSNI(r.buf[:r.contiguous])
 	if perr != nil {
 		if errors.Is(perr, sni.ErrIncomplete) {
 			// The ClientHello is not complete yet; wait for the next datagram.
-			return "", false, nil
+			return "", false, false, nil
 		}
 		// ErrNoSNI and any other parse error are terminal (fail-closed).
-		return "", false, fmt.Errorf("quic clienthello: %w", perr)
+		return "", false, false, fmt.Errorf("quic clienthello: %w", perr)
 	}
-	return name, true, nil
+	return name, true, ech, nil
 }
 
 // ParseInitialSNI decrypts one QUIC Initial datagram, reassembles its CRYPTO
@@ -127,7 +128,7 @@ func (r *InitialReassembler) Feed(datagram []byte) (name string, done bool, err 
 // datagram, or a ClientHello with no SNI all return an error. It never panics.
 func ParseInitialSNI(datagram []byte) (string, error) {
 	r := &InitialReassembler{}
-	name, done, err := r.Feed(datagram)
+	name, done, _, err := r.Feed(datagram)
 	if err != nil {
 		return "", err
 	}

@@ -201,3 +201,42 @@ func buildClientHelloHandshake(serverName string) []byte {
 // buildClientHelloHandshakeNoSNI builds a ClientHello handshake with no server_name
 // extension, so ParseInitialSNI must fail closed (no SNI to extract).
 func buildClientHelloHandshakeNoSNI() []byte { return buildClientHelloHandshake("") }
+
+// buildClientHelloHandshakeECH builds a wire-valid record-less ClientHello with a
+// server_name (SNI) extension followed by an encrypted_client_hello (ECH, 0xfe0d)
+// extension. Mirrors buildClientHelloHandshake; the ECH extension lets tests assert
+// InitialReassembler.Feed propagates echObserved through decrypt+reassembly.
+func buildClientHelloHandshakeECH(serverName string) []byte {
+	ext := &bytes.Buffer{}
+	name := []byte(serverName)
+	sn := &bytes.Buffer{}
+	sn.WriteByte(0x00) // name_type = host_name
+	binary.Write(sn, binary.BigEndian, uint16(len(name)))
+	sn.Write(name)
+	list := &bytes.Buffer{}
+	binary.Write(list, binary.BigEndian, uint16(sn.Len()))
+	list.Write(sn.Bytes())
+	binary.Write(ext, binary.BigEndian, uint16(0x0000)) // ext_type server_name
+	binary.Write(ext, binary.BigEndian, uint16(list.Len()))
+	ext.Write(list.Bytes())
+	// ECH extension after server_name (mirrors sni.buildClientHello's ech=true layout).
+	binary.Write(ext, binary.BigEndian, uint16(0xfe0d)) // encrypted_client_hello
+	binary.Write(ext, binary.BigEndian, uint16(4))
+	ext.Write([]byte{0x00, 0x01, 0x02, 0x03})
+
+	body := &bytes.Buffer{}
+	body.Write([]byte{0x03, 0x03})             // client_version TLS 1.2
+	body.Write(make([]byte, 32))               // random
+	body.WriteByte(0x00)                       // session_id len 0
+	body.Write([]byte{0x00, 0x02, 0x13, 0x01}) // cipher_suites
+	body.Write([]byte{0x01, 0x00})             // compression
+	binary.Write(body, binary.BigEndian, uint16(ext.Len()))
+	body.Write(ext.Bytes())
+
+	hs := &bytes.Buffer{}
+	hs.WriteByte(0x01) // handshake type client_hello
+	l := body.Len()
+	hs.Write([]byte{byte(l >> 16), byte(l >> 8), byte(l)}) // uint24 length
+	hs.Write(body.Bytes())
+	return hs.Bytes()
+}

@@ -71,9 +71,10 @@ func (a sniAction) String() string {
 }
 
 type sniDecision struct {
-	Action sniAction
-	SNI    string
-	Reason string
+	Action      sniAction
+	SNI         string
+	Reason      string
+	ECHObserved bool // outer ClientHello carried an ECH extension (0xfe0d). Set on classified decisions; consumed only on allowed flows (Task 2). Never affects Action.
 }
 
 type sniRegistryEntry struct {
@@ -202,11 +203,13 @@ func (l *sniVerdictLoop) decide(srcIP string, payload []byte) sniDecision {
 	if len(payload) == 0 {
 		return sniDecision{Action: sniPassthrough} // handshake packet, let it through unmarked
 	}
-	name, err := sni.ParseClientHelloSNI(payload)
+	name, ech, err := sni.ParseClientHelloSNI(payload)
 	if err != nil {
 		return sniDecision{Action: sniDrop, Reason: "egress_sni_unparsed"} // fail-closed
 	}
-	return l.classifyParsedSNI(entry, name)
+	d := l.classifyParsedSNI(entry, name)
+	d.ECHObserved = ech
+	return d
 }
 
 // decideQUIC is decide's QUIC/UDP:443 counterpart (also unit-tested without
@@ -258,7 +261,7 @@ func (l *sniVerdictLoop) decideQUIC(srcIP string, sport uint16, payload []byte) 
 	}
 	flowKey := srcIP + ":" + strconv.Itoa(int(sport))
 	r := l.reassemblerForQUIC(flowKey)
-	name, done, ferr := r.Feed(payload)
+	name, done, ech, ferr := r.Feed(payload)
 	switch {
 	case ferr != nil:
 		// Terminal parse error (malformed / no-SNI / inconsistent overlap /
@@ -274,7 +277,9 @@ func (l *sniVerdictLoop) decideQUIC(srcIP string, sport uint16, payload []byte) 
 		return sniDecision{Action: sniDrop, Reason: "egress_sni_incomplete"}
 	default:
 		l.evictQUICFlow(flowKey)
-		return l.classifyParsedSNI(entry, name) // shared with TCP: in matcher -> acceptMark, else denied
+		d := l.classifyParsedSNI(entry, name) // shared with TCP: in matcher -> acceptMark, else denied
+		d.ECHObserved = ech
+		return d
 	}
 }
 
@@ -532,7 +537,7 @@ func (l *sniVerdictLoop) Start(ctx context.Context) error {
 
 		flowKey := srcIP + ":" + strconv.Itoa(int(t.sport))
 		r := l.reassemblerFor(flowKey)
-		name, done, ferr := r.Feed(t.payload)
+		name, done, ech, ferr := r.Feed(t.payload)
 		switch {
 		case ferr != nil:
 			// Terminal parse error (malformed / no-SNI / oversized) -> fail closed.
@@ -545,7 +550,9 @@ func (l *sniVerdictLoop) Start(ctx context.Context) error {
 			l.setAccept(nf, id)
 		default:
 			l.evictFlow(flowKey)
-			l.applyVerdict(nf, id, l.classifyParsedSNI(entry, name), t, entry)
+			d := l.classifyParsedSNI(entry, name)
+			d.ECHObserved = ech
+			l.applyVerdict(nf, id, d, t, entry)
 		}
 		return 0
 	}
@@ -690,6 +697,13 @@ func (l *sniVerdictLoop) recordVerdict(entry sniRegistryEntry, d sniDecision, pr
 	switch d.Action {
 	case sniAcceptMark:
 		l.metrics.IncSNIVerdict(proto, "allowed")
+		if d.ECHObserved {
+			// Observation only: the flow is allowed. Surface ECH-on-allowed-flow so
+			// operators can see potential outer-SNI tunneling (ADR-0002 ECH residual).
+			// Content-free beyond proto + the already-allowed outer SNI; never denies.
+			l.metrics.IncSNIECHObserved(proto)
+			slog.Info("egress sni: ech observed on allowed flow", "proto", proto, "sni", d.SNI)
+		}
 	case sniDrop:
 		if d.Reason == "egress_sni_incomplete" {
 			// Fail-closed buffering drop of an incomplete multi-datagram Initial

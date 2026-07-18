@@ -285,10 +285,10 @@ func TestInitialReassembler_TwoDatagrams(t *testing.T) {
 		t.Fatalf("expected 2 datagrams, got %d", len(dgs))
 	}
 	r := &InitialReassembler{}
-	if name, done, err := r.Feed(dgs[0]); err != nil || done || name != "" {
+	if name, done, _, err := r.Feed(dgs[0]); err != nil || done || name != "" {
 		t.Fatalf("Feed(d1) = %q, %v, %v; want \"\", false, nil", name, done, err)
 	}
-	if name, done, err := r.Feed(dgs[1]); err != nil || !done || name != "api.anthropic.com" {
+	if name, done, _, err := r.Feed(dgs[1]); err != nil || !done || name != "api.anthropic.com" {
 		t.Fatalf("Feed(d2) = %q, %v, %v; want api.anthropic.com, true, nil", name, done, err)
 	}
 }
@@ -302,8 +302,9 @@ func TestInitialReassembler_SingleDatagramStillWorks(t *testing.T) {
 	dg := BuildInitialForTest(dcid, 0x00000001, ch)
 
 	r := &InitialReassembler{}
-	if name, done, err := r.Feed(dg); err != nil || !done || name != "cdn.example.com" {
-		t.Fatalf("single Feed = %q, %v, %v; want cdn.example.com, true, nil", name, done, err)
+	name, done, ech, err := r.Feed(dg)
+	if err != nil || !done || name != "cdn.example.com" || ech {
+		t.Fatalf("Feed = %q done=%v ech=%v err=%v; want cdn.example.com,true,false,nil", name, done, ech, err)
 	}
 	if got, err := ParseInitialSNI(dg); err != nil || got != "cdn.example.com" {
 		t.Fatalf("ParseInitialSNI = %q, %v; want cdn.example.com", got, err)
@@ -314,8 +315,25 @@ func TestInitialReassembler_SingleDatagramStillWorks(t *testing.T) {
 		t.Fatalf("splitAt>=len: expected 1 datagram, got %d", len(dgs))
 	}
 	r2 := &InitialReassembler{}
-	if name, done, err := r2.Feed(dgs[0]); err != nil || !done || name != "cdn.example.com" {
+	if name, done, _, err := r2.Feed(dgs[0]); err != nil || !done || name != "cdn.example.com" {
 		t.Fatalf("collapsed single Feed = %q, %v, %v; want cdn.example.com, true, nil", name, done, err)
+	}
+}
+
+// TestInitialReassembler_ECHObserved: a single-datagram Initial whose ClientHello
+// carries an ECH extension: Feed must complete, return the outer SNI, AND report
+// echObserved == true. echObserved rides the same ParseHandshakeSNI return as
+// name, so single-datagram coverage proves propagation; the multi-datagram
+// name/done path is tested above.
+func TestInitialReassembler_ECHObserved(t *testing.T) {
+	dg := BuildInitialForTest(mustHex("8394c8f03e515708"), 0x00000001, buildClientHelloHandshakeECH("cloudflare-ech.com"))
+	r := &InitialReassembler{}
+	name, done, ech, err := r.Feed(dg)
+	if err != nil || !done || name != "cloudflare-ech.com" {
+		t.Fatalf("Feed = %q done=%v err=%v; want cloudflare-ech.com,true,nil", name, done, err)
+	}
+	if !ech {
+		t.Fatalf("echObserved = false, want true")
 	}
 }
 
@@ -326,7 +344,7 @@ func TestInitialReassembler_OversizeTerminal(t *testing.T) {
 	oversize := bytes.Repeat([]byte{0x41}, maxQuicClientHelloBytes+1)
 	dg := buildInitialDatagram(dcid, 0x00000001, 0, oversize, 0)
 	r := &InitialReassembler{}
-	if _, _, err := r.Feed(dg); !errors.Is(err, errOversizeClientHello) {
+	if _, _, _, err := r.Feed(dg); !errors.Is(err, errOversizeClientHello) {
 		t.Fatalf("oversize err = %v, want errOversizeClientHello", err)
 	}
 }
@@ -366,7 +384,7 @@ func TestInitialReassembler_NDatagrams(t *testing.T) {
 			}
 			r := &InitialReassembler{}
 			for i, idx := range tc.order {
-				name, done, err := r.Feed(tc.dgs[idx])
+				name, done, _, err := r.Feed(tc.dgs[idx])
 				if err != nil {
 					t.Fatalf("Feed #%d (datagram %d): unexpected err %v", i, idx, err)
 				}
@@ -400,10 +418,10 @@ func TestInitialReassembler_InconsistentOverlapAcrossDatagrams(t *testing.T) {
 	d2 := buildInitialDatagram(dcid, 0x00000001, 0, conflict, 1)
 
 	r := &InitialReassembler{}
-	if name, done, err := r.Feed(d1); err != nil || done || name != "" {
+	if name, done, _, err := r.Feed(d1); err != nil || done || name != "" {
 		t.Fatalf("Feed(d1) = %q, %v, %v; want passthrough \"\", false, nil", name, done, err)
 	}
-	if _, _, err := r.Feed(d2); !errors.Is(err, errInconsistentOverlap) {
+	if _, _, _, err := r.Feed(d2); !errors.Is(err, errInconsistentOverlap) {
 		t.Fatalf("cross-datagram overlap err = %v, want errInconsistentOverlap", err)
 	}
 }

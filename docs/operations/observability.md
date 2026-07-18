@@ -225,6 +225,12 @@ runtime baseline의 canonical metric namespace는 `ephemera_*`다. anvil 기존 
   egress SNI 필터의 :443 판정. `proto`로 TCP:443과 QUIC/UDP:443을 구분한다(`unknown`은
   proto 분기 이전 no-payload drop 전용). additive label이라 `sum without(proto)(...)`가
   기존 total과 같다 — 단일 outcome series를 그리던 패널은 이제 proto별로 분리된다.
+- `ephemera_egress_sni_ech_observed_total{proto="tcp|udp"}` — egress SNI 필터가
+  **허용한** :443 flow 중 ClientHello가 ECH(`encrypted_client_hello`, `0xfe0d`)를
+  담은 건수. **관측 전용 — flow는 허용되며 deny하지 않는다**(allowlisted outer로
+  암호화 inner를 은닉하는 ECH 잔여위험 가시화; ADR-0002 잔여위험 표). allowed+ECH일
+  때만 증가(denied/non-ECH는 미발화)하므로 `... / ignoring(proto) sum(rate(ephemera_egress_sni_verdict_total{outcome="allowed"}[5m]))`로
+  허용 flow 중 ECH 비율을 낸다. 동반 `slog.Info`(proto+허용 outer SNI)로 어떤 도메인이 ECH를 쓰는지 확인.
 - `ephemera_cleanup_failure_total`
 - `ephemera_auth_failure_total`
 - `ephemera_auth_total{outcome="ok|denied|expired|relay|call"}` — `relay`는

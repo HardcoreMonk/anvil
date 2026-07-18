@@ -71,7 +71,7 @@ func mustHello(t *testing.T, name string) []byte {
 	// encoder mirroring Task 2's buildClientHello (kept local to avoid exporting
 	// test helpers). Implementation copies the byte layout from parser_test.go.
 	b := encodeClientHelloSNI(name) // small local encoder in this _test.go file
-	if got, err := sni.ParseClientHelloSNI(b); err != nil || got != name {
+	if got, _, err := sni.ParseClientHelloSNI(b); err != nil || got != name {
 		t.Fatalf("oracle: built hello for %q parsed as %q err=%v", name, got, err)
 	}
 	return b
@@ -404,4 +404,71 @@ func TestSNIRecordVerdictMetricAlwaysIncrements(t *testing.T) {
 	if !strings.Contains(out, `ephemera_egress_sni_verdict_total{proto="tcp",outcome="allowed"} 1`) {
 		t.Fatalf("expected allowed=1, got:\n%s", out)
 	}
+}
+
+func TestSNIRecordVerdictEmitsECHOnAllowed(t *testing.T) {
+	cp := newMetricsTestCP(t)
+	l := newSNIVerdictLoop(88, "", cp.metrics)
+
+	// allowed + ECH observed -> ech counter fires (and the normal allowed verdict still fires).
+	l.recordVerdict(sniRegistryEntry{VMID: "vm-a", TenantID: "ta"},
+		sniDecision{Action: sniAcceptMark, SNI: "cloudflare-ech.com", ECHObserved: true}, protoTCP)
+
+	rec := httptest.NewRecorder()
+	cp.handleMetrics(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body, _ := io.ReadAll(rec.Body)
+	out := string(body)
+
+	if !strings.Contains(out, `ephemera_egress_sni_ech_observed_total{proto="tcp"} 1`) {
+		t.Fatalf("expected ech counter=1 on allowed+ech, got:\n%s", out)
+	}
+	if !strings.Contains(out, `ephemera_egress_sni_verdict_total{proto="tcp",outcome="allowed"} 1`) {
+		t.Fatalf("verdict must still record allowed=1 (unchanged), got:\n%s", out)
+	}
+}
+
+func TestSNIRecordVerdictNoECHWhenNotObserved(t *testing.T) {
+	cp := newMetricsTestCP(t)
+	l := newSNIVerdictLoop(88, "", cp.metrics)
+
+	// allowed but no ECH -> ech counter absent.
+	l.recordVerdict(sniRegistryEntry{VMID: "vm-b"},
+		sniDecision{Action: sniAcceptMark, SNI: "api.anthropic.com", ECHObserved: false}, protoUDP)
+
+	rec := httptest.NewRecorder()
+	cp.handleMetrics(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body, _ := io.ReadAll(rec.Body)
+	// The counter is always registered, so its # HELP/# TYPE header lines are
+	// present regardless of observations (see internal/metrics/exposition.go
+	// writeCounterVec) — assert on the absence of a data sample line instead of
+	// the bare metric name.
+	if strings.Contains(string(body), `ephemera_egress_sni_ech_observed_total{`) {
+		t.Fatalf("ech counter must be absent when ECH not observed, got:\n%s", string(body))
+	}
+}
+
+func TestSNIRecordVerdictNoECHOnDenied(t *testing.T) {
+	cp := newMetricsTestCP(t)
+	l := newSNIVerdictLoop(88, "", cp.metrics)
+
+	// ECHObserved on a DENIED verdict must NOT emit the ech counter (observation is
+	// for allowed flows only — a denied flow is already blocked and audited).
+	l.recordVerdict(sniRegistryEntry{VMID: "vm-c", TenantID: "tc"},
+		sniDecision{Action: sniDrop, Reason: "egress_sni_denied", SNI: "evil.test", ECHObserved: true}, protoTCP)
+
+	rec := httptest.NewRecorder()
+	cp.handleMetrics(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body, _ := io.ReadAll(rec.Body)
+	// See TestSNIRecordVerdictNoECHWhenNotObserved: HELP/TYPE lines are always
+	// present for a registered counter, so assert on the data sample line.
+	if strings.Contains(string(body), `ephemera_egress_sni_ech_observed_total{`) {
+		t.Fatalf("ech counter must not fire on denied verdict, got:\n%s", string(body))
+	}
+}
+
+func TestSNIRecordVerdictECHNilMetricsSafe(t *testing.T) {
+	l := newSNIVerdictLoop(88, "", nil) // metrics intentionally nil
+	// Must not panic on a nil *daemonMetrics receiver.
+	l.recordVerdict(sniRegistryEntry{VMID: "vm-d", TenantID: "td"},
+		sniDecision{Action: sniAcceptMark, SNI: "ok.test", ECHObserved: true}, protoTCP)
 }

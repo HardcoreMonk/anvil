@@ -15,85 +15,118 @@ var (
 const maxClientHelloBytes = 16384 // TLS record max; bound the reassembly buffer
 
 // ParseClientHelloSNI parses reassembled TLS record bytes and returns the
-// lowercased server_name. ErrIncomplete means the caller should feed more bytes;
-// any other error (including ErrNoSNI) is terminal and the caller must fail closed.
-func ParseClientHelloSNI(b []byte) (string, error) {
+// lowercased server_name plus whether an ECH extension was present (best-effort;
+// echPresent is only meaningful when err == nil). ErrIncomplete means the caller
+// should feed more bytes; any other error (including ErrNoSNI) is terminal and
+// the caller must fail closed.
+func ParseClientHelloSNI(b []byte) (string, bool, error) {
 	// TLS record header: type(1) version(2) length(2)
 	if len(b) < 5 {
-		return "", ErrIncomplete
+		return "", false, ErrIncomplete
 	}
 	if b[0] != 0x16 {
-		return "", fmt.Errorf("not a handshake record (type 0x%02x)", b[0])
+		return "", false, fmt.Errorf("not a handshake record (type 0x%02x)", b[0])
 	}
 	recLen := int(binary.BigEndian.Uint16(b[3:5]))
 	if len(b) < 5+recLen {
-		return "", ErrIncomplete
+		return "", false, ErrIncomplete
 	}
 	return ParseHandshakeSNI(b[5 : 5+recLen])
 }
 
+// scanForECH reports whether the extensions block contains an
+// encrypted_client_hello extension (ECH, type 0xfe0d). It is deliberately
+// best-effort and SEPARATE from the authoritative SNI walk in ParseHandshakeSNI:
+// it never returns an error and never influences the parsed SNI or any
+// fail-closed error condition. A truncated trailing extension simply stops the
+// scan (reporting whatever it found so far) instead of being flagged malformed —
+// ECH observation must never turn a currently-parseable ClientHello into a parse
+// error. Unlike the SNI walk it scans the WHOLE block (no early return at
+// server_name), so it detects ECH whether it appears before or after server_name.
+func scanForECH(ext []byte) bool {
+	for len(ext) >= 4 {
+		etype := binary.BigEndian.Uint16(ext[0:2])
+		elen := int(binary.BigEndian.Uint16(ext[2:4]))
+		if etype == 0xfe0d { // encrypted_client_hello
+			return true
+		}
+		if len(ext) < 4+elen {
+			return false // truncated trailing extension: best-effort stop, no error
+		}
+		ext = ext[4+elen:]
+	}
+	return false
+}
+
 // ParseHandshakeSNI parses a TLS handshake message (starting at the ClientHello
-// handshake header, msg_type 0x01) and returns the lowercased server_name.
+// handshake header, msg_type 0x01) and returns the lowercased server_name and
+// whether the ClientHello carried an ECH extension (best-effort; see scanForECH).
 // QUIC carries the handshake directly in CRYPTO frames (no TLS record), so the
 // QUIC path calls this after reassembly; ParseClientHelloSNI calls it after
 // stripping the TLS record layer. ErrIncomplete = need more bytes; ErrNoSNI and
-// other errors are terminal.
-func ParseHandshakeSNI(hs []byte) (string, error) {
+// other errors are terminal. echPresent is only meaningful when err == nil.
+func ParseHandshakeSNI(hs []byte) (string, bool, error) {
 	// Handshake header: msg_type(1) length(3)
 	if len(hs) < 4 {
-		return "", ErrIncomplete
+		return "", false, ErrIncomplete
 	}
 	if hs[0] != 0x01 {
-		return "", fmt.Errorf("not a client_hello (msg_type 0x%02x)", hs[0])
+		return "", false, fmt.Errorf("not a client_hello (msg_type 0x%02x)", hs[0])
 	}
 	hsLen := int(hs[1])<<16 | int(hs[2])<<8 | int(hs[3])
 	body := hs[4:]
 	if len(body) < hsLen {
-		return "", ErrIncomplete
+		return "", false, ErrIncomplete
 	}
 	body = body[:hsLen]
 
 	// client_version(2) random(32) then variable fields.
 	p := 2 + 32
 	if len(body) < p+1 {
-		return "", fmt.Errorf("clienthello truncated before session_id")
+		return "", false, fmt.Errorf("clienthello truncated before session_id")
 	}
 	sidLen := int(body[p])
 	p += 1 + sidLen
 	if len(body) < p+2 {
-		return "", fmt.Errorf("clienthello truncated before cipher_suites")
+		return "", false, fmt.Errorf("clienthello truncated before cipher_suites")
 	}
 	csLen := int(binary.BigEndian.Uint16(body[p:]))
 	p += 2 + csLen
 	if len(body) < p+1 {
-		return "", fmt.Errorf("clienthello truncated before compression")
+		return "", false, fmt.Errorf("clienthello truncated before compression")
 	}
 	compLen := int(body[p])
 	p += 1 + compLen
 	if len(body) < p+2 {
-		// No extensions at all -> no SNI.
-		return "", ErrNoSNI
+		// No extensions at all -> no SNI (and no ECH).
+		return "", false, ErrNoSNI
 	}
 	extTotal := int(binary.BigEndian.Uint16(body[p:]))
 	p += 2
 	if len(body) < p+extTotal {
-		return "", fmt.Errorf("clienthello truncated extensions")
+		return "", false, fmt.Errorf("clienthello truncated extensions")
 	}
 	ext := body[p : p+extTotal]
+
+	// Best-effort ECH observation over the whole extensions block, computed
+	// independently of the authoritative SNI walk below so the returned SNI and
+	// every fail-closed error condition stay identical to the pre-ECH parser.
+	ech := scanForECH(ext)
 
 	for len(ext) >= 4 {
 		etype := binary.BigEndian.Uint16(ext[0:2])
 		elen := int(binary.BigEndian.Uint16(ext[2:4]))
 		if len(ext) < 4+elen {
-			return "", fmt.Errorf("truncated extension 0x%04x", etype)
+			return "", ech, fmt.Errorf("truncated extension 0x%04x", etype)
 		}
 		data := ext[4 : 4+elen]
 		if etype == 0x0000 { // server_name
-			return parseServerName(data)
+			name, err := parseServerName(data)
+			return name, ech, err
 		}
 		ext = ext[4+elen:]
 	}
-	return "", ErrNoSNI
+	return "", ech, ErrNoSNI
 }
 
 func parseServerName(data []byte) (string, error) {
@@ -155,21 +188,23 @@ func normalizeServerName(raw []byte) (string, error) {
 // Reassembler accumulates TCP payload segments until a full ClientHello parses.
 type Reassembler struct{ buf []byte }
 
-// Feed appends segment and re-attempts a parse. It returns (sni, true, nil) once
-// a full ClientHello is parsed, ("", false, nil) when more bytes are needed, and
-// ("", false, err) on any terminal error (malformed, no-SNI, or the buffer bound
-// being exceeded) — which the caller must treat as fail-closed.
-func (r *Reassembler) Feed(segment []byte) (string, bool, error) {
+// Feed appends segment and re-attempts a parse. It returns (sni, true,
+// echObserved, nil) once a full ClientHello is parsed, ("", false, false, nil)
+// when more bytes are needed, and ("", false, false, err) on any terminal error
+// (malformed, no-SNI, or the buffer bound being exceeded) — which the caller must
+// treat as fail-closed. echObserved reports whether the completed ClientHello
+// carried an ECH extension; it is false unless done is true.
+func (r *Reassembler) Feed(segment []byte) (string, bool, bool, error) {
 	if len(r.buf)+len(segment) > maxClientHelloBytes {
-		return "", false, fmt.Errorf("clienthello exceeds %d bytes", maxClientHelloBytes)
+		return "", false, false, fmt.Errorf("clienthello exceeds %d bytes", maxClientHelloBytes)
 	}
 	r.buf = append(r.buf, segment...)
-	sni, err := ParseClientHelloSNI(r.buf)
+	sni, ech, err := ParseClientHelloSNI(r.buf)
 	if errors.Is(err, ErrIncomplete) {
-		return "", false, nil
+		return "", false, false, nil
 	}
 	if err != nil {
-		return "", false, err
+		return "", false, false, err
 	}
-	return sni, true, nil
+	return sni, true, ech, nil
 }
