@@ -197,10 +197,13 @@ verdict 루프를 갖춰야 한다"는 **baseline 요구**로 문서화한다(�
 - **OQ7 (ECH fallback)**: ECH 엔드포인트에 outer-SNI allowlist를 허용하지
   않는다 — **CIDR fallback만** 명시 opt-in으로 허용한다. outer SNI는 신뢰가
   약하다는 판단.
-- **OQ8 (`allow_hosts` 폐기 시점)**: 즉시 제거하지 않는다. **deprecated
-  표기 후 유지**하고 신규 profile은 `allow_sni`로 유도한다. 고정 런타임
-  계약 표면(`docs/operations/runbook.md`, `docs/PUBLIC_RELEASE_BOUNDARY.md`)이라
-  제거는 별도 결정이 필요하다.
+- **OQ8 (`allow_hosts` 폐기 시점)**: **deprecation cycle 확정(2026-07-18).**
+  release N(지금): profile 로드 시 daemon이 런타임 deprecation 경고를 남긴다
+  (`loadEgressProfile` — 그동안 deprecation은 문서에만 있었다). release N+1(다음
+  tagged anvil 릴리즈): 필드·apply·validate·cleanup·test 제거 + `egressProfile`
+  unmarshal에 `DisallowUnknownFields`(또는 명시 거부)로 잔존 `allow_hosts` profile을
+  loud fail-closed 거부(조용한 drop 방지). 마이그레이션: 도메인 → `allow_sni`,
+  IP → `allow_cidrs`(`docs/operations/runbook.md`).
 - **OQ9 (single vs per-VM multi-queue)**: 단일 NFQUEUE(queue 88) + src-IP
   라우팅을 유지한다(per-VM 멀티 큐 아님). **재검토 결과(2026-07-18): YAGNI.**
   established flow는 connmark(`0x534e49`) fast-path로 커널이 바로 ACCEPT하므로
