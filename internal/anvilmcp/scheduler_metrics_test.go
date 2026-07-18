@@ -201,7 +201,7 @@ func TestRenderSchedulerMetricsIncludesSnapshotReplicationMetrics(t *testing.T) 
 	state := PlacementStoreState{
 		SnapshotReplicationMetrics: SnapshotReplicationMetricsState{
 			AttemptsByOutcomeReason: map[string]int64{
-				snapshotReplicationAttemptKey(SnapshotReplicationOutcomeReplicated, SnapshotReplicationReasonScheduled):        3,
+				snapshotReplicationAttemptKey(SnapshotReplicationOutcomeReplicated, SnapshotReplicationReasonScheduled):         3,
 				snapshotReplicationAttemptKey(SnapshotReplicationOutcomeDialFailed, SnapshotReplicationReasonTargetUnreachable): 2,
 				"tenant-1|http://host-a:3000": 5, // junk key must be normalized, not leaked
 			},
