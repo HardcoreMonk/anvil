@@ -526,3 +526,41 @@ func schedulerServiceListHosts(t *testing.T, service *SchedulerService) []Runtim
 	}
 	return hosts
 }
+
+func TestSchedulerHandleMetrics_IncludesQuota(t *testing.T) {
+	// Seed a disk-backed quota store, then Save() — handleMetrics reloads from disk
+	// (the daemon writes this file out-of-process), so the metrics must reflect it.
+	dir := t.TempDir()
+	q := NewQuotaStore(filepath.Join(dir, "quota.json"))
+	if err := q.SetTenantQuota("tenant.alpha", TenantQuota{SnapshotBytes: 100}); err != nil {
+		t.Fatalf("SetTenantQuota: %v", err)
+	}
+	if err := q.UpdateTenantUsage("tenant.alpha", TenantUsage{SnapshotBytes: 95}); err != nil {
+		t.Fatalf("UpdateTenantUsage: %v", err)
+	}
+	if err := q.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	svc := NewSchedulerService(SchedulerServiceOptions{QuotaStore: q})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	svc.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	wantLines := []string{
+		`anvil_scheduler_quota_usage_total{resource="snapshot_bytes"} 95`,
+		`anvil_scheduler_quota_limit_total{resource="snapshot_bytes"} 100`,
+		`anvil_scheduler_quota_tenants_near{resource="snapshot_bytes"} 1`,
+		"anvil_scheduler_quota_tenants_total 1",
+		"anvil_scheduler_control_loop_running", // existing scheduler metric still present
+	}
+	for _, w := range wantLines {
+		if !strings.Contains(body, w) {
+			t.Errorf("missing line %q in:\n%s", w, body)
+		}
+	}
+}

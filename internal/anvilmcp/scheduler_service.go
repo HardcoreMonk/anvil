@@ -72,8 +72,10 @@ func (s *SchedulerService) handleMetrics(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	_ = s.placements.Load()
+	_ = s.quotas.Load() // reload: the daemon writes the quota store out-of-process.
 	w.Header().Set("Content-Type", schedulerMetricsContentType)
 	_, _ = w.Write([]byte(RenderSchedulerMetrics(s.placements.State())))
+	_, _ = w.Write([]byte(RenderQuotaMetrics(s.quotas.QuotaAggregate())))
 }
 
 func (s *SchedulerService) handleHosts(w http.ResponseWriter, r *http.Request) {
