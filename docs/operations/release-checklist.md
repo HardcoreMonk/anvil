@@ -92,6 +92,8 @@ bash -n e2e_test.sh
 bash -n scripts/anvil-mcp-e2e.sh
 bash -n scripts/anvil-scheduler-smoke.sh
 bash -n scripts/vm-workload-e2e.sh
+bash -n scripts/anvil-egress-sni-e2e.sh
+bash -n scripts/anvil-quic-sni-e2e.sh
 bash -n scripts/anvil-cross-host-wall-e2e.sh
 ```
 
@@ -109,6 +111,15 @@ Go HTTP server 기동, VM 내부 benchmark, host-to-VM probe를 확인한다. �
 `summary.json`, `nginx-run.json`, `go-http-run.json`, `nginx.log`, `go-http.log`,
 `bench.txt`, `host-bench.txt`를 포함해야 하며 provider token, API key,
 control-plane token, agent token을 포함하지 않아야 한다.
+
+egress SNI 필터(`allow_sni`)를 포함하는 release candidate에서는 KVM host에서 TCP
+`sudo bash scripts/anvil-egress-sni-e2e.sh`와 QUIC/UDP:443
+`sudo bash scripts/anvil-quic-sni-e2e.sh`를 확인한다(2026-07-18 게이트 편입 — 이전엔
+게이트 밖이라 PR #71 proto-label 변경이 e2e `read_metric`을 깨뜨린 회귀가 escape했다).
+두 e2e는 실제 외부 도메인(cloudflare.com allow / www.google.com deny)에 실 QUIC/TLS
+핸드셰이크를 하므로, 실패 시 필터 회귀와 외부망 불가용(도메인·QUIC egress 도달성)을
+구분한다. QUIC e2e는 quic-go 프로브를 호스트에서 빌드해 게스트에 주입하므로 호스트에
+Go 툴체인 + 모듈 fetch가 필요하다.
 
 scheduler production automation을 포함하는 release candidate에서는 systemd host에서
 다음 검증을 수행한다. `--verify`는 host에 `curl`, `python3`가 있어야 실행된다.
