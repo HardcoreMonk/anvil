@@ -38,6 +38,7 @@ type daemonMetrics struct {
 	authTotal         *metrics.CounterVec // outcome=ok|denied|expired (v0.4.1)
 	mcpToolCalls      *metrics.CounterVec // server, outcome=ok|fail|forbidden|rate_limited (v0.6.0)
 	sniVerdictTotal   *metrics.CounterVec // proto=tcp|udp|unknown, outcome=allowed|denied|dropped (egress SNI filter)
+	sniECHObserved    *metrics.CounterVec // proto=tcp|udp — allowed flows whose ClientHello carried an ECH extension (0xfe0d)
 
 	// Histograms (seconds).
 	vmSpawnDuration         *metrics.Histogram
@@ -118,6 +119,11 @@ func newDaemonMetrics(cp *ControlPlane) *daemonMetrics {
 			"ephemera_egress_sni_verdict_total",
 			"Total :443 SNI verdicts by proto (tcp|udp|unknown) and outcome (allowed|denied|dropped; dropped = pre-classify infra fail-closed; unknown proto = no-payload drop before the tcp/udp branch).",
 			"proto", "outcome",
+		),
+		sniECHObserved: r.NewCounterVec(
+			"ephemera_egress_sni_ech_observed_total",
+			"Total :443 flows ALLOWED by the SNI filter whose ClientHello also carried an ECH extension (encrypted_client_hello, 0xfe0d), by proto (tcp|udp). Observation only — the flow is allowed; this never denies. Surfaces ECH usage / potential outer-SNI tunneling on allowed flows.",
+			"proto",
 		),
 
 		vmSpawnDuration: r.NewHistogram(
@@ -241,6 +247,20 @@ func (m *daemonMetrics) IncSNIVerdict(proto, outcome string) {
 	}
 	if m.sniVerdictTotal != nil {
 		m.sniVerdictTotal.WithLabelValues(proto, outcome).Inc()
+	}
+}
+
+// IncSNIECHObserved records one ALLOWED :443 flow whose ClientHello carried an
+// ECH extension, by proto (tcp|udp). It is a pure observation counter — the flow
+// was allowed by the SNI matcher; this never influences the verdict. Content-free
+// (proto only, never SNI/VMID/tenant), so like IncSNIVerdict it carries no
+// redaction risk and is never gated on the audit write. Nil-safe.
+func (m *daemonMetrics) IncSNIECHObserved(proto string) {
+	if m == nil {
+		return
+	}
+	if m.sniECHObserved != nil {
+		m.sniECHObserved.WithLabelValues(proto).Inc()
 	}
 }
 

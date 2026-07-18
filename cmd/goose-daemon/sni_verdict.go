@@ -697,6 +697,13 @@ func (l *sniVerdictLoop) recordVerdict(entry sniRegistryEntry, d sniDecision, pr
 	switch d.Action {
 	case sniAcceptMark:
 		l.metrics.IncSNIVerdict(proto, "allowed")
+		if d.ECHObserved {
+			// Observation only: the flow is allowed. Surface ECH-on-allowed-flow so
+			// operators can see potential outer-SNI tunneling (ADR-0002 ECH residual).
+			// Content-free beyond proto + the already-allowed outer SNI; never denies.
+			l.metrics.IncSNIECHObserved(proto)
+			slog.Info("egress sni: ech observed on allowed flow", "proto", proto, "sni", d.SNI)
+		}
 	case sniDrop:
 		if d.Reason == "egress_sni_incomplete" {
 			// Fail-closed buffering drop of an incomplete multi-datagram Initial

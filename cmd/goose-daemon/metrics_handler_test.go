@@ -172,3 +172,31 @@ func TestMetrics_IncSNIVerdictNilMetricsSafe(t *testing.T) {
 	var m *daemonMetrics
 	m.IncSNIVerdict(protoTCP, "allowed") // must not panic on nil receiver
 }
+
+func TestMetrics_HandlerExposesSNIECHObserved(t *testing.T) {
+	cp := newMetricsTestCP(t)
+	cp.metrics.IncSNIECHObserved(protoTCP)
+	cp.metrics.IncSNIECHObserved(protoTCP)
+	cp.metrics.IncSNIECHObserved(protoUDP)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	cp.handleMetrics(rec, req)
+	body, _ := io.ReadAll(rec.Body)
+	out := string(body)
+
+	wantLines := []string{
+		`ephemera_egress_sni_ech_observed_total{proto="tcp"} 2`,
+		`ephemera_egress_sni_ech_observed_total{proto="udp"} 1`,
+	}
+	for _, w := range wantLines {
+		if !strings.Contains(out, w) {
+			t.Errorf("missing line %q in:\n%s", w, out)
+		}
+	}
+}
+
+func TestMetrics_IncSNIECHObservedNilMetricsSafe(t *testing.T) {
+	var m *daemonMetrics
+	m.IncSNIECHObserved(protoTCP) // must not panic on nil receiver
+}
