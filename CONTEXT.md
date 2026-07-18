@@ -550,9 +550,13 @@ daemon으로 보내는 outbound Bearer token이다.
 - egress SNI 필터 후속(ADR-0002 잔여 위험/설계 한계에서 파생, 미착수):
   `allow_hosts`(legacy substring) 제거 시점 재검토(OQ8, 고정 런타임 계약
   표면이라 즉시 제거하지 않음), multi-queue per-VM NFQUEUE 재검토(현재 단일
-  queue 88 + src-IP 라우팅, TCP/QUIC 공유), pre-decision 부분 ClientHello 전달의
-  hold-then-decide 재설계(TCP 세그먼트 전달에 한정된 수용된 잔여 위험 —
-  승인 누수는 아니지만 완전 봉쇄에는 필요, YAGNI로 v1 미채택).
+  queue 88 + src-IP 라우팅, TCP/QUIC 공유).
+  pre-decision 부분 ClientHello 전달의 hold-then-decide 재설계는 **2026-07-18
+  분석 후 YAGNI 확정 기각**: 잔여가 무해(deny 시 부분 ClientHello 바이트만
+  서버 도달·핸드셰이크 미완결·exfil 불가·승인 누수 없음)한데, 재설계는 TCP
+  reassembler를 seq-offset 인지(중복 dedup)로 재작성 + 모든 멀티-세그먼트(PQ)
+  TCP 핸드셰이크에 +1 RTO 지연을 요구하고 QUIC의 connmark race 같은 강제 요인도
+  없다(순수 비용). 상세·근거는 ADR-0002 잔여위험 표.
   ECH inner 재확인 완료(2026-07-16): 파서는 outer(공개) SNI만 관측 —
   allowlisted outer/공개 이름 ECH는 flow 허용+inner 은닉(guest-asserted SNI
   동일 신뢰등급, CIDR 핀이 유일 완화; ADR-0002 잔여위험 행 정밀화). 신규
