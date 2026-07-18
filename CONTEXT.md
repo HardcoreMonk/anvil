@@ -563,9 +563,14 @@ daemon으로 보내는 outbound Bearer token이다.
   없다(순수 비용). 상세·근거는 ADR-0002 잔여위험 표.
   ECH inner 재확인 완료(2026-07-16): 파서는 outer(공개) SNI만 관측 —
   allowlisted outer/공개 이름 ECH는 flow 허용+inner 은닉(guest-asserted SNI
-  동일 신뢰등급, CIDR 핀이 유일 완화; ADR-0002 잔여위험 행 정밀화). 신규
-  follow-up: ECH 확장(`0xfe0d`) 탐지+fail-closed deny 하드닝(allowlisted CDN의
-  정상 ECH도 차단하는 트레이드오프, 별도 결정).
+  동일 신뢰등급, CIDR 핀이 유일 완화; ADR-0002 잔여위험 행 정밀화).
+  ~~ECH 확장 탐지+deny 하드닝~~ — **2026-07-18 관측성으로 종결**(brainstorming
+  후 blanket ECH-deny 기각: 신뢰-워크로드 모델상 net-negative — 정상 ECH 파손 ·
+  모델 밖 위협 · 불완전). 대신 파서가 `0xfe0d`를 best-effort 탐지(SNI 파싱 의미
+  불변)해 allowed+ECH flow에서 `ephemera_egress_sni_ech_observed_total{proto}`
+  metric + content-free `slog.Info`를 방출한다(verdict 불변, deny 안 함).
+  spec `docs/superpowers/specs/2026-07-18-ech-observability-design.md`,
+  plan `docs/superpowers/plans/2026-07-18-ech-observability.md`.
   ~~QUIC/UDP:443 SNI 파싱~~ — **DONE(2026-07-14)**, 위 항목 참조. QUIC
   확장이 새로 남긴 후속: 새 QUIC 버전(v1/v2 외) salt/label 추가.
   (TCP/UDP proto별 `ephemera_egress_sni_verdict_total` metric label 분리는
