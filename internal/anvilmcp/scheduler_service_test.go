@@ -541,6 +541,13 @@ func TestSchedulerHandleMetrics_IncludesQuota(t *testing.T) {
 	if err := q.Save(); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
+	// Diverge the IN-MEMORY store from the saved file WITHOUT saving: 95 -> 155
+	// (over the 100 limit) in memory only. handleMetrics must Load() the SAVED file
+	// so the metrics show 95 / near=1 / over=0 — not the in-memory 155 / near=0 / over=1.
+	// This regression-protects the freshness Load(): remove it and these assertions fail.
+	if err := q.UpdateTenantUsage("tenant.alpha", TenantUsage{SnapshotBytes: 60}); err != nil {
+		t.Fatalf("UpdateTenantUsage (in-memory divergence): %v", err)
+	}
 
 	svc := NewSchedulerService(SchedulerServiceOptions{QuotaStore: q})
 	rec := httptest.NewRecorder()
@@ -555,6 +562,7 @@ func TestSchedulerHandleMetrics_IncludesQuota(t *testing.T) {
 		`anvil_scheduler_quota_usage_total{resource="snapshot_bytes"} 95`,
 		`anvil_scheduler_quota_limit_total{resource="snapshot_bytes"} 100`,
 		`anvil_scheduler_quota_tenants_near{resource="snapshot_bytes"} 1`,
+		`anvil_scheduler_quota_tenants_over{resource="snapshot_bytes"} 0`,
 		"anvil_scheduler_quota_tenants_total 1",
 		"anvil_scheduler_control_loop_running", // existing scheduler metric still present
 	}
