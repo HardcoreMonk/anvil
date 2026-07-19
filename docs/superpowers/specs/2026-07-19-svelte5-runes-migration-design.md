@@ -6,7 +6,7 @@
 
 ## 목표
 
-anvil operator Web UI의 **legacy Svelte 4 반응성을 Svelte 5 runes로 전환**한다 — 범위는 **core runes**(`$props`/`$derived`/`$effect`/`$bindable`). behavior-preserving 리팩터이며, 신규 `svelte-check` 게이트 + 수동 `/ui` 스모크로 검증한다.
+anvil operator Web UI의 **legacy Svelte 4 반응성을 Svelte 5 runes로 전환**한다 — 범위는 **core runes**(`$props`/`$state`/`$derived`/`$effect`/`$bindable`). behavior-preserving 리팩터이며, 신규 `svelte-check` 게이트 + 수동 `/ui` 스모크로 검증한다.
 
 ## 배경
 
@@ -40,7 +40,8 @@ SystemPromptModal, TaskPanel, VMDetail, WatchdogPanel
    - (svelte-check가 non-bindable prop 바인딩을 에러로 잡으므로 누락은 게이트에서 검출된다.)
 3. `$: x = expr`(derived, 10건) → `let x = $derived(expr)`.
 4. `$:` side-effect(1건, `ModelPicker.svelte:19` `$: if (value && models.includes(value)) custom = false`) → `$effect(() => { if (value && models.includes(value)) custom = false })`. **개별 리뷰**: effect는 렌더 후 실행되고 effect 내 state 변경이 재렌더를 유발하므로, 이 케이스가 `$effect`로 정확히 보존되는지 확인하고(필요 시 파생/이벤트 기반으로 재구성) 무한 루프가 없음을 확인한다.
-5. **불변**: `$store` 자동구독(`$auth`/`$view`), `on:` 디렉티브, `createEventDispatcher`, 모든 템플릿 구문(`{#if}`/`{#each}`/`{expr}`) 그대로 둔다.
+5. **local reactive state → `$state`** (intrinsic to runes mode): legacy 모드는 최상위 `let x`를 전부 반응형으로 만들지만 **runes 모드는 그렇지 않다** — 재할당되고 템플릿/derived에서 읽히는 지역 `let`은 `let x = $state(init)`로 전환해야 반응성이 보존된다(예: `ModelPicker`의 `let custom`). 누락 시 Svelte 컴파일러가 `non_reactive_update` 경고로 해당 변수를 지목하므로, **svelte-check 게이트(경고=실패)가 컴포넌트별 완전성을 기계적으로 보장**한다. 순수 상수(`const`)나 이벤트 핸들러 함수는 대상 아님.
+6. **불변**: `$store` 자동구독(`$auth`/`$view`), `on:` 디렉티브, `createEventDispatcher`, 모든 템플릿 구문(`{#if}`/`{#each}`/`{expr}`) 그대로 둔다.
 
 ### `$:` 인벤토리 (전건, 파생/이펙트 판정)
 
