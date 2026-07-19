@@ -8,28 +8,26 @@
   import BuiltinPicker from './BuiltinPicker.svelte'
 
   // Available providers only: [{ id, label, default_model, suggested_models }].
-  export let providers = []
   // VM sizing presets from GET /config/presets: [{ id, label, vcpu_count, mem_size_mib }].
-  export let presets = []
   // Builtin extension registry from GET /config/builtins: [{ id, label, description, default }].
-  export let builtins = []
+  let { providers = [], presets = [], builtins = [] } = $props()
 
   const dispatch = createEventDispatcher()
 
-  let name = ''
-  let provider = providers.length ? providers[0].id : ''
-  let model = providers.length ? providers[0].default_model : ''
-  let vcpu = 1
-  let mem = 1024
+  let name = $state('')
+  let provider = $state(providers.length ? providers[0].id : '')
+  let model = $state(providers.length ? providers[0].default_model : '')
+  let vcpu = $state(1)
+  let mem = $state(1024)
   // Pre-select the registry defaults (currently "developer"), all removable.
-  let selectedBuiltins = builtins.filter((b) => b.default).map((b) => b.id)
-  let busy = false
+  let selectedBuiltins = $state(builtins.filter((b) => b.default).map((b) => b.id))
+  let busy = $state(false)
 
   // Suggested models track the selected provider.
-  $: suggested = (providers.find((p) => p.id === provider) || {}).suggested_models || []
+  let suggested = $derived((providers.find((p) => p.id === provider) || {}).suggested_models || [])
 
   // The preset whose sizing matches the current vcpu/mem, or null for a custom mix.
-  $: activePreset = presets.find((p) => p.vcpu_count === vcpu && p.mem_size_mib === mem) || null
+  let activePreset = $derived(presets.find((p) => p.vcpu_count === vcpu && p.mem_size_mib === mem) || null)
 
   // Apply a preset's sizing to the form. Users may still fine-tune the fields after.
   function applyPreset(p) {

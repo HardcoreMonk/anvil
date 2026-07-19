@@ -10,23 +10,23 @@
   import BroadcastModal from './BroadcastModal.svelte'
   import SendTaskModal from './SendTaskModal.svelte'
 
-  export let flock // selected from the list; refetched for live state
+  let { flock } = $props() // selected from the list; refetched for live state
 
-  let detail = flock
+  let detail = $state(flock)
   const flockId = flock.flock_id
   let timer = null
-  let busyAction = false // pause/resume/remove/restart/delete in flight
+  let busyAction = $state(false) // pause/resume/remove/restart/delete in flight
 
-  let showAddAgent = false
-  let showBroadcast = false
-  let changeRoleTarget = null
-  let sendTaskTarget = null // agent the Send-task modal targets
-  let confirmingRemove = null // agent pending remove
-  let confirmingRestart = null // agent pending restart
-  let confirmingDelete = false
+  let showAddAgent = $state(false)
+  let showBroadcast = $state(false)
+  let changeRoleTarget = $state(null)
+  let sendTaskTarget = $state(null) // agent the Send-task modal targets
+  let confirmingRemove = $state(null) // agent pending remove
+  let confirmingRestart = $state(null) // agent pending restart
+  let confirmingDelete = $state(false)
 
   // agents is a map agent_id → AgentInfo on GET responses (Flock.MarshalJSON).
-  $: agents = detail && detail.agents ? Object.values(detail.agents) : []
+  let agents = $derived(detail && detail.agents ? Object.values(detail.agents) : [])
 
   async function refreshDetail() {
     try {

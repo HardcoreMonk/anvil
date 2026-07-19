@@ -6,14 +6,14 @@
   import { toast } from '../lib/store.js'
 
   // The single agent to dispatch a one-shot task to (from a FlockDetail row).
-  export let agent // { agent_id, vm_id, role }
+  let { agent } = $props() // { agent_id, vm_id, role }
 
   const dispatch = createEventDispatcher()
 
-  let body = ''
-  let busy = false
+  let body = $state('')
+  let busy = $state(false)
   let controller = null
-  let result = null // { status: 'ok'|'busy'|'error', output, error }
+  let result = $state(null) // { status: 'ok'|'busy'|'error', output, error }
 
   async function send() {
     if (!body.trim()) {

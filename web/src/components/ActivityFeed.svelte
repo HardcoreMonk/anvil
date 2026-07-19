@@ -5,17 +5,17 @@
   import { streamSSE } from '../lib/stream.js'
   import { toast } from '../lib/store.js'
 
-  export let flockId
+  let { flockId } = $props()
 
-  let messages = []
-  let status = 'connecting' // connecting | connected | disconnected
+  let messages = $state([])
+  let status = $state('connecting') // connecting | connected | disconnected
   let controller = null
   let gen = 0 // generation token: ignore frames from a superseded stream
-  let logEl
+  let logEl = $state()
 
   const postAgent = 'operator' // UI posts are always operator-authored (no agent impersonation)
-  let postBody = ''
-  let posting = false
+  let postBody = $state('')
+  let posting = $state(false)
 
   function scrollDown() {
     queueMicrotask(() => {

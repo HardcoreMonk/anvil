@@ -4,8 +4,8 @@
   import { toast } from '../lib/store.js'
   import { apiJSON } from '../lib/api.js'
 
-  let status = null
-  let loading = true
+  let status = $state(null)
+  let loading = $state(true)
   let timer = null
 
   async function refresh() {
@@ -24,8 +24,8 @@
   })
   onDestroy(() => clearInterval(timer))
 
-  $: failEntries = status && status.vm_fail_counts ? Object.entries(status.vm_fail_counts) : []
-  $: deadList = status && status.vm_dead_marked ? status.vm_dead_marked : []
+  let failEntries = $derived(status && status.vm_fail_counts ? Object.entries(status.vm_fail_counts) : [])
+  let deadList = $derived(status && status.vm_dead_marked ? status.vm_dead_marked : [])
 </script>
 
 {#if loading}

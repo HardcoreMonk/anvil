@@ -6,21 +6,21 @@
   import { streamFrames } from '../lib/stream.js'
   import { toast } from '../lib/store.js'
 
-  export let vmId
+  let { vmId } = $props()
 
   // messages: { role:'user', text } | { role:'assistant', progress:[], output, error, done }
-  let messages = []
-  let prompt = ''
-  let running = false
+  let messages = $state([])
+  let prompt = $state('')
+  let running = $state(false)
   let session = '' // goose session name; the agent resumes it across turns
   let controller = null
-  let elapsed = 0
+  let elapsed = $state(0)
   let elapsedTimer = null
-  let logEl
-  let sessionList = [] // [{ name, created_at, title, turns, last_output }] from the agent
-  let selectedKey = '__new__' // conversation picker: '__new__' or a session name
-  let resuming = false // true when the active session is a resumed prior conversation
-  let resumeTurns = 0
+  let logEl = $state()
+  let sessionList = $state([]) // [{ name, created_at, title, turns, last_output }] from the agent
+  let selectedKey = $state('__new__') // conversation picker: '__new__' or a session name
+  let resuming = $state(false) // true when the active session is a resumed prior conversation
+  let resumeTurns = $state(0)
 
   function newSession() {
     // A fresh goose session per conversation. Date.now keeps it unique per VM.
@@ -106,8 +106,11 @@
     if (!text || running) return
     prompt = ''
     messages = [...messages, { role: 'user', text }]
-    const a = { role: 'assistant', progress: [], output: '', error: '', done: false }
-    messages = [...messages, a]
+    messages = [...messages, { role: 'assistant', progress: [], output: '', error: '', done: false }]
+    // Mutate the assistant message THROUGH the $state array (by index) so deep
+    // reactivity fires. A captured raw ref + `messages = messages` is a strict-`===`
+    // no-op under runes and would freeze streamed progress/output (legacy Svelte 4 idiom).
+    const aIdx = messages.length - 1
     scrollDown()
 
     running = true
@@ -125,30 +128,28 @@
         await streamFrames(resp, (frame) => {
           if (frame.type === 'progress') {
             if (frame.text) {
-              a.progress = [...a.progress, frame.text]
-              messages = messages // trigger reactivity
+              messages[aIdx].progress = [...messages[aIdx].progress, frame.text]
               scrollDown()
             }
           } else if (frame.type === 'result') {
-            a.output = frame.output || ''
-            a.error = frame.error || ''
+            messages[aIdx].output = frame.output || ''
+            messages[aIdx].error = frame.error || ''
           }
         })
       } else {
         const data = await resp.json()
-        a.output = data.output || ''
-        a.error = data.error || ''
+        messages[aIdx].output = data.output || ''
+        messages[aIdx].error = data.error || ''
       }
     } catch (e) {
       if (e.name === 'AbortError') {
-        a.error = get(_)('taskpanel.canceled')
+        messages[aIdx].error = get(_)('taskpanel.canceled')
       } else if (e.message !== 'unauthorized') {
-        a.error = e.message
+        messages[aIdx].error = e.message
         toast(e.message, 'error')
       }
     } finally {
-      a.done = true
-      messages = messages
+      messages[aIdx].done = true
       running = false
       stopElapsed()
       controller = null

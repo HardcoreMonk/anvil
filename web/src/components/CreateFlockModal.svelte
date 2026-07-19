@@ -7,13 +7,13 @@
 
   const dispatch = createEventDispatcher()
 
-  let task = ''
+  let task = $state('')
   // Each row: { role: free-text label, profile: profile name }. One VM per row.
-  let roles = [{ role: '', profile: 'default' }]
-  let profiles = [] // [{ name, provider, model, ... }] from GET /config/profiles
-  let maxAgents = '' // optional per-flock cap; blank → daemon default (20)
-  let busy = false
-  let result = null // FlockCreateResponse once created (carries one-time agent_tokens)
+  let roles = $state([{ role: '', profile: 'default' }])
+  let profiles = $state([]) // [{ name, provider, model, ... }] from GET /config/profiles
+  let maxAgents = $state('') // optional per-flock cap; blank → daemon default (20)
+  let busy = $state(false)
+  let result = $state(null) // FlockCreateResponse once created (carries one-time agent_tokens)
 
   onMount(async () => {
     try {
@@ -25,7 +25,7 @@
   })
 
   // New rows default to the first listed profile ("default" if present).
-  $: defaultProfile = profiles.length ? profiles[0].name : 'default'
+  let defaultProfile = $derived(profiles.length ? profiles[0].name : 'default')
 
   function addRole() {
     roles = [...roles, { role: '', profile: defaultProfile }]
@@ -66,7 +66,7 @@
   }
 
   // agent_tokens maps agent_id → token; turn it into rows for one-time display.
-  $: tokenRows = result ? Object.entries(result.agent_tokens || {}) : []
+  let tokenRows = $derived(result ? Object.entries(result.agent_tokens || {}) : [])
 
   async function copyToken(token) {
     try {

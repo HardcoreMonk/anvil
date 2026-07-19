@@ -3,20 +3,21 @@
 
   // models: suggested model ids for the current provider.
   // value: the chosen model id (two-way bound by the parent).
-  export let models = []
-  export let value = ''
-  export let id = undefined // optional, so a parent <label for> can target the select
+  // id: optional, so a parent <label for> can target the select
+  let { models = [], value = $bindable(''), id = undefined } = $props()
 
   const CUSTOM = '__custom__'
 
   // custom = show the free-text input because the value is not a suggested model.
-  // Seeded from the initial value, then kept in sync below.
-  let custom = !!value && !models.includes(value)
+  let custom = $state(!!value && !models.includes(value))
 
-  // When the suggested list changes (e.g. a provider switch sets value to a model
-  // that IS in the new list), drop back to the dropdown. Selecting "custom" sets
-  // value='' which leaves custom untouched here, so the input stays open.
-  $: if (value && models.includes(value)) custom = false
+  // When the suggested list changes so the value IS a suggested model, drop back
+  // to the dropdown. (Svelte 4 ran this pre-render via `$:`; $effect runs post-render
+  // — behavior-equivalent here: it only flips custom→false, is idempotent, reads
+  // value/models and writes custom, so it cannot loop. Verified by the /ui smoke.)
+  $effect(() => {
+    if (value && models.includes(value)) custom = false
+  })
 
   function onSelect(e) {
     if (e.target.value === CUSTOM) {

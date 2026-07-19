@@ -5,12 +5,12 @@
   import { apiJSON } from '../lib/api.js'
   import { toast, view } from '../lib/store.js'
 
-  export let snapshot // the SnapshotInfo to restore
+  let { snapshot } = $props() // the SnapshotInfo to restore
 
   const dispatch = createEventDispatcher()
 
-  let busy = false
-  let result = null // VMRestoreResult once restored (carries the reused agent_token)
+  let busy = $state(false)
+  let result = $state(null) // VMRestoreResult once restored (carries the reused agent_token)
 
   async function restore() {
     busy = true

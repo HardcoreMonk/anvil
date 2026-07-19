@@ -9,20 +9,20 @@
   import BuiltinsModal from './BuiltinsModal.svelte'
   import ModelPicker from './ModelPicker.svelte'
 
-  let profiles = [] // [{ name, provider, model, builtins }]
-  let providers = [] // [{ id, label, available, default_model, suggested_models }]
-  let presets = [] // [{ id, label, vcpu_count, mem_size_mib }]
-  let builtins = [] // [{ id, label, description, default }]
-  let loading = true
-  let savingName = null
-  let deletingName = null
-  let confirmName = null // profile whose Delete is awaiting in-row confirmation
-  let showCreate = false
-  let systemPromptName = null // profile whose system.md editor is open
-  let builtinsName = null // profile whose builtin-extensions editor is open
+  let profiles = $state([]) // [{ name, provider, model, builtins }]
+  let providers = $state([]) // [{ id, label, available, default_model, suggested_models }]
+  let presets = $state([]) // [{ id, label, vcpu_count, mem_size_mib }]
+  let builtins = $state([]) // [{ id, label, description, default }]
+  let loading = $state(true)
+  let savingName = $state(null)
+  let deletingName = $state(null)
+  let confirmName = $state(null) // profile whose Delete is awaiting in-row confirmation
+  let showCreate = $state(false)
+  let systemPromptName = $state(null) // profile whose system.md editor is open
+  let builtinsName = $state(null) // profile whose builtin-extensions editor is open
 
   // Only providers whose API key is configured may be selected.
-  $: availableProviders = providers.filter((p) => p.available)
+  let availableProviders = $derived(providers.filter((p) => p.available))
 
   async function load() {
     loading = true

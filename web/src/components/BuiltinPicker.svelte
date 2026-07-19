@@ -2,10 +2,8 @@
   import { _ } from 'svelte-i18n'
 
   // Registry from GET /config/builtins: [{ id, label, description, default }].
-  export let options = []
-  // Two-way bound array of selected builtin ids.
-  export let selected = []
-  export let disabled = false
+  // Two-way bound array of selected builtin ids: selected.
+  let { options = [], selected = $bindable([]), disabled = false } = $props()
 
   // Localized description for a builtin, falling back to the API's English text
   // for any id without an i18n entry (e.g. a builtin added to the registry later).

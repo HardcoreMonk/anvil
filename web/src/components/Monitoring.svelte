@@ -4,15 +4,15 @@
   import { toast } from '../lib/store.js'
   import { apiJSON } from '../lib/api.js'
 
-  let grafanaUrl = ''
-  let enabled = false
-  let loading = true
+  let grafanaUrl = $state('')
+  let enabled = $state(false)
+  let loading = $state(true)
 
   // Dashboard uid is configs/observability/dashboards/ephemera-overview.json.
   // kiosk hides Grafana's own chrome so only the panels render inside the iframe.
-  $: src = enabled
+  let src = $derived(enabled
     ? grafanaUrl.replace(/\/$/, '') + '/d/ephemera-overview/ephemera-overview?kiosk&refresh=5s&theme=dark'
-    : ''
+    : '')
 
   onMount(async () => {
     try {
