@@ -113,7 +113,7 @@
 </script>
 
 <div class="row" style="gap:10px; margin-bottom:16px;">
-  <button class="ghost" on:click={back}>← {$_('common.back')}</button>
+  <button class="ghost" onclick={back}>← {$_('common.back')}</button>
   <h1 class="mono">{flockId}</h1>
   <span class="pill" class:paused={detail.paused}>
     {detail.paused ? $_('orchestration.paused') : $_('orchestration.active')}
@@ -128,12 +128,12 @@
   </div>
   <div class="row" style="gap:8px; margin-top:16px; flex-wrap:wrap;">
     {#if detail.paused}
-      <button on:click={() => lifecycle('resume')} disabled={busyAction}>{$_('flockDetail.resume')}</button>
+      <button onclick={() => lifecycle('resume')} disabled={busyAction}>{$_('flockDetail.resume')}</button>
     {:else}
-      <button class="ghost" on:click={() => lifecycle('pause')} disabled={busyAction}>{$_('flockDetail.pause')}</button>
+      <button class="ghost" onclick={() => lifecycle('pause')} disabled={busyAction}>{$_('flockDetail.pause')}</button>
     {/if}
-    <button class="ghost" on:click={() => (showAddAgent = true)} disabled={busyAction}>{$_('flockDetail.addAgent')}</button>
-    <button class="ghost" on:click={() => (showBroadcast = true)} disabled={busyAction || agents.length === 0}>{$_('flockDetail.broadcast')}</button>
+    <button class="ghost" onclick={() => (showAddAgent = true)} disabled={busyAction}>{$_('flockDetail.addAgent')}</button>
+    <button class="ghost" onclick={() => (showBroadcast = true)} disabled={busyAction || agents.length === 0}>{$_('flockDetail.broadcast')}</button>
   </div>
 </div>
 
@@ -161,10 +161,10 @@
             <td class="mono">{a.vm_id}</td>
             <td>
               <div class="row" style="gap:8px;">
-                <button class="ghost sm" on:click={() => (sendTaskTarget = a)} disabled={busyAction}>{$_('flockDetail.sendTask')}</button>
-                <button class="ghost sm" on:click={() => (changeRoleTarget = a)} disabled={busyAction}>{$_('flockDetail.changeRole')}</button>
-                <button class="ghost sm" on:click={() => (confirmingRestart = a)} disabled={busyAction}>{$_('flockDetail.restart')}</button>
-                <button class="danger sm" on:click={() => (confirmingRemove = a)} disabled={busyAction}>{$_('flockDetail.remove')}</button>
+                <button class="ghost sm" onclick={() => (sendTaskTarget = a)} disabled={busyAction}>{$_('flockDetail.sendTask')}</button>
+                <button class="ghost sm" onclick={() => (changeRoleTarget = a)} disabled={busyAction}>{$_('flockDetail.changeRole')}</button>
+                <button class="ghost sm" onclick={() => (confirmingRestart = a)} disabled={busyAction}>{$_('flockDetail.restart')}</button>
+                <button class="danger sm" onclick={() => (confirmingRemove = a)} disabled={busyAction}>{$_('flockDetail.remove')}</button>
               </div>
             </td>
           </tr>
@@ -178,57 +178,57 @@
 
 <div class="panel" style="margin-top:16px;">
   <h2>{$_('flockDetail.dangerZone')}</h2>
-  <button class="danger" on:click={() => (confirmingDelete = true)} disabled={busyAction}>{$_('flockDetail.deleteGroup')}</button>
+  <button class="danger" onclick={() => (confirmingDelete = true)} disabled={busyAction}>{$_('flockDetail.deleteGroup')}</button>
 </div>
 
 {#if showAddAgent}
-  <AddAgentModal {flockId} on:close={() => (showAddAgent = false)} on:added={refreshDetail} />
+  <AddAgentModal {flockId} onclose={() => (showAddAgent = false)} onadded={refreshDetail} />
 {/if}
 {#if showBroadcast}
-  <BroadcastModal {flockId} on:close={() => (showBroadcast = false)} />
+  <BroadcastModal {flockId} onclose={() => (showBroadcast = false)} />
 {/if}
 {#if sendTaskTarget}
-  <SendTaskModal agent={sendTaskTarget} on:close={() => (sendTaskTarget = null)} />
+  <SendTaskModal agent={sendTaskTarget} onclose={() => (sendTaskTarget = null)} />
 {/if}
 {#if changeRoleTarget}
-  <ChangeRoleModal {flockId} agent={changeRoleTarget} on:close={() => (changeRoleTarget = null)} on:changed={refreshDetail} />
+  <ChangeRoleModal {flockId} agent={changeRoleTarget} onclose={() => (changeRoleTarget = null)} onchanged={refreshDetail} />
 {/if}
 
 {#if confirmingRemove}
-  <div class="modal-backdrop" role="presentation" on:click|self={() => (confirmingRemove = null)} on:keydown={(e) => e.key === 'Escape' && (confirmingRemove = null)}>
+  <div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && (confirmingRemove = null)} onkeydown={(e) => e.key === 'Escape' && (confirmingRemove = null)}>
     <div class="modal">
       <h2>{$_('flockDetail.remove')}</h2>
       <p class="muted">{$_('flockDetail.removeConfirm', { values: { id: confirmingRemove.agent_id } })}</p>
       <div class="row between" style="margin-top:18px;">
-        <button class="ghost" on:click={() => (confirmingRemove = null)} disabled={busyAction}>{$_('common.cancel')}</button>
-        <button class="danger" on:click={confirmRemove} disabled={busyAction}>{$_('flockDetail.remove')}</button>
+        <button class="ghost" onclick={() => (confirmingRemove = null)} disabled={busyAction}>{$_('common.cancel')}</button>
+        <button class="danger" onclick={confirmRemove} disabled={busyAction}>{$_('flockDetail.remove')}</button>
       </div>
     </div>
   </div>
 {/if}
 
 {#if confirmingRestart}
-  <div class="modal-backdrop" role="presentation" on:click|self={() => (confirmingRestart = null)} on:keydown={(e) => e.key === 'Escape' && (confirmingRestart = null)}>
+  <div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && (confirmingRestart = null)} onkeydown={(e) => e.key === 'Escape' && (confirmingRestart = null)}>
     <div class="modal">
       <h2>{$_('flockDetail.restart')}</h2>
       <p class="muted">{$_('flockDetail.restartConfirm', { values: { id: confirmingRestart.agent_id } })}</p>
       <div class="row between" style="margin-top:18px;">
-        <button class="ghost" on:click={() => (confirmingRestart = null)} disabled={busyAction}>{$_('common.cancel')}</button>
-        <button on:click={confirmRestart} disabled={busyAction}>{$_('flockDetail.restart')}</button>
+        <button class="ghost" onclick={() => (confirmingRestart = null)} disabled={busyAction}>{$_('common.cancel')}</button>
+        <button onclick={confirmRestart} disabled={busyAction}>{$_('flockDetail.restart')}</button>
       </div>
     </div>
   </div>
 {/if}
 
 {#if confirmingDelete}
-  <div class="modal-backdrop" role="presentation" on:click|self={() => (confirmingDelete = false)} on:keydown={(e) => e.key === 'Escape' && (confirmingDelete = false)}>
+  <div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && (confirmingDelete = false)} onkeydown={(e) => e.key === 'Escape' && (confirmingDelete = false)}>
     <div class="modal">
       <h2>{$_('flockDetail.deleteGroup')}</h2>
       <p class="muted">{$_('flockDetail.deleteConfirm', { values: { id: flockId } })}</p>
       <div class="warn-box">{$_('flockDetail.deleteWarn')}</div>
       <div class="row between" style="margin-top:18px;">
-        <button class="ghost" on:click={() => (confirmingDelete = false)} disabled={busyAction}>{$_('common.cancel')}</button>
-        <button class="danger" on:click={confirmDeleteFlock} disabled={busyAction}>{$_('flockDetail.deleteGroup')}</button>
+        <button class="ghost" onclick={() => (confirmingDelete = false)} disabled={busyAction}>{$_('common.cancel')}</button>
+        <button class="danger" onclick={confirmDeleteFlock} disabled={busyAction}>{$_('flockDetail.deleteGroup')}</button>
       </div>
     </div>
   </div>
