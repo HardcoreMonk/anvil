@@ -864,3 +864,16 @@ curl -s -H "Authorization: Bearer $TOK" -X POST "$API/vms/$VM/workloads/run" \
 tool 이름은 `<backend-namespace>__<tool>`로 접두된다. host에서 직접 `http://10.0.1.1:3001/mcp`로
 POST하면 미등록 source-IP라 `403 forbidden`(정상 — VM만 호출 가능). 검증 후 VM 삭제·임시
 `servers.yaml` 제거·daemon 정지.
+
+## Quota near/over 알림 대응
+
+`anvil_scheduler_quota_tenants_near`/`_over`(scheduler `/metrics`)가 0보다 크면 해당 resource에서 한도에 근접/초과한 테넌트가 있다는 뜻이다. metric은 aggregate라 "어느 테넌트"는 담지 않는다.
+
+1. 어느 resource인지 확인: alert의 `resource` 라벨(예: `snapshot_bytes`).
+2. 어느 테넌트인지 확인: scheduler host에서 quota store JSON을 조회한다.
+   ```bash
+   # 경로는 ANVIL_SCHEDULER_QUOTA_STORE / cfg.scheduler_quota_store_path
+   jq '.tenants | to_entries[] | {tenant: .key, usage: .value.usage, quota: .value.quota}' "$ANVIL_SCHEDULER_QUOTA_STORE"
+   ```
+   `usage.<resource>`가 `quota.<resource>`에 근접(≥90%)/초과한 테넌트를 찾는다.
+3. 조치: 해당 테넌트의 quota 상향(daemon quota API), 오래된 snapshot GC(`POST /snapshots/gc`), 또는 워크로드 축소. quota store는 daemon이 기록하고 scheduler는 읽기 전용이므로 quota 변경은 daemon 경로로 한다.

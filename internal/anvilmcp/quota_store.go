@@ -24,6 +24,44 @@ type QuotaStoreState struct {
 	Tenants map[string]TenantQuotaState `json:"tenants"`
 }
 
+// nearQuotaThreshold is the usage/limit ratio at or above which a tenant is
+// counted "near" its quota (but not yet over). Fixed by design (not configurable).
+const nearQuotaThreshold = 0.9
+
+// quotaResource maps one bounded quota dimension to its Prometheus `resource`
+// label and its accessors on TenantQuota/TenantUsage. The slice order below is the
+// fixed metric render order (snapshot dimensions first).
+type quotaResource struct {
+	label string
+	limit func(TenantQuota) int64
+	usage func(TenantUsage) int64
+}
+
+var quotaResources = []quotaResource{
+	{"snapshot_bytes", func(q TenantQuota) int64 { return q.SnapshotBytes }, func(u TenantUsage) int64 { return u.SnapshotBytes }},
+	{"snapshot_count", func(q TenantQuota) int64 { return q.SnapshotCount }, func(u TenantUsage) int64 { return u.SnapshotCount }},
+	{"active_vms", func(q TenantQuota) int64 { return q.ActiveVMs }, func(u TenantUsage) int64 { return u.ActiveVMs }},
+	{"concurrent_tasks", func(q TenantQuota) int64 { return q.ConcurrentTasks }, func(u TenantUsage) int64 { return u.ConcurrentTasks }},
+	{"retained_audit_records", func(q TenantQuota) int64 { return q.RetainedAuditRecords }, func(u TenantUsage) int64 { return u.RetainedAuditRecords }},
+}
+
+// ResourceQuotaAggregate is the fleet-aggregate quota rollup for one resource.
+type ResourceQuotaAggregate struct {
+	Resource   string
+	UsageTotal int64 // sum of usage across all tenants
+	LimitTotal int64 // sum of limits across tenants with limit > 0
+	Near       int   // tenants with limit>0 and nearQuotaThreshold <= usage/limit <= 1.0
+	Over       int   // tenants with usage > limit (limit > 0)
+}
+
+// QuotaAggregate is the tenant-anonymous, fleet-wide quota rollup backing the
+// scheduler quota metrics. It carries no per-tenant identity (metric-label policy:
+// bounded labels only).
+type QuotaAggregate struct {
+	Resources    []ResourceQuotaAggregate // one per quotaResources, in fixed order
+	TenantsTotal int
+}
+
 type QuotaStore struct {
 	mu    sync.RWMutex
 	path  string
@@ -153,6 +191,37 @@ func (s *QuotaStore) ListTenants() []TenantRecord {
 		records = append(records, TenantRecord{TenantID: tenantID, Quota: state.Quota, Usage: state.Usage})
 	}
 	return records
+}
+
+// QuotaAggregate computes the fleet-wide rollup under the store read lock.
+func (s *QuotaStore) QuotaAggregate() QuotaAggregate {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	agg := QuotaAggregate{
+		Resources:    make([]ResourceQuotaAggregate, len(quotaResources)),
+		TenantsTotal: len(s.state.Tenants),
+	}
+	for i, res := range quotaResources {
+		r := ResourceQuotaAggregate{Resource: res.label}
+		for _, tenant := range s.state.Tenants {
+			usage := res.usage(tenant.Usage)
+			limit := res.limit(tenant.Quota)
+			r.UsageTotal += usage
+			if limit <= 0 {
+				continue // unset/unlimited: no limit_total, near, or over.
+			}
+			r.LimitTotal += limit
+			switch {
+			case usage > limit:
+				r.Over++
+			case float64(usage) >= nearQuotaThreshold*float64(limit):
+				r.Near++
+			}
+		}
+		agg.Resources[i] = r
+	}
+	return agg
 }
 
 func (s *QuotaStore) ensureTenants() {

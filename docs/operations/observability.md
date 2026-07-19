@@ -91,6 +91,14 @@ curl http://127.0.0.1:3010/metrics
 - `anvil_scheduler_snapshot_replication_giving_up`
 - `anvil_scheduler_snapshot_replication_last_success_timestamp_seconds`
 - `anvil_scheduler_snapshot_replication_last_failure_timestamp_seconds`
+- `anvil_scheduler_quota_usage_total{resource}` / `anvil_scheduler_quota_limit_total{resource}` —
+  fleet-summed tenant quota usage / limit by resource (`resource ∈ snapshot_bytes,
+  snapshot_count, active_vms, concurrent_tasks, retained_audit_records`). `limit_total`은
+  limit>0 테넌트만 합산(무제한=0은 제외). fleet 활용률 = `usage_total / limit_total`.
+- `anvil_scheduler_quota_tenants_near{resource}` / `anvil_scheduler_quota_tenants_over{resource}` —
+  resource별 near(사용률 ≥90%, 한도 이하)·over(사용>한도) 테넌트 수. **near/over 상호 배타**(정확히 100%는 near). alert: `..._tenants_over{resource="snapshot_bytes"} > 0`(critical), `..._tenants_near{...} > 0`(warning).
+- `anvil_scheduler_quota_tenants_total` — quota store에 추적 중인 테넌트 총수(라벨 없음).
+- **정책**: quota metric은 aggregate만 노출하며 `tenant_id`/host 라벨을 넣지 않는다(무인증 `/metrics` + bounded-enum 규율). "어느 테넌트가 near/over인지"는 metric에 없다 — host의 quota store JSON(`SchedulerQuotaStorePath`/`ANVIL_SCHEDULER_QUOTA_STORE`)을 직접 조회한다(runbook 참조). near 임계값은 0.9 고정.
 
 metric label에는 host name, endpoint, raw daemon response, authorization header,
 `agent_token`을 넣지 않는다. scheduler service에는 자체 인증 계층이 없으므로

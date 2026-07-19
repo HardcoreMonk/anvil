@@ -581,7 +581,12 @@ daemon으로 보내는 outbound Bearer token이다.
   이에 **2026-07-18 egress SNI(TCP+QUIC) e2e를 release-checklist KVM 게이트에 편입**).
   3+ 데이터그램 ClientHello 지원은 2026-07-15
   증명·문서교정으로 종결 — 이미 지원되며 >8192B만 잔여, 주류 클라 미해당.)
-- snapshot storage quota dashboard
+- ~~snapshot storage quota dashboard~~ — **2026-07-19 종결**: scheduler `/metrics`에 aggregate
+  quota metric family(`anvil_scheduler_quota_{usage_total,limit_total,tenants_near,tenants_over}{resource}`
+  + `tenants_total`) 추가 → Grafana 대시보드·near-overflow alert. per-tenant 라벨은 비목표(무인증
+  `/metrics` + bounded-enum 정책; "어느 테넌트"는 quota store JSON 조회, runbook). spec/plan:
+  `docs/superpowers/specs/2026-07-19-snapshot-quota-metrics-design.md`,
+  `docs/superpowers/plans/2026-07-19-snapshot-quota-metrics.md`.
 - web svelte 5 runes 전환(선택) — PR #39는 legacy-compat 유지, runes 마이그레이션 미착수
 - fc upstream/OpenZFS 참고 보고 검토(D3의 fc diff "sparseness=의미" 상호작용)
 - e2e 단일-host 동시 실행 불가 — cross-host wall/gtcall/failover e2e는 게스트가
