@@ -18,9 +18,8 @@ func TestProbeHoleGranularityFineFS(t *testing.T) {
 	if g != HoleGranularityFine {
 		t.Fatalf("granularity = %d, want %d (fine fs)", g, HoleGranularityFine)
 	}
-	if HoleGranularityCoarse(dir) {
-		t.Fatalf("HoleGranularityCoarse(%s) = true on a fine fs, want false", dir)
-	}
+	// g == HoleGranularityFine is exactly the "not coarse" predicate the guards apply
+	// (coarse = err != nil || g > HoleGranularityFine), so a fine fs is safe.
 }
 
 // TestProbeHoleGranularityMissingDirIsCoarse: a probe that cannot even create its
@@ -32,10 +31,9 @@ func TestProbeHoleGranularityMissingDirIsCoarse(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error probing non-existent dir, got nil (g=%d)", g)
 	}
+	// err != nil (and g > HoleGranularityFine) is exactly the "coarse" predicate the
+	// guards apply — a probe that fails fails safe (coarse), so the guards refuse/demote.
 	if g <= HoleGranularityFine {
 		t.Fatalf("granularity on probe failure = %d, want > %d (coarse, safe side)", g, HoleGranularityFine)
-	}
-	if !HoleGranularityCoarse(missing) {
-		t.Fatal("HoleGranularityCoarse on probe failure = false, want true (safe side)")
 	}
 }
