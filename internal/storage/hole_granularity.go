@@ -71,14 +71,9 @@ func ProbeHoleGranularity(dir string) (int64, error) {
 	return holeProbeFileSize, nil
 }
 
-// HoleGranularityCoarse reports whether dir's filesystem exposes holes at coarser than
-// 4KiB granularity — or the probe itself failed — in which case sparse diff snapshots are
-// unsafe (D3) and callers must demote diff→full (creation) or refuse the overlay (read).
-func HoleGranularityCoarse(dir string) bool {
-	g, err := holeGranularityFn(dir)
-	return err != nil || g > HoleGranularityFine
-}
-
-// holeGranularityFn measures a directory's filesystem hole granularity. Package-level so
-// tests can inject a coarse (ZFS recordsize>4K) filesystem without provisioning real ZFS.
+// holeGranularityFn measures a directory's filesystem hole granularity. It is the
+// seam the read-side overlay guard (snapshot.go) calls — package-level so tests can
+// inject a coarse (ZFS recordsize>4K) filesystem without provisioning real ZFS.
+// Callers apply the "coarse = err != nil || g > HoleGranularityFine" predicate inline
+// (the read/creation sites both need the granularity value g for their D3 diagnostics).
 var holeGranularityFn = ProbeHoleGranularity
