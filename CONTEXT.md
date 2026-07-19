@@ -572,7 +572,11 @@ daemon으로 보내는 outbound Bearer token이다.
   spec `docs/superpowers/specs/2026-07-18-ech-observability-design.md`,
   plan `docs/superpowers/plans/2026-07-18-ech-observability.md`.
   ~~QUIC/UDP:443 SNI 파싱~~ — **DONE(2026-07-14)**, 위 항목 참조. QUIC
-  확장이 새로 남긴 후속: 새 QUIC 버전(v1/v2 외) salt/label 추가.
+  확장이 새로 남긴 후속(~~새 QUIC 버전 salt/label~~ — **2026-07-19 reactive 확정 종결**:
+  v1(`0x00000001`)/v2(`0x6b3343cf`)만 지원하고 그 외 버전은 fail-closed deny(`hkdf.go:versionParams`/
+  `initial.go:initialTypeForVersion`/`decryptInitial`, 테스트 `0xdeadbeef must error`) + 클라 TCP/HTTP2
+  graceful fallback이라 break 아님. 새 QUIC 버전 등장·유의미 채택 시에만 `versionParams`(salt+key/iv/hp
+  label)·`initialTypeForVersion`에 항목 추가로 대응 — 그 전엔 착수 불요).
   (TCP/UDP proto별 `ephemera_egress_sni_verdict_total` metric label 분리는
   **2026-07-16 종결**(PR #71로 `proto=tcp|udp|unknown` label 추가). 3-데이터그램
   kernel 경로 KVM e2e 실증은 **2026-07-17 종결**(PR #76 — 합성 padding ALPN으로
