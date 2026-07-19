@@ -1,11 +1,11 @@
 <script>
-  import { createEventDispatcher, onMount } from 'svelte'
+  import { onMount } from 'svelte'
   import { get } from 'svelte/store'
   import { _ } from 'svelte-i18n'
   import { apiJSON } from '../lib/api.js'
   import { toast } from '../lib/store.js'
 
-  const dispatch = createEventDispatcher()
+  let { onclose, oncreated } = $props()
 
   let task = $state('')
   // Each row: { role: free-text label, profile: profile name }. One VM per row.
@@ -53,7 +53,7 @@
       // take minutes; the button stays in its "creating" state until it returns.
       result = await apiJSON('/flocks', { method: 'POST', body: JSON.stringify(body) })
       toast(get(_)('createFlockModal.createdToast', { values: { id: result.flock_id } }), 'ok')
-      dispatch('created')
+      oncreated?.()
     } catch (e) {
       if (e.message !== 'unauthorized') toast(e.message, 'error')
     } finally {
@@ -62,7 +62,7 @@
   }
 
   function close() {
-    dispatch('close')
+    onclose?.()
   }
 
   // agent_tokens maps agent_id → token; turn it into rows for one-time display.
@@ -78,7 +78,7 @@
   }
 </script>
 
-<div class="modal-backdrop" role="presentation" on:click|self={close} on:keydown={(e) => e.key === 'Escape' && close()}>
+<div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && close()} onkeydown={(e) => e.key === 'Escape' && close()}>
   <div class="modal">
     {#if !result}
       <h2>{$_('createFlockModal.title')}</h2>
@@ -96,10 +96,10 @@
                 <option value={p.name}>{p.name}</option>
               {/each}
             </select>
-            <button class="ghost" on:click={() => removeRole(i)} disabled={roles.length === 1} title={$_('createFlockModal.removeRole')}>✕</button>
+            <button class="ghost" onclick={() => removeRole(i)} disabled={roles.length === 1} title={$_('createFlockModal.removeRole')}>✕</button>
           </div>
         {/each}
-        <button class="ghost" on:click={addRole}>{$_('createFlockModal.addRole')}</button>
+        <button class="ghost" onclick={addRole}>{$_('createFlockModal.addRole')}</button>
         <div class="muted" style="margin-top:6px; font-size:12px;">{$_('createFlockModal.rolesHint')}</div>
       </div>
       <div class="field">
@@ -107,8 +107,8 @@
         <input id="max" type="number" min="1" bind:value={maxAgents} placeholder={$_('createFlockModal.maxAgentsPlaceholder')} />
       </div>
       <div class="row between" style="margin-top:18px;">
-        <button class="ghost" on:click={close} disabled={busy}>{$_('common.cancel')}</button>
-        <button on:click={create} disabled={busy}>{busy ? $_('createFlockModal.creating') : $_('createFlockModal.create')}</button>
+        <button class="ghost" onclick={close} disabled={busy}>{$_('common.cancel')}</button>
+        <button onclick={create} disabled={busy}>{busy ? $_('createFlockModal.creating') : $_('createFlockModal.create')}</button>
       </div>
     {:else}
       <h2>{$_('createFlockModal.createdTitle')}</h2>
@@ -118,14 +118,14 @@
       {#each tokenRows as [agentId, token] (agentId)}
         <div class="mono" style="margin-top:10px; font-size:12px; color:var(--muted);">{agentId}</div>
         <div class="token-box">{token}</div>
-        <button class="ghost" style="margin-top:6px;" on:click={() => copyToken(token)}>{$_('createFlockModal.copyToken')}</button>
+        <button class="ghost" style="margin-top:6px;" onclick={() => copyToken(token)}>{$_('createFlockModal.copyToken')}</button>
       {/each}
       <div class="warn-box">
         {$_('createFlockModal.tokenWarnPre')}<strong>{$_('createFlockModal.tokenWarnBold')}</strong>{$_('createFlockModal.tokenWarnPost')}
       </div>
       <div class="row between" style="margin-top:18px;">
         <span></span>
-        <button on:click={close}>{$_('common.done')}</button>
+        <button onclick={close}>{$_('common.done')}</button>
       </div>
     {/if}
   </div>
