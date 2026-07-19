@@ -195,6 +195,10 @@ SNI 필터는 신뢰 워크로드의 의도된 :443 egress를 강제·감사한�
   목적지는 은닉된다** — guest-asserted SNI와 동일 신뢰등급 잔여다. anvil은
   ECH를 무력화하지 않으며(inner는 서버 키 없이 복호 불가), 완화는 해당
   엔드포인트 CIDR fallback 핀뿐이다(outer-SNI allowlist는 신뢰 근거 아님).
+  **2026-07-18부로 이 잔여 케이스는 최소한 관측 가능하다**: 허용된 flow의
+  ClientHello가 ECH를 담으면 `ephemera_egress_sni_ech_observed_total{proto}`가
+  증가한다(+content-free `slog.Info`) — 관측 전용이며 allow/deny verdict는
+  그대로다.
 - **non-TLS**(HTTP:80, 임의 TCP): SNI가 없어 NFQUEUE 대상이 아니다 — 기존
   base REJECT + CIDR만 통제한다.
 - **QUIC/UDP:443**: 2026-07-14부터 구현됨(위 "UDP:443(QUIC/HTTP3) 확장"

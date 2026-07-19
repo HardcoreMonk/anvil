@@ -10,7 +10,10 @@ preflight, [ADR-0002](docs/adr/0002-egress-sni-transparent-filter.md))·
 **UDP:443(QUIC/HTTP3) SNI 필터 확장**(같은 ADR-0002, 신규 패키지
 `internal/network/quic`로 QUIC Initial을 자체 복호해 같은 `allow_sni` 매처를
 UDP에도 적용, post-quantum multi-datagram ClientHello 재조립, 신규 direct 의존
-`golang.org/x/crypto`) 등 untagged 작업을 더 포함한다.
+`golang.org/x/crypto`)·`allow_hosts` deprecation cycle 확정(런타임 경고, 다음
+tagged 릴리즈에서 제거)·egress ECH 관측 metric(`ephemera_egress_sni_ech_observed_total`)·
+scheduler aggregate quota metric(`anvil_scheduler_quota_*`)·CI gofmt gate(빌드
+전 `gofmt -l .` 검사) 등 untagged 작업을 더 포함한다.
 (D4 cow diff-restore panic은 4라운드 조사로 anvil-측 소진, 근본은 anvil 밖
 KVM/Firecracker resume-race로 확정 → 2026-07-13 **종결**(default plain 유지·COW
 opt-in, fc v1.16.1이 실패율 100%→~15–25%로 최대 완화) — `docs/ADR_INDEX.md` v0.4.2 행

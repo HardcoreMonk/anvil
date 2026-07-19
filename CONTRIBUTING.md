@@ -14,7 +14,10 @@ IronClaw MCP 실행 계층으로 통합하는 downstream product fork다.
 - Linux host. KVM E2E는 `/dev/kvm`이 필요하다.
 - root 또는 `sudo` 권한.
 - `curl`, `debootstrap`, `e2fsprogs`, `util-linux`, `jq`, `dmsetup`.
-- Go toolchain. 현재 MCP SDK와 프로젝트 검증은 Go 1.25 이상을 기준으로 한다.
+- Go toolchain. 현재 MCP SDK와 프로젝트 검증은 Go 1.25 이상을 기준으로 한다
+  (`go.mod`는 `go 1.25.0`을 정확히 pin — CI의 `Gofmt` 단계는 러너 기본이 아니라
+  이 go.mod-pinned 툴체인의 `gofmt`를 사용하므로, 다른 Go minor 버전에서는 포맷
+  결과가 CI와 달라질 수 있다).
 
 기본 빌드:
 
@@ -104,10 +107,15 @@ go test ./...
 go build ./cmd/goose-daemon
 go build ./cmd/anvil-mcp
 go build ./cmd/anvil-scheduler
+gofmt -l .
 bash -n e2e_test.sh
 bash -n scripts/anvil-mcp-e2e.sh
 git diff --check
 ```
+
+CI `Gofmt` 단계가 `gofmt -l .`를 `Build`/`Vet`/`Test`보다 먼저 실행해 포맷이 깨진
+`.go` 파일이 있으면 빌드를 fail한다. 로컬에서 위 명령이 비어 있지 않은 출력을 내면
+푸시 전에 `gofmt -w`로 해당 파일을 정리한다.
 
 다음 경로를 건드리면 KVM E2E를 실행한다.
 

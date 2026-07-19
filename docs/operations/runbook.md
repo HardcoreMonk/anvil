@@ -401,6 +401,17 @@ QUIC이 계속 실패하면 먼저 ClientHello 크기(확장 개수, PQ 알고�
 `proto="tcp|udp"` label로 구분한다(`unknown`은 proto 판별 전 no-payload
 drop 전용). `egress_sni_denied` audit도 TCP/UDP 동일 스키마를 재사용한다.
 
+### (f) ECH 관측 확인 (2026-07-18)
+
+```bash
+curl -s http://127.0.0.1:3000/metrics | grep ephemera_egress_sni_ech_observed_total
+# ephemera_egress_sni_ech_observed_total{proto="tcp"} N
+```
+
+관측 전용 metric이라 조치 불필요하다 — allowlisted 도메인 중 어떤 것이
+ECH(`0xfe0d`)를 쓰는지 확인하는 용도이며, verdict(allow/deny)는 이 metric과
+무관하게 그대로 유지된다(ADR-0002 잔여위험 표 참조).
+
 ## Goosetown flock 점검
 
 live flock 목록과 단일 flock 상태:

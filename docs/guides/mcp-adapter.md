@@ -272,9 +272,13 @@ Scheduler service API는 operator가 host inventory와 placement 상태를 관�
 Scheduler service는 operator JSON endpoint와 별도로 scheduler 전용 Prometheus text
 `GET /metrics`를 제공한다. 이 endpoint는 daemon `/metrics`와 다른 surface이며
 `anvil_scheduler_*` namespace로 control loop running flag, persistence degraded
-flag, host status count, suspect placement count, last poll/reconcile timestamp를
-반환한다. scheduler에는 자체 인증 계층이 없으므로 기존 scheduler 운영 경계처럼
-loopback/private network 또는 reverse proxy policy 뒤에서만 노출한다.
+flag, host status count, suspect placement count, last poll/reconcile timestamp,
+flock placement, snapshot replication, tenant quota metric family를 반환한다 —
+전체 목록·라벨은 canonical [`docs/operations/observability.md`](../operations/observability.md)의
+"Scheduler metrics endpoint" 절을 참조한다(이 페이지는 신규 metric family가
+추가돼도 갱신을 보장하지 않는다). scheduler에는 자체 인증 계층이 없으므로 기존
+scheduler 운영 경계처럼 loopback/private network 또는 reverse proxy policy 뒤에서만
+노출한다.
 
 `deny_all` egress policy는 host `iptables` reject rule로 강제한다. `profile` policy는
 `configs/profiles/{profile}/egress.json`,

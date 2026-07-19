@@ -184,6 +184,7 @@ Exposed series (additive — never breaks the wire format on minor bumps):
 | `ephemera_cp_token_propagated_total` | counter | `outcome` | per-VM vsock fan-out result |
 | `ephemera_mcp_tool_calls_total` | counter | `server`, `outcome=ok\|fail\|forbidden\|rate_limited` | MCP gateway tool calls by backend server (v0.6.0) |
 | `ephemera_egress_sni_verdict_total` | counter | `proto=tcp\|udp\|unknown`, `outcome=allowed\|denied\|dropped` | :443 egress SNI filter verdicts; `unknown` is the pre-classify no-payload drop (ADR-0002) |
+| `ephemera_egress_sni_ech_observed_total` | counter | `proto=tcp\|udp` | ECH (`0xfe0d`) observed on an **allowed** :443 flow — observe-only, verdict/deny path unchanged (ADR-0002) |
 | `ephemera_vm_count` / `_flock_count` / `_snapshot_count` / `_api_clients_count` | gauge | — | re-read on each scrape (GaugeFunc) |
 | `ephemera_lifecycle_queue_depth` | gauge | — | current in-flight lifecycle operations |
 | `ephemera_vm_spawn_duration_seconds` | histogram | — | wall-clock spawn time |
