@@ -5,14 +5,14 @@
   import { apiFetch } from '../lib/api.js'
   import { toast } from '../lib/store.js'
 
-  export let flockId
+  let { flockId } = $props()
 
   const dispatch = createEventDispatcher()
 
-  let body = ''
-  let busy = false
+  let body = $state('')
+  let busy = $state(false)
   let controller = null
-  let result = null // { agents, sent, skipped, failed, results{agent_id → {status, output, error}} }
+  let result = $state(null) // { agents, sent, skipped, failed, results{agent_id → {status, output, error}} }
 
   async function send() {
     if (!body.trim()) {
@@ -53,7 +53,7 @@
     dispatch('close')
   }
 
-  $: resultRows = result ? Object.entries(result.results || {}) : []
+  let resultRows = $derived(result ? Object.entries(result.results || {}) : [])
 </script>
 
 <div class="modal-backdrop" role="presentation" on:click|self={close} on:keydown={(e) => e.key === 'Escape' && close()}>
