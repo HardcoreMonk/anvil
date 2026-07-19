@@ -1,14 +1,12 @@
 <script>
-  import { createEventDispatcher, onMount } from 'svelte'
+  import { onMount } from 'svelte'
   import { get } from 'svelte/store'
   import { _ } from 'svelte-i18n'
   import { apiJSON } from '../lib/api.js'
   import { toast } from '../lib/store.js'
 
   // The profile whose system.md is being edited (passed from the Settings row).
-  let { name } = $props()
-
-  const dispatch = createEventDispatcher()
+  let { name, onclose } = $props()
 
   let value = $state('')
   let loading = $state(true)
@@ -33,7 +31,7 @@
     try {
       await apiJSON(path, { method: 'PUT', body: JSON.stringify({ system_md: value }) })
       toast(get(_)('systemPrompt.savedToast', { values: { name } }), 'ok')
-      dispatch('close')
+      onclose?.()
     } catch (e) {
       if (e.message !== 'unauthorized') toast(e.message, 'error')
     } finally {
@@ -56,11 +54,11 @@
   }
 
   function close() {
-    dispatch('close')
+    onclose?.()
   }
 </script>
 
-<div class="modal-backdrop" role="presentation" on:click|self={close} on:keydown={(e) => e.key === 'Escape' && close()}>
+<div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && close()} onkeydown={(e) => e.key === 'Escape' && close()}>
   <div class="modal wide">
     <h2>{$_('systemPrompt.title', { values: { name } })}</h2>
     <p class="muted">{$_('systemPrompt.intro')}</p>
@@ -72,15 +70,15 @@
     <div class="row between" style="margin-top:18px;">
       <div class="row" style="gap:8px;">
         {#if confirmClear}
-          <button class="danger" on:click={clear} disabled={busy}>{$_('systemPrompt.clearConfirm')}</button>
-          <button class="ghost" on:click={() => (confirmClear = false)} disabled={busy}>{$_('common.cancel')}</button>
+          <button class="danger" onclick={clear} disabled={busy}>{$_('systemPrompt.clearConfirm')}</button>
+          <button class="ghost" onclick={() => (confirmClear = false)} disabled={busy}>{$_('common.cancel')}</button>
         {:else}
-          <button class="danger" on:click={() => (confirmClear = true)} disabled={busy || loading}>{$_('systemPrompt.clear')}</button>
+          <button class="danger" onclick={() => (confirmClear = true)} disabled={busy || loading}>{$_('systemPrompt.clear')}</button>
         {/if}
       </div>
       <div class="row" style="gap:8px;">
-        <button class="ghost" on:click={close} disabled={busy}>{$_('common.cancel')}</button>
-        <button on:click={save} disabled={busy || loading}>{busy ? $_('systemPrompt.saving') : $_('systemPrompt.save')}</button>
+        <button class="ghost" onclick={close} disabled={busy}>{$_('common.cancel')}</button>
+        <button onclick={save} disabled={busy || loading}>{busy ? $_('systemPrompt.saving') : $_('systemPrompt.save')}</button>
       </div>
     </div>
   </div>

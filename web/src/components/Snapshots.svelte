@@ -51,7 +51,7 @@
 
 <div class="row between" style="margin-bottom:16px;">
   <h1>{$_('snapshots.title')}</h1>
-  <button class="ghost" on:click={refresh}>{$_('common.refresh')}</button>
+  <button class="ghost" onclick={refresh}>{$_('common.refresh')}</button>
 </div>
 
 <div class="panel">
@@ -85,8 +85,8 @@
             <td>{new Date(s.created_at).toLocaleString()}</td>
             <td>
               <div class="row" style="gap:8px;">
-                <button class="ghost" on:click={() => (restoreTarget = s)}>{$_('snapshots.restoreBtn')}</button>
-                <button class="danger" on:click={() => (deleteTarget = s)}>{$_('snapshots.deleteBtn')}</button>
+                <button class="ghost" onclick={() => (restoreTarget = s)}>{$_('snapshots.restoreBtn')}</button>
+                <button class="danger" onclick={() => (deleteTarget = s)}>{$_('snapshots.deleteBtn')}</button>
               </div>
             </td>
           </tr>
@@ -97,18 +97,18 @@
 </div>
 
 {#if restoreTarget}
-  <RestoreModal snapshot={restoreTarget} on:close={() => (restoreTarget = null)} on:restored={refresh} />
+  <RestoreModal snapshot={restoreTarget} onclose={() => (restoreTarget = null)} onrestored={refresh} />
 {/if}
 
 {#if deleteTarget}
-  <div class="modal-backdrop" role="presentation" on:click|self={() => (deleteTarget = null)} on:keydown={(e) => e.key === 'Escape' && (deleteTarget = null)}>
+  <div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && (deleteTarget = null)} onkeydown={(e) => e.key === 'Escape' && (deleteTarget = null)}>
     <div class="modal">
       <h2>{$_('snapshots.deleteTitle')}</h2>
       <p class="muted">{$_('snapshots.deleteConfirm', { values: { id: deleteTarget.snapshot_id } })}</p>
       <div class="warn-box">{$_('snapshots.deleteWarnRestored')}</div>
       <div class="row between" style="margin-top:18px;">
-        <button class="ghost" on:click={() => (deleteTarget = null)} disabled={deleting}>{$_('common.cancel')}</button>
-        <button class="danger" on:click={confirmDelete} disabled={deleting}>
+        <button class="ghost" onclick={() => (deleteTarget = null)} disabled={deleting}>{$_('common.cancel')}</button>
+        <button class="danger" onclick={confirmDelete} disabled={deleting}>
           {deleting ? $_('snapshots.deleting') : $_('snapshots.deleteBtn')}
         </button>
       </div>

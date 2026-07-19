@@ -14,11 +14,11 @@
 </div>
 
 <div class="tabs">
-  <button class="tab" class:active={tab === 'audit'} on:click={() => (tab = 'audit')}>{$_('system.tabAudit')}</button>
-  <button class="tab" class:active={tab === 'watchdog'} on:click={() => (tab = 'watchdog')}>{$_('system.tabWatchdog')}</button>
-  <button class="tab" class:active={tab === 'clients'} on:click={() => (tab = 'clients')}>{$_('system.tabClients')}</button>
-  <button class="tab" class:active={tab === 'mcp'} on:click={() => (tab = 'mcp')}>{$_('system.tabMCP')}</button>
-  <button class="tab" class:active={tab === 'monitoring'} on:click={() => (tab = 'monitoring')}>{$_('system.tabMonitoring')}</button>
+  <button class="tab" class:active={tab === 'audit'} onclick={() => (tab = 'audit')}>{$_('system.tabAudit')}</button>
+  <button class="tab" class:active={tab === 'watchdog'} onclick={() => (tab = 'watchdog')}>{$_('system.tabWatchdog')}</button>
+  <button class="tab" class:active={tab === 'clients'} onclick={() => (tab = 'clients')}>{$_('system.tabClients')}</button>
+  <button class="tab" class:active={tab === 'mcp'} onclick={() => (tab = 'mcp')}>{$_('system.tabMCP')}</button>
+  <button class="tab" class:active={tab === 'monitoring'} onclick={() => (tab = 'monitoring')}>{$_('system.tabMonitoring')}</button>
 </div>
 
 <!-- Mounting only the active sub-view means its onMount starts a fresh poll and

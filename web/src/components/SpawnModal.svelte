@@ -1,16 +1,16 @@
 <script>
-  import { onMount, createEventDispatcher } from 'svelte'
+  import { onMount } from 'svelte'
   import { get } from 'svelte/store'
   import { _ } from 'svelte-i18n'
   import { apiJSON } from '../lib/api.js'
   import { toast } from '../lib/store.js'
 
-  const dispatch = createEventDispatcher()
+  let { onclose, onspawned } = $props()
 
-  let profiles = [] // [{ name, provider, model }]
-  let selected = '' // chosen profile name
-  let busy = false
-  let result = null // VMSpawnResult once created (carries the one-time agent_token)
+  let profiles = $state([]) // [{ name, provider, model }]
+  let selected = $state('') // chosen profile name
+  let busy = $state(false)
+  let result = $state(null) // VMSpawnResult once created (carries the one-time agent_token)
 
   onMount(async () => {
     try {
@@ -29,7 +29,7 @@
       const body = JSON.stringify(selected && selected !== 'default' ? { profile: selected } : {})
       result = await apiJSON('/vms', { method: 'POST', body })
       toast(get(_)('createModal.createdToast', { values: { id: result.vm_id } }), 'ok')
-      dispatch('spawned')
+      onspawned?.()
     } catch (e) {
       if (e.message !== 'unauthorized') toast(e.message, 'error')
     } finally {
@@ -38,7 +38,7 @@
   }
 
   function close() {
-    dispatch('close')
+    onclose?.()
   }
 
   async function copyToken() {
@@ -55,7 +55,7 @@
   }
 </script>
 
-<div class="modal-backdrop" role="presentation" on:click|self={close} on:keydown={(e) => e.key === 'Escape' && close()}>
+<div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && close()} onkeydown={(e) => e.key === 'Escape' && close()}>
   <div class="modal">
     {#if !result}
       <h2>{$_('createModal.title')}</h2>
@@ -73,8 +73,8 @@
         <div class="muted" style="margin-top:6px; font-size:12px;">{$_('createModal.profileHint')}</div>
       </div>
       <div class="row between" style="margin-top:18px;">
-        <button class="ghost" on:click={close}>{$_('common.cancel')}</button>
-        <button on:click={spawn} disabled={busy}>{busy ? $_('createModal.creating') : $_('createModal.create')}</button>
+        <button class="ghost" onclick={close}>{$_('common.cancel')}</button>
+        <button onclick={spawn} disabled={busy}>{busy ? $_('createModal.creating') : $_('createModal.create')}</button>
       </div>
     {:else}
       <h2>{$_('createModal.createdTitle')}</h2>
@@ -86,8 +86,8 @@
         {$_('createModal.tokenWarnPre')}<strong>{$_('createModal.tokenWarnBold')}</strong>{$_('createModal.tokenWarnPost')}
       </div>
       <div class="row between" style="margin-top:18px;">
-        <button class="ghost" on:click={copyToken}>{$_('createModal.copyToken')}</button>
-        <button on:click={close}>{$_('common.done')}</button>
+        <button class="ghost" onclick={copyToken}>{$_('createModal.copyToken')}</button>
+        <button onclick={close}>{$_('common.done')}</button>
       </div>
     {/if}
   </div>

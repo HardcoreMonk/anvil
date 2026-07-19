@@ -1,5 +1,4 @@
 <script>
-  import { createEventDispatcher } from 'svelte'
   import { get } from 'svelte/store'
   import { _ } from 'svelte-i18n'
   import { apiJSON } from '../lib/api.js'
@@ -10,9 +9,7 @@
   // Available providers only: [{ id, label, default_model, suggested_models }].
   // VM sizing presets from GET /config/presets: [{ id, label, vcpu_count, mem_size_mib }].
   // Builtin extension registry from GET /config/builtins: [{ id, label, description, default }].
-  let { providers = [], presets = [], builtins = [] } = $props()
-
-  const dispatch = createEventDispatcher()
+  let { providers = [], presets = [], builtins = [], onclose, oncreated } = $props()
 
   let name = $state('')
   let provider = $state(providers.length ? providers[0].id : '')
@@ -47,7 +44,7 @@
       const body = JSON.stringify({ name: name.trim(), provider, model: model.trim(), vcpu_count: vcpu, mem_size_mib: mem, builtins: selectedBuiltins })
       await apiJSON('/config/profiles', { method: 'POST', body })
       toast(get(_)('profileModal.createdToast', { values: { name: name.trim() } }), 'ok')
-      dispatch('created')
+      oncreated?.()
     } catch (e) {
       if (e.message !== 'unauthorized') toast(e.message, 'error')
     } finally {
@@ -56,17 +53,17 @@
   }
 
   function close() {
-    dispatch('close')
+    onclose?.()
   }
 </script>
 
-<div class="modal-backdrop" role="presentation" on:click|self={close} on:keydown={(e) => e.key === 'Escape' && close()}>
+<div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && close()} onkeydown={(e) => e.key === 'Escape' && close()}>
   <div class="modal">
     <h2>{$_('profileModal.title')}</h2>
     {#if providers.length === 0}
       <p class="muted">{$_('profileModal.noProviders')}</p>
       <div class="row between" style="margin-top:18px;">
-        <button class="ghost" on:click={close}>{$_('common.cancel')}</button>
+        <button class="ghost" onclick={close}>{$_('common.cancel')}</button>
       </div>
     {:else}
       <div class="field">
@@ -76,7 +73,7 @@
       </div>
       <div class="field">
         <label for="pm-provider">{$_('profileModal.providerLabel')}</label>
-        <select id="pm-provider" bind:value={provider} on:change={onProviderChange}>
+        <select id="pm-provider" bind:value={provider} onchange={onProviderChange}>
           {#each providers as prov (prov.id)}
             <option value={prov.id}>{prov.label}</option>
           {/each}
@@ -93,7 +90,7 @@
           <div class="row" style="gap:8px; flex-wrap:wrap;">
             {#each presets as p (p.id)}
               <button type="button" class="ghost preset-chip" class:active={activePreset && activePreset.id === p.id}
-                on:click={() => applyPreset(p)}>
+                onclick={() => applyPreset(p)}>
                 {p.label} <small>{p.vcpu_count} vCPU · {p.mem_size_mib} MiB</small>
               </button>
             {/each}
@@ -122,8 +119,8 @@
         </div>
       {/if}
       <div class="row between" style="margin-top:18px;">
-        <button class="ghost" on:click={close} disabled={busy}>{$_('common.cancel')}</button>
-        <button on:click={create} disabled={busy || !name.trim() || !model.trim()}>
+        <button class="ghost" onclick={close} disabled={busy}>{$_('common.cancel')}</button>
+        <button onclick={create} disabled={busy || !name.trim() || !model.trim()}>
           {busy ? $_('profileModal.creating') : $_('profileModal.create')}
         </button>
       </div>

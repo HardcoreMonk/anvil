@@ -1,5 +1,5 @@
 <script>
-  import { createEventDispatcher, onMount } from 'svelte'
+  import { onMount } from 'svelte'
   import { get } from 'svelte/store'
   import { _ } from 'svelte-i18n'
   import { apiJSON } from '../lib/api.js'
@@ -8,9 +8,7 @@
 
   // The profile whose builtin extensions are being edited (from the Settings row).
   // Builtin extension registry from GET /config/builtins (loaded once by Settings).
-  let { name, options = [] } = $props()
-
-  const dispatch = createEventDispatcher()
+  let { name, options = [], onclose } = $props()
 
   let selected = $state([])
   let loading = $state(true)
@@ -34,7 +32,7 @@
     try {
       await apiJSON(path, { method: 'PUT', body: JSON.stringify({ builtins: selected }) })
       toast(get(_)('builtinsModal.savedToast', { values: { name } }), 'ok')
-      dispatch('close')
+      onclose?.()
     } catch (e) {
       if (e.message !== 'unauthorized') toast(e.message, 'error')
     } finally {
@@ -43,11 +41,11 @@
   }
 
   function close() {
-    dispatch('close')
+    onclose?.()
   }
 </script>
 
-<div class="modal-backdrop" role="presentation" on:click|self={close} on:keydown={(e) => e.key === 'Escape' && close()}>
+<div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && close()} onkeydown={(e) => e.key === 'Escape' && close()}>
   <div class="modal">
     <h2>{$_('builtinsModal.title', { values: { name } })}</h2>
     <p class="muted">{$_('builtinsModal.intro')}</p>
@@ -58,8 +56,8 @@
       <div class="muted" style="margin-top:6px; font-size:12px;">{$_('builtins.tokenHint')}</div>
     {/if}
     <div class="row between" style="margin-top:18px;">
-      <button class="ghost" on:click={close} disabled={busy}>{$_('common.cancel')}</button>
-      <button on:click={save} disabled={busy || loading}>{busy ? $_('builtinsModal.saving') : $_('builtinsModal.save')}</button>
+      <button class="ghost" onclick={close} disabled={busy}>{$_('common.cancel')}</button>
+      <button onclick={save} disabled={busy || loading}>{busy ? $_('builtinsModal.saving') : $_('builtinsModal.save')}</button>
     </div>
   </div>
 </div>

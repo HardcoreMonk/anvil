@@ -1,14 +1,12 @@
 <script>
-  import { createEventDispatcher, onMount } from 'svelte'
+  import { onMount } from 'svelte'
   import { get } from 'svelte/store'
   import { _ } from 'svelte-i18n'
   import { apiJSON } from '../lib/api.js'
   import { toast } from '../lib/store.js'
 
   // agent: AgentInfo { agent_id, role, profile, ... }
-  let { flockId, agent } = $props()
-
-  const dispatch = createEventDispatcher()
+  let { flockId, agent, onclose, onchanged } = $props()
 
   let role = $state('')
   let profile = $state('')
@@ -40,8 +38,8 @@
         body: JSON.stringify({ role: role.trim(), profile }),
       })
       toast(get(_)('changeRoleModal.changedToast', { values: { id: agent.agent_id } }), 'ok')
-      dispatch('changed')
-      dispatch('close')
+      onchanged?.()
+      onclose?.()
     } catch (e) {
       // Surfaces 400 "already has role" / spawn failure verbatim.
       if (e.message !== 'unauthorized') toast(e.message, 'error')
@@ -51,11 +49,11 @@
   }
 
   function close() {
-    dispatch('close')
+    onclose?.()
   }
 </script>
 
-<div class="modal-backdrop" role="presentation" on:click|self={close} on:keydown={(e) => e.key === 'Escape' && close()}>
+<div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && close()} onkeydown={(e) => e.key === 'Escape' && close()}>
   <div class="modal">
     <h2>{$_('changeRoleModal.title')}</h2>
     <p class="muted">{$_('changeRoleModal.intro', { values: { id: agent.agent_id, role: agent.role } })}</p>
@@ -73,8 +71,8 @@
     </div>
     <div class="warn-box">{$_('changeRoleModal.warn')}</div>
     <div class="row between" style="margin-top:18px;">
-      <button class="ghost" on:click={close} disabled={busy}>{$_('common.cancel')}</button>
-      <button on:click={change} disabled={busy}>{busy ? $_('changeRoleModal.changing') : $_('changeRoleModal.change')}</button>
+      <button class="ghost" onclick={close} disabled={busy}>{$_('common.cancel')}</button>
+      <button onclick={change} disabled={busy}>{busy ? $_('changeRoleModal.changing') : $_('changeRoleModal.change')}</button>
     </div>
   </div>
 </div>

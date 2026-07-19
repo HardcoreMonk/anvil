@@ -1,13 +1,10 @@
 <script>
-  import { createEventDispatcher } from 'svelte'
   import { get } from 'svelte/store'
   import { _ } from 'svelte-i18n'
   import { apiFetch } from '../lib/api.js'
   import { toast } from '../lib/store.js'
 
-  let { flockId } = $props()
-
-  const dispatch = createEventDispatcher()
+  let { flockId, onclose } = $props()
 
   let body = $state('')
   let busy = $state(false)
@@ -50,13 +47,13 @@
   }
 
   function close() {
-    dispatch('close')
+    onclose?.()
   }
 
   let resultRows = $derived(result ? Object.entries(result.results || {}) : [])
 </script>
 
-<div class="modal-backdrop" role="presentation" on:click|self={close} on:keydown={(e) => e.key === 'Escape' && close()}>
+<div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && close()} onkeydown={(e) => e.key === 'Escape' && close()}>
   <div class="modal wide">
     {#if !result}
       <h2>{$_('broadcastModal.title')}</h2>
@@ -65,10 +62,10 @@
       <div class="row between" style="margin-top:18px;">
         {#if busy}
           <span class="muted">{$_('broadcastModal.sending')}</span>
-          <button class="ghost" on:click={cancel}>{$_('common.cancel')}</button>
+          <button class="ghost" onclick={cancel}>{$_('common.cancel')}</button>
         {:else}
-          <button class="ghost" on:click={close}>{$_('common.cancel')}</button>
-          <button on:click={send} disabled={!body.trim()}>{$_('broadcastModal.send')}</button>
+          <button class="ghost" onclick={close}>{$_('common.cancel')}</button>
+          <button onclick={send} disabled={!body.trim()}>{$_('broadcastModal.send')}</button>
         {/if}
       </div>
     {:else}
@@ -100,7 +97,7 @@
       </div>
       <div class="row between" style="margin-top:18px;">
         <span></span>
-        <button on:click={close}>{$_('common.done')}</button>
+        <button onclick={close}>{$_('common.done')}</button>
       </div>
     {/if}
   </div>

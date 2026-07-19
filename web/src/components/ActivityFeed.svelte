@@ -96,7 +96,7 @@
     <div class="row" style="gap:8px;">
       <span class="conn {status}">{$_('activityFeed.' + status)}</span>
       {#if status === 'disconnected'}
-        <button class="ghost sm" on:click={reconnect}>{$_('activityFeed.reconnect')}</button>
+        <button class="ghost sm" onclick={reconnect}>{$_('activityFeed.reconnect')}</button>
       {/if}
     </div>
   </div>
@@ -117,8 +117,8 @@
 
   <div class="composer row" style="gap:8px; margin-top:12px;">
     <span class="who-static mono" title={$_('activityFeed.postAs')}>operator</span>
-    <input bind:value={postBody} placeholder={$_('activityFeed.composerBody')} on:keydown={onKey} disabled={posting} />
-    <button on:click={post} disabled={posting || !postBody.trim()}>{posting ? $_('activityFeed.posting') : $_('activityFeed.post')}</button>
+    <input bind:value={postBody} placeholder={$_('activityFeed.composerBody')} onkeydown={onKey} disabled={posting} />
+    <button onclick={post} disabled={posting || !postBody.trim()}>{posting ? $_('activityFeed.posting') : $_('activityFeed.post')}</button>
   </div>
 </div>
 

@@ -64,20 +64,20 @@
   <div class="nav">
     <span class="brand">EPHEMERA</span>
     <span class="badge">v0.6.0</span>
-    <button class="ghost" on:click={() => view.set({ name: 'list' })}>{$_('nav.vms')}</button>
-    <button class="ghost" on:click={() => view.set({ name: 'snapshots' })}>{$_('nav.snapshots')}</button>
-    <button class="ghost" on:click={() => view.set({ name: 'flocks' })}>{$_('nav.orchestration')}</button>
-    <button class="ghost" on:click={() => view.set({ name: 'settings' })}>{$_('nav.settings')}</button>
-    <button class="ghost" on:click={() => view.set({ name: 'system' })}>{$_('nav.system')}</button>
+    <button class="ghost" onclick={() => view.set({ name: 'list' })}>{$_('nav.vms')}</button>
+    <button class="ghost" onclick={() => view.set({ name: 'snapshots' })}>{$_('nav.snapshots')}</button>
+    <button class="ghost" onclick={() => view.set({ name: 'flocks' })}>{$_('nav.orchestration')}</button>
+    <button class="ghost" onclick={() => view.set({ name: 'settings' })}>{$_('nav.settings')}</button>
+    <button class="ghost" onclick={() => view.set({ name: 'system' })}>{$_('nav.system')}</button>
     <span class="spacer"></span>
     <div class="lang-switch">
-      <button class="lang-btn" class:active={$locale === 'en'} on:click={() => setLocale('en')}>EN</button>
-      <button class="lang-btn" class:active={$locale === 'ko'} on:click={() => setLocale('ko')}>한국어</button>
+      <button class="lang-btn" class:active={$locale === 'en'} onclick={() => setLocale('en')}>EN</button>
+      <button class="lang-btn" class:active={$locale === 'ko'} onclick={() => setLocale('ko')}>한국어</button>
     </div>
     {#if $auth.disabled}
       <span class="badge">{$_('nav.authDisabled')}</span>
     {:else}
-      <button class="ghost" on:click={logout}>{$_('nav.logout')}</button>
+      <button class="ghost" onclick={logout}>{$_('nav.logout')}</button>
     {/if}
   </div>
   <div class="container">

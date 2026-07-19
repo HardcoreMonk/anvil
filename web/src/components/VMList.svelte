@@ -39,8 +39,8 @@
 <div class="row between" style="margin-bottom:16px;">
   <h1>{$_('vmlist.title')}</h1>
   <div class="row" style="gap:8px;">
-    <button class="ghost" on:click={refresh}>{$_('common.refresh')}</button>
-    <button on:click={() => (showSpawn = true)}>{$_('vmlist.create')}</button>
+    <button class="ghost" onclick={refresh}>{$_('common.refresh')}</button>
+    <button onclick={() => (showSpawn = true)}>{$_('vmlist.create')}</button>
   </div>
 </div>
 
@@ -56,7 +56,7 @@
       </thead>
       <tbody>
         {#each vms as vm (vm.vm_id)}
-          <tr class="clickable" on:click={() => open(vm)}>
+          <tr class="clickable" onclick={() => open(vm)}>
             <td class="mono">{vm.vm_id}</td>
             <td class="mono">{vm.guest_ip}</td>
             <td>{vm.profile || 'default'}</td>
@@ -72,5 +72,5 @@
 </div>
 
 {#if showSpawn}
-  <SpawnModal on:close={() => (showSpawn = false)} on:spawned={refresh} />
+  <SpawnModal onclose={() => (showSpawn = false)} onspawned={refresh} />
 {/if}

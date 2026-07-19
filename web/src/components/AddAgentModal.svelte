@@ -1,13 +1,11 @@
 <script>
-  import { createEventDispatcher, onMount } from 'svelte'
+  import { onMount } from 'svelte'
   import { get } from 'svelte/store'
   import { _ } from 'svelte-i18n'
   import { apiJSON } from '../lib/api.js'
   import { toast } from '../lib/store.js'
 
-  let { flockId } = $props()
-
-  const dispatch = createEventDispatcher()
+  let { flockId, onclose, onadded } = $props()
 
   let role = $state('')
   let profile = $state('default')
@@ -37,7 +35,7 @@
         body: JSON.stringify({ role: role.trim(), profile }),
       })
       toast(get(_)('addAgentModal.addedToast', { values: { id: result.agent_id } }), 'ok')
-      dispatch('added')
+      onadded?.()
     } catch (e) {
       if (e.message !== 'unauthorized') toast(e.message, 'error')
     } finally {
@@ -46,7 +44,7 @@
   }
 
   function close() {
-    dispatch('close')
+    onclose?.()
   }
 
   async function copyToken() {
@@ -59,7 +57,7 @@
   }
 </script>
 
-<div class="modal-backdrop" role="presentation" on:click|self={close} on:keydown={(e) => e.key === 'Escape' && close()}>
+<div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && close()} onkeydown={(e) => e.key === 'Escape' && close()}>
   <div class="modal">
     {#if !result}
       <h2>{$_('addAgentModal.title')}</h2>
@@ -77,8 +75,8 @@
         </select>
       </div>
       <div class="row between" style="margin-top:18px;">
-        <button class="ghost" on:click={close} disabled={busy}>{$_('common.cancel')}</button>
-        <button on:click={add} disabled={busy}>{busy ? $_('addAgentModal.adding') : $_('addAgentModal.add')}</button>
+        <button class="ghost" onclick={close} disabled={busy}>{$_('common.cancel')}</button>
+        <button onclick={add} disabled={busy}>{busy ? $_('addAgentModal.adding') : $_('addAgentModal.add')}</button>
       </div>
     {:else}
       <h2>{$_('addAgentModal.addedTitle')}</h2>
@@ -90,8 +88,8 @@
         {$_('addAgentModal.tokenWarnPre')}<strong>{$_('addAgentModal.tokenWarnBold')}</strong>{$_('addAgentModal.tokenWarnPost')}
       </div>
       <div class="row between" style="margin-top:18px;">
-        <button class="ghost" on:click={copyToken}>{$_('addAgentModal.copyToken')}</button>
-        <button on:click={close}>{$_('common.done')}</button>
+        <button class="ghost" onclick={copyToken}>{$_('addAgentModal.copyToken')}</button>
+        <button onclick={close}>{$_('common.done')}</button>
       </div>
     {/if}
   </div>

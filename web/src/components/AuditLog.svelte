@@ -39,7 +39,7 @@
 
 <div class="panel">
   <div class="filters row" style="gap:8px; margin-bottom:14px; flex-wrap:wrap;">
-    <select bind:value={fMethod} on:change={refresh}>
+    <select bind:value={fMethod} onchange={refresh}>
       <option value="">{$_('system.methodAny')}</option>
       <option value="GET">GET</option>
       <option value="POST">POST</option>
@@ -47,14 +47,14 @@
       <option value="DELETE">DELETE</option>
       <option value="PATCH">PATCH</option>
     </select>
-    <input bind:value={fClient} on:input={refresh} placeholder={$_('system.filterClient')} />
-    <input bind:value={fStatus} on:input={refresh} placeholder={$_('system.filterStatus')} style="width:110px;" />
-    <select bind:value={fLimit} on:change={refresh}>
+    <input bind:value={fClient} oninput={refresh} placeholder={$_('system.filterClient')} />
+    <input bind:value={fStatus} oninput={refresh} placeholder={$_('system.filterStatus')} style="width:110px;" />
+    <select bind:value={fLimit} onchange={refresh}>
       <option value="100">100</option>
       <option value="250">250</option>
       <option value="1000">1000</option>
     </select>
-    <button class="ghost" on:click={refresh}>{$_('common.refresh')}</button>
+    <button class="ghost" onclick={refresh}>{$_('common.refresh')}</button>
   </div>
 
   {#if loading}

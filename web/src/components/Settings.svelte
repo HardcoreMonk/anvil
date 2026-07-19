@@ -88,7 +88,7 @@
 
 <div class="row between" style="margin-bottom:16px;">
   <h1>{$_('settings.title')}</h1>
-  <button on:click={() => (showCreate = true)} disabled={loading || availableProviders.length === 0}>
+  <button onclick={() => (showCreate = true)} disabled={loading || availableProviders.length === 0}>
     {$_('settings.createProfile')}
   </button>
 </div>
@@ -124,21 +124,21 @@
             </td>
             <td>
               <div class="row" style="gap:6px;">
-                <button class="ghost" on:click={() => save(p)} disabled={savingName === p.name}>
+                <button class="ghost" onclick={() => save(p)} disabled={savingName === p.name}>
                   {savingName === p.name ? $_('settings.saving') : $_('settings.save')}
                 </button>
-                <button class="ghost" on:click={() => (builtinsName = p.name)}>{$_('settings.editBuiltins')}</button>
+                <button class="ghost" onclick={() => (builtinsName = p.name)}>{$_('settings.editBuiltins')}</button>
                 {#if p.name !== 'default'}
-                  <button class="ghost" on:click={() => (systemPromptName = p.name)}>{$_('settings.editSystem')}</button>
+                  <button class="ghost" onclick={() => (systemPromptName = p.name)}>{$_('settings.editSystem')}</button>
                   {#if confirmName === p.name}
-                    <button class="danger" on:click={() => remove(p)} disabled={deletingName === p.name}>
+                    <button class="danger" onclick={() => remove(p)} disabled={deletingName === p.name}>
                       {deletingName === p.name ? $_('settings.deleting') : $_('settings.confirmDeleteBtn')}
                     </button>
-                    <button class="ghost" on:click={() => (confirmName = null)} disabled={deletingName === p.name}>
+                    <button class="ghost" onclick={() => (confirmName = null)} disabled={deletingName === p.name}>
                       {$_('common.cancel')}
                     </button>
                   {:else}
-                    <button class="danger" on:click={() => (confirmName = p.name)}>{$_('settings.delete')}</button>
+                    <button class="danger" onclick={() => (confirmName = p.name)}>{$_('settings.delete')}</button>
                   {/if}
                 {/if}
               </div>
@@ -152,14 +152,14 @@
 
 {#if showCreate}
   <ProfileModal providers={availableProviders} {presets} {builtins}
-    on:created={() => { showCreate = false; load() }}
-    on:close={() => (showCreate = false)} />
+    oncreated={() => { showCreate = false; load() }}
+    onclose={() => (showCreate = false)} />
 {/if}
 
 {#if systemPromptName}
-  <SystemPromptModal name={systemPromptName} on:close={() => (systemPromptName = null)} />
+  <SystemPromptModal name={systemPromptName} onclose={() => (systemPromptName = null)} />
 {/if}
 
 {#if builtinsName}
-  <BuiltinsModal name={builtinsName} options={builtins} on:close={() => (builtinsName = null)} />
+  <BuiltinsModal name={builtinsName} options={builtins} onclose={() => (builtinsName = null)} />
 {/if}

@@ -1,14 +1,11 @@
 <script>
-  import { createEventDispatcher } from 'svelte'
   import { get } from 'svelte/store'
   import { _ } from 'svelte-i18n'
   import { apiFetch } from '../lib/api.js'
   import { toast } from '../lib/store.js'
 
   // The single agent to dispatch a one-shot task to (from a FlockDetail row).
-  let { agent } = $props() // { agent_id, vm_id, role }
-
-  const dispatch = createEventDispatcher()
+  let { agent, onclose } = $props() // { agent_id, vm_id, role }
 
   let body = $state('')
   let busy = $state(false)
@@ -53,11 +50,11 @@
     if (controller) controller.abort()
   }
   function close() {
-    dispatch('close')
+    onclose?.()
   }
 </script>
 
-<div class="modal-backdrop" role="presentation" on:click|self={close} on:keydown={(e) => e.key === 'Escape' && close()}>
+<div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && close()} onkeydown={(e) => e.key === 'Escape' && close()}>
   <div class="modal wide">
     {#if !result}
       <h2>{$_('sendTask.title', { values: { id: agent.agent_id } })}</h2>
@@ -66,10 +63,10 @@
       <div class="row between" style="margin-top:18px;">
         {#if busy}
           <span class="muted">{$_('sendTask.sending')}</span>
-          <button class="ghost" on:click={cancel}>{$_('common.cancel')}</button>
+          <button class="ghost" onclick={cancel}>{$_('common.cancel')}</button>
         {:else}
-          <button class="ghost" on:click={close}>{$_('common.cancel')}</button>
-          <button on:click={send} disabled={!body.trim()}>{$_('sendTask.send')}</button>
+          <button class="ghost" onclick={close}>{$_('common.cancel')}</button>
+          <button onclick={send} disabled={!body.trim()}>{$_('sendTask.send')}</button>
         {/if}
       </div>
     {:else}
@@ -79,8 +76,8 @@
       </div>
       <div class="out"><pre>{result.error || result.output || '—'}</pre></div>
       <div class="row between" style="margin-top:18px;">
-        <button class="ghost" on:click={() => (result = null)}>{$_('sendTask.again')}</button>
-        <button on:click={close}>{$_('common.done')}</button>
+        <button class="ghost" onclick={() => (result = null)}>{$_('sendTask.again')}</button>
+        <button onclick={close}>{$_('common.done')}</button>
       </div>
     {/if}
   </div>

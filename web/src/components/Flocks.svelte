@@ -43,8 +43,8 @@
 <div class="row between" style="margin-bottom:16px;">
   <h1>{$_('orchestration.title')}</h1>
   <div class="row" style="gap:8px;">
-    <button class="ghost" on:click={refresh}>{$_('common.refresh')}</button>
-    <button on:click={() => (showCreate = true)}>{$_('orchestration.create')}</button>
+    <button class="ghost" onclick={refresh}>{$_('common.refresh')}</button>
+    <button onclick={() => (showCreate = true)}>{$_('orchestration.create')}</button>
   </div>
 </div>
 
@@ -66,7 +66,7 @@
       </thead>
       <tbody>
         {#each flocks as f (f.flock_id)}
-          <tr class="clickable" on:click={() => open(f)}>
+          <tr class="clickable" onclick={() => open(f)}>
             <td class="mono">{f.flock_id}</td>
             <td class="task">{f.task || '—'}</td>
             <td>{agentCount(f)}</td>
@@ -84,7 +84,7 @@
 </div>
 
 {#if showCreate}
-  <CreateFlockModal on:close={() => (showCreate = false)} on:created={refresh} />
+  <CreateFlockModal onclose={() => (showCreate = false)} oncreated={refresh} />
 {/if}
 
 <style>
