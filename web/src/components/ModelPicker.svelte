@@ -30,7 +30,7 @@
   }
 </script>
 
-<select {id} value={custom ? CUSTOM : value} on:change={onSelect}>
+<select {id} value={custom ? CUSTOM : value} onchange={onSelect}>
   {#each models as m}
     <option value={m}>{m}</option>
   {/each}

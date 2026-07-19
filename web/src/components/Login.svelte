@@ -37,7 +37,7 @@
   <div class="panel" style="width: 380px;">
     <h1>Ephemera</h1>
     <p class="muted" style="margin-top:6px;">{$_('login.subtitle')}</p>
-    <form on:submit|preventDefault={submit}>
+    <form onsubmit={(e) => { e.preventDefault(); submit() }}>
       <div class="field" style="margin-top:16px;">
         <label for="tok">{$_('login.tokenLabel')}</label>
         <input id="tok" type="password" bind:value={token} placeholder={$_('login.tokenPlaceholder')} autocomplete="off" />

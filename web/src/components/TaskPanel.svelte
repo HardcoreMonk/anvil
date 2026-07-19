@@ -187,14 +187,14 @@
   <div class="row between" style="margin-bottom:12px;">
     <h2>{$_('taskpanel.title')}</h2>
     {#if sessionList.length}
-      <select class="conv" bind:value={selectedKey} on:change={onPickSession} disabled={running}>
+      <select class="conv" bind:value={selectedKey} onchange={onPickSession} disabled={running}>
         <option value="__new__">{$_('taskpanel.newConversation')}</option>
         {#each sessionList as s (s.name)}
           <option value={s.name}>{s.title || s.name}</option>
         {/each}
       </select>
     {:else}
-      <button class="ghost" on:click={newConversation} disabled={running || messages.length === 0}>
+      <button class="ghost" onclick={newConversation} disabled={running || messages.length === 0}>
         {$_('taskpanel.newConversation')}
       </button>
     {/if}
@@ -237,14 +237,14 @@
     rows="3"
     placeholder={$_('taskpanel.placeholder')}
     disabled={running}
-    on:keydown={onKey}
+    onkeydown={onKey}
   ></textarea>
   <div class="row between" style="margin-top:10px;">
     <span class="muted">{running ? $_('taskpanel.runningFor', { values: { sec: elapsed } }) : $_('taskpanel.hint')}</span>
     {#if running}
-      <button class="ghost" on:click={cancel}>{$_('common.cancel')}</button>
+      <button class="ghost" onclick={cancel}>{$_('common.cancel')}</button>
     {:else}
-      <button on:click={send} disabled={!prompt.trim()}>{$_('taskpanel.send')}</button>
+      <button onclick={send} disabled={!prompt.trim()}>{$_('taskpanel.send')}</button>
     {/if}
   </div>
 </div>
