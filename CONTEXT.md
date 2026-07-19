@@ -591,8 +591,18 @@ daemon으로 보내는 outbound Bearer token이다.
   `/metrics` + bounded-enum 정책; "어느 테넌트"는 quota store JSON 조회, runbook). spec/plan:
   `docs/superpowers/specs/2026-07-19-snapshot-quota-metrics-design.md`,
   `docs/superpowers/plans/2026-07-19-snapshot-quota-metrics.md`.
-- web svelte 5 runes 전환(선택) — PR #39는 legacy-compat 유지, runes 마이그레이션 미착수
-- fc upstream/OpenZFS 참고 보고 검토(D3의 fc diff "sparseness=의미" 상호작용)
+- ~~web svelte 5 runes 전환~~ — **2026-07-19 종결(PR #87)**: 19개 컴포넌트(export let∪$:)를
+  core runes(`$props`/`$state`/`$derived`/`$effect`/`$bindable`)로 behavior-preserving 전환.
+  `svelte-check` 게이트 신설(`non_reactive_update`→failing error). event-idiom(`on:`/`createEventDispatcher`)·
+  stores·`$store`는 비목표(runes 모드 동작, 후속 선택). 최종 whole-branch 리뷰가 TaskPanel 스트리밍
+  렌더 Critical(=== no-op self-assign)을 포착·수정·empirical 재검증. spec/plan:
+  `docs/superpowers/{specs,plans}/2026-07-19-svelte5-runes-migration*`.
+- ~~fc upstream/OpenZFS 참고 보고 검토(D3)~~ — **2026-07-19 종결(VALIDATED)**: anvil D3 방어(probe→
+  창설 diff→full 강등/판독 overlay 거부 + recordsize=4K 권장)가 upstream fc(4KiB sparse dirty-page diff)·
+  OpenZFS(recordsize hole granularity·`zfs_dmu_offset_next_sync` dirty 보고) 의미론과 전 지점 정합,
+  fail-safe(불확실=coarse), 근본적 내구(recordsize 과대보고는 ZFS 할당 모델 고유). 코드 변경 불요.
+  read-side 가드가 의존하는 불변식(창설측 강등의 보편성)은 확인됨(단일 경로 `api.go` resolveSnapshotType→
+  applyD3DiffGuard). 검토 상세·인용: `docs/operations/2026-07-19-d3-upstream-review.md`.
 - e2e 단일-host 동시 실행 불가 — cross-host wall/gtcall/failover e2e는 게스트가
   하드코딩된 gateway `10.0.1.1:3000`(`cmd/goose-agent/main.go`)로 daemon에 도달하므로,
   한 host에서 두 daemon이 공유 브릿지 게이트웨이·`:3000`에 충돌한다("기본 포트 공유"가
