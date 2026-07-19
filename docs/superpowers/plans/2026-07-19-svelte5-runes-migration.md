@@ -4,7 +4,7 @@
 
 **Goal:** Migrate the 19 operator-UI components under `web/src/components/` that use legacy Svelte 4 reactivity to Svelte 5 runes (`$props`/`$state`/`$derived`/`$effect`/`$bindable`), behavior-preserving, gated by a new `svelte-check` step.
 
-**Architecture:** Hand-migrate component-by-component (grouped into tasks). Each component enters runes mode atomically: `export let`→`$props` (+ `$bindable` for parent-bound props), `$:`→`$derived`/`$effect`, and every reactive local `let`→`$state`. A new `svelte-check` gate mechanically catches missed `$state`/`$bindable` (the compiler's `non_reactive_update` and binding warnings). Mixed legacy+runes across components is fully supported, so the app builds and works at every step. Stores, `on:` directives, `createEventDispatcher`, and `$store` auto-subscription are unchanged.
+**Architecture:** Hand-migrate component-by-component (grouped into tasks). Each component enters runes mode atomically: `export let`→`$props` (+ `$bindable` for parent-bound props), `$:`→`$derived`/`$effect`, and every reactive local `let`→`$state`. A new `svelte-check` gate (`--compiler-warnings non_reactive_update:error`) mechanically catches a missed `$state` (promoted to a failing error). A missed `$bindable` is a Svelte *runtime* error the static gate does NOT catch — the 2 bindable props are specified exactly and verified by the Task 7 manual smoke. Mixed legacy+runes across components is fully supported, so the app builds and works at every step. Stores, `on:` directives, `createEventDispatcher`, and `$store` auto-subscription are unchanged.
 
 **Tech Stack:** Svelte 5.56.4 (pinned in `web/package-lock.json`), Vite 8, `svelte-check` (added here), vanilla JS (no TypeScript source).
 
@@ -18,7 +18,7 @@
 - **`npm ci` first:** a checkout's `node_modules` may be stale (e.g. Svelte 4.2.20) vs the pinned 5.56.4 — the app won't build until `npm ci`. `node_modules` is gitignored.
 - **`uidist` is tracked + `//go:embed`'d:** `cmd/goose-daemon/uidist/` (3 files) is the daemon-embedded bundle. `vite build` outputs there. Rebuild + commit it ONCE at the end (Task 7); do not commit intermediate rebuilds.
 - **web/ is not in CI:** verification is local (`npm run check`, `npx vite build`, manual `/ui` smoke).
-- **The gate's must-fix set** (this is the DoD for every migration task): **0 errors + 0 `non_reactive_update` warnings + 0 binding-to-non-bindable warnings.** Because the scope KEEPS `on:` directives and `createEventDispatcher` (event idiom out of scope), svelte-check WILL emit **deprecation warnings** for them in runes-mode components — these are **EXPECTED, allowed, and will increase** as components migrate. Never treat a deprecation warning as a defect and never "fix" it by converting `on:`→`onevent` (out of scope). Only errors + `non_reactive_update` + non-bindable-binding warnings block a task.
+- **The gate's must-fix set** (this is the DoD for every migration task): **0 errors + 0 `non_reactive_update` warnings** (the `check` script promotes `non_reactive_update` to a failing error via `--compiler-warnings`, so `npm run check` exits non-zero on a missed `$state`). Because the scope KEEPS `on:` directives and `createEventDispatcher` (event idiom out of scope), svelte-check WILL emit **deprecation warnings** for them in runes-mode components — these are **EXPECTED, allowed, and will increase** as components migrate (they do not fail the gate). Never treat a deprecation warning as a defect and never "fix" it by converting `on:`→`onevent` (out of scope). **A missed `$bindable` is a Svelte runtime error the static gate does NOT catch** — it is verified by the Task 7 manual smoke (only 2 props, specified exactly in Task 6).
 - **Per-task verification:** `npm run check` at the must-fix set above; commit source only (not `node_modules`, not `uidist`).
 
 ## File Structure
@@ -343,7 +343,7 @@ function onSelect(e) {
 - [ ] **Step 3: Run the gate**
 
 Run: `cd /data/projects/claude-zone/anvil/web && npm run check 2>&1 | tail -30`
-Expected (must-fix set): 0 errors, 0 `non_reactive_update`, 0 binding warnings. Critically: **no "cannot bind to a non-bindable property" error** for `selected`/`value` (proves `$bindable` is correct), and no `non_reactive_update` for `custom`. (`on:change` deprecation warning in ModelPicker is expected/ignored.)
+Expected (must-fix set): 0 errors, 0 `non_reactive_update` (e.g. for `custom`). **NOTE:** svelte-check does NOT catch a missed `$bindable` (binding to a non-bindable prop is a Svelte *runtime* error, not a static one — confirmed empirically). So apply the `$bindable()` on `selected`/`value` **exactly as specified above**; its correctness is verified at runtime by the Task 7 manual smoke (in ProfileModal/Settings, pick a model and toggle "custom"; in Builtins, toggle a builtin — the parent's `bind:` must round-trip). (`on:change` deprecation warning in ModelPicker is expected/ignored.)
 
 - [ ] **Step 4: Commit**
 
