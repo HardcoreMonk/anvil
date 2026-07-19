@@ -59,9 +59,9 @@
     view.set({ name: 'list' })
   }
 
-  function onSnapshotCreated(e) {
+  function onSnapshotCreated(payload) {
     // stop_after destroyed the VM — leave the now-dead detail page.
-    if (e.detail && e.detail.stopAfter) {
+    if (payload && payload.stopAfter) {
       stopPolling()
       view.set({ name: 'list' })
     }
@@ -77,7 +77,7 @@
 </script>
 
 <div class="row" style="gap:10px; margin-bottom:16px;">
-  <button class="ghost" on:click={back}>← {$_('common.back')}</button>
+  <button class="ghost" onclick={back}>← {$_('common.back')}</button>
   <h1 class="mono">{vm.vm_id}</h1>
   {#if health}
     <span class="badge">{$_('vmdetail.agentBadge', { values: { status: $_('status.' + health.status) } })}</span>
@@ -114,24 +114,24 @@
 <div class="panel" style="margin-bottom:16px;">
   <h2>{$_('vmdetail.snapshotsSection')}</h2>
   <p class="muted" style="margin-bottom:12px;">{$_('vmdetail.snapshotsHint')}</p>
-  <button on:click={() => (showSnapshot = true)}>{$_('vmdetail.createSnapshotBtn')}</button>
+  <button onclick={() => (showSnapshot = true)}>{$_('vmdetail.createSnapshotBtn')}</button>
 </div>
 
 <div class="panel">
   <h2>{$_('vmdetail.dangerZone')}</h2>
-  <button class="danger" on:click={() => (confirmingDelete = true)} disabled={destroying}>
+  <button class="danger" onclick={() => (confirmingDelete = true)} disabled={destroying}>
     {$_('vmdetail.deleteBtn')}
   </button>
 </div>
 
 {#if confirmingDelete}
-  <div class="modal-backdrop" role="presentation" on:click|self={() => (confirmingDelete = false)} on:keydown={(e) => e.key === 'Escape' && (confirmingDelete = false)}>
+  <div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && (confirmingDelete = false)} onkeydown={(e) => e.key === 'Escape' && (confirmingDelete = false)}>
     <div class="modal">
       <h2>{$_('vmdetail.deleteBtn')}</h2>
       <p class="muted">{$_('vmdetail.deleteConfirm', { values: { id: vm.vm_id } })}</p>
       <div class="row between" style="margin-top:18px;">
-        <button class="ghost" on:click={() => (confirmingDelete = false)} disabled={destroying}>{$_('common.cancel')}</button>
-        <button class="danger" on:click={confirmDelete} disabled={destroying}>
+        <button class="ghost" onclick={() => (confirmingDelete = false)} disabled={destroying}>{$_('common.cancel')}</button>
+        <button class="danger" onclick={confirmDelete} disabled={destroying}>
           {destroying ? $_('vmdetail.deleting') : $_('vmdetail.deleteBtn')}
         </button>
       </div>
@@ -140,5 +140,5 @@
 {/if}
 
 {#if showSnapshot}
-  <SnapshotModal vmId={vm.vm_id} on:close={() => (showSnapshot = false)} on:created={onSnapshotCreated} />
+  <SnapshotModal vmId={vm.vm_id} onclose={() => (showSnapshot = false)} oncreated={onSnapshotCreated} />
 {/if}

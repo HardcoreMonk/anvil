@@ -1,13 +1,10 @@
 <script>
-  import { createEventDispatcher } from 'svelte'
   import { get } from 'svelte/store'
   import { _ } from 'svelte-i18n'
   import { apiJSON } from '../lib/api.js'
   import { toast } from '../lib/store.js'
 
-  let { vmId } = $props() // the VM to snapshot
-
-  const dispatch = createEventDispatcher()
+  let { vmId, onclose, oncreated } = $props() // the VM to snapshot
 
   let type = $state('auto') // "auto" | "full" | "diff"
   let stopAfter = $state(false)
@@ -21,8 +18,8 @@
       const res = await apiJSON('/vms/' + encodeURIComponent(vmId) + '/snapshot', { method: 'POST', body })
       toast(get(_)('snapshotModal.createdToast', { values: { id: res.snapshot_id } }), 'ok')
       // stop_after destroys the source VM — let the parent leave the detail page.
-      dispatch('created', { stopAfter })
-      dispatch('close')
+      oncreated?.({ stopAfter })
+      onclose?.()
     } catch (e) {
       if (e.message !== 'unauthorized') toast(e.message, 'error')
     } finally {
@@ -31,11 +28,11 @@
   }
 
   function close() {
-    dispatch('close')
+    onclose?.()
   }
 </script>
 
-<div class="modal-backdrop" role="presentation" on:click|self={close} on:keydown={(e) => e.key === 'Escape' && close()}>
+<div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && close()} onkeydown={(e) => e.key === 'Escape' && close()}>
   <div class="modal">
     <h2>{$_('snapshotModal.title')}</h2>
     <div class="field">
@@ -52,8 +49,8 @@
       <div class="muted" style="margin-top:6px; font-size:12px;">{$_('snapshotModal.stopAfterHint')}</div>
     </div>
     <div class="row between" style="margin-top:18px;">
-      <button class="ghost" on:click={close} disabled={busy}>{$_('common.cancel')}</button>
-      <button on:click={create} disabled={busy}>{busy ? $_('snapshotModal.creating') : $_('snapshotModal.create')}</button>
+      <button class="ghost" onclick={close} disabled={busy}>{$_('common.cancel')}</button>
+      <button onclick={create} disabled={busy}>{busy ? $_('snapshotModal.creating') : $_('snapshotModal.create')}</button>
     </div>
   </div>
 </div>
