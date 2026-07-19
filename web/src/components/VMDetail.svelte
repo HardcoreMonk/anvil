@@ -7,13 +7,13 @@
   import TaskPanel from './TaskPanel.svelte'
   import SnapshotModal from './SnapshotModal.svelte'
 
-  export let vm // the VMInfo selected from the list
+  let { vm } = $props() // the VMInfo selected from the list
 
-  let stats = null
-  let health = null // { status: "idle" | "busy" }
-  let destroying = false
-  let confirmingDelete = false
-  let showSnapshot = false
+  let stats = $state(null)
+  let health = $state(null) // { status: "idle" | "busy" }
+  let destroying = $state(false)
+  let confirmingDelete = $state(false)
+  let showSnapshot = $state(false)
   let statsTimer = null
   let healthTimer = null
 

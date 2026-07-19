@@ -7,15 +7,14 @@
   import BuiltinPicker from './BuiltinPicker.svelte'
 
   // The profile whose builtin extensions are being edited (from the Settings row).
-  export let name
   // Builtin extension registry from GET /config/builtins (loaded once by Settings).
-  export let options = []
+  let { name, options = [] } = $props()
 
   const dispatch = createEventDispatcher()
 
-  let selected = []
-  let loading = true
-  let busy = false
+  let selected = $state([])
+  let loading = $state(true)
+  let busy = $state(false)
 
   const path = '/config/profiles/' + encodeURIComponent(name) + '/builtins'
 

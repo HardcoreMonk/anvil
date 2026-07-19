@@ -6,21 +6,21 @@
   import { streamFrames } from '../lib/stream.js'
   import { toast } from '../lib/store.js'
 
-  export let vmId
+  let { vmId } = $props()
 
   // messages: { role:'user', text } | { role:'assistant', progress:[], output, error, done }
-  let messages = []
-  let prompt = ''
-  let running = false
+  let messages = $state([])
+  let prompt = $state('')
+  let running = $state(false)
   let session = '' // goose session name; the agent resumes it across turns
   let controller = null
-  let elapsed = 0
+  let elapsed = $state(0)
   let elapsedTimer = null
-  let logEl
-  let sessionList = [] // [{ name, created_at, title, turns, last_output }] from the agent
-  let selectedKey = '__new__' // conversation picker: '__new__' or a session name
-  let resuming = false // true when the active session is a resumed prior conversation
-  let resumeTurns = 0
+  let logEl = $state()
+  let sessionList = $state([]) // [{ name, created_at, title, turns, last_output }] from the agent
+  let selectedKey = $state('__new__') // conversation picker: '__new__' or a session name
+  let resuming = $state(false) // true when the active session is a resumed prior conversation
+  let resumeTurns = $state(0)
 
   function newSession() {
     // A fresh goose session per conversation. Date.now keeps it unique per VM.
