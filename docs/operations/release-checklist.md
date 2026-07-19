@@ -88,6 +88,7 @@ go test ./...
 go build ./cmd/goose-daemon
 go build ./cmd/anvil-mcp
 go build ./cmd/anvil-scheduler
+gofmt -l .
 bash -n e2e_test.sh
 bash -n scripts/anvil-mcp-e2e.sh
 bash -n scripts/anvil-scheduler-smoke.sh

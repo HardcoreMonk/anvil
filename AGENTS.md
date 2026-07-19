@@ -60,6 +60,7 @@ go test ./...
 go build ./cmd/goose-daemon
 go build ./cmd/anvil-mcp
 go build ./cmd/anvil-scheduler
+gofmt -l .
 ```
 
 전체 통합 검증:
