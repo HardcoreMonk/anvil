@@ -5,15 +5,15 @@
   import { apiJSON } from '../lib/api.js'
   import { toast } from '../lib/store.js'
 
-  export let flockId
-  export let agent // AgentInfo { agent_id, role, profile, ... }
+  // agent: AgentInfo { agent_id, role, profile, ... }
+  let { flockId, agent } = $props()
 
   const dispatch = createEventDispatcher()
 
-  let role = ''
-  let profile = ''
-  let profiles = []
-  let busy = false
+  let role = $state('')
+  let profile = $state('')
+  let profiles = $state([])
+  let busy = $state(false)
 
   onMount(async () => {
     try {

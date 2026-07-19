@@ -6,14 +6,14 @@
   import { toast } from '../lib/store.js'
 
   // The profile whose system.md is being edited (passed from the Settings row).
-  export let name
+  let { name } = $props()
 
   const dispatch = createEventDispatcher()
 
-  let value = ''
-  let loading = true
-  let busy = false
-  let confirmClear = false // Clear awaiting confirmation, mirroring the Delete flow
+  let value = $state('')
+  let loading = $state(true)
+  let busy = $state(false)
+  let confirmClear = $state(false) // Clear awaiting confirmation, mirroring the Delete flow
 
   const path = '/config/profiles/' + encodeURIComponent(name) + '/system'
 

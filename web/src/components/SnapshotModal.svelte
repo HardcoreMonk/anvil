@@ -5,13 +5,13 @@
   import { apiJSON } from '../lib/api.js'
   import { toast } from '../lib/store.js'
 
-  export let vmId // the VM to snapshot
+  let { vmId } = $props() // the VM to snapshot
 
   const dispatch = createEventDispatcher()
 
-  let type = 'auto' // "auto" | "full" | "diff"
-  let stopAfter = false
-  let busy = false
+  let type = $state('auto') // "auto" | "full" | "diff"
+  let stopAfter = $state(false)
+  let busy = $state(false)
 
   async function create() {
     busy = true
