@@ -102,6 +102,25 @@ func applyConfiguredHosts(store *anvilmcp.PlacementStore, hosts []anvilmcp.Runti
 	return store.ApplyConfiguredHostsAndSave(hosts)
 }
 
+// newSchedulerServer builds the scheduler's HTTP listener.
+//
+// ReadHeaderTimeout and IdleTimeout both apply before any handler — and thus
+// before any token check — runs. Left at net/http's zero value they mean "no
+// limit", so an unauthenticated peer could hold connections, goroutines and fds
+// open indefinitely.
+//
+// ReadTimeout and WriteTimeout stay unset on purpose, matching the control plane:
+// a global budget on the whole request or response would sever long-lived bodies
+// and streamed responses.
+func newSchedulerServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+}
+
 func main() {
 	cfg, err := loadSchedulerConfig()
 	if err != nil {
@@ -138,7 +157,7 @@ func main() {
 	defer stop()
 	loop.Start(ctx)
 	log.Printf("anvil scheduler service on %s", cfg.Addr)
-	server := &http.Server{Addr: cfg.Addr, Handler: service.Handler()}
+	server := newSchedulerServer(cfg.Addr, service.Handler())
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

@@ -61,6 +61,26 @@ func initSlog() {
 	slog.SetDefault(slog.New(h))
 }
 
+// initUmask narrows the inherited file-creation mask to 0077 so that nothing the
+// daemon emits is readable by group or other.
+//
+// The daemon's artifacts — per-VM rootfs images, snapshot memory.bin/state.bin,
+// COW exception stores — embed 0600 secrets (LLM provider API keys, the guest
+// agent token, the operator control-plane bearer). Under the default 0022 umask
+// they land at 0644/0755, so any unprivileged local account recovers those
+// secrets with a single `strings vm-*.ext4`.
+//
+// Per-call file modes cannot close this: a large share of the artifacts are
+// created by child processes (Firecracker, `cp`, `truncate`, the image build
+// script), whose modes the daemon does not control. The umask does, because it
+// is inherited across fork/exec. It must therefore run before any provisioner or
+// storage bootstrap. Anything that genuinely needs broader bits (e.g. an
+// executable dropped for another user) sets them explicitly with os.Chmod, which
+// the umask does not affect.
+func initUmask() {
+	syscall.Umask(0o077)
+}
+
 func fatal(msg string, args ...any) {
 	slog.Error(msg, args...)
 	os.Exit(1)
@@ -82,6 +102,9 @@ func main() {
 	}
 
 	initSlog()
+	// Before any artifact is created (provisioner, storage bootstrap, snapshot
+	// dirs, Firecracker children): everything below inherits this mask.
+	initUmask()
 	slog.Warn("starting ephemera control plane")
 	if len(apiClients) == 0 {
 		slog.Warn("api unauthenticated (no tokens configured)")
@@ -106,7 +129,7 @@ func main() {
 	gooseSecretsPath := filepath.Join(cwd, "configs/goose-secrets.yaml")
 	snapshotDir := filepath.Join(cwd, "snapshots")
 
-	if err := os.MkdirAll(snapshotDir, 0755); err != nil {
+	if err := os.MkdirAll(snapshotDir, 0700); err != nil {
 		fatal("fatal: create snapshot dir", "err", err, "dir", snapshotDir)
 	}
 
