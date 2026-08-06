@@ -13,7 +13,10 @@ UDP에도 적용, post-quantum multi-datagram ClientHello 재조립, 신규 dire
 `golang.org/x/crypto`)·`allow_hosts` deprecation cycle 확정(런타임 경고, 다음
 tagged 릴리즈에서 제거)·egress ECH 관측 metric(`ephemera_egress_sni_ech_observed_total`)·
 scheduler aggregate quota metric(`anvil_scheduler_quota_*`)·CI gofmt gate(빌드
-전 `gofmt -l .` 검사) 등 untagged 작업을 더 포함한다.
+전 `gofmt -l .` 검사)·**보안 하드닝 시리즈**(host-local 파일 권한, listener pre-auth
+한계, adapter/gateway 입력 검증, Town Wall 레코드 무결성, supply chain·release
+workflow, pinned artifact 검증 — PR #91~#99, 아래 「보안/운영 강화」)
+등 untagged 작업(PR #19~#99)을 더 포함한다.
 (D4 cow diff-restore panic은 4라운드 조사로 anvil-측 소진, 근본은 anvil 밖
 KVM/Firecracker resume-race로 확정 → 2026-07-13 **종결**(default plain 유지·COW
 opt-in, fc v1.16.1이 실패율 100%→~15–25%로 최대 완화) — `docs/ADR_INDEX.md` v0.4.2 행
@@ -34,6 +37,187 @@ post-release backlog batch(PR #18 merge `726cbdc`)와 open-gate closure(step 59
   genericize한다(`ae96c34`, #36). 상세는 host slog에만 남긴다 — stdio stderr
   scrub(`4a802f5`)과 같은 정책으로, backend 오동작 시 detail이 VM으로 새는 경로를
   차단한다.
+- daemon이 디스크에 남기는 산출물을 owner-only로 좁힌다(`ac93472`, #91). bootstrap
+  이전에 `initUmask()`가 umask를 0077로 내리고, workspace/snapshot `MkdirAll`
+  literal 셋은 0700, systemd unit은 `UMask=0077`을 갖는다. per-VM rootfs image,
+  snapshot `memory.bin`/`state.bin`, COW exception store는 provider API key·guest
+  agent token·operator control-plane bearer를 품는데, 대부분 child
+  process(Firecracker, `cp`, `truncate`)가 쓰는 파일이라 per-call mode로는 닫히지
+  않는다. `UMask`는 파일 생성 마스크일 뿐 sandbox가 아니므로 `/dev/kvm`·iptables·
+  loop mount 접근은 그대로다. **이미 가동 중인 호스트는 `os.MkdirAll`이 기존
+  디렉토리를 좁히지 않으므로 배포 시 한 번의 `chmod`가 필요하다.**
+- control plane·runtime MCP gateway·scheduler·in-guest agent 네 listener에
+  `ReadHeaderTimeout`/`IdleTimeout`을 건다(`ac93472`, #91). 둘 다 handler보다,
+  따라서 `authMiddleware`보다 앞서 적용되는 구간을 덮는다. `ReadTimeout`/
+  `WriteTimeout`은 SSE Town Wall stream·NDJSON task stream·수 GB
+  snapshot/workspace body가 어떤 고정 예산보다 오래 살기 때문에 의도적으로 0(무제한)
+  으로 남기고, 테스트가 그 0을 고정해 이후 "완전성" 편집이 값을 채워 넣지 못하게
+  한다. timeout 구성을 테스트 가능하게 하려는 `newSchedulerServer`/`newAgentServer`
+  순수 추출이 함께 들어간다.
+- profile 이름 검증을 create 경로와 공유한다(`ac93472`, #91). 기존 inline guard는
+  `""`·`".."`·separator만 걸러 `"."`를 통과시켰다. create가 이미 강제하던
+  `^[a-z0-9][a-z0-9_-]*$`의 format 절반을 read/update/delete 핸들러가 함께 쓴다 —
+  대신 대문자·점이 든 이름으로 디스크에 손수 만든 profile 디렉토리는 더 이상 API로
+  관리되지 않는다. 같은 커밋에서 `PUT /hosts`가 `DELETE`와 동일하게 config-managed
+  host에 409를 반환한다.
+- go toolchain을 patch 릴리즈로 고정하고 CI에 reachability 기반 취약점 게이트를
+  추가한다(`ac93472`, #91). CI와 release 모두 `go.mod`에서 toolchain을 해석하는데
+  `go 1.25.0` floor만 선언돼 있었다. `toolchain go1.25.12` 고정으로
+  `govulncheck ./...`가 14 → 0이 된다 — third-party module 기여분은 0이었고 전량이
+  toolchain 버전 문제였다. `ci.yml`에는 pinned `govulncheck@v1.6.0` step과
+  `permissions: contents: read`가 함께 들어간다.
+- MCP adapter가 `vm_id`/`snapshot_id`를 daemon URL에 넣기 전에 검증하고
+  escape한다(`62c07b9`, #92). 두 층이 모두 필요하다 — `url.PathEscape`만으로는 `.`이
+  unreserved라 dot-segment가 그대로 통과하고, 검증만으로는 이후 새 call site가
+  우회한다. 검증은 모든 `vm_id`-taking tool이 이미 지나가는 chokepoint
+  `resolveIdentity`에 두어 session alias에서 해석된 `vm_id`까지 함께 덮는다. adapter는
+  control-plane bearer를 쥔 채 `anvil_*` tool surface만 노출하는 자리이므로,
+  identifier가 경로 구조를 바꾸지 못하는 것이 그 경계의 전제다.
+- TLS SNI 파서가 여러 record에 걸친 ClientHello를 재조립한다(`62c07b9`, #92). RFC
+  8446 §5.1은 handshake message가 여러 TLS record에 걸치는 것을 허용하는데, 파서가 첫
+  record의 length만 읽고 reassembler가 매번 버퍼 처음부터 다시 파싱해 분할된
+  ClientHello는 끝내 resolve되지 않았다. 이제 feed당 한 번 선두의 완결 handshake
+  record 런을 flatten한다 — record가 추가될 때마다 다시 파싱하면 1바이트 segment가 CPU
+  증폭기가 되므로 비용은 버퍼 크기에 선형으로 유지하고, 단일 record는 sub-slice로 넘겨
+  common path를 무할당으로 둔다. ClientHello 도중의 non-handshake record는 terminal로
+  다루되 이미 파싱된 ClientHello가 그 검사를 이기므로 RFC 8446 D.4 0-RTT는 그대로다.
+  관측 공백은 `outcome="incomplete"`로 닫는다. QUIC은 불완전 datagram을 버려 대응물이
+  없고 `ParseHandshakeSNI`는 손대지 않아 영향이 없다.
+- Town Wall이 authorship을 roster에 대조하고 레코드를 줄당 JSON object 하나로
+  저장한다(`62c07b9`, #92). wall write는 per-flock relay token(guest capability)으로
+  admit되므로 `agent_id`는 caller가 정하는 입력이었고, `[ts] <agent> body\n` 포맷에는
+  escaping이 없었다. 이제 wall owner에서 `SystemAuthor`는 절대 caller-assignable하지
+  않고(membership 검사보다 먼저 확인해 roster가 그 label을 달고 있어도 열리지 않는다)
+  author는 roster에 있어야 한다. relay flock은 wall을 소유하지 않지만 hop 이전에 같은
+  거부를 적용한다. JSON 레코드는 Post 하나가 구조적으로 레코드 하나만 낼 수 있게 하며,
+  reader가 선두 바이트로 두 포맷을 구분해 기존 로그와 rotate된 백업을 그대로 읽는다.
+  gtwall이 파일 전체를 publish할 때 multi-line body의 첫 줄만 남고 잘리던 기존 손실도
+  함께 고쳐진다.
+- guest·peer가 만든 응답 body를 읽는 여섯 `io.ReadAll` 호출에 상한을 건다(`62c07b9`,
+  #92). 담는 내용에 따라 상한이 다르다 — payload body는 자르지 않고 error를 낸다(조용히
+  잘린 task 결과는 caller가 감지할 수 없는 무결성 실패다). error snippet은 잘라서 peer의
+  status code가 502 뒤로 사라지지 않게 한다.
+- 죽은 `decide()` classifier를 제거하고 그 assertion을 `decideTCP`로 옮긴다(`95c316f`,
+  #93). production caller가 없었고 — TCP data path는 `62c07b9`가 `decideTCP`를 뽑기
+  전까지 nfqueue closure 안에 있었다 — `sni.ErrIncomplete`에 fail-closed하는, production이
+  가진 적 없는 규칙을 고정하고 있었다. data-path coverage가 아닌 green이다. 여섯 assertion
+  중 다섯은 이미 `TestSNIDecideTCPRouting`에 등가물이 있었고, malformed vector
+  `{0x16,0x03,0x01,0xff,0xff,0x01}`은 실제 동작(`sniPassthrough`, 이유
+  `egress_sni_incomplete`)을 주장하도록 추가되며 진짜 terminal error(`content_type=0x17`)가
+  여전히 drop함을 함께 고정한다. 잃은 assertion은 없다. 제거된 함수를 가리키던 주석은
+  `sni_verdict.go`·그 테스트·`api.go`에서 함께 갱신한다.
+- **Town Wall JSON 전환의 rollback 트랩**을 `disaster-recovery.md`에 적는다(`95c316f`,
+  #93). 업그레이드는 reader가 두 포맷을 모두 받으므로 투명하지만, 그 변경 이전으로
+  daemon을 되돌리면 옛 `parseLine`이 `[`로 시작하지 않는 줄을 에러 없이 건너뛰어 그 사이에
+  쓰인 history가 비어 보인다. 파일은 그대로이고 재업그레이드하면 복구되므로 data loss가
+  아니라 read-compatibility 문제이며, 문서도 그렇게 적는다. rollback 시점에 operator가 실제로
+  여는 daemon 재시작 절차 옆에 두고 `runbook.md`의 Town Wall 절에서 교차 참조한다. rotation은
+  byte-size 기반이라 포맷 무관이고, 두 포맷이 섞인 파일도 올바로 읽힌다.
+- MCP gateway session store에 TTL sweep과 hard cap을 넣고 `*/list` fan-out을
+  limiter·audit에 태운다(`eb4ab08`, #94). `memSessionStore.Create`는 cap도 TTL도 eviction도
+  없이 삽입했다. 이제 `tokenBucketLimiter`와 필드 단위로 같은 패턴으로 sweep하고
+  `maxSessions`(1024)·`sessionTTL`(1h)을 강제한다 — `SessionStore.Get`은 production caller가
+  없고 identity는 요청마다 source IP에서 다시 해석되므로 entry 하나를 잃는 비용은
+  re-initialize 한 번이다. session key는 fresh random이라 sweep만으로는 부족해 cap이 함께
+  필요하다(limiter의 low-cardinality (VM, server) 쌍과 다른 점이다). 세 `*/list` 메서드는
+  host-side credential로 모든 allowed backend에 fan-out하면서 limiter도 audit도 거치지 않았는데
+  이제 둘 다 거치며 metadata-only `Kind: "list"` 레코드를 남긴다. bucket이 마른 backend는 요청을
+  실패시키지 않고 건너뛰어 "backend 하나가 죽어도 catalog가 비지 않는다"는 문서화된 동작을
+  지킨다. `initialize`는 backend를 건드리지 않아 limiter 키가 없으므로 제외된다.
+- `PlacementStore.Save`가 state 파일 rewrite까지 write lock을 쥔다(`eb4ab08`, #94).
+  이전에는 lock을 먼저 놓아 동시 `SaveRoutedFlockAndPlacements`가 그 틈에 자기
+  read-modify-write를 끝내고 덮어쓸 수 있었다. relay token을 그렇게 잃으면
+  `runtime_router`가 persisted relay secret 없이 hub 재등록을 건너뛰어 home failover 이후
+  flock의 Town Wall이 복구되지 않는다. 디스크를 건드리는 다른 mutator는 이미 RMW 전체에
+  write lock을 쥐고 있었고 `Save`만 예외였다. `-race`로는 보이지 않는 file-level TOCTOU라
+  회귀 테스트는 지속 경합으로 재현한다(수정 전 token 46~59% 유실, 이후 0).
+- VM teardown이 guest IP의 conntrack 엔트리를 flush한다(`eb4ab08`, #94). 이전에는 방화벽
+  규칙만 지우고 conntrack 엔트리는 남겨, 재활용된 IP가 이전 사용자의 tracked flow 상태를
+  물려받을 수 있었다. `Manager.Release`가 가동 중이던 VM의 IP가 풀로 돌아오는 유일한
+  지점이라(나머지 `ipInUse` reset은 할당 실패 rollback이다) 거기 한 번의 flush로 모든 경로를
+  덮는다. 규칙이 사라진 뒤·IP가 풀리기 전에 실행돼 경합하는 `Allocate`가 stale 상태가 남은
+  주소를 내주지 못한다. 커널 쪽 세부(재사용된 tuple의 mark 유지 여부, 실제 timeout)는 이
+  환경에서 검증할 수 없어 코드가 그렇게 적고 있으며, flush는 확인 못 한 transport에 gate하지
+  않고 무조건 돌린다 — 어느 쪽이든 싸다.
+- 아무것도 지우지 않은 conntrack flush를 Warn이 아니라 Debug로 남긴다(`2f6121e`, #95).
+  conntrack-tools v1.4.9에서 `conntrack -D -s <ip>`는 필터가 아무것도 매치하지 않으면 exit
+  1이고, 이는 tracked flow를 연 적 없는 VM의 평범한 teardown 결과다. Warn으로 두면 일상적인
+  teardown마다 울려 operator가 그 줄을 읽지 않게 되는데, security-adjacent 로그에 가장 나쁜
+  결과다. 주의가 필요한 경우(conntrack 자체 부재)는 startup에서 `conntrackAvailable()`이 한
+  번 보고한다. `eb4ab08`의 주석이 남긴 열린 질문 — 호스트에서 관측되면 강등하라 — 을 실제
+  관측으로 닫는다.
+- 이미지 빌드와 설치의 supply chain을 조인다(`eb4ab08`, #94). `build_image.sh`는 goose를
+  rolling `stable` 태그에서 검증 없이 받아 golden image에 넣고 있었다(SLIM에서는 그 다운로드가
+  최종 사용자 호스트에서 root로 일어난다). 이제 `v1.45.0` 고정 + `sha256sum -c || die`로
+  kernel·firecracker와 같은 패턴을 따른다 — **해당 저장소는 mutable release를 publish하므로
+  태그 고정 자체는 아무것도 보장하지 않고 digest가 통제 수단이다.** 같은 스크립트가 root로
+  쓰던 고정 `/tmp` 경로는 둘 다 `mktemp`로 바뀌고 EXIT trap을 생성 이전에 설치한다. cleanup은
+  깊은 것부터 unmount하고 `rm -rf`가 아니라 `rmdir`로 끝나, unmount가 실패해도 아직 마운트된
+  rootfs로 재귀하지 않는다. `install.sh`는 `cp -a`가 추출한 사용자의 ownership을
+  `/opt/ephemera`로 끌고 들어가던 것을(`INSTALL.md`는 비특권 추출 후 sudo 설치를 문서화한다)
+  mode·timestamp만 보존하는 복사 + 재귀 chown으로 바꾼다. `-dR`이 필요하다 — `--preserve=`만
+  쓰면 `-a`가 함축하던 재귀가 빠져 디렉토리 복사가 실패한다. timestamp는 계속 보존한다:
+  daemon은 golden image가 build input보다 새로울 때만 현행으로 취급하고 chown은 mtime이 아니라
+  ctime을 움직인다. 재귀 chown이 생긴 만큼 preflight가 정확한 system 디렉토리를 거부해
+  `EPHEMERA_HOME` 오타가 시스템 트리를 재소유하는 일을 막는다(기본값을 포함한 전용
+  subdirectory는 영향 없다).
+- ADR-0002에 TCP insertion·reordering residual-risk 행을 더하고 pre-decision 행을
+  정정한다(`eb4ab08`, #94). 그 행의 hold-then-decide 기각 근거는 "완결되는 segment가 결국
+  verdict를 확정한다"는 진술되지 않은 전제에 기대고 있었는데, `62c07b9` 이전에는 성립하지
+  않았다. 같은 행의 두 사실도 갱신한다 — 해당 분기는 이제 `outcome="incomplete"`를 내보내고,
+  16 KiB cap은 flow가 아니라 reassembly window를 제한한다.
+- release workflow가 실제 태그 형식 `anvil-v*`에서 트리거된다(`99507d3`, #96). 트리거가
+  `v*`였는데 anvil 릴리즈는 `anvil-v*`로 태깅하고 bare `v*`는 이 fork가 의도적으로 유지하는
+  upstream ephemera runtime namespace라(`CONTEXT.md`, "Fork와 upstream 정책"), 워크플로는 6월
+  추가 이후 한 번도 실행된 적이 없다(`release.yml/runs` total_count 0) — `anvil-v0.7.0`을 포함해
+  지금까지의 릴리즈는 전부 개발 머신에서 빌드해 손으로 업로드한 것이다. origin에는 이 워크플로
+  이전의 `v0.1.0`·`v0.2.0`이 있고 fork 정책상 upstream 태그가 저장소를 통과하므로, 트리거 교정은
+  다음 upstream sync가 `v*` 태그를 밀었을 때 upstream 태그에서 빌드된 anvil 릴리즈가 publish되는
+  footgun도 함께 닫는다. `workflow_dispatch`가 추가되고(입력 없음 — 태그를 run의 ref로 고르면
+  `GITHUB_REF_NAME`이 버전을 나르므로 보간 문자열이 shell이나 checkout ref로 들어가지 않는다)
+  job은 `refs/tags/` prefix에서만 돈다(branch에서의 dispatch는 branch 이름을 release name으로
+  삼게 되므로 건너뛴다). `softprops/action-gh-release`는 움직이는 major 태그 대신 commit으로
+  고정한다(`c125837`, v3.0.2). **이 워크플로는 GitHub-hosted runner에서 실행된 적이 없다 —
+  FULL variant는 `debootstrap`을 돌리고 ~250 MB 자산을 만든다. 실제 릴리즈가 의존하기 전에
+  throwaway 태그로 검증할 것.** 릴리즈를 CI로 옮길지 자체는 이 PR이 내리는 결정이 아니라
+  이 PR이 여는 결정이다.
+- 이미 디스크에 있는 kernel·firecracker도 pin과 대조한다(`8933331`, #97).
+  `EnsureKernel`/`EnsureFirecracker`는 둘 다 `expectedSHA256`을 받으면서 `os.Stat`에서 early
+  return해, pin이 해당 파일을 갖고 있지 않은 호스트에만 적용되고 drift는 아무도 보고하지
+  않았다(이 개발 호스트가 v1.16.1 pin에 v1.15.1을 실행하고 있었다). 두 아티팩트는 다르게 다뤄야
+  한다 — kernel pin은 설치된 파일 자체의 digest라 직접 비교하면 되지만(`build_release.sh`가
+  `vmlinux.bin`을 `kernelSHA256`에 직접 대조한다), firecracker pin은 release **tarball**의
+  digest이고 디스크에 남는 것은 거기서 추출된 바이너리라 둘은 어떤 버전에서도 같을 수 없다(순진한
+  `sha256(destPath) == expectedSHA256`은 올바르게 provision된 것을 포함해 **모든** 설치를
+  거부했을 것이다). 그래서 firecracker는 provenance sidecar(`.pin-state`)에 출처 tarball과 설치된
+  파일의 digest를 기록해 verified(오프라인 통과) / mismatch(fail closed) / unknown(스탬프 없음) 세
+  상태를 만든다. unknown은 known-bad와 다르게 다룬다 — 이 변경 이전에 provision된 모든 호스트와
+  현행 release tarball이 거기 해당하고, 어차피 오늘 검증 없이 도는 것들을 전부 깨뜨려 얻을 것이
+  없기 때문이다. 가능하면 재provision하고 불가능하면 큰 소리로 에러를 내며 계속 돌아, 첫 성공
+  이후 verified-and-offline으로 수렴한다. sidecar 이름은 일부러 `.sha256`이 아니다: 그 접미사는
+  어디서나 "옆 파일의 digest"로 읽히는데 이 파일은 digest 둘을 담고 그중 하나는 인접 바이너리의
+  것이 아니다. 추출은 temp 파일 staging 후 rename이라, 실패한 추출이 동작하던 바이너리를 파괴하지
+  못하고 실행 중 바이너리의 `ETXTBSY`도 사라진다.
+- runtime이 이미 가진 아티팩트를 `os.Stat`로 건너뛴다는 서술을 정정한다(`9317fe9`, #98).
+  `8933331` 이후로는 사실이 아니다. `RELEASE_NOTES.md`는 chronology이므로 v0.7.0 항목은 시제만
+  바꾸고 현재 동작을 가리키는 주석을 붙여 남긴다. `docs/guides/runtime-usage.md`의 표는 오늘의
+  런타임 동작을 기술하므로 검증 자체에 대한 행이 추가된다 — 두 아티팩트를 같은 방식으로 검사할 수
+  없는 이유와, 검증 불가능한 바이너리를 불량으로 취급하지 않는 이유(스탬프 이전 호스트와
+  air-gapped 설치가 계속 부팅해야 한다). `docs/analysis/01-source-line-analysis.md`와 2026-07-06
+  parity-sync handoff는 특정 커밋에 고정된 날짜 기록이고 자기 시점을 과거형으로 진술하므로
+  의도적으로 두었다.
+- restore된 guest가 어떻게 reseed하는지와 그것이 요구하는 버전 하한을
+  `docs/guides/security-and-resilience.md` Known Limitations에 적는다(`0625f35`, #99).
+  Firecracker는 x86_64에서 VMGenID 장치를 무조건 만들고 API·SDK 설정이 아예 없으므로 machine
+  config에 그 항목이 없는 것이 올바른 구성이다 — restore마다 새 128-bit ID를 발급하고 guest
+  kernel(6.1.155가 `vmgenid`·`add_vmfork_randomness`·`crng_reseed`를 포함)이 그 인터럽트로
+  reseed한다. 새 행이 적는 것은 이 기존 완화가 지고 있는 두 조건이다. 첫째, upstream이 문서화한
+  resume/reseed 경합 구간 — anvil의 restore 경로는 guest-reachable TLS 이전에 host-side vsock
+  왕복(guest IP 재구성, 그 다음 agent token)을 두고 agent·control-plane token은 guest randomness가
+  아니라 host entropy로 생성해 주입하므로 구간이 좁지만, anvil이 닫는다고는 적지 않는다. 둘째,
+  이 reseed는 **Firecracker v1.16.1부터** 성립한다 — v1.15.1은 장치를 `FCVMGID`로 광고하고 kernel은
+  `VMGENCTR`를 매치한다(upstream이 v1.16.0에서 수정). D4 행이 이미 다른 이유로 같은 버전 하한을
+  권고하고 있어 이제 둘이 한 방향으로 맞는다. 코드 변경 없는 문서 작업이다.
 
 ## 유지보수
 
