@@ -56,6 +56,11 @@ set -Eeuo pipefail
 #            POST /snapshots/import (the export bundle crossed the wire);
 #            snapshot_locations[snap1] converges to [real-host, stub-b] (len 2);
 #            /metrics attempts{replicated,scheduled}>=1 and queue_depth==0.
+#            peer_only_satisfied stays 0: both locations here are
+#            adapter-verified (create + ReplicateSnapshot), never
+#            peer-observed, so the gauge is asserted present-in-exposition
+#            and 0, not faked non-zero -- this stub cannot produce a genuine
+#            peer-only-satisfied snapshot (see the assertion's comment).
 #            Redaction: neither /metrics nor adapter stderr leaks the stub loopback
 #            address or the operator token.
 #   Phase 2  kill target, create snap2 (again under-replicated). /metrics
@@ -690,6 +695,24 @@ if [ "$p1_ok" = "true" ]; then
 else
   fail "phase1_failed: import=$(stub_import_count "$CAP") len=$(snap_locs_len "$SNAP1_ID") replicated=$(attempt_value replicated scheduled) queue_depth=$(gauge_value anvil_scheduler_snapshot_replication_queue_depth)"
   exit 1
+fi
+
+# peer_only_satisfied stays 0 in this topology: snap1's real-host location is
+# adapter-verified at create time (RuntimeRouter.CreateSnapshot) and its stub-b
+# location is adapter-verified by the reconcile loop's own ReplicateSnapshot
+# call (recordSnapshotLocation) -- never peer-observed, because the stub's
+# GET /snapshots always answers `[]` so discovery's ListSnapshots pass never
+# reports a stub-b location for the adapter to record as observed. This
+# single-daemon-plus-stub e2e therefore cannot exercise a genuinely
+# peer-only-satisfied snapshot; assert the gauge is present in the exposition
+# (writeSchedulerGauge renders it unconditionally) and reads 0, so a
+# regression that drops the metric or miscounts a fully-verified snapshot as
+# peer-only would still be caught.
+if grep -qE '^anvil_scheduler_snapshot_replication_peer_only_satisfied ' "$METRICS_OUT" \
+  && [ "$(gauge_value anvil_scheduler_snapshot_replication_peer_only_satisfied)" = "0" ]; then
+  ok "/metrics peer_only_satisfied == 0 (present in exposition; this scenario has no peer-observed-only location)"
+else
+  fail "phase1_failed: peer_only_satisfied missing or nonzero: $(gauge_value anvil_scheduler_snapshot_replication_peer_only_satisfied)"
 fi
 
 # Redaction spot check: neither the rendered /metrics nor the adapter stderr may
