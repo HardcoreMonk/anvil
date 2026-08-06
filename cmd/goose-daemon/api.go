@@ -269,9 +269,25 @@ type runningVM struct {
 	// snapshot on recovery rather than re-layering the preserved exception store).
 	sourceSnapshotID string
 	vsockPath        string // host-side UDS for Firecracker vsock proxy; cleaned up on teardown
-	machine          *firecracker.Machine
-	tapDevice        string
-	socketPath       string
+	// cpTokenManaged records the PROVENANCE of this guest's
+	// /root/.ephemera-cp-token: true only when THIS daemon injected its OWN
+	// operator bearer (cp.controlPlaneTokenForVM) at spawn time. It is the sole
+	// admission test for the SIGHUP rotation fan-out (propagateCPTokenToVMs).
+	//
+	// It is deliberately NOT inferred from FlockID or flock kind:
+	//   - a plain POST /vms VM has NO cp-token file at all (the provisioner skips
+	//     it when the token is empty), so rotating it would GRANT a workload VM
+	//     control-plane access it was never meant to have;
+	//   - a routed-flock member holds a caller-supplied, per-flock SCOPED relay
+	//     token, so rotating it would both escalate the guest's privileges and
+	//     break its relay hop to the home daemon.
+	// The routed-flock case is exactly why FlockID is not a usable proxy: it is
+	// non-empty there too, yet that VM must be left alone. Only an explicit
+	// provenance record separates the two.
+	cpTokenManaged bool
+	machine        *firecracker.Machine
+	tapDevice      string
+	socketPath     string
 	// v0.3.5 additions for /vms/{vm_id}/stats. memSizeMib mirrors VMState.MemSizeMib,
 	// spawnedAt mirrors VMState.CreatedAt, and fcPID caches the Firecracker child
 	// PID resolved via /proc/net/unix on first stats request. atomic stores so
@@ -845,11 +861,22 @@ func (cp *ControlPlane) ReloadClients() {
 }
 
 // propagateCPTokenToVMs fans out the first non-expired client's token to every
-// running VM that has a vsock UDS path. Best-effort: per-VM failure is logged, not
-// propagated. Older (pre-v0.3.4) guests lack the SET_CP_TOKEN handler and will fail
-// here; operators can fall back to POST /flocks/{id}/agents/{agent_id}/restart.
-// When auth is enabled but every token has expired, an empty token is propagated
-// (the in-VM forwarder then calls CP unauthenticated) and a warning is logged.
+// running VM that (a) has a vsock UDS path and (b) is cpTokenManaged — i.e. whose
+// /root/.ephemera-cp-token this daemon populated with its OWN operator bearer.
+// Rotation is a re-injection of a token we already put there; it must never be a
+// FIRST injection into a guest that was intentionally given a different token, or
+// none at all. Concretely, this skips:
+//   - plain POST /vms VMs, which are provisioned with no cp-token file (the
+//     provisioner skips it for an empty token), and
+//   - routed flock members, which hold a caller-supplied per-flock SCOPED relay
+//     token that is both narrower than the operator bearer and the credential
+//     their home daemon expects to see.
+//
+// Best-effort: per-VM failure is logged, not propagated. Older (pre-v0.3.4) guests
+// lack the SET_CP_TOKEN handler and will fail here; operators can fall back to
+// POST /flocks/{id}/agents/{agent_id}/restart. When auth is enabled but every
+// token has expired, an empty token is propagated to the managed VMs (the in-VM
+// forwarder then calls CP unauthenticated) and a warning is logged.
 func (cp *ControlPlane) propagateCPTokenToVMs(clients []APIClient) {
 	newToken := ""
 	if c, ok := firstActiveClient(clients); ok {
@@ -862,7 +889,7 @@ func (cp *ControlPlane) propagateCPTokenToVMs(clients []APIClient) {
 	type target struct{ vmID, vsock string }
 	targets := make([]target, 0, len(cp.vms))
 	for id, v := range cp.vms {
-		if v.vsockPath != "" {
+		if v.vsockPath != "" && v.cpTokenManaged {
 			targets = append(targets, target{id, v.vsockPath})
 		}
 	}
@@ -1350,11 +1377,20 @@ type spawnVMOptions struct {
 	AgentToken string
 	// ControlPlaneToken, when set, is injected into the VM at /root/.ephemera-cp-token
 	// so the in-VM /townwall/post forwarder can authenticate when calling
-	// back into the control plane. Auto-populated by spawnVMForFlock from
-	// the daemon's apiClients[0]; standalone spawnVM leaves this empty.
+	// back into the control plane. Auto-populated by the local-flock spawn paths
+	// from the daemon's own client list (controlPlaneTokenForVM); standalone
+	// spawnVM forwards the caller's control_plane_token, or leaves it empty when
+	// the request carries none (in which case no cp-token file is written).
 	ControlPlaneToken string
-	VcpuCount         int64 // 0 → default 1
-	MemSizeMib        int64 // 0 → default 1024
+	// ControlPlaneTokenManaged must be set true if and only if ControlPlaneToken
+	// came from cp.controlPlaneTokenForVM() — i.e. it is the DAEMON'S OWN operator
+	// bearer, which the daemon is therefore entitled to rotate on SIGHUP. Leave it
+	// false for a caller-supplied token (POST /vms control_plane_token, used by
+	// routed flock members, which carry a narrower per-flock relay token) and for
+	// an empty token. See runningVM.cpTokenManaged.
+	ControlPlaneTokenManaged bool
+	VcpuCount                int64 // 0 → default 1
+	MemSizeMib               int64 // 0 → default 1024
 }
 
 // spawnVMInternal performs the actual VM lifecycle: allocate networking, clone
@@ -1521,12 +1557,15 @@ func (cp *ControlPlane) spawnVMInternal(opts spawnVMOptions) (*VMInfo, string, e
 		diskPath:   diskPath,
 		dmSnapshot: dmInfo,
 		vsockPath:  vsockPath,
-		machine:    machine,
-		tapDevice:  tapDevice,
-		socketPath: socketPath,
-		vcpuCount:  vcpu,
-		memSizeMib: memSize,
-		spawnedAt:  spawnedAt,
+		// Only a token the daemon injected from its own client list is ours to
+		// rotate later; an empty token means no cp-token file exists at all.
+		cpTokenManaged: opts.ControlPlaneTokenManaged && opts.ControlPlaneToken != "",
+		machine:        machine,
+		tapDevice:      tapDevice,
+		socketPath:     socketPath,
+		vcpuCount:      vcpu,
+		memSizeMib:     memSize,
+		spawnedAt:      spawnedAt,
 	}
 	cp.mu.Unlock()
 	// The VM is now registered in cp.vms and owned by the daemon; from here
@@ -1558,10 +1597,13 @@ func (cp *ControlPlane) spawnVMInternal(opts spawnVMOptions) (*VMInfo, string, e
 		Model:        info.Model,
 		VcpuCount:    opts.VcpuCount,
 		MemSizeMib:   opts.MemSizeMib,
-		FlockID:      opts.FlockID,
-		AgentID:      opts.AgentID,
-		AgentURL:     info.AgentURL,
-		CreatedAt:    spawnedAt,
+		// Persisted so SIGHUP rotation keeps working for this VM after a daemon
+		// restart; recovery reads it back in registerRecoveredVM.
+		CPTokenManaged: opts.ControlPlaneTokenManaged && opts.ControlPlaneToken != "",
+		FlockID:        opts.FlockID,
+		AgentID:        opts.AgentID,
+		AgentURL:       info.AgentURL,
+		CreatedAt:      spawnedAt,
 	}); err != nil {
 		// State persistence failure must not abort the spawn — the VM is
 		// already live. Log and continue; recovery just won't include it.
