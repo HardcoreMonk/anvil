@@ -93,6 +93,17 @@ func (s *SchedulerService) handleHosts(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "host name must be non-empty", http.StatusBadRequest)
 			return
 		}
+		// Same config-managed guard as DELETE (handleHostItem below): the
+		// scheduler is unauthenticated (loopback trust), so without this any
+		// local process could PUT a config-managed host's name and repoint its
+		// endpoint — DELETE alone (409) can't clean that up, since the record
+		// stays config-managed. This only guards the HTTP surface; the hosts-
+		// file loading path (ApplyConfiguredHostsAndSave) never calls
+		// SetHostAndSave, so it is untouched by this check.
+		if s.placements.IsConfigManagedHost(host.Name) {
+			http.Error(w, "config-managed host must be changed in the hosts file", http.StatusConflict)
+			return
+		}
 		if err := s.placements.SetHostAndSave(host); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
