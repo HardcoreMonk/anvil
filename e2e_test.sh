@@ -1792,7 +1792,7 @@ fi
 
 # `|| echo "000"` survives a curl process error (connection refused, timeout)
 # so set -e does not kill the script before we print a real ✗ message.
-step "58c.iv. Post-rotation /townwall/post must still succeed (v2 reached VM)"
+step "58c.iv. Post-rotation /townwall/post must still succeed (guest credential is rotation-independent)"
 POST_CODE=$(curl -s -o /dev/null -m 5 -w "%{http_code}" \
     -X POST "http://${ROT_GUEST_IP}:8080/townwall/post" \
     -H "Authorization: Bearer $ROT_TOKEN" \
