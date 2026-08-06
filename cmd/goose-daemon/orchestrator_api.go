@@ -851,8 +851,10 @@ func (cp *ControlPlane) restartAgent(w http.ResponseWriter, flockID, agentID str
 		AgentID:           agentID,
 		AgentToken:        oldToken,
 		ControlPlaneToken: cp.controlPlaneTokenForVM(),
-		VcpuCount:         agentProfile.VcpuCount,
-		MemSizeMib:        agentProfile.MemSizeMib,
+		// The daemon's OWN operator bearer -> this daemon may rotate it on SIGHUP.
+		ControlPlaneTokenManaged: true,
+		VcpuCount:                agentProfile.VcpuCount,
+		MemSizeMib:               agentProfile.MemSizeMib,
 	})
 	if err != nil {
 		// Agent slot no longer has a backing VM — mark dead so callers see it
@@ -1083,8 +1085,10 @@ func (cp *ControlPlane) changeFlockAgentRole(w http.ResponseWriter, r *http.Requ
 		AgentID:           agentID,
 		AgentToken:        oldToken,
 		ControlPlaneToken: cp.controlPlaneTokenForVM(),
-		VcpuCount:         agentProfile.VcpuCount,
-		MemSizeMib:        agentProfile.MemSizeMib,
+		// The daemon's OWN operator bearer -> this daemon may rotate it on SIGHUP.
+		ControlPlaneTokenManaged: true,
+		VcpuCount:                agentProfile.VcpuCount,
+		MemSizeMib:               agentProfile.MemSizeMib,
 	})
 	if err != nil {
 		f.UpdateAgentStatus(agentID, orchestrator.AgentStatusDead)
@@ -1772,8 +1776,10 @@ func (cp *ControlPlane) spawnVMForFlock(flockID, agentID, profile, tenantID, egr
 		FlockID:           flockID,
 		AgentID:           agentID,
 		ControlPlaneToken: cp.controlPlaneTokenForVM(),
-		VcpuCount:         vcpu,
-		MemSizeMib:        mem,
+		// The daemon's OWN operator bearer -> this daemon may rotate it on SIGHUP.
+		ControlPlaneTokenManaged: true,
+		VcpuCount:                vcpu,
+		MemSizeMib:               mem,
 	})
 }
 

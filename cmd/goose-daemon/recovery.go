@@ -316,10 +316,15 @@ func (cp *ControlPlane) registerRecoveredVM(s storage.VMState, machine *firecrac
 			Provider:     s.Provider,
 			Model:        s.Model,
 		},
-		agentToken:       s.AgentToken,
-		diskPath:         s.DiskPath,
-		dmSnapshot:       dmInfo,
-		vsockPath:        s.VsockPath,
+		agentToken: s.AgentToken,
+		diskPath:   s.DiskPath,
+		dmSnapshot: dmInfo,
+		vsockPath:  s.VsockPath,
+		// Carried across the restart so SIGHUP rotation keeps reaching the VMs
+		// whose CP token this daemon owns. A legacy state.json predating the
+		// field decodes as false — see storage.VMState.CPTokenManaged for why
+		// that is the safe default.
+		cpTokenManaged:   s.CPTokenManaged,
 		machine:          machine,
 		tapDevice:        s.TapDevice,
 		socketPath:       s.SocketPath,

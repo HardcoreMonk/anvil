@@ -51,13 +51,30 @@ type VMState struct {
 	// (discarded on shutdown, recreated fresh on re-restore), so the recoverable
 	// artifact is the source snapshot, not the disk. Empty for spawn-path VMs.
 	// Snapshot GC must keep this source while the restored VM state is live.
-	SourceSnapshotID string    `json:"source_snapshot_id,omitempty"`
-	VcpuCount        int64     `json:"vcpu_count"`
-	MemSizeMib       int64     `json:"mem_size_mib"`
-	FlockID          string    `json:"flock_id,omitempty"`
-	AgentID          string    `json:"agent_id,omitempty"`
-	AgentURL         string    `json:"agent_url"`
-	CreatedAt        time.Time `json:"created_at"`
+	SourceSnapshotID string `json:"source_snapshot_id,omitempty"`
+	VcpuCount        int64  `json:"vcpu_count"`
+	MemSizeMib       int64  `json:"mem_size_mib"`
+	// CPTokenManaged records that this guest's /root/.ephemera-cp-token holds the
+	// DAEMON'S OWN operator bearer, injected by the daemon at spawn. Only such VMs
+	// are eligible for the SIGHUP token-rotation fan-out; persisting it keeps
+	// rotation working across a daemon restart.
+	//
+	// Backward compatibility: a state.json written before this field existed has no
+	// "cp_token_managed" key and therefore decodes as FALSE — deliberately the safe
+	// direction. Defaulting to true would re-grant the operator bearer to every
+	// pre-existing plain VM (which has no cp-token file at all) and would clobber
+	// the scoped relay token of every pre-existing routed-flock member, i.e. it
+	// would reintroduce the very privilege escalation this field exists to stop.
+	// Defaulting to false costs only that an already-running LOCAL flock VM stops
+	// receiving rotations until it is respawned; that is fully recoverable through
+	// the documented fallback, POST /flocks/{id}/agents/{agent_id}/restart, which
+	// re-injects the current token and re-marks the VM as managed. A recoverable
+	// loss of convenience beats an unrecoverable disclosure of the operator bearer.
+	CPTokenManaged bool      `json:"cp_token_managed,omitempty"`
+	FlockID        string    `json:"flock_id,omitempty"`
+	AgentID        string    `json:"agent_id,omitempty"`
+	AgentURL       string    `json:"agent_url"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 // vmStatePath returns the per-VM state.json location under workDir.

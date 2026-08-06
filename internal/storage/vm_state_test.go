@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -46,6 +48,57 @@ func TestVMState_SaveLoadRoundTrip(t *testing.T) {
 	}
 	if loaded.SchemaVersion != vmStateSchemaVersion {
 		t.Errorf("schema version not set, got %d", loaded.SchemaVersion)
+	}
+}
+
+// TestVMState_CPTokenManagedRoundTrip pins that the "this guest holds the
+// daemon's own operator bearer" provenance bit survives a save/load cycle, so
+// recovery after a daemon restart can keep rotating the VMs it is allowed to.
+func TestVMState_CPTokenManagedRoundTrip(t *testing.T) {
+	tmp := t.TempDir()
+	if err := SaveVMState(tmp, VMState{VMID: "vm-managed", DiskMode: DiskModePlain, CPTokenManaged: true}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	loaded, err := LoadVMState(tmp, "vm-managed")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !loaded.CPTokenManaged {
+		t.Errorf("CPTokenManaged not preserved: %+v", loaded)
+	}
+
+	if err := SaveVMState(tmp, VMState{VMID: "vm-unmanaged", DiskMode: DiskModePlain}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	loaded, err = LoadVMState(tmp, "vm-unmanaged")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.CPTokenManaged {
+		t.Errorf("CPTokenManaged set on a VM that never had one: %+v", loaded)
+	}
+}
+
+// TestVMState_LegacyStateDecodesCPTokenUnmanaged fixes the upgrade semantics: a
+// state.json written before the field existed must decode as UNMANAGED, so a
+// pre-existing plain VM is never handed the operator bearer by the first SIGHUP
+// after the upgrade.
+func TestVMState_LegacyStateDecodesCPTokenUnmanaged(t *testing.T) {
+	tmp := t.TempDir()
+	dir := filepath.Join(tmp, "vms", "vm-legacy")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	legacy := `{"schema_version":1,"vm_id":"vm-legacy","guest_ip":"10.0.1.9","disk_mode":"plain","flock_id":"flock-1","agent_id":"researcher-1"}`
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte(legacy), 0600); err != nil {
+		t.Fatalf("write legacy state: %v", err)
+	}
+	loaded, err := LoadVMState(tmp, "vm-legacy")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.CPTokenManaged {
+		t.Fatalf("legacy state.json decoded as CP-token-managed; it must default to unmanaged")
 	}
 }
 
