@@ -388,12 +388,20 @@ func (m *Manager) flushConntrack(guestIP string) {
 		return
 	}
 	if err := m.command("conntrack", "-D", "-s", guestIP); err != nil {
-		// Some conntrack-tools builds exit nonzero when the filter matched no
-		// entries, which is the normal case for a VM that never opened a tracked
-		// flow. If this line turns out to fire on routine teardowns, downgrade it
-		// to Debug rather than leaving a security-adjacent warning that operators
-		// learn to ignore — it was not observable from the build environment.
-		slog.Warn("conntrack flush failed (best-effort, teardown continues)", "guest_ip", guestIP, "err", err)
+		// Debug, not Warn. Measured on conntrack-tools v1.4.9: `-D` exits 1 with
+		// "0 flow entries have been deleted." whenever the filter matched nothing,
+		// which is the ordinary outcome for a VM that never opened a tracked flow.
+		// Warning there would fire on routine teardowns until operators stopped
+		// reading it — the worst place to spend a security-adjacent log line.
+		//
+		// Exit 1 is also what a non-root caller gets, so the status cannot separate
+		// the two, and m.command reports only the error. Neither variant is worth a
+		// warning here: the daemon runs as root, and the case that does deserve
+		// attention — conntrack absent entirely — is caught once at startup by
+		// conntrackAvailable(). A failure that leaves stale entries costs the
+		// recycled IP its flush, which the fastpath rule alone never turns into an
+		// approval; it only forgoes the extra hygiene.
+		slog.Debug("conntrack flush did not delete entries (best-effort, teardown continues)", "guest_ip", guestIP, "err", err)
 	}
 }
 
