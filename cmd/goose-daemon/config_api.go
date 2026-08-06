@@ -120,8 +120,12 @@ func (cp *ControlPlane) handleConfigProfile(w http.ResponseWriter, r *http.Reque
 		cp.handleConfigProfileMCP(w, r, strings.TrimSuffix(name, "/mcp"))
 		return
 	}
-	// Reject empty and any path-traversal form before touching the filesystem.
-	if name == "" || name == ".." || strings.ContainsAny(name, "/\\") {
+	// Reject empty and any path-traversal form before touching the filesystem
+	// (see validProfileNameSyntax; this must catch "." — DELETE below builds a
+	// bare filepath.Join(workDir,"configs","profiles",name) with no trailing
+	// element, so a "." that slips past here resolves to the profiles
+	// directory itself once Clean collapses the trailing dot).
+	if !validProfileNameSyntax(name) {
 		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("profile name required"))
 		return
 	}
@@ -221,7 +225,7 @@ func (cp *ControlPlane) handleConfigProfile(w http.ResponseWriter, r *http.Reque
 func (cp *ControlPlane) handleConfigProfileSystem(w http.ResponseWriter, r *http.Request, name string) {
 	// Reject empty and any path-traversal form before touching the filesystem
 	// (same guard as handleConfigProfile). The default profile has no directory.
-	if name == "" || name == ".." || strings.ContainsAny(name, "/\\") {
+	if !validProfileNameSyntax(name) {
 		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("profile name required"))
 		return
 	}
@@ -355,6 +359,26 @@ func isPlaceholderSecret(v string) bool {
 // URL-safe slug; it also rejects "/", "\", "." and "..".
 var profileNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 
+// validProfileNameSyntax reports whether name is a syntactically safe
+// on-disk profile name: it must match profileNameRe, which (starting with a
+// lowercase letter or digit) rejects "", ".", ".." and any separator. This is
+// the format half of validateProfileName, split out so GET/PUT/DELETE paths
+// — which must still resolve the "default" profile that validateProfileName
+// itself reserves/rejects — can share the same traversal check instead of
+// re-implementing a looser inline guard.
+//
+// 2026-08-06 security audit M1: several handlers used an inline
+// `name == ".." || strings.ContainsAny(name, "/\\")` guard that never
+// rejected ".". DELETE /config/profiles/. reached
+// filepath.Join(workDir,"configs","profiles",".") — Clean collapses the
+// trailing "." away, resolving to the profiles directory itself — and
+// os.RemoveAll wiped every profile. "default" is unaffected: it matches this
+// regex (plain letters) and is only excluded by validateProfileName's
+// separate reserved-word check, which read/update paths don't apply.
+func validProfileNameSyntax(name string) bool {
+	return profileNameRe.MatchString(name)
+}
+
 // validateProfileName enforces the slug format and reserves "default".
 func validateProfileName(name string) error {
 	if name == "" {
@@ -366,7 +390,7 @@ func validateProfileName(name string) error {
 	if len(name) > 64 {
 		return fmt.Errorf("profile name too long (max 64)")
 	}
-	if !profileNameRe.MatchString(name) {
+	if !validProfileNameSyntax(name) {
 		return fmt.Errorf("profile name must be lowercase letters, digits, '-' or '_'")
 	}
 	return nil
