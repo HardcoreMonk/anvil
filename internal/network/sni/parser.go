@@ -95,9 +95,9 @@ func ParseClientHelloSNI(b []byte) (string, bool, error) {
 		// The record run is cut short by a non-handshake record before the
 		// ClientHello is complete: no more handshake bytes can arrive, so
 		// "need more bytes" would never be satisfied. Fail closed instead.
-		// (When the ClientHello IS already complete we return above — trailing
-		// non-handshake records, e.g. the 0-RTT change_cipher_spec of RFC 8446
-		// Appendix D.4, are simply not consumed.)
+		// (When the ClientHello IS already complete, err is nil and this branch
+		// is skipped — trailing non-handshake records, e.g. the 0-RTT
+		// change_cipher_spec of RFC 8446 Appendix D.4, are simply not consumed.)
 		return "", false, fmt.Errorf("not a handshake record (type 0x%02x)", blockedType)
 	}
 	return name, ech, err

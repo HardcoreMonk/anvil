@@ -202,10 +202,14 @@ func (l *sniVerdictLoop) Ready() bool {
 //   - Feed incomplete -> sniPassthrough (egress_sni_incomplete): forwarded
 //     unmarked so the next segment re-queues here. This is the one verdict path
 //     that lets bytes leave the host with no policy decision, so unlike the
-//     bare-ACK passthrough it IS counted (see recordVerdict). It cannot be
-//     ridden indefinitely: the reassembler's byte cap turns a never-completing
-//     ClientHello into a terminal drop, and it can never yield an approved
-//     connmark.
+//     bare-ACK passthrough it IS counted (see recordVerdict). The invariant that
+//     holds is the one that matters: this branch can never yield an approved
+//     connmark, so no amount of riding it opens the fast path.
+//     The reassembler's byte cap bounds a single reassembly WINDOW, not a flow:
+//     the terminal branch below evicts the flow, so the next segment on the same
+//     srcIP:sport starts a fresh window. Chasing a true per-flow bound is not
+//     worth state machinery — a guest rotates its source port to get a new flow
+//     key for free.
 //   - Feed done -> classifyParsedSNI (accept+mark or policy deny) + flow evict.
 //
 // Why TCP forwards an incomplete segment where decideQUIC drops one: TCP's
