@@ -1057,3 +1057,38 @@ func TestPlacementStoreSaveRaceLosesConcurrentRoutedFlockToken(t *testing.T) {
 		t.Fatalf("%d/%d routed flock relay tokens lost to Save()'s unlocked disk RMW race", lost, len(written))
 	}
 }
+
+func TestPlacementStoreResolvedPath(t *testing.T) {
+	t.Run("empty path stays empty", func(t *testing.T) {
+		store := NewPlacementStore("")
+		if got := store.ResolvedPath(); got != "" {
+			t.Fatalf("ResolvedPath() = %q, want empty (in-memory store)", got)
+		}
+	})
+
+	t.Run("absolute path is returned as-is", func(t *testing.T) {
+		abs := filepath.Join(t.TempDir(), "placements.json")
+		if !filepath.IsAbs(abs) {
+			t.Fatalf("test setup: %q is not absolute", abs)
+		}
+		store := NewPlacementStore(abs)
+		if got := store.ResolvedPath(); got != abs {
+			t.Fatalf("ResolvedPath() = %q, want %q", got, abs)
+		}
+	})
+
+	t.Run("relative path is resolved to absolute", func(t *testing.T) {
+		store := NewPlacementStore("relative/placements.json")
+		got := store.ResolvedPath()
+		if !filepath.IsAbs(got) {
+			t.Fatalf("ResolvedPath() = %q, want an absolute path", got)
+		}
+		want, err := filepath.Abs("relative/placements.json")
+		if err != nil {
+			t.Fatalf("filepath.Abs: %v", err)
+		}
+		if got != want {
+			t.Fatalf("ResolvedPath() = %q, want %q", got, want)
+		}
+	})
+}
