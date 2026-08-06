@@ -191,6 +191,10 @@ keep-alive stale-connection(`64ec57c`). 검증(parity gate): full KVM e2e `334�
   - release build integrity: `build_release.sh`가 다운로드한 kernel/firecracker를
     `main.go`에서 parse한 pin과 `sha256sum -c`로 검증해, runtime `EnsureKernel`이 기존
     파일을 `os.Stat`로 skip하던 FULL-tarball supply-chain gap을 닫는다.
+    (2026-08-06 갱신: 그 runtime 쪽 skip은 이제 없다 — `EnsureKernel`/`EnsureFirecracker`가
+    기존 파일도 pin과 대조한다. 커널은 pin이 곧 파일 다이제스트라 직접 비교하고,
+    firecracker는 pin이 `.tgz` 다이제스트라 provenance stamp `firecracker.pin-state`를
+    거친다. 이 문단의 v0.7.0 서술은 당시 상태 기록으로 남긴다.)
   - upstream hardening reconcile: 사전 독립 backport 3종(kernel SHA atomic temp+rename
     무조건 검증, `resolveWorkDir`/`EPHEMERA_HOME`, `waitForAgent` per-probe timeout
     deadline cap)이 upstream `v0.7.0` 버전을 이기고 single definition으로 남았다(anvil이
