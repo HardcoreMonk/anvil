@@ -161,7 +161,7 @@ func TestHandleConfigProfile_RejectsNewlineInjection(t *testing.T) {
 
 func TestHandleConfigProfile_PathTraversal(t *testing.T) {
 	cp := newTestCP(t)
-	for _, p := range []string{"/config/profiles/../evil", "/config/profiles/a/b"} {
+	for _, p := range []string{"/config/profiles/../evil", "/config/profiles/a/b", "/config/profiles/."} {
 		rr := httptest.NewRecorder()
 		cp.handleConfigProfile(rr, httptest.NewRequest(http.MethodPut, p, strings.NewReader(`{"provider":"x","model":"y"}`)))
 		if rr.Code != http.StatusBadRequest {
@@ -312,6 +312,37 @@ func TestDeleteProfile_NotFound(t *testing.T) {
 	cp.handleConfigProfile(rr, httptest.NewRequest(http.MethodDelete, "/config/profiles/nope", nil))
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rr.Code)
+	}
+}
+
+// TestDeleteProfile_DotRejected locks the M1 fix (2026-08-06 security audit):
+// DELETE /config/profiles/. reaches the handler as name="." (Go's ServeMux
+// does not redirect on the encoded "%2e" form). The old guard only rejected
+// "", "..", and separators, so filepath.Join(workDir,"configs","profiles",".")
+// cleaned away the trailing "." and resolved to the profiles directory
+// itself — the in-use-VM 409 guard never matched (no VM has Profile=="."),
+// and os.RemoveAll wiped every profile's goose.yaml/system.md/egress.json in
+// one call. The name guard must reject "." with 400 before that join ever
+// happens, and every existing profile directory must survive untouched.
+func TestDeleteProfile_DotRejected(t *testing.T) {
+	cp := newTestCP(t)
+	writeProfileFixture(t, cp, "alpha", sampleGooseYAML)
+	writeProfileFixture(t, cp, "bravo", sampleGooseYAML)
+
+	rr := httptest.NewRecorder()
+	cp.handleConfigProfile(rr, httptest.NewRequest(http.MethodDelete, "/config/profiles/.", nil))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("DELETE /config/profiles/.: status = %d, want 400; body=%s", rr.Code, rr.Body.String())
+	}
+	for _, name := range []string{"alpha", "bravo"} {
+		dir := filepath.Join(cp.workDir, "configs", "profiles", name)
+		if _, err := os.Stat(dir); err != nil {
+			t.Fatalf("profile %q dir gone after rejected DELETE .: %v", name, err)
+		}
+	}
+	// The profiles parent directory itself must also survive.
+	if _, err := os.Stat(filepath.Join(cp.workDir, "configs", "profiles")); err != nil {
+		t.Fatalf("profiles dir itself was removed: %v", err)
 	}
 }
 

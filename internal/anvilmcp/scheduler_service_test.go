@@ -281,6 +281,56 @@ func TestSchedulerServiceRejectsDeleteConfigManagedHostWithEncodedWhitespace(t *
 	}
 }
 
+// TestSchedulerServiceRejectsPutConfigManagedHost locks the M5 fix
+// (2026-08-06 security audit): the scheduler runs unauthenticated (loopback
+// trust), so before this fix any local process could PUT /hosts with a
+// config-managed host's name and silently repoint its endpoint. The control
+// loop (scheduler_control_loop.go) would then forward the daemon control-
+// plane bearer (ANVIL_SCHEDULER_API_TOKEN) to the attacker-controlled
+// endpoint on the next poll — and DELETE couldn't clean it up (409,
+// IsConfigManagedHost), so PUT was the only way in. This must now mirror
+// DELETE's config-managed 409 guard, and the stored endpoint must be
+// unchanged after the rejected PUT.
+func TestSchedulerServiceRejectsPutConfigManagedHost(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "scheduler.json"))
+	_ = store.SetHost(RuntimeHost{Name: "host-a", Endpoint: "http://host-a", Healthy: true, AvailableVMs: 1})
+	_ = store.MarkConfigManagedHost("host-a", true)
+	service := NewSchedulerService(SchedulerServiceOptions{PlacementStore: store})
+
+	req := httptest.NewRequest(http.MethodPut, "/hosts", strings.NewReader(`{"name":"host-a","endpoint":"http://attacker","healthy":true,"available_vms":1}`))
+	rr := httptest.NewRecorder()
+	service.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("PUT config-managed host status = %d body=%s, want 409", rr.Code, rr.Body.String())
+	}
+
+	hosts := schedulerServiceListHosts(t, service)
+	if len(hosts) != 1 || hosts[0].Name != "host-a" || hosts[0].Endpoint != "http://host-a" {
+		t.Fatalf("hosts after rejected PUT = %+v, want unchanged host-a endpoint http://host-a", hosts)
+	}
+}
+
+// TestSchedulerServicePutSucceedsForNonConfigManagedHost is the companion
+// regression for TestSchedulerServiceRejectsPutConfigManagedHost: a host
+// that config didn't claim (the normal register/update path — an agent or
+// operator PUTting its own host record) must keep working.
+func TestSchedulerServicePutSucceedsForNonConfigManagedHost(t *testing.T) {
+	store := NewPlacementStore(filepath.Join(t.TempDir(), "scheduler.json"))
+	service := NewSchedulerService(SchedulerServiceOptions{PlacementStore: store})
+
+	req := httptest.NewRequest(http.MethodPut, "/hosts", strings.NewReader(`{"name":"host-b","endpoint":"http://host-b","healthy":true,"available_vms":1}`))
+	rr := httptest.NewRecorder()
+	service.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("PUT non-config-managed host status = %d body=%s, want 200", rr.Code, rr.Body.String())
+	}
+
+	hosts := schedulerServiceListHosts(t, service)
+	if len(hosts) != 1 || hosts[0].Name != "host-b" || hosts[0].Endpoint != "http://host-b" {
+		t.Fatalf("hosts after PUT = %+v, want host-b registered", hosts)
+	}
+}
+
 func TestSchedulerServiceScheduleIncludesHostStatusSummary(t *testing.T) {
 	store := NewPlacementStore(filepath.Join(t.TempDir(), "scheduler.json"))
 	_ = store.SetHost(RuntimeHost{Name: "host-a", Endpoint: "http://host-a", Healthy: false, AvailableVMs: 1, EgressPolicies: []EgressPolicy{EgressPolicyProfile}})

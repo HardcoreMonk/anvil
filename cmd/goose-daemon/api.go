@@ -535,6 +535,24 @@ func newAgentHTTPClient() *http.Client {
 	return &http.Client{Transport: tr}
 }
 
+// Listener timeouts shared by the control plane and the runtime MCP gateway.
+//
+// Both bounds apply BEFORE any handler — and therefore before authMiddleware —
+// runs, which is the point: without them an unauthenticated peer holds a
+// connection, its goroutine and its fd open indefinitely (net/http's zero value
+// means "no limit"), so no valid token is needed to exhaust the daemon.
+//
+// ReadTimeout and WriteTimeout are deliberately left unset. These servers hold
+// connections open far longer than any fixed budget by design: the SSE Town Wall
+// stream and NDJSON task streams (POST /vms/{id}/tasks?stream=1) write for the
+// whole life of a task, and snapshot import/export plus workspace PUT move
+// multi-gigabyte bodies. A global read or write budget would sever those working
+// features, so the header/idle pair is the correct control here.
+const (
+	httpReadHeaderTimeout = 10 * time.Second
+	httpIdleTimeout       = 120 * time.Second
+)
+
 func NewControlPlane(
 	provisioner *storage.Provisioner,
 	netManager *network.Manager,
@@ -705,7 +723,12 @@ func NewControlPlane(
 	apiChain := cp.auditMiddleware(authMiddleware(cp.getClients, cp.relayTokenFor, cp.callTokenFor, cp.metrics.authTotal, internalMux))
 	externalMux.Handle("/", rootRedirectOr(apiChain))
 
-	cp.srv = &http.Server{Addr: apiAddr, Handler: externalMux}
+	cp.srv = &http.Server{
+		Addr:              apiAddr,
+		Handler:           externalMux,
+		ReadHeaderTimeout: httpReadHeaderTimeout,
+		IdleTimeout:       httpIdleTimeout,
+	}
 	return cp
 }
 
@@ -3288,7 +3311,7 @@ func (cp *ControlPlane) createSnapshot(w http.ResponseWriter, r *http.Request, v
 
 	snapID := fmt.Sprintf("snap-%d", time.Now().UnixNano())
 	snapDir := storage.SnapshotDir(cp.workDir, snapID)
-	if err := os.MkdirAll(snapDir, 0755); err != nil {
+	if err := os.MkdirAll(snapDir, 0700); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":"failed to create snapshot dir: %v"}`, err), http.StatusInternalServerError)
 		return
 	}

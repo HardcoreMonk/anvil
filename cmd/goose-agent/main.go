@@ -393,6 +393,25 @@ func agentAuthMiddlewareWithTokenProvider(tokenProvider func() string, next http
 	}
 }
 
+// newAgentServer builds the in-guest agent's HTTP listener.
+//
+// ReadHeaderTimeout and IdleTimeout both apply before any handler — and thus
+// before agentAuthMiddleware's bearer check — runs. Left at net/http's zero value
+// they mean "no limit", so a peer on the VM network with no valid token could pin
+// goroutines and fds indefinitely.
+//
+// ReadTimeout and WriteTimeout stay unset on purpose: /tasks streams NDJSON for
+// the whole life of a task and /workspace accepts large uploads, both of which a
+// global request/response budget would sever.
+func newAgentServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+}
+
 func main() {
 	initSlog()
 	token := loadAgentToken()
@@ -416,7 +435,7 @@ func main() {
 	mux.HandleFunc("/health", handleHealth) // always unauthenticated
 
 	addr := agentListenAddr()
-	srv = &http.Server{Addr: addr, Handler: mux}
+	srv = newAgentServer(addr, mux)
 	slog.Warn("goose-agent ready", "addr", addr)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fatal("server error", "err", err)

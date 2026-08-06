@@ -149,7 +149,12 @@ func (cp *ControlPlane) initMCPGateway() {
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", gw)
 	mux.Handle("/mcp/", gw)
-	cp.mcpSrv = &http.Server{Addr: fmt.Sprintf("%s:%d", mcpBindIP(), port), Handler: mux}
+	cp.mcpSrv = &http.Server{
+		Addr:              fmt.Sprintf("%s:%d", mcpBindIP(), port),
+		Handler:           mux,
+		ReadHeaderTimeout: httpReadHeaderTimeout,
+		IdleTimeout:       httpIdleTimeout,
+	}
 	slog.Warn("mcp gateway configured", "endpoint", cp.mcpEndpoint, "bind", cp.mcpSrv.Addr, "servers", len(servers))
 }
 

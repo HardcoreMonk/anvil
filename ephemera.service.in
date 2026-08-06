@@ -19,6 +19,12 @@ TimeoutStopSec=30
 # process, which can take several minutes — do not let systemd time it out.
 TimeoutStartSec=0
 LimitNOFILE=65536
+# Defense in depth for the daemon's own syscall.Umask(0077): VM rootfs images,
+# snapshots and COW stores embed 0600 secrets and must never be group/other
+# readable. UMask is only the file-creation mask, not a sandbox — it does not
+# restrict /dev/kvm, iptables or loop mounts, so it is safe alongside the
+# deliberately unhardened settings below.
+UMask=0077
 # No ProtectSystem/PrivateTmp/sandbox on purpose: the daemon needs /dev/kvm, raw
 # networking (iptables/dmsetup/TAP), and loop mounts under /tmp/goose-workspaces.
 # A hardened unit would break VM provisioning. Keep the API on localhost + a token

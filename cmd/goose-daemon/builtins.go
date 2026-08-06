@@ -171,8 +171,11 @@ func (cp *ControlPlane) writeProfileBuiltins(name string, builtins []string) err
 // run time). Like system.md, editing affects only FUTURE spawns, so there is no
 // in-use (409) guard. Mirrors handleConfigProfileSystem.
 func (cp *ControlPlane) handleConfigProfileBuiltins(w http.ResponseWriter, r *http.Request, name string) {
-	// Reject empty and any path-traversal form before touching the filesystem.
-	if name == "" || name == ".." || strings.ContainsAny(name, "/\\") {
+	// Reject empty and any path-traversal form before touching the filesystem
+	// (same guard as handleConfigProfile; see validProfileNameSyntax for why
+	// "." must be caught here rather than left to the looser inline check
+	// this used to have).
+	if !validProfileNameSyntax(name) {
 		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("profile name required"))
 		return
 	}

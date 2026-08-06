@@ -29,7 +29,7 @@ type Provisioner struct {
 // NewProvisioner initializes a new Storage Provisioner and ensures the golden image exists.
 func NewProvisioner(goldenImagePath, workspaceDir, buildScriptPath string) (*Provisioner, error) {
 	// 1. Ensure the workspace directory exists
-	if err := os.MkdirAll(workspaceDir, 0755); err != nil {
+	if err := os.MkdirAll(workspaceDir, 0700); err != nil {
 		return nil, fmt.Errorf("failed to create workspace directory: %w", err)
 	}
 
