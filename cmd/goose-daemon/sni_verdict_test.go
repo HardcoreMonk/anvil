@@ -304,6 +304,156 @@ func TestSNIDecideQUICMultiDatagram(t *testing.T) {
 	}
 }
 
+// --- H3: TCP segment classification (decideTCP), the Start hook's own core ---
+
+// splitHelloIntoRecords re-frames the single TLS record encodeClientHelloSNI
+// produces into n consecutive handshake records (content_type 0x16), each with
+// its own 5-byte header. RFC 8446 §5.1 explicitly permits a handshake message to
+// span records, so this is wire-legal ClientHello traffic that a guest can emit
+// at will. Records are returned separately so a test can send each in its own
+// TCP segment, the shape that made the ClientHello unclassifiable.
+func splitHelloIntoRecords(rec []byte, n int) [][]byte {
+	hs := rec[5:] // strip the single record header encodeClientHelloSNI wrote
+	chunk := (len(hs) + n - 1) / n
+	var recs [][]byte
+	for off := 0; off < len(hs); off += chunk {
+		end := off + chunk
+		if end > len(hs) {
+			end = len(hs)
+		}
+		out := &bytes.Buffer{}
+		out.WriteByte(0x16)
+		out.Write([]byte{0x03, 0x01})
+		binary.Write(out, binary.BigEndian, uint16(end-off))
+		out.Write(hs[off:end])
+		recs = append(recs, out.Bytes())
+	}
+	return recs
+}
+
+// TestSNIDecideTCPRouting is the routing contract of the function the Start
+// hook's TCP branch actually calls. decide() (above) is a single-packet
+// classifier with NO production caller, so its coverage never touched the real
+// data path — this test does.
+func TestSNIDecideTCPRouting(t *testing.T) {
+	l := newSNIVerdictLoop(88, "", nil)
+	m, _ := sni.NewMatcher([]string{"api.anthropic.com", "*.example.com"})
+	l.Register("10.0.1.10", sniRegistryEntry{VMID: "vm-1", TenantID: "t1", Profile: "p", Matcher: m})
+
+	// Each case uses a distinct sport so it gets its own flow reassembler.
+	if d := l.decideTCP("10.0.1.10", 1001, mustHello(t, "api.anthropic.com")); d.Action != sniAcceptMark {
+		t.Fatalf("allowed exact -> %v (%s)", d.Action, d.Reason)
+	}
+	if d := l.decideTCP("10.0.1.10", 1002, mustHello(t, "cdn.example.com")); d.Action != sniAcceptMark {
+		t.Fatalf("allowed wildcard -> %v (%s)", d.Action, d.Reason)
+	}
+	d := l.decideTCP("10.0.1.10", 1003, mustHello(t, "evil.test"))
+	if d.Action != sniDrop || d.Reason != "egress_sni_denied" || d.SNI != "evil.test" {
+		t.Fatalf("denied -> action=%v reason=%q sni=%q", d.Action, d.Reason, d.SNI)
+	}
+	// Bare ACK / handshake segment: no TLS bytes yet, forwarded unmarked and
+	// deliberately unreasoned (so recordVerdict does not count every ACK).
+	if d := l.decideTCP("10.0.1.10", 1004, []byte{}); d.Action != sniPassthrough || d.Reason != "" {
+		t.Fatalf("empty payload -> %v/%q, want passthrough with no reason", d.Action, d.Reason)
+	}
+	if d := l.decideTCP("10.0.1.99", 1005, mustHello(t, "api.anthropic.com")); d.Action != sniDrop {
+		t.Fatalf("unregistered -> %v, want fail-closed drop", d.Action)
+	}
+	// Terminal parse error (not a handshake record) -> fail-closed drop.
+	badRec := append([]byte(nil), mustHello(t, "api.anthropic.com")...)
+	badRec[0] = 0x17 // application_data
+	if d := l.decideTCP("10.0.1.10", 1006, badRec); d.Action != sniDrop || d.Reason != "egress_sni_unparsed" {
+		t.Fatalf("non-handshake record -> %v/%q, want drop/egress_sni_unparsed", d.Action, d.Reason)
+	}
+}
+
+// TestSNIDecideTCPMultiRecordClientHello is the H3 regression at the production
+// layer: a ClientHello split across two TLS records, one per TCP segment, must
+// reach the SAME verdict as the one-record form. Before the record-layer fix the
+// parse stayed pinned to record #1, so every segment took the !done branch and
+// was ACCEPTed unmarked — NF_ACCEPT bypasses the FORWARD chain's default REJECT,
+// so a denied host was reachable with no verdict ever being taken.
+func TestSNIDecideTCPMultiRecordClientHello(t *testing.T) {
+	l := newSNIVerdictLoop(88, "", nil)
+	m, _ := sni.NewMatcher([]string{"api.anthropic.com"})
+	l.Register("10.0.1.10", sniRegistryEntry{VMID: "vm-1", TenantID: "t1", Matcher: m})
+
+	for _, tc := range []struct {
+		name       string
+		sni        string
+		wantAction sniAction
+		wantReason string
+		sport      uint16
+	}{
+		{"denied host over 2 records", "evil.test", sniDrop, "egress_sni_denied", 2001},
+		{"allowed host over 2 records", "api.anthropic.com", sniAcceptMark, "egress_sni_allowed", 2002},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recs := splitHelloIntoRecords(mustHello(t, tc.sni), 2)
+			if len(recs) != 2 {
+				t.Fatalf("test setup: want 2 records, got %d", len(recs))
+			}
+			// Segment 1 carries only record #1: genuinely incomplete, forwarded
+			// unmarked but now COUNTED (reason egress_sni_incomplete).
+			if d := l.decideTCP("10.0.1.10", tc.sport, recs[0]); d.Action != sniPassthrough || d.Reason != "egress_sni_incomplete" {
+				t.Fatalf("segment 1 -> %v/%q, want passthrough/egress_sni_incomplete", d.Action, d.Reason)
+			}
+			// Segment 2 completes the ClientHello across the record boundary.
+			d := l.decideTCP("10.0.1.10", tc.sport, recs[1])
+			if d.Action != tc.wantAction || d.Reason != tc.wantReason || d.SNI != tc.sni {
+				t.Fatalf("segment 2 -> action=%v reason=%q sni=%q; want %v/%q/%q",
+					d.Action, d.Reason, d.SNI, tc.wantAction, tc.wantReason, tc.sni)
+			}
+		})
+	}
+}
+
+// TestSNIDecideTCPMultiRecordSingleSegment covers both records arriving in ONE
+// TCP segment — the record split alone (no TCP fragmentation) was equally fatal,
+// since the pin to record #1 is at the record layer, not the segment layer.
+func TestSNIDecideTCPMultiRecordSingleSegment(t *testing.T) {
+	l := newSNIVerdictLoop(88, "", nil)
+	m, _ := sni.NewMatcher([]string{"api.anthropic.com"})
+	l.Register("10.0.1.10", sniRegistryEntry{VMID: "vm-1", TenantID: "t1", Matcher: m})
+
+	both := bytes.Join(splitHelloIntoRecords(mustHello(t, "evil.test"), 2), nil)
+	d := l.decideTCP("10.0.1.10", 3001, both)
+	if d.Action != sniDrop || d.Reason != "egress_sni_denied" || d.SNI != "evil.test" {
+		t.Fatalf("2 records in 1 segment -> action=%v reason=%q sni=%q; want drop/egress_sni_denied/evil.test",
+			d.Action, d.Reason, d.SNI)
+	}
+}
+
+// TestSNIDecideTCPStalledFlowIsBounded pins that the passthrough branch cannot be
+// ridden indefinitely: a guest that dribbles handshake records which never
+// complete a ClientHello is forwarded unmarked only until the reassembler's byte
+// cap trips, after which the flow is terminally denied. This is the property
+// ADR-0002 assumed when it dismissed pre-decision partial forwarding as harmless.
+func TestSNIDecideTCPStalledFlowIsBounded(t *testing.T) {
+	l := newSNIVerdictLoop(88, "", nil)
+	m, _ := sni.NewMatcher([]string{"api.anthropic.com"})
+	l.Register("10.0.1.10", sniRegistryEntry{VMID: "vm-1", TenantID: "t1", Matcher: m})
+
+	empty := []byte{0x16, 0x03, 0x01, 0x00, 0x00} // handshake record, zero-length payload
+	var denied bool
+	for i := 0; i < 1<<14; i++ {
+		d := l.decideTCP("10.0.1.10", 4001, empty)
+		if d.Action == sniAcceptMark {
+			t.Fatalf("stalled flow must never be approved (iteration %d)", i)
+		}
+		if d.Action == sniDrop {
+			if d.Reason != "egress_sni_unparsed" {
+				t.Fatalf("stalled flow terminal drop reason = %q, want egress_sni_unparsed", d.Reason)
+			}
+			denied = true
+			break
+		}
+	}
+	if !denied {
+		t.Fatal("stalled flow was forwarded forever; the reassembly bound never tripped")
+	}
+}
+
 // --- Task 6: recordVerdict / auditDeny (audit + metric emit) ---
 //
 // applyVerdict itself needs a live *nfqueue.Nfqueue (root + netfilter, see
@@ -463,6 +613,54 @@ func TestSNIRecordVerdictNoECHOnDenied(t *testing.T) {
 	// present for a registered counter, so assert on the data sample line.
 	if strings.Contains(string(body), `ephemera_egress_sni_ech_observed_total{`) {
 		t.Fatalf("ech counter must not fire on denied verdict, got:\n%s", string(body))
+	}
+}
+
+// TestSNIRecordVerdictCountsIncompletePassthrough closes the H3 observability
+// gap: the TCP hook's "ClientHello not complete yet" branch FORWARDS the segment
+// unmarked, so those bytes leave the host without any policy decision — the one
+// verdict path that lets traffic out unclassified. Before this it emitted no
+// metric and no audit at all, which is why a ClientHello that could never
+// complete forwarded ~16 KiB with a zero reading on every counter.
+//
+// The bare-ACK passthrough (no reason) stays deliberately uncounted: it fires on
+// every empty-payload segment of every flow and carries no classification signal.
+func TestSNIRecordVerdictCountsIncompletePassthrough(t *testing.T) {
+	cp := newMetricsTestCP(t)
+	l := newSNIVerdictLoop(88, "", cp.metrics)
+	entry := sniRegistryEntry{VMID: "vm-i", TenantID: "ti"}
+
+	l.recordVerdict(entry, sniDecision{Action: sniPassthrough, Reason: "egress_sni_incomplete"}, protoTCP)
+	l.recordVerdict(entry, sniDecision{Action: sniPassthrough, Reason: "egress_sni_incomplete"}, protoTCP)
+	l.recordVerdict(entry, sniDecision{Action: sniPassthrough}, protoTCP) // bare ACK: uncounted
+
+	rec := httptest.NewRecorder()
+	cp.handleMetrics(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	out := rec.Body.String()
+
+	if !strings.Contains(out, `ephemera_egress_sni_verdict_total{proto="tcp",outcome="incomplete"} 2`) {
+		t.Fatalf("expected incomplete=2 (bare-ACK passthrough uncounted), got:\n%s", out)
+	}
+	// A forwarded-but-unclassified segment is neither an allow nor a policy deny.
+	if strings.Contains(out, `ephemera_egress_sni_verdict_total{proto="tcp",outcome="allowed"}`) ||
+		strings.Contains(out, `ephemera_egress_sni_verdict_total{proto="tcp",outcome="denied"}`) {
+		t.Fatalf("incomplete passthrough must not be counted as allowed/denied, got:\n%s", out)
+	}
+}
+
+// TestSNIRecordVerdictIncompletePassthroughNoAudit pins that the new passthrough
+// counter did not also open an audit path: no SNI has been parsed yet, so there
+// is no domain worth recording (same rule as the egress_sni_unparsed deny).
+func TestSNIRecordVerdictIncompletePassthroughNoAudit(t *testing.T) {
+	dir := t.TempDir()
+	auditPath := filepath.Join(dir, "audit.jsonl")
+	l := newSNIVerdictLoop(88, auditPath, nil) // nil metrics: also pins nil-safety
+
+	l.recordVerdict(sniRegistryEntry{VMID: "vm-i", TenantID: "ti"},
+		sniDecision{Action: sniPassthrough, Reason: "egress_sni_incomplete"}, protoTCP)
+
+	if _, err := os.Stat(auditPath); !os.IsNotExist(err) {
+		t.Fatalf("expected no audit record for an unclassified passthrough, stat err=%v", err)
 	}
 }
 

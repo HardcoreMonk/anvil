@@ -170,7 +170,11 @@ func TestPauseResumeFlock_NoVMs(t *testing.T) {
 
 func TestPostAndHistory(t *testing.T) {
 	cp := newMetricsTestCP(t)
-	seedFlock(t, cp, "flock-1", "demo")
+	f := seedFlock(t, cp, "flock-1", "demo")
+	// The wall's write path authorizes the caller-supplied agent_id against the
+	// flock roster (see TestPostToTownWall_RejectsNonMemberAgent), so the happy
+	// path needs a real member to post as.
+	f.AddAgent(&orchestrator.AgentInfo{AgentID: "worker-1", Role: "worker", VMID: "vm-1", Status: orchestrator.AgentStatusReady})
 
 	// Missing body → 400.
 	rec := httptest.NewRecorder()

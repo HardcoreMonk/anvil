@@ -229,10 +229,16 @@ runtime baseline의 canonical metric namespace는 `ephemera_*`다. anvil 기존 
 - `ephemera_watchdog_heal_total`
 - `ephemera_sighup_reload_total`
 - `ephemera_cp_token_propagated_total{outcome="ok|fail"}`
-- `ephemera_egress_sni_verdict_total{proto="tcp|udp|unknown",outcome="allowed|denied|dropped"}` —
+- `ephemera_egress_sni_verdict_total{proto="tcp|udp|unknown",outcome="allowed|denied|dropped|incomplete"}` —
   egress SNI 필터의 :443 판정. `proto`로 TCP:443과 QUIC/UDP:443을 구분한다(`unknown`은
   proto 분기 이전 no-payload drop 전용). additive label이라 `sum without(proto)(...)`가
   기존 total과 같다 — 단일 outcome series를 그리던 패널은 이제 proto별로 분리된다.
+  `incomplete`(2026-08-06 신설, TCP 전용)는 ClientHello 재조립이 끝나기 전에
+  unmarked ACCEPT로 내보낸 세그먼트 수다 — 승인 mark를 절대 달지 않으므로 allow가
+  아니고, 정책 판정 없이 바이트가 나가는 유일한 경로라 관측 대상이다. QUIC은 미완결
+  데이터그램을 DROP하므로 대응 계상이 없다(내보내는 바이트가 없음). 이 시리즈가
+  꾸준히 증가하는데 같은 flow의 `allowed`/`denied`가 따라오지 않으면 재조립이
+  완결되지 않는 흐름이 있다는 신호다.
 - `ephemera_egress_sni_ech_observed_total{proto="tcp|udp"}` — egress SNI 필터가
   **허용한** :443 flow 중 ClientHello가 ECH(`encrypted_client_hello`, `0xfe0d`)를
   담은 건수. **관측 전용 — flow는 허용되며 deny하지 않는다**(allowlisted outer로

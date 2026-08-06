@@ -14,24 +14,93 @@ var (
 
 const maxClientHelloBytes = 16384 // TLS record max; bound the reassembly buffer
 
+// recordTypeHandshake is the TLS record content_type for handshake records
+// (RFC 8446 §5.1). It is the only content_type the ClientHello walk consumes.
+const recordTypeHandshake = 0x16
+
+// recordHeaderLen is the TLS record header: type(1) legacy_version(2) length(2).
+const recordHeaderLen = 5
+
+// coalesceHandshakeRecords flattens the TLS record layer at the front of b: it
+// walks the leading run of COMPLETE handshake records (content_type 0x16) and
+// concatenates their payloads into one handshake byte stream.
+//
+// This loop is the fix for the multi-record fail-open: RFC 8446 §5.1 explicitly
+// permits a single handshake message to span several records, so reading only
+// the first record's length and handing b[5:5+recLen] to the handshake parser
+// pins the parse to record #1 forever. A ClientHello split across two records
+// then never completes — every Feed returns ErrIncomplete, and the TCP hook's
+// non-terminal branch forwards each segment unmarked, so unbounded unclassified
+// bytes reach the server (fail-OPEN) until the byte cap finally trips.
+//
+// It stops at the first record that is not a complete handshake record and
+// reports which case ended the run:
+//
+//   - blocked == true: the next record's content_type is NOT handshake, so no
+//     further handshake bytes can ever follow the ones returned. If the returned
+//     bytes do not already contain a whole ClientHello the caller MUST fail
+//     closed — waiting for more would stall forever, which is the fail-open
+//     shape this function exists to remove.
+//   - blocked == false: the buffer merely ends mid-header or mid-record body;
+//     more bytes may still complete the handshake, so the caller waits.
+//
+// The single-record case (the overwhelming majority) returns a subslice of b
+// with no copy, exactly as the pre-fix code did.
+func coalesceHandshakeRecords(b []byte) (hs []byte, blocked bool, blockedType byte) {
+	var first []byte
+	n := 0
+	for off := 0; len(b)-off >= recordHeaderLen; {
+		if b[off] != recordTypeHandshake {
+			blocked, blockedType = true, b[off]
+			break
+		}
+		recLen := int(binary.BigEndian.Uint16(b[off+3 : off+recordHeaderLen]))
+		if recLen > len(b)-off-recordHeaderLen {
+			break // record body has not fully arrived yet
+		}
+		payload := b[off+recordHeaderLen : off+recordHeaderLen+recLen]
+		off += recordHeaderLen + recLen
+		n++
+		switch n {
+		case 1:
+			first = payload // single-record fast path: no copy
+		case 2:
+			hs = make([]byte, 0, len(first)+len(payload))
+			hs = append(hs, first...)
+			hs = append(hs, payload...)
+		default:
+			hs = append(hs, payload...)
+		}
+	}
+	if n == 1 {
+		return first, blocked, blockedType
+	}
+	return hs, blocked, blockedType
+}
+
 // ParseClientHelloSNI parses reassembled TLS record bytes and returns the
 // lowercased server_name plus whether an ECH extension was present (best-effort;
 // echPresent is only meaningful when err == nil). ErrIncomplete means the caller
 // should feed more bytes; any other error (including ErrNoSNI) is terminal and
 // the caller must fail closed.
+//
+// It owns the TLS record layer — flattening the leading run of handshake records
+// (see coalesceHandshakeRecords) before handing one contiguous handshake stream
+// to ParseHandshakeSNI. QUIC has no record layer and calls ParseHandshakeSNI
+// directly, so that function's contract is untouched by the flattening.
 func ParseClientHelloSNI(b []byte) (string, bool, error) {
-	// TLS record header: type(1) version(2) length(2)
-	if len(b) < 5 {
-		return "", false, ErrIncomplete
+	hs, blocked, blockedType := coalesceHandshakeRecords(b)
+	name, ech, err := ParseHandshakeSNI(hs)
+	if blocked && errors.Is(err, ErrIncomplete) {
+		// The record run is cut short by a non-handshake record before the
+		// ClientHello is complete: no more handshake bytes can arrive, so
+		// "need more bytes" would never be satisfied. Fail closed instead.
+		// (When the ClientHello IS already complete, err is nil and this branch
+		// is skipped — trailing non-handshake records, e.g. the 0-RTT
+		// change_cipher_spec of RFC 8446 Appendix D.4, are simply not consumed.)
+		return "", false, fmt.Errorf("not a handshake record (type 0x%02x)", blockedType)
 	}
-	if b[0] != 0x16 {
-		return "", false, fmt.Errorf("not a handshake record (type 0x%02x)", b[0])
-	}
-	recLen := int(binary.BigEndian.Uint16(b[3:5]))
-	if len(b) < 5+recLen {
-		return "", false, ErrIncomplete
-	}
-	return ParseHandshakeSNI(b[5 : 5+recLen])
+	return name, ech, err
 }
 
 // scanForECH reports whether the extensions block contains an
@@ -186,6 +255,11 @@ func normalizeServerName(raw []byte) (string, error) {
 }
 
 // Reassembler accumulates TCP payload segments until a full ClientHello parses.
+// It reassembles BOTH layers a ClientHello can be fragmented over: TCP segment
+// boundaries (by buffering) and TLS record boundaries (via ParseClientHelloSNI's
+// record-layer flattening, RFC 8446 §5.1). Neither fragmentation is a parse
+// failure — a ClientHello split either way completes and gets classified, rather
+// than staying "incomplete" forever while its segments are forwarded unmarked.
 type Reassembler struct{ buf []byte }
 
 // Feed appends segment and re-attempts a parse. It returns (sni, true,

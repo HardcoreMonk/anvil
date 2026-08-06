@@ -331,6 +331,35 @@ func (f *Flock) MarkAgentDeadIfNotPaused(agentID string) bool {
 	return true
 }
 
+// HasMember reports whether agentID belongs to this flock, under the same read
+// lock that guards Agents and Roster. Membership is the union of the two
+// because the two flock kinds that OWN a Town Wall record it differently: a
+// local flock's members live in Agents (ReserveAgent/AddAgent), while a hub
+// flock owns no local VMs and carries its cross-host membership in Roster.
+//
+// This is the authorization predicate for Town Wall authorship: the wall's
+// write path is reachable with the per-flock relay token, which is a GUEST
+// capability, so the caller-supplied agent_id is attacker-controlled and must
+// be checked against the roster the control plane assigned. An unknown flock
+// with no members admits nobody — fail closed, so a flock whose last agent was
+// removed does not become an open wall.
+func (f *Flock) HasMember(agentID string) bool {
+	if agentID == "" {
+		return false
+	}
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if _, ok := f.Agents[agentID]; ok {
+		return true
+	}
+	for _, m := range f.Roster {
+		if m.AgentID == agentID {
+			return true
+		}
+	}
+	return false
+}
+
 // AgentStatus returns an agent's current status under a read lock, or "" when
 // the agent is unknown. Used by the watchdog to skip dead-marking paused agents.
 func (f *Flock) AgentStatus(agentID string) string {

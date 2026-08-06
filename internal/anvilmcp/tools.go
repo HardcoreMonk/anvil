@@ -680,9 +680,9 @@ func (t *Tools) RestoreSnapshot(ctx context.Context, input RestoreSnapshotInput)
 	if err != nil {
 		return nil, err
 	}
-	snapshotID := strings.TrimSpace(input.SnapshotID)
-	if snapshotID == "" {
-		return nil, fmt.Errorf("snapshot_id is required")
+	snapshotID, err := requireSnapshotID(input.SnapshotID)
+	if err != nil {
+		return nil, err
 	}
 	egressPolicy, err := NormalizeEgressPolicy(input.EgressPolicy)
 	if err != nil {
@@ -759,9 +759,9 @@ func (t *Tools) DeleteSnapshot(ctx context.Context, input SnapshotIdentityInput)
 	if err != nil {
 		return nil, err
 	}
-	snapshotID := strings.TrimSpace(input.SnapshotID)
-	if snapshotID == "" {
-		return nil, fmt.Errorf("snapshot_id is required")
+	snapshotID, err := requireSnapshotID(input.SnapshotID)
+	if err != nil {
+		return nil, err
 	}
 	out, err := t.daemon.DeleteSnapshot(ctx, snapshotID)
 	if err != nil {
@@ -786,9 +786,9 @@ func (t *Tools) ReplicateSnapshot(ctx context.Context, input ReplicateSnapshotIn
 	if err != nil {
 		return nil, err
 	}
-	snapshotID := strings.TrimSpace(input.SnapshotID)
-	if snapshotID == "" {
-		return nil, fmt.Errorf("snapshot_id is required")
+	snapshotID, err := requireSnapshotID(input.SnapshotID)
+	if err != nil {
+		return nil, err
 	}
 	sourceHost := strings.TrimSpace(input.SourceHost)
 	if sourceHost == "" {
@@ -1178,6 +1178,46 @@ func requireFlockID(value string) (string, error) {
 	return flockID, nil
 }
 
+// maxResourceIDLength bounds vm_id/snapshot_id. Daemon-generated IDs are
+// "vm-<UnixNano>"/"snap-<UnixNano>" (at most 24 bytes), so this leaves ample
+// headroom while keeping an attacker from stuffing a whole URL into a segment.
+const maxResourceIDLength = 128
+
+// requireVMID and requireSnapshotID narrow the two identifiers that DaemonClient
+// splices into daemon URL paths (/vms/<vm_id>/..., /snapshots/<snapshot_id>/...).
+// url.PathEscape in daemon_client.go is the second layer; this is the first, and
+// it is the only one that can reject ".." — PathEscape leaves dot segments
+// untouched because "." is an unreserved URL character.
+func requireVMID(value string) (string, error) {
+	return requireResourceID("vm_id", value)
+}
+
+func requireSnapshotID(value string) (string, error) {
+	return requireResourceID("snapshot_id", value)
+}
+
+func requireResourceID(field, value string) (string, error) {
+	id := strings.TrimSpace(value)
+	if id == "" {
+		return "", fmt.Errorf("%s is required", field)
+	}
+	if len(id) > maxResourceIDLength {
+		return "", fmt.Errorf("%s must be at most %d characters", field, maxResourceIDLength)
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-', r == '_', r == '.':
+		default:
+			return "", fmt.Errorf("%s must contain only letters, digits, '-', '_', and '.'", field)
+		}
+	}
+	if id == "." || strings.Contains(id, "..") {
+		return "", fmt.Errorf("%s must not contain path traversal segments", field)
+	}
+	return id, nil
+}
+
 func normalizeWorkspacePath(value string) (string, error) {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" || strings.HasPrefix(trimmed, "/") || strings.Contains(trimmed, `\`) {
@@ -1202,7 +1242,18 @@ func normalizeWorkspaceEncoding(value string) (string, error) {
 	}
 }
 
+// resolveIdentity is the single chokepoint every vm_id-taking tool goes through,
+// so validating the resolved value here covers both the explicit vm_id argument
+// and a vm_id smuggled in through a session alias (tampered on-disk session file).
 func (t *Tools) resolveIdentity(vmID, sessionName string) (string, error) {
+	resolved, err := t.lookupIdentity(vmID, sessionName)
+	if err != nil {
+		return "", err
+	}
+	return requireVMID(resolved)
+}
+
+func (t *Tools) lookupIdentity(vmID, sessionName string) (string, error) {
 	t.sessionPersistenceMu.Lock()
 	defer t.sessionPersistenceMu.Unlock()
 

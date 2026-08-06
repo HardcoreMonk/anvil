@@ -237,7 +237,7 @@ func (c *DaemonClient) ListVMs(ctx context.Context) ([]VMInfo, error) {
 }
 
 func (c *DaemonClient) RunTask(ctx context.Context, vmID, prompt string) (*RawDaemonResponse, error) {
-	return c.raw(ctx, http.MethodPost, "/vms/"+vmID+"/tasks", map[string]string{"prompt": prompt})
+	return c.raw(ctx, http.MethodPost, vmPath(vmID)+"/tasks", map[string]string{"prompt": prompt})
 }
 
 func (c *DaemonClient) CopyIn(ctx context.Context, vmID, workspacePath, content string, overwrite bool) (*RawDaemonResponse, error) {
@@ -249,14 +249,14 @@ func (c *DaemonClient) CopyIn(ctx context.Context, vmID, workspacePath, content 
 	return c.rawBody(
 		ctx,
 		http.MethodPut,
-		"/vms/"+vmID+"/workspace?"+query.Encode(),
+		vmPath(vmID)+"/workspace?"+query.Encode(),
 		strings.NewReader(content),
 		"application/octet-stream",
 	)
 }
 
 func (c *DaemonClient) CopyOut(ctx context.Context, vmID, workspacePath string) (string, error) {
-	_, body, err := c.doRaw(ctx, http.MethodGet, "/vms/"+vmID+"/workspace?path="+url.QueryEscape(workspacePath), nil, "")
+	_, body, err := c.doRaw(ctx, http.MethodGet, vmPath(vmID)+"/workspace?path="+url.QueryEscape(workspacePath), nil, "")
 	if err != nil {
 		return "", err
 	}
@@ -264,19 +264,19 @@ func (c *DaemonClient) CopyOut(ctx context.Context, vmID, workspacePath string) 
 }
 
 func (c *DaemonClient) Health(ctx context.Context, vmID string) (*RawDaemonResponse, error) {
-	return c.raw(ctx, http.MethodGet, "/vms/"+vmID+"/health", nil)
+	return c.raw(ctx, http.MethodGet, vmPath(vmID)+"/health", nil)
 }
 
 func (c *DaemonClient) Stop(ctx context.Context, vmID string) (*RawDaemonResponse, error) {
-	return c.raw(ctx, http.MethodPost, "/vms/"+vmID+"/stop", nil)
+	return c.raw(ctx, http.MethodPost, vmPath(vmID)+"/stop", nil)
 }
 
 func (c *DaemonClient) Delete(ctx context.Context, vmID string) (*RawDaemonResponse, error) {
-	return c.raw(ctx, http.MethodDelete, "/vms/"+vmID, nil)
+	return c.raw(ctx, http.MethodDelete, vmPath(vmID), nil)
 }
 
 func (c *DaemonClient) CreateSnapshot(ctx context.Context, vmID string, req CreateSnapshotRequest) (*SnapshotInfo, error) {
-	_, body, err := c.do(ctx, http.MethodPost, "/vms/"+vmID+"/snapshot", req)
+	_, body, err := c.do(ctx, http.MethodPost, vmPath(vmID)+"/snapshot", req)
 	if err != nil {
 		return nil, err
 	}
@@ -302,7 +302,7 @@ func (c *DaemonClient) ListSnapshots(ctx context.Context) ([]SnapshotInfo, error
 }
 
 func (c *DaemonClient) RestoreSnapshot(ctx context.Context, snapshotID string, req RestoreSnapshotRequest) (*RestoreSnapshotResponse, error) {
-	_, body, err := c.do(ctx, http.MethodPost, "/snapshots/"+snapshotID+"/restore", req)
+	_, body, err := c.do(ctx, http.MethodPost, snapshotPath(snapshotID)+"/restore", req)
 	if err != nil {
 		return nil, err
 	}
@@ -315,7 +315,7 @@ func (c *DaemonClient) RestoreSnapshot(ctx context.Context, snapshotID string, r
 }
 
 func (c *DaemonClient) DeleteSnapshot(ctx context.Context, snapshotID string) (*RawDaemonResponse, error) {
-	return c.raw(ctx, http.MethodDelete, "/snapshots/"+snapshotID, nil)
+	return c.raw(ctx, http.MethodDelete, snapshotPath(snapshotID), nil)
 }
 
 func (c *DaemonClient) ExportSnapshot(ctx context.Context, snapshotID string) (*SnapshotExportStream, error) {
@@ -324,7 +324,7 @@ func (c *DaemonClient) ExportSnapshot(ctx context.Context, snapshotID string) (*
 		return nil, fmt.Errorf("snapshot id is required")
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/snapshots/"+url.PathEscape(snapshotID)+"/export", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+snapshotPath(snapshotID)+"/export", nil)
 	if err != nil {
 		return nil, fmt.Errorf("create daemon request: %w", err)
 	}
@@ -569,6 +569,19 @@ func tenantPath(tenantID string) (string, error) {
 
 func flockPath(flockID string) string {
 	return "/flocks/" + url.PathEscape(flockID)
+}
+
+// vmPath and snapshotPath keep a caller-supplied identifier inside a single URL
+// path segment. PathEscape encodes "/", "?", "#", "%" and control bytes, so the
+// identifier can neither climb out of the collection prefix nor pre-empt the
+// query string. It does NOT encode ".", so dot segments are rejected upstream by
+// requireVMID/requireSnapshotID in tools.go.
+func vmPath(vmID string) string {
+	return "/vms/" + url.PathEscape(vmID)
+}
+
+func snapshotPath(snapshotID string) string {
+	return "/snapshots/" + url.PathEscape(snapshotID)
 }
 
 func (c *DaemonClient) raw(ctx context.Context, method, path string, payload any) (*RawDaemonResponse, error) {

@@ -362,6 +362,203 @@ func TestReassemblerHardErrorPropagates(t *testing.T) {
 	}
 }
 
+// --- H3: ClientHello spanning multiple TLS records (RFC 8446 §5.1) ---
+
+// splitHandshakeIntoRecords re-frames one complete TLS handshake message into n
+// consecutive handshake records (content_type 0x16), each carrying its own
+// 5-byte record header. RFC 8446 §5.1 explicitly permits a handshake message to
+// span several records, so this is wire-legal traffic — not a malformed vector.
+// Records are returned separately so tests can feed them one at a time (record
+// boundaries) or joined (arbitrary TCP segment boundaries).
+func splitHandshakeIntoRecords(hs []byte, n int) [][]byte {
+	if n < 1 {
+		panic("splitHandshakeIntoRecords: n must be >= 1")
+	}
+	chunk := (len(hs) + n - 1) / n
+	var recs [][]byte
+	for off := 0; off < len(hs); off += chunk {
+		end := off + chunk
+		if end > len(hs) {
+			end = len(hs)
+		}
+		rec := &bytes.Buffer{}
+		rec.WriteByte(0x16)                                  // content_type handshake
+		rec.Write([]byte{0x03, 0x01})                        // legacy_record_version
+		binary.Write(rec, binary.BigEndian, uint16(end-off)) // record length
+		rec.Write(hs[off:end])                               // handshake fragment
+		recs = append(recs, rec.Bytes())
+	}
+	return recs
+}
+
+// TestReassemblerMultiRecordClientHello is the H3 regression: the SAME
+// ClientHello framed as one record and as two records must reach the SAME
+// verdict. Parsing only the first record's declared length pins the handshake
+// parser to record #1's bytes forever, so a two-record ClientHello never
+// completes — Feed keeps returning (\"\", false, nil), which the TCP hook treats
+// as "pass this segment through unmarked". That is fail-OPEN: an unlimited
+// number of unclassified segments reach the server.
+func TestReassemblerMultiRecordClientHello(t *testing.T) {
+	const want = "multi.example.com"
+	full := buildClientHello(want, false)
+	hs := stripRecordHeader(full)
+
+	// Control: the identical ClientHello in ONE record completes immediately.
+	ctl := &Reassembler{}
+	name, done, _, err := ctl.Feed(full)
+	if err != nil || !done || name != want {
+		t.Fatalf("control (1 record): name=%q done=%v err=%v; want %q,true,nil", name, done, err, want)
+	}
+
+	recs := splitHandshakeIntoRecords(hs, 2)
+	if len(recs) != 2 {
+		t.Fatalf("test setup: want 2 records, got %d", len(recs))
+	}
+	r := &Reassembler{}
+	if n, d, _, e := r.Feed(recs[0]); e != nil || d {
+		t.Fatalf("record 1 of 2: name=%q done=%v err=%v; want incomplete (\"\",false,nil)", n, d, e)
+	}
+	name, done, _, err = r.Feed(recs[1])
+	if err != nil || !done || name != want {
+		t.Fatalf("after BOTH records: name=%q done=%v err=%v; want %q,true,nil", name, done, err, want)
+	}
+}
+
+// TestReassemblerThreeRecordClientHello extends the two-record regression past
+// the "one extra record" special case: the record-layer flattening must be a
+// loop over the whole run, not a fixed two-record peek.
+func TestReassemblerThreeRecordClientHello(t *testing.T) {
+	const want = "three.example.com"
+	recs := splitHandshakeIntoRecords(stripRecordHeader(buildClientHello(want, false)), 3)
+	if len(recs) != 3 {
+		t.Fatalf("test setup: want 3 records, got %d", len(recs))
+	}
+	r := &Reassembler{}
+	for i := 0; i < len(recs)-1; i++ {
+		if n, d, _, e := r.Feed(recs[i]); e != nil || d {
+			t.Fatalf("record %d of 3: name=%q done=%v err=%v; want incomplete", i+1, n, d, e)
+		}
+	}
+	name, done, _, err := r.Feed(recs[len(recs)-1])
+	if err != nil || !done || name != want {
+		t.Fatalf("after ALL 3 records: name=%q done=%v err=%v; want %q,true,nil", name, done, err, want)
+	}
+}
+
+// TestParseClientHelloSNI_MultiRecord pins the record-layer flattening at the
+// ParseClientHelloSNI level (the Reassembler's parse step), including that the
+// best-effort ECH observation survives a record split.
+func TestParseClientHelloSNI_MultiRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sni  string
+		ech  bool
+		n    int
+	}{
+		{"two records", "multi.example.com", false, 2},
+		{"three records", "multi.example.com", false, 3},
+		{"two records with ech", "cloudflare-ech.com", true, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recs := splitHandshakeIntoRecords(stripRecordHeader(buildClientHello(tc.sni, tc.ech)), tc.n)
+			if len(recs) != tc.n {
+				t.Fatalf("test setup: want %d records, got %d", tc.n, len(recs))
+			}
+			got, ech, err := ParseClientHelloSNI(bytes.Join(recs, nil))
+			if err != nil || got != tc.sni {
+				t.Fatalf("ParseClientHelloSNI over %d records = %q, %v; want %q, nil", tc.n, got, err, tc.sni)
+			}
+			if ech != tc.ech {
+				t.Fatalf("echPresent = %v, want %v (must survive the record split)", ech, tc.ech)
+			}
+		})
+	}
+}
+
+// TestReassemblerMultiRecordAcrossSegments feeds a two-record ClientHello in TCP
+// segments whose boundaries do NOT line up with record boundaries — the realistic
+// wire case, and the one that mixes both reassembly layers (TCP segment + TLS
+// record).
+func TestReassemblerMultiRecordAcrossSegments(t *testing.T) {
+	const want = "segmented.example.com"
+	buf := bytes.Join(splitHandshakeIntoRecords(stripRecordHeader(buildClientHello(want, false)), 2), nil)
+
+	r := &Reassembler{}
+	var got string
+	for off := 0; off < len(buf); off += 7 { // 7 bytes at a time: never a record boundary
+		end := off + 7
+		if end > len(buf) {
+			end = len(buf)
+		}
+		name, done, _, err := r.Feed(buf[off:end])
+		if err != nil {
+			t.Fatalf("segment at %d: unexpected terminal err %v", off, err)
+		}
+		if done {
+			got = name
+		}
+	}
+	if got != want {
+		t.Fatalf("reassembled sni = %q, want %q", got, want)
+	}
+}
+
+// TestReassemblerMultiRecordFailClosed pins that flattening the record layer does
+// NOT open a new fail-open hole: a run that cannot complete must be terminal, and
+// the 16 KiB bound must still apply across records.
+func TestReassemblerMultiRecordFailClosed(t *testing.T) {
+	recs := splitHandshakeIntoRecords(stripRecordHeader(buildClientHello("split.example.com", false)), 2)
+
+	// (a) First record complete + the second record's bare header only: genuinely
+	// incomplete, so non-terminal (the caller must keep waiting, not deny).
+	t.Run("bare trailing record header stays incomplete", func(t *testing.T) {
+		buf := append(append([]byte{}, recs[0]...), recs[1][:5]...)
+		r := &Reassembler{}
+		name, done, _, err := r.Feed(buf)
+		if err != nil || done {
+			t.Fatalf("record1+bare header: name=%q done=%v err=%v; want (\"\",false,nil)", name, done, err)
+		}
+	})
+
+	// (b) A non-handshake record interrupts the run BEFORE the ClientHello is
+	// complete. No further handshake bytes can ever arrive, so "need more bytes"
+	// would stall forever (= unbounded fail-open passthrough). Must be terminal.
+	t.Run("non-handshake record mid-clienthello is terminal", func(t *testing.T) {
+		interrupted := append([]byte{}, recs[0]...)
+		ccs := append([]byte{}, recs[1]...)
+		ccs[0] = 0x14 // change_cipher_spec, not handshake
+		interrupted = append(interrupted, ccs...)
+
+		r := &Reassembler{}
+		name, done, _, err := r.Feed(interrupted)
+		if err == nil || done || errors.Is(err, ErrIncomplete) {
+			t.Fatalf("interrupted run: name=%q done=%v err=%v; want terminal error", name, done, err)
+		}
+	})
+
+	// (c) The reassembly bound is per-buffer, so a flood of empty handshake
+	// records (5 bytes of pure record header each) can neither complete nor
+	// buffer without limit.
+	t.Run("empty-record flood hits the byte bound", func(t *testing.T) {
+		r := &Reassembler{}
+		empty := []byte{0x16, 0x03, 0x01, 0x00, 0x00}
+		var tripped error
+		for i := 0; i < maxClientHelloBytes; i++ {
+			_, done, _, err := r.Feed(empty)
+			if done {
+				t.Fatalf("empty-record flood completed at iteration %d; must never classify", i)
+			}
+			if err != nil {
+				tripped = err
+				break
+			}
+		}
+		if tripped == nil {
+			t.Fatalf("empty-record flood never hit the %d-byte reassembly bound", maxClientHelloBytes)
+		}
+	})
+}
+
 // FuzzParseClientHelloSNI asserts the parser never panics on arbitrary bytes and
 // that a nil-error result always upholds the output invariant (non-empty,
 // lowercased, no trailing dot, printable ASCII only).
