@@ -35,11 +35,23 @@ preflight() {
 	[ "$(id -u)" -eq 0 ] || die "run as root: sudo ./install.sh"
 
 	# place_files() ends in a recursive chown of $DEST, so a mistyped EPHEMERA_HOME
-	# would no longer just scatter files — it would re-own a system tree. Exact
-	# matches only: /opt/ephemera, /var/lib/ephemera, /srv/ephemera all still pass.
+	# would no longer just scatter files — it would re-own a system tree.
+	#
+	# The path is canonicalised BEFORE it is matched, and DEST keeps the canonical
+	# form for the rest of the run. Matching the raw value is not enough: "/opt/.."
+	# resolves to "/", "/etc/" is "/etc" with a trailing slash, and a symlinked
+	# EPHEMERA_HOME points somewhere the literal string never names — each would
+	# walk straight past a list of exact spellings. readlink -m resolves symlinks
+	# and ".." without requiring the directory to exist yet, which matters because
+	# install.sh creates it.
+	case "$DEST" in
+		/*) ;;
+		*) die "EPHEMERA_HOME must be an absolute path (got '$DEST')." ;;
+	esac
+	DEST=$(readlink -m -- "$DEST") || die "could not resolve EPHEMERA_HOME='$DEST'."
 	case "$DEST" in
 		""|/|/bin|/boot|/dev|/etc|/home|/lib|/lib64|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var)
-			die "EPHEMERA_HOME=$DEST is a system directory; point it at a dedicated subdirectory (default /opt/ephemera)." ;;
+			die "EPHEMERA_HOME resolves to $DEST, a system directory; point it at a dedicated subdirectory (default /opt/ephemera)." ;;
 	esac
 	[ "$(uname -m)" = "x86_64" ] || die "Ephemera ships amd64 binaries; this host is $(uname -m). Unsupported."
 	[ -e /dev/kvm ] || die "/dev/kvm not found — enable KVM (or nested virtualization if this host is itself a VM)."

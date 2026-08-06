@@ -267,11 +267,14 @@ CIDR로, DNS는 `dns_servers`로 — 세 층은 병렬 additive 계약이다.
 
 - verdict 루프가 host별 신규 런타임 컴포넌트다 — NFQUEUE/netlink 가용성이
   host baseline 요구가 된다(OQ2, 스케줄러 capability 축은 아직 없음).
-- 잔여 위험 계약 표에서 아직 열려 있는 항목들(특히 SNI spoofing/domain
-  fronting/pre-decision 부분전달/TCP 삽입·재정렬 evasion)은 적대적 in-guest
-  루트를 완전히 막지 못한다 — 신뢰 워크로드 전제가 깨지면 이 설계의 보장도
-  약해진다. 표의 나머지 항목 중 QUIC/UDP:443과 복구 중 transient egress 창은
-  이미 구현·해소로 닫혔다.
+- 잔여 위험 계약 표에서 **적대적 in-guest 루트에게 실제 능력을 남기는** 항목은
+  SNI spoofing, domain fronting, TCP 삽입·재정렬 evasion이다 — 셋 다 guest가
+  allowlist 밖 목적지에 도달할 수 있게 하며, 신뢰 워크로드 전제가 깨지면 이
+  설계의 보장도 함께 약해진다. pre-decision 부분전달은 성격이 다르다: 표의
+  해당 행이 결론짓듯 **승인 누수가 아니고**(승인 connmark는 완결된 positive
+  매치에서만 찍힌다) 전달되는 것은 판정 전 ClientHello 앞부분 바이트뿐이라,
+  같은 묶음으로 읽으면 위험을 과대 서술하게 된다. 표의 나머지 항목 중
+  QUIC/UDP:443과 복구 중 transient egress 창은 이미 구현·해소로 닫혔다.
 - `allow_hosts`(legacy substring)를 당장 제거하지 않아 두 계층(coarse
   substring + precise SNI)이 당분간 공존한다.
 
