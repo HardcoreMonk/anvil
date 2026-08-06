@@ -119,7 +119,8 @@ func TestPropagateCPTokenToVMs_OnlyDaemonInjectedTokens(t *testing.T) {
 		VMInfo:    VMInfo{VMID: "vm-routed", Profile: "researcher"},
 		vsockPath: routed.path,
 	}
-	// A local flock member: the daemon injected its own operator bearer here.
+	// A local flock member spawned BEFORE capability tokens: the daemon injected
+	// its own operator bearer here, so it stays eligible for rotation.
 	cp.vms["vm-local"] = &runningVM{
 		VMInfo:         VMInfo{VMID: "vm-local", Profile: "researcher"},
 		vsockPath:      local.path,
@@ -190,17 +191,22 @@ func spawnHarness(t *testing.T, cp *ControlPlane) {
 }
 
 // TestSpawnMarksCPTokenManagedOnlyForDaemonInjectedToken pins the provenance
-// record at its source: only the spawn paths that pass cp.controlPlaneTokenForVM()
-// (local flock members) may mark a VM as carrying the daemon's own bearer. A
-// caller-supplied control_plane_token on POST /vms must not, and neither must a
-// plain spawn with no token at all. The flag is also persisted so a daemon
-// restart does not silently stop rotating local flock members.
+// record at its source: a VM may be marked as carrying the daemon's own operator
+// bearer only if that is in fact what it was injected. Since local flock members
+// moved to per-flock guest capability tokens, NO spawn path injects the operator
+// bearer any more, so no spawn path may set the flag — the SIGHUP rotation set is
+// now fed exclusively by recovery, from VMs spawned before that change (see
+// TestSIGHUP_StillRotatesPreExistingManagedVM), and drains as they are replaced.
 func TestSpawnMarksCPTokenManagedOnlyForDaemonInjectedToken(t *testing.T) {
 	cp := newTestCP(t)
 	cp.clients = []APIClient{{Name: "ops", Token: "operator-bearer-secret"}}
 	spawnHarness(t, cp)
 
-	// 1) Local flock member: the daemon injects its own bearer.
+	// 1) Local flock member: injected a per-flock capability token, which is not
+	// the daemon's bearer and therefore not the daemon's to rotate. Marking it
+	// managed would let the next SIGHUP replace the scoped token with the broad
+	// one and undo the privilege reduction.
+	cp.ensureLocalFlockGuestToken("flock-1")
 	info, _, err := cp.spawnVMForFlock("flock-1", "researcher-1", "researcher", "", "")
 	if err != nil {
 		t.Fatalf("spawnVMForFlock: %v", err)
@@ -208,15 +214,15 @@ func TestSpawnMarksCPTokenManagedOnlyForDaemonInjectedToken(t *testing.T) {
 	cp.mu.RLock()
 	managed := cp.vms[info.VMID].cpTokenManaged
 	cp.mu.RUnlock()
-	if !managed {
-		t.Fatalf("local flock VM %s cpTokenManaged = false, want true", info.VMID)
+	if managed {
+		t.Fatalf("local flock VM %s cpTokenManaged = true; a per-flock capability token is not the operator bearer", info.VMID)
 	}
 	st, err := storage.LoadVMState(cp.workDir, info.VMID)
 	if err != nil {
 		t.Fatalf("LoadVMState(%s): %v", info.VMID, err)
 	}
-	if !st.CPTokenManaged {
-		t.Fatalf("persisted VMState.CPTokenManaged = false for local flock VM, want true (rotation must survive a daemon restart)")
+	if st.CPTokenManaged {
+		t.Fatalf("persisted VMState.CPTokenManaged = true for a capability-token flock VM, want false")
 	}
 
 	// 2) Routed flock member: caller supplies a scoped relay token.
