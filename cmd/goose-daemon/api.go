@@ -271,19 +271,27 @@ type runningVM struct {
 	vsockPath        string // host-side UDS for Firecracker vsock proxy; cleaned up on teardown
 	// cpTokenManaged records the PROVENANCE of this guest's
 	// /root/.ephemera-cp-token: true only when THIS daemon injected its OWN
-	// operator bearer (cp.controlPlaneTokenForVM) at spawn time. It is the sole
-	// admission test for the SIGHUP rotation fan-out (propagateCPTokenToVMs).
+	// operator bearer at spawn time. It is the sole admission test for the SIGHUP
+	// rotation fan-out (propagateCPTokenToVMs).
+	//
+	// No spawn path sets it any more. Every flock member now receives a per-flock
+	// guest capability token instead of the operator bearer, and a capability
+	// token is not the daemon's to rotate — rotating it would replace a narrow
+	// credential with a broad one. The flag therefore survives only on VMs
+	// recovered from before that change, and the rotation set drains as those VMs
+	// are replaced. It is kept (rather than deleted along with the fan-out)
+	// precisely so those pre-existing guests keep working across an upgrade.
 	//
 	// It is deliberately NOT inferred from FlockID or flock kind:
 	//   - a plain POST /vms VM has NO cp-token file at all (the provisioner skips
 	//     it when the token is empty), so rotating it would GRANT a workload VM
 	//     control-plane access it was never meant to have;
-	//   - a routed-flock member holds a caller-supplied, per-flock SCOPED relay
-	//     token, so rotating it would both escalate the guest's privileges and
-	//     break its relay hop to the home daemon.
-	// The routed-flock case is exactly why FlockID is not a usable proxy: it is
-	// non-empty there too, yet that VM must be left alone. Only an explicit
-	// provenance record separates the two.
+	//   - a flock member holds a per-flock SCOPED token, so rotating it would both
+	//     escalate the guest's privileges and break the credential its daemon
+	//     expects to see.
+	// The flock case is exactly why FlockID is not a usable proxy: it is non-empty
+	// there too, yet that VM must be left alone. Only an explicit provenance
+	// record separates the two.
 	cpTokenManaged bool
 	machine        *firecracker.Machine
 	tapDevice      string
@@ -634,6 +642,12 @@ func NewControlPlane(
 		}
 	}
 
+	// Re-register the persisted guest capability token of every recovered LOCAL
+	// flock. This cannot live inside LoadFromDisk: that is a FlockManager method
+	// and the admission store belongs to the ControlPlane. It must run here,
+	// immediately after recovery and before any member can be spawned.
+	cp.rehydrateFlockGuestTokens()
+
 	// Register all Prometheus collectors BEFORE RecoverVMs: warm-restore (v0.4.0)
 	// records ephemera_auto_restore_total during recovery, so cp.metrics must be
 	// live by then or that path nil-derefs. GaugeFunc closures read
@@ -819,11 +833,15 @@ func (cp *ControlPlane) removeCallToken(flockID string) {
 	cp.callTokensMu.Unlock()
 }
 
-// controlPlaneTokenForVM returns the bearer the in-VM /townwall/post forwarder
-// uses when calling back into the control plane. Returns the first NON-EXPIRED
-// API client's token when auth is enabled, or "" when auth is disabled or every
-// token has expired — in the latter case the in-VM forwarder calls CP
-// unauthenticated (v0.4.1: was blindly clients[0]).
+// controlPlaneTokenForVM returns the daemon's own operator bearer: the first
+// NON-EXPIRED API client's token when auth is enabled, or "" when auth is
+// disabled or every token has expired (v0.4.1: was blindly clients[0]).
+//
+// It is deliberately NOT wired into any VM spawn path. Flock members are injected
+// their flock's guest capability token instead (cp.flockGuestToken), because a
+// guest needs only its own flock's wall and call sub-paths and this value opens
+// every control-plane route. The "ForVM" name records what it used to feed; the
+// auth-disabled "" result is the behaviour flockGuestToken preserves in that mode.
 //
 // Read under clientsMu so SIGHUP-driven ReloadClients is safe.
 func (cp *ControlPlane) controlPlaneTokenForVM() string {
@@ -868,9 +886,13 @@ func (cp *ControlPlane) ReloadClients() {
 // none at all. Concretely, this skips:
 //   - plain POST /vms VMs, which are provisioned with no cp-token file (the
 //     provisioner skips it for an empty token), and
-//   - routed flock members, which hold a caller-supplied per-flock SCOPED relay
+//   - flock members of either kind, which hold a per-flock SCOPED capability
 //     token that is both narrower than the operator bearer and the credential
-//     their home daemon expects to see.
+//     their daemon expects to see.
+//
+// Since flock members moved to capability tokens, nothing spawned by this daemon
+// is eligible; the remaining targets are VMs recovered from before that change,
+// and the set drains as they are replaced.
 //
 // Best-effort: per-VM failure is logged, not propagated. Older (pre-v0.3.4) guests
 // lack the SET_CP_TOKEN handler and will fail here; operators can fall back to
@@ -895,7 +917,15 @@ func (cp *ControlPlane) propagateCPTokenToVMs(clients []APIClient) {
 	}
 	cp.mu.RUnlock()
 
+	// An empty target set is now the steady state, not an edge case: once a flock
+	// VM carries its own per-flock capability token the daemon has nothing of its
+	// own to rotate into it, and a host running only plain VMs never had anything
+	// either. Log it anyway. SIGHUP is a deliberate, infrequent operator action,
+	// and an operator who rotates a token and sees no line at all cannot tell
+	// "nothing needed rotating" apart from "the reload never happened" — which is
+	// exactly the ambiguity this line exists to remove.
 	if len(targets) == 0 {
+		slog.Warn("sighup: cp token propagated", "ok", 0, "total", 0)
 		return
 	}
 
@@ -1377,17 +1407,17 @@ type spawnVMOptions struct {
 	AgentToken string
 	// ControlPlaneToken, when set, is injected into the VM at /root/.ephemera-cp-token
 	// so the in-VM /townwall/post forwarder can authenticate when calling
-	// back into the control plane. Auto-populated by the local-flock spawn paths
-	// from the daemon's own client list (controlPlaneTokenForVM); standalone
-	// spawnVM forwards the caller's control_plane_token, or leaves it empty when
-	// the request carries none (in which case no cp-token file is written).
+	// back into the control plane. The flock spawn paths populate it with that
+	// flock's guest capability token (cp.flockGuestToken), which admits only that
+	// flock's wall and call sub-paths; standalone spawnVM forwards the caller's
+	// control_plane_token, or leaves it empty when the request carries none (in
+	// which case no cp-token file is written).
 	ControlPlaneToken string
 	// ControlPlaneTokenManaged must be set true if and only if ControlPlaneToken
-	// came from cp.controlPlaneTokenForVM() — i.e. it is the DAEMON'S OWN operator
-	// bearer, which the daemon is therefore entitled to rotate on SIGHUP. Leave it
-	// false for a caller-supplied token (POST /vms control_plane_token, used by
-	// routed flock members, which carry a narrower per-flock relay token) and for
-	// an empty token. See runningVM.cpTokenManaged.
+	// is the DAEMON'S OWN operator bearer, which the daemon is therefore entitled
+	// to rotate on SIGHUP. No current spawn path qualifies: flock members get a
+	// per-flock capability token and standalone VMs get a caller-supplied token or
+	// none. See runningVM.cpTokenManaged for why the flag is nonetheless kept.
 	ControlPlaneTokenManaged bool
 	VcpuCount                int64 // 0 → default 1
 	MemSizeMib               int64 // 0 → default 1024

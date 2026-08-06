@@ -37,6 +37,10 @@ func restartCP(t *testing.T, cp *ControlPlane) *ControlPlane {
 	if _, _, err := cp2.flockMgr.LoadFromDisk(); err != nil {
 		t.Fatalf("restart LoadFromDisk: %v", err)
 	}
+	// The boot sequence re-registers recovered LOCAL flocks' persisted guest
+	// capability tokens right after LoadFromDisk; a restart simulation that
+	// skipped it would not reproduce what the daemon actually does.
+	cp2.rehydrateFlockGuestTokens()
 	return cp2
 }
 

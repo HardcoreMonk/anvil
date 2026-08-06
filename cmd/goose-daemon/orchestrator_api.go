@@ -280,6 +280,13 @@ func (cp *ControlPlane) createFlock(w http.ResponseWriter, r *http.Request) {
 	defer unlock()
 	flock.MaxAgents = maxAgents
 
+	// Issue this flock's guest capability token BEFORE the first spawn: the member
+	// guests are injected it (not the operator bearer), and it must be registered
+	// for admission by the time they call back into the wall. The flock is not in
+	// the registry yet, so this is the one call site that names the id directly
+	// rather than going through ensureFlockGuestTokenFor.
+	cp.ensureLocalFlockGuestToken(flockID)
+
 	// Spawn each VM sequentially. On failure, tear everything down so we don't
 	// leak resources or leave an unusable flock registered.
 	//
@@ -293,6 +300,9 @@ func (cp *ControlPlane) createFlock(w http.ResponseWriter, r *http.Request) {
 			cp.destroyVM(vmID)
 		}
 		cp.flockMgr.Delete(flockID)
+		// A flock that never came up must not leave a live capability token (nor a
+		// token file a later restart would rehydrate) behind.
+		cp.revokeFlockGuestToken(flockID)
 	}
 	for i, role := range req.Roles {
 		roleSeq[role]++
@@ -378,7 +388,10 @@ func (cp *ControlPlane) deleteFlock(w http.ResponseWriter, flockID string) {
 	cp.flockMgr.Delete(flockID)
 	// Revoke the flock's scoped relay-token admission (Task 8): once the flock is
 	// gone, a stale relay token must no longer authenticate a cross-host wall hop.
-	cp.removeRelayToken(flockID)
+	// For a local flock the same store holds its guest capability token, so this
+	// also removes the persisted token file — flock deletion is the token's only
+	// expiry, and it must reach disk or a restart would rehydrate it.
+	cp.revokeFlockGuestToken(flockID)
 	// Revoke the flock's scoped call-token admission too, mirroring the relay
 	// token above: a stale call token must no longer authenticate a call entry.
 	cp.removeCallToken(flockID)
@@ -840,6 +853,9 @@ func (cp *ControlPlane) restartAgent(w http.ResponseWriter, flockID, agentID str
 		return
 	}
 	agentProfile := LookupProfile(profileName)
+	// A flock recovered from a release that predates capability tokens has none;
+	// mint one now rather than respawning this member with no credential.
+	cp.ensureFlockGuestTokenFor(f)
 	info, _, err := cp.spawnVMInternal(spawnVMOptions{
 		Profile:           profileName,
 		ConfigPath:        configPath,
@@ -850,9 +866,11 @@ func (cp *ControlPlane) restartAgent(w http.ResponseWriter, flockID, agentID str
 		FlockID:           flockID,
 		AgentID:           agentID,
 		AgentToken:        oldToken,
-		ControlPlaneToken: cp.controlPlaneTokenForVM(),
-		// The daemon's OWN operator bearer -> this daemon may rotate it on SIGHUP.
-		ControlPlaneTokenManaged: true,
+		ControlPlaneToken: cp.flockGuestToken(flockID),
+		// A per-flock capability token, NOT the daemon's operator bearer -> this
+		// daemon must not rotate it on SIGHUP. Leaving this true would let the next
+		// rotation overwrite the scoped token with the broad one.
+		ControlPlaneTokenManaged: false,
 		VcpuCount:                agentProfile.VcpuCount,
 		MemSizeMib:               agentProfile.MemSizeMib,
 	})
@@ -930,6 +948,9 @@ func (cp *ControlPlane) addFlockAgent(w http.ResponseWriter, r *http.Request, fl
 	if strings.TrimSpace(req.Profile) != "" {
 		profile = strings.TrimSpace(req.Profile)
 	}
+	// A flock recovered from a release that predates capability tokens has none;
+	// mint one so the joining member is not spawned without a credential.
+	cp.ensureFlockGuestTokenFor(f)
 	vmInfo, _, err := cp.spawnVMForFlock(flockID, agentID, profile, f.TenantID, f.EgressPolicy)
 	if err != nil {
 		f.RemoveAgent(agentID)
@@ -1074,6 +1095,8 @@ func (cp *ControlPlane) changeFlockAgentRole(w http.ResponseWriter, r *http.Requ
 	cp.destroyVM(oldVMID)
 	cp.watchdog.ForgetVM(oldVMID)
 
+	// See restartAgent: a pre-capability-token flock mints on its next member spawn.
+	cp.ensureFlockGuestTokenFor(f)
 	info, _, err := cp.spawnVMInternal(spawnVMOptions{
 		Profile:           newProfile,
 		ConfigPath:        configPath,
@@ -1084,9 +1107,10 @@ func (cp *ControlPlane) changeFlockAgentRole(w http.ResponseWriter, r *http.Requ
 		FlockID:           flockID,
 		AgentID:           agentID,
 		AgentToken:        oldToken,
-		ControlPlaneToken: cp.controlPlaneTokenForVM(),
-		// The daemon's OWN operator bearer -> this daemon may rotate it on SIGHUP.
-		ControlPlaneTokenManaged: true,
+		ControlPlaneToken: cp.flockGuestToken(flockID),
+		// A per-flock capability token, NOT the daemon's operator bearer -> this
+		// daemon must not rotate it on SIGHUP.
+		ControlPlaneTokenManaged: false,
 		VcpuCount:                agentProfile.VcpuCount,
 		MemSizeMib:               agentProfile.MemSizeMib,
 	})
@@ -1775,9 +1799,11 @@ func (cp *ControlPlane) spawnVMForFlock(flockID, agentID, profile, tenantID, egr
 		SystemPrompt:      cp.loadProfileSystemPrompt(agentProfile.ProfileDir),
 		FlockID:           flockID,
 		AgentID:           agentID,
-		ControlPlaneToken: cp.controlPlaneTokenForVM(),
-		// The daemon's OWN operator bearer -> this daemon may rotate it on SIGHUP.
-		ControlPlaneTokenManaged: true,
+		ControlPlaneToken: cp.flockGuestToken(flockID),
+		// A per-flock capability token, NOT the daemon's operator bearer -> this
+		// daemon must not rotate it on SIGHUP. Callers (createFlock, addFlockAgent)
+		// are responsible for having issued the flock's token first.
+		ControlPlaneTokenManaged: false,
 		VcpuCount:                vcpu,
 		MemSizeMib:               mem,
 	})

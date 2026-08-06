@@ -444,7 +444,7 @@ func (f *Flock) ToMetadata() FlockMetadata {
 	// Defensively copy the roster (as ToMetadata does for agents) so the caller
 	// can mutate the returned metadata without touching live flock state, and
 	// scrub each member's Addr: it is daemon-internal (see RosterMember) and must
-	// never reach a serialized surface such as the 0644 metadata.json (R2). A
+	// never reach a serialized surface such as metadata.json (R2). A
 	// recovered hub reloads with Addr="" and cannot resolve a 2nd-hop /call until
 	// the reconcile re-POST (UpdateHubRoster) refills Addr in memory — but that
 	// hop is already gated by CallToken, which is likewise absent until the same

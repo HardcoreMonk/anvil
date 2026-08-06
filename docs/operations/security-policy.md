@@ -57,6 +57,41 @@ daemon의 restore 응답, flock 응답, MCP output은 `agent_token`을 노출하
 운영자가 과거 로그나 오래된 test fixture를 공유해야 할 때는 legacy restore/flock
 body에 token이 남아 있지 않은지 확인한다.
 
+## 게스트 control-plane token 주입 (per-flock 능력 토큰)
+
+flock member VM 안의 agent는 host daemon으로 되돌아오는 호출(`gtwall`의
+`POST /flocks/{id}/post`, `gtcall`의 `POST /flocks/{id}/call`)을
+`/root/.ephemera-cp-token`에 주입된 bearer로 인증한다.
+
+이 자리에 주입되는 값은 **그 flock의 per-flock guest 능력 토큰**이다 — 운영자
+control-plane bearer가 아니다. 두 flock kind가 같은 모델을 쓴다: routed flock은
+adapter가 발급한 `relay_token`을, local flock은 daemon이 flock 생성 시 발급한
+능력 토큰을 받는다. `authMiddleware`는 요청 경로에서 flock id를 뽑아 **그
+flock의** 토큰과만 비교하므로, 이 토큰은 해당 flock의 wall
+sub-path(`post|wall|wall/history`)와 `call` 진입만 admit하고 다른 flock의 같은
+경로나 어떤 control-plane 경로(`/vms`, `/config/*`, `/tenants`, `/snapshots`)도
+열지 않는다. 결정 근거는
+[ADR-0003](../adr/0003-per-flock-guest-capability-tokens.md).
+
+운영상 알아야 할 것:
+
+- local flock의 능력 토큰은 flock 디렉토리 안 `guest-token` 파일에 **0600**으로
+  영속되고, daemon 시작 시 `metadata.json` 복구 직후 admission에 되꽂힌다.
+  `metadata.json`에는 어떤 토큰도 기록되지 않는다.
+- **폐기 수단은 flock 삭제 하나뿐이다.** 능력 토큰에는 만료가 없고 개별 회전
+  경로도 없다(routed flock의 `relay_token`과 동일 규율). flock을 지우면
+  admission과 토큰 파일이 함께 제거된다.
+- **SIGHUP 운영자 토큰 회전은 flock member의 능력 토큰을 건드리지 않는다.**
+  회전 fan-out은 daemon이 자기 운영자 bearer를 주입했던 VM만 대상으로 하며,
+  능력 토큰 도입 이전에 spawn된 VM만 거기 해당한다. 그런 구세대 VM은 계속
+  회전을 받고, 교체되면서 대상 집합이 비워진다.
+- 토큰 발급/영속에 실패하면 member는 **빈 토큰**으로 spawn된다(cp-token 파일이
+  아예 기록되지 않는다). 운영자 bearer로 폴백하지 않는다. 이 경우 해당 member의
+  `gtwall`/`gtcall`이 401을 받으므로 Error 로그를 확인하고
+  `POST /flocks/{id}/agents/{agent_id}/restart`로 재주입한다.
+- API auth가 비활성(`EPHEMERA_API_TOKENS` 미설정)이면 능력 토큰을 발급하지
+  않는다 — admission 자체가 무의미한 개발 모드이며, 이는 종전 동작과 같다.
+
 ## 로컬 secret
 
 `configs/goose-secrets.yaml`과 profile별 secrets 파일은 local secret이다. 예시는
