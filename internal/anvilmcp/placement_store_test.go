@@ -1,7 +1,9 @@
 package anvilmcp
 
 import (
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -957,5 +959,101 @@ func TestPlacementStoreCallTokenLifecycle(t *testing.T) {
 	}
 	if _, ok := store2.RoutedFlockCallToken("routed-1"); ok {
 		t.Fatal("call token survived removal")
+	}
+}
+
+// TestPlacementStoreSaveRaceLosesConcurrentRoutedFlockToken is a stress test
+// for M7: Save() is the ONLY persistence method that performs its disk
+// read-modify-write outside s.mu.Lock() (it RLocks only long enough to clone
+// s.state, then unlocks before reading-merging-writing the file). Every other
+// mutator that touches disk -- SaveRoutedFlockAndPlacements chief among them
+// -- holds s.mu.Lock() across its entire read-modify-write.
+//
+// That asymmetry is a logical (file-level) TOCTOU, not a memory race, so
+// `go test -race` cannot see it: a control-loop-style Save() can read the
+// on-disk image, then a concurrent SaveRoutedFlockAndPlacements can acquire
+// the store's lock, read-modify-write its own flock (with its relay token)
+// to disk, and then Save() -- still working off its earlier read -- writes
+// back over it, silently dropping the concurrently-persisted token.
+//
+// Reproducing this reliably needs sustained back-to-back contention rather
+// than a single fixed batch of paired goroutines: Save()'s vulnerable window
+// (between its own internal disk read and its disk write, both inside
+// savePlacementStoreStatePreserveFlockMetrics) is narrow, and a one-shot
+// "launch N pairs and wait" batch rarely lands a SaveRoutedFlockAndPlacements
+// write inside any single Save()'s window. Running both sides in tight loops
+// for a fixed wall-clock duration gives many independent attempts per
+// goroutine and reproduces the loss with very high probability (empirically,
+// tens of percent of writes lost per run before the fix).
+//
+// Before the M7 fix this fails with dropped tokens; after the fix Save()
+// takes s.mu.Lock() across its own disk RMW, which serializes it against
+// SaveRoutedFlockAndPlacements (also s.mu.Lock()-guarded end to end) and
+// closes the window entirely -- so the loop's outcome no longer depends on
+// timing at all.
+func TestPlacementStoreSaveRaceLosesConcurrentRoutedFlockToken(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "scheduler.json")
+	store := NewPlacementStore(path)
+	if err := store.SetHost(RuntimeHost{Name: "seed-host", Endpoint: "http://seed-host", Healthy: true, AvailableVMs: 1}); err != nil {
+		t.Fatalf("SetHost: %v", err)
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("seed Save: %v", err)
+	}
+
+	const writers = 12
+	const savers = 12
+	deadline := time.Now().Add(400 * time.Millisecond)
+
+	var mu sync.Mutex
+	written := make(map[string]string) // flockID -> relay token, recorded only after a successful SaveRoutedFlockAndPlacements
+
+	var wg sync.WaitGroup
+	wg.Add(writers + savers)
+	for w := 0; w < writers; w++ {
+		w := w
+		go func() {
+			defer wg.Done()
+			for i := 0; time.Now().Before(deadline); i++ {
+				flockID := fmt.Sprintf("routed-flock-race-w%d-%d", w, i)
+				token := fmt.Sprintf("relay-secret-w%d-%d", w, i)
+				rec := RoutedFlockRecord{
+					FlockID: flockID,
+					Mode:    RoutedFlockModeCrossHostMembersOnly,
+					Status:  RoutedFlockStatusReady,
+				}
+				rec.relayToken = token
+				if err := store.SaveRoutedFlockAndPlacements(rec, nil); err != nil {
+					t.Errorf("SaveRoutedFlockAndPlacements(%s): %v", flockID, err)
+					continue
+				}
+				mu.Lock()
+				written[flockID] = token
+				mu.Unlock()
+			}
+		}()
+	}
+	for s := 0; s < savers; s++ {
+		go func() {
+			defer wg.Done()
+			for time.Now().Before(deadline) {
+				_ = store.Save()
+			}
+		}()
+	}
+	wg.Wait()
+
+	reloaded := NewPlacementStore(path)
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	lost := 0
+	for flockID, want := range written {
+		if tok, ok := reloaded.RoutedFlockRelayToken(flockID); !ok || tok != want {
+			lost++
+		}
+	}
+	if lost > 0 {
+		t.Fatalf("%d/%d routed flock relay tokens lost to Save()'s unlocked disk RMW race", lost, len(written))
 	}
 }

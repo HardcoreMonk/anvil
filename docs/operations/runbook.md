@@ -820,7 +820,15 @@ adapter(`ANVIL_MCP_*`, `cmd/anvil-mcp`)와 별개 namespace다. 환경 변수 ca
 
 - `EPHEMERA_MCP_RATE` 기본 `0`=unlimited. 실운영에서는 per-(VM, server) tool-call 분당 예산을 명시적으로 건다(예: 신뢰 backend `60`, 외부/유료 backend `20~30`).
 - `EPHEMERA_MCP_BURST` unset이면 limiter가 rate로 기본값을 잡는다. 순간 스파이크를 흡수하려면 rate의 1~2배로 설정한다.
-- rate limit은 tool call뿐 아니라 resources/prompts에도 동일 policy·budget로 적용된다.
+- rate limit은 tool call뿐 아니라 resources/prompts, 그리고 카탈로그 조회
+  (`tools/list`·`resources/list`·`prompts/list`)에도 동일 policy·budget로
+  적용된다. **예산을 잡을 때 list를 빼먹지 않는다** — 세션이 초기화될 때마다
+  세 list가 각각 backend별로 1건씩 같은 (VM, server) 버킷을 소비하므로, 낮게
+  잡은 예산에서는 정상적인 카탈로그 재조회가 tool-call 몫을 잠식하거나, 반대로
+  list가 먼저 rate-limit되어 **그 backend가 카탈로그에서 조용히 빠진다**(요청
+  전체가 실패하지 않고 해당 backend leg만 skip되는 것이 의도된 동작이다 — 버킷이
+  마른 backend는 어차피 tool call도 거부되기 때문). 이 경우 `audit/mcp.jsonl`에
+  `kind=list`, `err=rate limited` 레코드가 남으므로 거기서 확인한다.
 
 ### credential(secrets.yaml) 운영 규율
 

@@ -291,7 +291,8 @@ func TestGateway_EndToEnd(t *testing.T) {
 	if !strings.Contains(string(call.Result), "called echo") {
 		t.Fatalf("unexpected call result: %s", call.Result)
 	}
-	if len(audited) != 1 || !audited[0].OK || audited[0].Server != "mock" || audited[0].Tool != "echo" {
+	calls := auditOfKind(audited, "tool")
+	if len(calls) != 1 || !calls[0].OK || calls[0].Server != "mock" || calls[0].Tool != "echo" {
 		t.Fatalf("audit record wrong: %+v", audited)
 	}
 	// Backend received the injected credential, not the VM.
@@ -462,7 +463,8 @@ func TestGateway_ResourcesAggregation(t *testing.T) {
 	if !strings.Contains(string(read.Result), "read file:///a.txt") {
 		t.Fatalf("unexpected read result: %s", read.Result)
 	}
-	if len(audited) != 1 || !audited[0].OK || audited[0].Kind != "resource" || audited[0].Tool != "file:///a.txt" {
+	reads := auditOfKind(audited, "resource")
+	if len(reads) != 1 || !reads[0].OK || reads[0].Tool != "file:///a.txt" {
 		t.Fatalf("resource audit record wrong: %+v", audited)
 	}
 
@@ -500,7 +502,8 @@ func TestGateway_PromptsAggregation(t *testing.T) {
 	if !strings.Contains(string(get.Result), "got greet") {
 		t.Fatalf("unexpected get result: %s", get.Result)
 	}
-	if len(audited) != 1 || !audited[0].OK || audited[0].Kind != "prompt" || audited[0].Tool != "greet" {
+	gets := auditOfKind(audited, "prompt")
+	if len(gets) != 1 || !gets[0].OK || gets[0].Tool != "greet" {
 		t.Fatalf("prompt audit record wrong: %+v", audited)
 	}
 }

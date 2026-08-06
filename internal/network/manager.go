@@ -3,6 +3,7 @@ package network
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"sort"
@@ -11,16 +12,17 @@ import (
 )
 
 type Manager struct {
-	mu         sync.Mutex
-	ipList     []string // sorted slice for deterministic allocation order
-	ipInUse    map[string]bool
-	gatewayIP  string
-	subnet     string
-	nextTapID  int
-	freeTapIDs []int // recycled tap IDs — prefer these over nextTapID
-	bridgeName string
-	runCommand func(name string, args ...string) error
-	antiSpoof  bool // pin each TAP to its assigned MAC/IP via ebtables
+	mu                    sync.Mutex
+	ipList                []string // sorted slice for deterministic allocation order
+	ipInUse               map[string]bool
+	gatewayIP             string
+	subnet                string
+	nextTapID             int
+	freeTapIDs            []int // recycled tap IDs — prefer these over nextTapID
+	bridgeName            string
+	runCommand            func(name string, args ...string) error
+	antiSpoof             bool // pin each TAP to its assigned MAC/IP via ebtables
+	conntrackFlushEnabled bool // conntrack binary found on PATH at startup (M15 teardown flush)
 }
 
 func NewManager(subnet string, gatewayIP string) *Manager {
@@ -66,7 +68,23 @@ func NewManager(subnet string, gatewayIP string) *Manager {
 		slog.Warn("per-TAP anti-spoof enabled", "chain", antiSpoofChain)
 	}
 
+	// M15: probe once at startup rather than on every VM teardown, so a host
+	// without conntrack logs a single warning instead of spamming one per
+	// Release() call.
+	m.conntrackFlushEnabled = conntrackAvailable()
+	if !m.conntrackFlushEnabled {
+		slog.Warn("conntrack not found on PATH; stale conntrack entries will not be flushed on VM teardown (best-effort hygiene skipped)")
+	}
+
 	return m
+}
+
+// conntrackAvailable reports whether the conntrack binary is on PATH. It is a
+// pure PATH probe (no command execution), called once by NewManager to decide
+// whether Release() attempts the M15 teardown flush.
+func conntrackAvailable() bool {
+	_, err := exec.LookPath("conntrack")
+	return err == nil
 }
 
 func (m *Manager) setupBridge() error {
@@ -321,6 +339,26 @@ func (m *Manager) Release(tapDevice string, guestIP string) error {
 		slog.Warn("delete tap device failed", "tap", tapDevice, "err", err)
 	}
 
+	// M15: flush this guest IP's conntrack entries before it re-enters the
+	// pool. Must run after the iptables/ebtables rules are gone (above) and
+	// the TAP is deregistered, but strictly before the IP is freed below —
+	// otherwise a racing Allocate() could hand the IP to a new VM while a
+	// stale entry still carries the egress SNI fastpath mark (0x534e49, see
+	// cmd/goose-daemon/sni_verdict.go). That mark lets the fastpath iptables
+	// rule ACCEPT a matching flow without a second SNI inspection; a stale
+	// entry surviving teardown could let a new tenant on the reused IP ride
+	// an old, unrelated approval.
+	//
+	// Confidence note (could not be verified without root in this audit): a
+	// fresh TCP SYN against an existing conntrack entry causes the kernel to
+	// tear down and recreate it, which drops the mark — so TCP is likely safe
+	// regardless. The realistic exposure is UDP/QUIC, where no handshake
+	// forces recreation and a stale entry can persist until timeout (also not
+	// independently verified here). Flushing before IP reuse is cheap
+	// hygiene either way, so it is done unconditionally rather than gated on
+	// a transport we can't confirm.
+	m.flushConntrack(guestIP)
+
 	// Return IP to the pool.
 	if _, exists := m.ipInUse[guestIP]; exists {
 		m.ipInUse[guestIP] = false
@@ -331,6 +369,32 @@ func (m *Manager) Release(tapDevice string, guestIP string) error {
 		m.freeTapIDs = append(m.freeTapIDs, tapID)
 	}
 	return nil
+}
+
+// flushConntrack best-effort deletes kernel conntrack entries sourced from
+// guestIP (M15). No-op when the conntrack binary was absent at startup
+// (conntrackFlushEnabled, warned once in NewManager) — hosts without the tool
+// simply skip this hygiene step rather than failing teardown. guestIP is
+// validated with net.ParseIP before it reaches exec.Command's argv (never a
+// shell) so a corrupted caller-supplied value cannot inject extra arguments.
+// Any failure (including the common case of "no matching entries") is
+// logged, never returned — this must never fail VM teardown.
+func (m *Manager) flushConntrack(guestIP string) {
+	if !m.conntrackFlushEnabled {
+		return
+	}
+	if net.ParseIP(guestIP) == nil {
+		slog.Warn("skipping conntrack flush: guest IP failed validation", "guest_ip", guestIP)
+		return
+	}
+	if err := m.command("conntrack", "-D", "-s", guestIP); err != nil {
+		// Some conntrack-tools builds exit nonzero when the filter matched no
+		// entries, which is the normal case for a VM that never opened a tracked
+		// flow. If this line turns out to fire on routine teardowns, downgrade it
+		// to Debug rather than leaving a security-adjacent warning that operators
+		// learn to ignore — it was not observable from the build environment.
+		slog.Warn("conntrack flush failed (best-effort, teardown continues)", "guest_ip", guestIP, "err", err)
+	}
 }
 
 func (m *Manager) createTapDevice(tapName string) error {

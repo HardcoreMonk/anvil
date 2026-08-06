@@ -751,7 +751,8 @@ func TestGateway_EndToEnd_StdioBackend(t *testing.T) {
 	if !strings.Contains(string(call.Result), "called echo") {
 		t.Fatalf("unexpected call result: %s", call.Result)
 	}
-	if len(audited) != 1 || !audited[0].OK || audited[0].Server != "helper" || audited[0].Tool != "echo" {
+	calls := auditOfKind(audited, "tool")
+	if len(calls) != 1 || !calls[0].OK || calls[0].Server != "helper" || calls[0].Tool != "echo" {
 		t.Fatalf("audit record wrong: %+v", audited)
 	}
 }

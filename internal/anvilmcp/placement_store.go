@@ -171,14 +171,28 @@ func (s *PlacementStore) Load() error {
 	return nil
 }
 
+// Save persists the current state. Like SaveRoutedFlockAndPlacements and the
+// other disk-touching mutators, it holds s.mu.Lock() across the entire
+// read-modify-write of the file: releasing the lock before the disk RMW (as
+// this used to do) lets a concurrent SaveRoutedFlockAndPlacements read-
+// modify-write its own flock in the gap, which Save then clobbers with a
+// write based on its earlier read. That is a TOCTOU on the file rather than a
+// memory race, so -race cannot catch it (see
+// TestPlacementStoreSaveRaceLosesConcurrentRoutedFlockToken).
+//
+// Scope: s.mu is process-local, so this serializes goroutines within one
+// PlacementStore and nothing more. Two processes sharing a state path -- the
+// scheduler's ANVIL_SCHEDULER_STATE and the adapter's ANVIL_MCP_SCHEDULER_STATE
+// can be pointed at the same file -- still interleave their reads and writes,
+// and the same token loss follows. There is no file lock anywhere in this
+// package; refreshPersistedMetricsLocked's own comment about clobbering "a
+// concurrent process's counters" describes the same unclosed gap from the
+// metrics side. Closing it needs flock(2) or an equivalent, which is a separate
+// change from this one.
 func (s *PlacementStore) Save() error {
-	if strings.TrimSpace(s.path) == "" {
-		return nil
-	}
-	s.mu.RLock()
-	state := clonePlacementStoreState(s.state)
-	s.mu.RUnlock()
-	return savePlacementStoreStatePreserveFlockMetrics(s.path, state)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.saveLockedPreserveFlockMetrics()
 }
 
 func readPlacementStoreState(path string) (PlacementStoreState, bool, error) {
