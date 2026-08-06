@@ -335,9 +335,10 @@ func loadFlockMeta() (flockID, agentID string) {
 
 // loadCPToken returns the bearer the in-VM /townwall/post forwarder uses
 // when calling back into the control plane. Prefers the host-injected file
-// (matches apiClients[0]); falls back to EPHEMERA_CONTROL_PLANE_TOKEN for
-// older golden images that predate v0.3.3. Returns "" when neither is set
-// (auth disabled mode).
+// (for a flock member, that flock's guest capability token); falls back to
+// EPHEMERA_CONTROL_PLANE_TOKEN for older golden images that predate v0.3.3.
+// Returns "" when neither is set (auth disabled mode). The guest never inspects
+// the value — it forwards whatever the file holds.
 func loadCPToken() string {
 	if b, err := os.ReadFile(cpTokenPath); err == nil {
 		return strings.TrimSpace(string(b))

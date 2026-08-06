@@ -1767,7 +1767,8 @@ func (cp *ControlPlane) registerRelayFlock(w http.ResponseWriter, r *http.Reques
 // system prompt injected at boot. The profile may differ from the agent's logical
 // role: createFlock passes the chosen profile, while add-agent passes the role
 // (preserving the legacy role==profile behavior). The control plane token is
-// auto-injected (apiClients[0]) so the in-VM /townwall/post forwarder
+// auto-injected — that flock's guest capability token (cp.flockGuestToken), not
+// the daemon's operator bearer — so the in-VM /townwall/post forwarder
 // authenticates against an auth-on control plane without manual setup.
 func (cp *ControlPlane) spawnVMForFlock(flockID, agentID, profile, tenantID, egressPolicy string) (*VMInfo, string, error) {
 	configPath, secretsPath, err := cp.profileConfigPaths(profile)

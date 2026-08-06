@@ -183,9 +183,13 @@ EPHEMERA_API_TOKENS_FILE
 `EPHEMERA_*`는 ephemera runtime의 canonical 설정이고 `ANVIL_*`는 anvil 운영자를
 위한 alias다. canonical 값이 있으면 alias 값보다 우선한다.
 
-reload 후 daemon은 새 `apiClients[0].Token`을 running VM의 vsock으로 fan-out해
-guest 내부 `/root/.ephemera-cp-token`을 갱신한다. 이 propagation은 best-effort이며
-v0.3.4+ guest agent가 있어야 성공한다. 실패한 VM은 log와
+reload 후 daemon은 첫 번째 **미만료** client token을 vsock으로 fan-out해 guest 내부
+`/root/.ephemera-cp-token`을 갱신한다. 대상은 daemon이 자기 운영자 bearer를 직접
+주입했던 VM(`runningVM.cpTokenManaged`)뿐이다. [ADR-0003](../adr/0003-per-flock-guest-capability-tokens.md)
+이후 이 flag를 세우는 spawn 경로가 없으므로 정상 상태의 대상 집합은 비어 있고
+(`ok=0 total=0`), flock member는 그 flock의 guest 능력 토큰을 갖기 때문에 운영자
+token 회전의 영향을 받지 않는다. 이 propagation은 best-effort이며 v0.3.4+ guest
+agent가 있어야 성공한다. 실패한 VM은 log와
 `ephemera_cp_token_propagated_total{outcome="fail"}`로 관측한다.
 
 ## Health, metrics, tenant, audit 로직

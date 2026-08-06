@@ -235,8 +235,10 @@ type VMPrepareOptions struct {
 
 	// ControlPlaneToken, when non-empty, is written to /root/.ephemera-cp-token
 	// (mode 0600) and used by the in-VM /townwall/post forwarder as the bearer
-	// when calling back into the control plane. Auto-derived from the host's
-	// apiClients[0] by the daemon; empty when control plane auth is disabled.
+	// when calling back into the control plane. For a flock member the daemon
+	// supplies that flock's per-flock guest capability token — NOT an API client
+	// token and not the daemon's operator bearer; empty when control plane auth
+	// is disabled, in which case no file is written at all.
 	ControlPlaneToken string
 
 	// MCPGatewayURL, when non-empty, is written to /root/.ephemera-mcp. The in-VM
