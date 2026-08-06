@@ -1143,3 +1143,73 @@ func TestEnsureFirecrackerKeepsUnstampedBinaryWhenUnreachable(t *testing.T) {
 		t.Fatalf("firecracker content = %q, want it left in place", got)
 	}
 }
+
+// realLayoutFirecrackerTarball reproduces the entry ORDER and MODES of a genuine
+// firecracker release tarball. Both matter and neither is captured by
+// fakeFirecrackerTarball: upstream ships the detached debug object
+// (firecracker-v<ver>-x86_64.debug, mode 0644) BEFORE the executable
+// (firecracker-v<ver>-x86_64, mode 0755), and both share the "firecracker-"
+// prefix. Verified against v1.16.1, where .debug is tar entry 7 and the binary
+// is entry 15.
+func realLayoutFirecrackerTarball(t *testing.T, binary string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	entries := []struct {
+		name    string
+		mode    int64
+		content string
+	}{
+		{"release-v9.9.9-x86_64/seccompiler-bin-v9.9.9-x86_64", 0755, "seccompiler"},
+		{"release-v9.9.9-x86_64/firecracker-v9.9.9-x86_64.debug", 0644, "DEBUG-OBJECT-NOT-EXECUTABLE"},
+		{"release-v9.9.9-x86_64/jailer-v9.9.9-x86_64.debug", 0644, "jailer-debug"},
+		{"release-v9.9.9-x86_64/firecracker-v9.9.9-x86_64", 0755, binary},
+		{"release-v9.9.9-x86_64/jailer-v9.9.9-x86_64", 0755, "jailer-not-this-one"},
+	}
+	for _, e := range entries {
+		if err := tw.WriteHeader(&tar.Header{
+			Name:     e.name,
+			Mode:     e.mode,
+			Size:     int64(len(e.content)),
+			Typeflag: tar.TypeReg,
+		}); err != nil {
+			t.Fatalf("tar header %s: %v", e.name, err)
+		}
+		if _, err := tw.Write([]byte(e.content)); err != nil {
+			t.Fatalf("tar write %s: %v", e.name, err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("tar close: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// The detached debug object is not an executable. Installing it as the hypervisor
+// makes every VM spawn die with a segfault, so extraction must select the real
+// binary even though the debug object shares its prefix and comes first in the tar.
+func TestExtractFirecrackerBinSkipsDebugObject(t *testing.T) {
+	dir := t.TempDir()
+	tgz := filepath.Join(dir, "fc.tgz")
+	writeFileOrFail(t, tgz, string(realLayoutFirecrackerTarball(t, "REAL-FIRECRACKER-BINARY")), 0644)
+
+	dest := filepath.Join(dir, "firecracker")
+	if err := extractFirecrackerBin(tgz, dest); err != nil {
+		t.Fatalf("extractFirecrackerBin: %v", err)
+	}
+
+	if got := readFileOrFail(t, dest); got != "REAL-FIRECRACKER-BINARY" {
+		t.Fatalf("installed the wrong tar entry as the hypervisor: got %q, want the executable", got)
+	}
+	fi, err := os.Stat(dest)
+	if err != nil {
+		t.Fatalf("stat %s: %v", dest, err)
+	}
+	if fi.Mode()&0o111 == 0 {
+		t.Fatalf("installed firecracker is not executable: mode %v", fi.Mode())
+	}
+}

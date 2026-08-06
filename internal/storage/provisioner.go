@@ -1146,9 +1146,25 @@ func extractFirecrackerBin(tgzPath, dest string) error {
 		if err != nil {
 			return fmt.Errorf("failed to read tar entry: %w", err)
 		}
-		// Match "firecracker-*" but not "jailer-*"
+		// Match "firecracker-*" but not "jailer-*".
+		//
+		// Two further exclusions are load-bearing, because upstream ships a
+		// DETACHED DEBUG OBJECT that also starts with "firecracker-":
+		// firecracker-v<ver>-x86_64.debug. In v1.16.1 it is tar entry 7 while the
+		// executable is entry 15, so a first-match loop installs the debug object
+		// as the hypervisor. It is not executable, so every VM spawn then dies
+		// with "Firecracker did not create API socket ...: signal: segmentation
+		// fault". The archive is intact and its digest matches the pin, which is
+		// what makes the failure so confusing.
+		//
+		// Both tests below are kept rather than one: the suffix check states the
+		// intent, and the mode check is the property that actually matters and
+		// holds even if upstream renames the debug artifact.
 		base := filepath.Base(hdr.Name)
 		if hdr.Typeflag != tar.TypeReg || !strings.HasPrefix(base, "firecracker-") {
+			continue
+		}
+		if strings.HasSuffix(base, ".debug") || hdr.FileInfo().Mode()&0o111 == 0 {
 			continue
 		}
 		// Stage beside dest and rename into place. Truncating dest directly would

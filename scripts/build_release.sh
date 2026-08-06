@@ -89,7 +89,14 @@ fctgz="$STAGEROOT/firecracker.tgz"
 curl -fL -o "$fctgz" "$FURL"
 echo "$FSHA  $fctgz" | sha256sum -c - >/dev/null || die "firecracker SHA256 mismatch"
 fcx="$STAGEROOT/fc"; mkdir -p "$fcx"; tar -xzf "$fctgz" -C "$fcx"
-fcbin=$(find "$fcx" -type f -name 'firecracker-*' ! -name 'jailer*' | head -1)
+# Exclude the detached debug object and require the executable bit. Upstream ships
+# firecracker-v<ver>-x86_64.debug (mode 0644) alongside the real binary and both
+# match 'firecracker-*', so `head -1` picks whichever the filesystem hands back
+# first. It happens to return the executable today, which is exactly why this is
+# worth pinning down rather than leaving to directory order: installing the debug
+# object as the hypervisor makes every VM spawn die with a segfault, and the
+# archive digest still matches the pin, so nothing upstream of here looks wrong.
+fcbin=$(find "$fcx" -type f -name 'firecracker-*' ! -name 'jailer*' ! -name '*.debug' -perm -u+x | head -1)
 [ -n "$fcbin" ] || die "firecracker binary not found in release tarball"
 cp "$fcbin" "$STAGE/artifacts/firecracker"
 chmod 755 "$STAGE/artifacts/firecracker"
