@@ -153,6 +153,25 @@ func NewPlacementStore(path string) *PlacementStore {
 	}
 }
 
+// ResolvedPath returns the absolute path this store reads from and writes to,
+// so two processes' logs can be compared to catch an accidental shared-file
+// deployment (see Save's doc comment for the contract this exists to make
+// diagnosable). Returns "" when the store has no path configured (in-memory
+// only), so callers can distinguish "no file" from "resolution failed". If
+// filepath.Abs errors, the raw path is returned rather than "" -- a
+// diagnostic must never claim in-memory when a path was actually configured.
+func (s *PlacementStore) ResolvedPath() string {
+	path := strings.TrimSpace(s.path)
+	if path == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return path
+	}
+	return abs
+}
+
 func (s *PlacementStore) Load() error {
 	if strings.TrimSpace(s.path) == "" {
 		return nil
@@ -181,14 +200,18 @@ func (s *PlacementStore) Load() error {
 // TestPlacementStoreSaveRaceLosesConcurrentRoutedFlockToken).
 //
 // Scope: s.mu is process-local, so this serializes goroutines within one
-// PlacementStore and nothing more. Two processes sharing a state path -- the
-// scheduler's ANVIL_SCHEDULER_STATE and the adapter's ANVIL_MCP_SCHEDULER_STATE
-// can be pointed at the same file -- still interleave their reads and writes,
-// and the same token loss follows. There is no file lock anywhere in this
-// package; refreshPersistedMetricsLocked's own comment about clobbering "a
-// concurrent process's counters" describes the same unclosed gap from the
-// metrics side. Closing it needs flock(2) or an equivalent, which is a separate
-// change from this one.
+// PlacementStore and nothing more. There is no file lock anywhere in this
+// package, so this TOCTOU gap is NOT closed across processes. The deployment
+// contract is therefore that the scheduler's ANVIL_SCHEDULER_STATE and the
+// adapter's scheduler_state_path/ANVIL_MCP_SCHEDULER_STATE must always name
+// distinct files -- the two binaries do not coordinate writes to a shared
+// path, and pointing them at the same file reintroduces the same token loss
+// (and, from the metrics side, the gap refreshPersistedMetricsLocked's own
+// comment narrows but does not close). Both binaries log PlacementStore.
+// ResolvedPath() at startup precisely so an operator can compare two logs and
+// catch an accidental collision. flock(2) or an equivalent only becomes
+// necessary if sharing a single file across processes is ever deliberately
+// supported -- it is not today, and this comment is not a TODO for it.
 func (s *PlacementStore) Save() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -360,9 +383,14 @@ func (s *PlacementStore) saveLockedRaw() error {
 
 // refreshPersistedMetricsLocked reloads BOTH persisted metric families
 // (flock-placement and snapshot-replication) from disk into s.state before a
-// Record* method's saveLockedRaw, which writes both families from memory. Without
-// this, recording one family would clobber a concurrent process's counters of the
-// other. Caller must hold s.mu.
+// Record* method's saveLockedRaw, which writes both families from memory.
+// Without this, recording one family would overwrite whatever value the
+// OTHER family holds on disk with this store's own (possibly stale)
+// in-memory copy of it, since saveLockedRaw writes both families from
+// s.state regardless of which one the caller actually changed. See Save's
+// doc comment for why on-disk state can drift from this store's memory in
+// the first place; this reload only narrows that window immediately before
+// a write, it does not close it. Caller must hold s.mu.
 func (s *PlacementStore) refreshPersistedMetricsLocked() error {
 	if strings.TrimSpace(s.path) == "" {
 		return nil

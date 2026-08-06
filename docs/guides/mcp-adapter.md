@@ -180,6 +180,15 @@ MCP router 관련 설정:
 | `cross_host_flock_create_mode` / `ANVIL_MCP_CROSS_HOST_FLOCK_CREATE=members_only` | members-only routed flock create opt-in. persistent `scheduler_state_path`가 필요하며 기본 `anvil_spawn_flock`을 대체하지 않는다 |
 | `reconcile_interval` / `ANVIL_MCP_RECONCILE_INTERVAL` | `members_only` 모드에서 `ReconcilePlacements`를 재실행하는 주기(`time.ParseDuration` 형식, 기본 `60s`, `0`=off). daemon 재시작 후 hub/relay wall 등록과 relay-token admission을 자동 복구한다 |
 
+`scheduler_state_path`/`ANVIL_MCP_SCHEDULER_STATE`(adapter)와
+`ANVIL_SCHEDULER_STATE`(scheduler, 아래 참고)는 **같은 파일을 가리키면 안 된다**.
+두 process는 별도 binary이고 서로의 파일 write를 조율하지 않으므로, 같은 파일을
+공유하면 동시 write가 상대의 갱신을 덮어써 유실될 수 있다. 이 유실을 막는
+file lock은 이 package에 없다 — 의도적으로 추가하지 않은 설계 결정이며, 두
+경로를 분리하는 것이 계약이다. 두 binary 모두 시작 시 자신이 실제로 읽고 쓸
+resolved absolute path를 log로 남기므로, 두 log를 나란히 비교해 우발적인 경로
+충돌을 확인할 수 있다.
+
 예시:
 
 ```bash

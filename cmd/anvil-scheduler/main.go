@@ -127,6 +127,11 @@ func main() {
 		log.Fatalf("load scheduler config: %v", err)
 	}
 	placements := anvilmcp.NewPlacementStore(cfg.PlacementPath)
+	if resolved := placements.ResolvedPath(); resolved == "" {
+		log.Printf("anvil-scheduler: placement store is in-memory (no path configured)")
+	} else {
+		log.Printf("anvil-scheduler: placement store path = %s", resolved)
+	}
 	if err := placements.Load(); err != nil {
 		log.Fatalf("load scheduler placement store: %v", err)
 	}

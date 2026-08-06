@@ -205,6 +205,11 @@ func newMCPDaemon(cfg anvilmcp.Config, httpClient *http.Client) (anvilmcp.Daemon
 	}
 
 	store := anvilmcp.NewPlacementStore(cfg.SchedulerStatePath)
+	if resolved := store.ResolvedPath(); resolved == "" {
+		log.Printf("anvil-mcp: scheduler placement store is in-memory (no path configured)")
+	} else {
+		log.Printf("anvil-mcp: scheduler placement store path = %s", resolved)
+	}
 	if err := store.Load(); err != nil {
 		return nil, nil, err
 	}
