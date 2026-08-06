@@ -855,8 +855,10 @@ func (cp *ControlPlane) controlPlaneTokenForVM() string {
 
 // ReloadClients re-reads API tokens from the environment (or EPHEMERA_API_TOKENS_FILE)
 // and hot-swaps the client list. Called on SIGHUP. Also propagates the first
-// non-expired client's token to every running flock VM via vsock so the in-VM
-// /townwall/post forwarder keeps authenticating after rotation.
+// non-expired client's token via vsock to the running VMs this daemon injected
+// that same operator bearer into, so their in-VM /townwall/post forwarder keeps
+// authenticating after rotation. That set excludes flock members, which hold a
+// per-flock capability token instead — see propagateCPTokenToVMs for the rule.
 func (cp *ControlPlane) ReloadClients() {
 	newClients := loadAPIClients()
 	cp.clientsMu.Lock()

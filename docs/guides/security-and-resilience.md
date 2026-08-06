@@ -146,11 +146,15 @@ printf 'ops:%s\nci:%s:2026-06-01T00:00:00Z\n' "$OPS_TOKEN" "$CI_TOKEN" > /etc/ep
 - Tokens may themselves contain `:`; the expiry is recognized only when the
   trailing colon-separated field parses as a timestamp, so an existing
   colon-bearing token keeps working.
-- **Primary (CP) token selection:** the token injected into flock VMs is the
+- **Primary (CP) token selection:** the token the SIGHUP fan-out propagates is the
   **first non-expired** client (not blindly the first), so letting a primary
-  token expire does not break in-VM `/townwall/post`. If every token has expired,
-  an empty token is propagated (the forwarder then calls unauthenticated) and a
-  warning is logged. Keep at least one never-expiring client for VM callbacks.
+  token expire does not break the in-VM `/townwall/post` of a VM that holds that
+  bearer. If every token has expired, an empty token is propagated (the forwarder
+  then calls unauthenticated) and a warning is logged. Since
+  [ADR-0003](../adr/0003-per-flock-guest-capability-tokens.md) a flock member is
+  injected its **flock's guest capability token**, not a client token, so client
+  expiry does not reach it — this rule now applies only to VMs spawned before
+  ADR-0003. See [Auto-injected control-plane token](#auto-injected-control-plane-token-v033-narrowed-by-adr-0003).
 
 ### Access audit log (v0.4.1)
 

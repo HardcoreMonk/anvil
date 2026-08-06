@@ -149,7 +149,7 @@ Guest disk 상태:
 | `/root/.config/goose/config.yaml` | 주입된 Goose config |
 | `/root/.config/goose/secrets.yaml` | 주입된 Goose secrets |
 | `/root/.ephemera-agent-token` | VM별 guest agent Bearer token, mode `0600` |
-| `/root/.ephemera-cp-token` | in-VM Town Wall forwarder가 control plane으로 callback할 때 쓰는 control-plane token. v0.3.4+에서 SIGHUP fan-out으로 갱신 |
+| `/root/.ephemera-cp-token` | in-VM Town Wall forwarder가 control plane으로 callback할 때 쓰는 bearer. flock member는 그 flock의 **guest 능력 토큰**을 받는다([ADR-0003](../adr/0003-per-flock-guest-capability-tokens.md)) — 운영자 bearer가 아니며 SIGHUP fan-out 대상도 아니다. v0.3.4 SIGHUP fan-out은 daemon이 자기 운영자 bearer를 주입했던 VM(= ADR-0003 이전 spawn)만 갱신한다 |
 | `/root/.ephemera-flock` | flock member VM의 flock ID, agent ID, role, Town Wall endpoint context |
 | `/root/.goose-system-prompt` | role profile의 system prompt |
 | `/usr/local/bin/goose-agent` | guest task server |

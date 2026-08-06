@@ -1541,7 +1541,8 @@ ok "Daemon stopped"
 # ── 58b. Auth-on daemon: in-VM CP token auto-injected (v0.3.3) ───
 # Phase 3. With EPHEMERA_API_TOKENS set, the in-VM /townwall/post
 # forwarder must authenticate to the control plane using a token
-# auto-injected by the host at /root/.ephemera-cp-token (= apiClients[0]).
+# auto-injected by the host at /root/.ephemera-cp-token — since ADR-0003
+# that is the flock's own guest capability token, not an API client token.
 # A 200 here proves the injection chain works end-to-end; a 401 would
 # mean the in-VM forwarder hit the CP without (or with the wrong) token.
 step "58b. Auth-on daemon spawned for v0.3.3 CP-token scenarios"
