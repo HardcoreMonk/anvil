@@ -2100,7 +2100,7 @@ func (e *commandEgressEnforcer) Cleanup(vmID string) error {
 		return nil
 	}
 	// Deregister first (before attempting kernel-rule teardown below) so a
-	// torn-down VM's guest IP falls back to decide()'s fail-closed
+	// torn-down VM's guest IP falls back to the classifiers' fail-closed
 	// unregistered_source verdict immediately, even if the iptables cleanup
 	// commands below partially fail.
 	if e.sniLoop != nil {

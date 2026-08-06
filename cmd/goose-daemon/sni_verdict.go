@@ -184,10 +184,11 @@ func (l *sniVerdictLoop) Ready() bool {
 //
 // It exists because the hook's verdict logic previously lived only inside the
 // nfqueue closure, which no unit test can reach (Start needs root + netfilter).
-// The only testable classifier was decide() below, which has NO production
-// caller and implements a DIFFERENT incomplete-segment policy — so the tests
-// pinned a fail-closed rule the data path never had, and the multi-record
-// fail-open (H3) sat untested underneath.
+// The only testable classifier was a single-packet decide() helper with no
+// production caller, which implemented a DIFFERENT incomplete-segment policy —
+// so the tests pinned a fail-closed rule the data path never had, and the
+// multi-record fail-open (H3) sat untested underneath. That helper is gone; its
+// assertions were migrated onto this function.
 //
 // Fail-closed contract (byte-for-byte the branch it replaced):
 //   - unregistered srcIP -> sniDrop (unregistered_source). The hook re-checks
@@ -243,48 +244,7 @@ func (l *sniVerdictLoop) decideTCP(srcIP string, sport uint16, payload []byte) s
 	}
 }
 
-// decide is the pure routing core (unit-tested without root). payload is the TCP
-// application payload of one queued packet; srcIP is the packet source address.
-//
-// NOTE: decide is NOT the production TCP path — decideTCP is. decide classifies a
-// single packet with no reassembler, so it cannot express "need more bytes" and
-// fails closed on ErrIncomplete instead (see the deviation note below). Do not
-// read its coverage as coverage of the data path.
-//
-// Fail-closed contract:
-//   - unregistered srcIP        -> sniDrop  (reason unregistered_source)
-//   - empty payload (handshake) -> sniPassthrough (ACCEPT, no mark; next segment re-queues)
-//   - any parse error           -> sniDrop  (reason egress_sni_unparsed)
-//   - SNI in matcher            -> sniAcceptMark (reason egress_sni_allowed)
-//   - SNI not in matcher        -> sniDrop  (reason egress_sni_denied, SNI recorded)
-//
-// NOTE (deviation from brief Step 3 case (c)): the brief's pseudocode mapped
-// sni.ErrIncomplete to sniPassthrough. We instead fail closed on *every* parse
-// error including ErrIncomplete, because (1) the verbatim malformed test vector
-// {0x16,0x03,0x01,0xff,0xff,0x01} declares a 64 KiB record in a 6-byte buffer and
-// so classifies as ErrIncomplete, yet must DROP; and (2) forwarding an
-// unverifiable single packet is strictly less safe than dropping it. Legitimate
-// multi-segment ClientHellos are reassembled by decideTCP (which owns the "need
-// more bytes" signal via sni.Reassembler) before any decision is taken, so decide
-// never has to say "retry" — the loop, not the classifier, re-queues partials.
-func (l *sniVerdictLoop) decide(srcIP string, payload []byte) sniDecision {
-	entry, ok := l.resolveEntry(srcIP)
-	if !ok {
-		return sniDecision{Action: sniDrop, Reason: "unregistered_source"}
-	}
-	if len(payload) == 0 {
-		return sniDecision{Action: sniPassthrough} // handshake packet, let it through unmarked
-	}
-	name, ech, err := sni.ParseClientHelloSNI(payload)
-	if err != nil {
-		return sniDecision{Action: sniDrop, Reason: "egress_sni_unparsed"} // fail-closed
-	}
-	d := l.classifyParsedSNI(entry, name)
-	d.ECHObserved = ech
-	return d
-}
-
-// decideQUIC is decide's QUIC/UDP:443 counterpart (also unit-tested without
+// decideQUIC is decideTCP's QUIC/UDP:443 counterpart (also unit-tested without
 // root). payload is one UDP datagram believed to carry a QUIC Initial packet;
 // srcIP/sport identify the flow, keying the per-flow *quic.InitialReassembler
 // this function drives via reassemblerForQUIC (Task 6c).
@@ -355,8 +315,8 @@ func (l *sniVerdictLoop) decideQUIC(srcIP string, sport uint16, payload []byte) 
 	}
 }
 
-// resolveEntry does the locked registry lookup that both decide (single-packet
-// core) and the Start hook's pre-classify stage share, so the RLock/RUnlock dance
+// resolveEntry does the locked registry lookup that both decideTCP/decideQUIC
+// and the Start hook's pre-classify stage share, so the RLock/RUnlock dance
 // and the unregistered-source fail-closed contract live in exactly one place. It
 // only reads the registry; callers own the drop/passthrough/parse routing that
 // follows, which differs between the pure core (returns a decision) and the hook
@@ -369,8 +329,8 @@ func (l *sniVerdictLoop) resolveEntry(srcIP string) (sniRegistryEntry, bool) {
 }
 
 // classifyParsedSNI applies the allow-list policy to an already-parsed SNI for a
-// registered source. Shared by decide (single-packet fast path) and Start's
-// multi-segment reassembly path so the accept/deny rule lives in exactly one place.
+// registered source. Shared by the TCP and QUIC classifiers so the accept/deny
+// rule lives in exactly one place.
 func (l *sniVerdictLoop) classifyParsedSNI(entry sniRegistryEntry, name string) sniDecision {
 	if entry.Matcher.Match(name) {
 		return sniDecision{Action: sniAcceptMark, SNI: name, Reason: "egress_sni_allowed"}
@@ -546,7 +506,7 @@ func parseIPv4UDP(pkt []byte) (ipv4UDP, error) {
 //
 // This whole path (netlink bind, verdict I/O, connmark, RST) needs root +
 // netfilter and is verified by the Task 7 KVM e2e; the unit tests cover only
-// decide()/the registry/fail-closed routing.
+// decideTCP/decideQUIC, the registry and the fail-closed routing.
 func (l *sniVerdictLoop) Start(ctx context.Context) error {
 	cfg := &nfqueue.Config{
 		NfQueue:      uint16(l.queueNum),
