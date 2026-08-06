@@ -94,6 +94,21 @@ fcbin=$(find "$fcx" -type f -name 'firecracker-*' ! -name 'jailer*' | head -1)
 cp "$fcbin" "$STAGE/artifacts/firecracker"
 chmod 755 "$STAGE/artifacts/firecracker"
 
+# Provenance stamp for the extracted binary: "<tarball-sha256> <binary-sha256>".
+# The daemon cannot compare the installed binary against the pin directly — the
+# pin is the digest of the .tgz, not of what comes out of it — so this sidecar is
+# what makes the check possible (storage.firecrackerPinStatus).
+#
+# Shipping it is not an optimisation. install.sh copies artifacts/ over an
+# existing install without deleting anything, so a host that booted once under
+# an older pin keeps that stamp. Without a stamp in the tarball there is nothing
+# to overwrite it with, and the next boot reads a pin the stamp disagrees with,
+# calls it a mismatch and refuses to start — with the correct binary already on
+# disk. Carrying the stamp alongside the binary keeps the pair self-consistent
+# through an upgrade, the way the kernel's pin already is.
+printf '%s  %s\n' "$FSHA" "$(sha256sum "$STAGE/artifacts/firecracker" | cut -d' ' -f1)" \
+	> "$STAGE/artifacts/firecracker.pin-state"
+
 # -------------------------------------------- scripts, configs, installer ----
 say "Staging scripts, config templates, and installer"
 cp scripts/build_image.sh scripts/gtwall scripts/gtcall "$STAGE/scripts/"

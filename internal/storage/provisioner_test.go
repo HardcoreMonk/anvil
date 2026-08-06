@@ -1,6 +1,9 @@
 package storage
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"fmt"
 	"net/http"
@@ -9,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -847,5 +851,295 @@ func TestGoldenAgentMarkerSkipDecision(t *testing.T) {
 	}
 	if goldenAgentMarkerCurrent(golden, hash) {
 		t.Fatal("expected not-current after the golden image was rebuilt (size/mtime changed)")
+	}
+}
+
+// --- pinned-artifact verification (EnsureKernel / EnsureFirecracker) --------
+//
+// These tests never touch the real network: every download endpoint is an
+// httptest loopback server, and the "download unavailable" cases point at a
+// server that has already been closed (connection refused on 127.0.0.1).
+
+// countingServer serves body and records how many requests it received, so a
+// test can assert that the fast path did *not* hit the network.
+func countingServer(body []byte) (*httptest.Server, *atomic.Int64) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write(body)
+	}))
+	return srv, &hits
+}
+
+// unreachableURL returns a loopback URL that is guaranteed to refuse connections.
+func unreachableURL() string {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	url := srv.URL
+	srv.Close()
+	return url
+}
+
+// fakeFirecrackerTarball builds a .tgz with the same layout as a real firecracker
+// release: release-v<ver>-x86_64/firecracker-v<ver>-x86_64 (plus a jailer sibling
+// that extractFirecrackerBin must ignore).
+func fakeFirecrackerTarball(t *testing.T, binary string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	entries := []struct{ name, content string }{
+		{"release-v9.9.9-x86_64/jailer-v9.9.9-x86_64", "jailer-not-this-one"},
+		{"release-v9.9.9-x86_64/firecracker-v9.9.9-x86_64", binary},
+	}
+	for _, e := range entries {
+		if err := tw.WriteHeader(&tar.Header{
+			Name:     e.name,
+			Mode:     0755,
+			Size:     int64(len(e.content)),
+			Typeflag: tar.TypeReg,
+		}); err != nil {
+			t.Fatalf("tar header %s: %v", e.name, err)
+		}
+		if _, err := tw.Write([]byte(e.content)); err != nil {
+			t.Fatalf("tar write %s: %v", e.name, err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("tar close: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func hexSHA256(b []byte) string { return fmt.Sprintf("%x", sha256.Sum256(b)) }
+
+func writeFileOrFail(t *testing.T, path, content string, mode os.FileMode) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), mode); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func readFileOrFail(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(b)
+}
+
+// A kernel already on disk whose digest differs from the pin must not be trusted:
+// the pin is authoritative, so the artifact is re-fetched and replaced.
+func TestEnsureKernelReplacesExistingFileOnPinMismatch(t *testing.T) {
+	want := []byte("pinned kernel v2")
+	srv, hits := countingServer(want)
+	defer srv.Close()
+
+	kernelPath := filepath.Join(t.TempDir(), "vmlinux.bin")
+	writeFileOrFail(t, kernelPath, "stale kernel v1", 0644)
+
+	if err := EnsureKernel(kernelPath, srv.URL, hexSHA256(want)); err != nil {
+		t.Fatalf("EnsureKernel: %v", err)
+	}
+	if got := readFileOrFail(t, kernelPath); got != string(want) {
+		t.Fatalf("kernel content = %q, want %q", got, want)
+	}
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("download requests = %d, want 1", n)
+	}
+}
+
+// If the on-disk kernel is known-bad and cannot be re-fetched, startup must fail
+// closed with a diagnostic naming both the mismatch and the download failure.
+func TestEnsureKernelFailsClosedWhenMismatchedAndUnreachable(t *testing.T) {
+	kernelPath := filepath.Join(t.TempDir(), "vmlinux.bin")
+	writeFileOrFail(t, kernelPath, "stale kernel v1", 0644)
+
+	err := EnsureKernel(kernelPath, unreachableURL(), strings.Repeat("a", 64))
+	if err == nil {
+		t.Fatal("EnsureKernel returned nil for a mismatched on-disk kernel that could not be re-downloaded")
+	}
+	if !strings.Contains(err.Error(), "kernel SHA256 mismatch") {
+		t.Fatalf("EnsureKernel error = %q, want it to name the SHA256 mismatch", err)
+	}
+}
+
+// Regression: the normal path (kernel present and matching the pin) must stay
+// offline and must not rewrite the file.
+func TestEnsureKernelAcceptsMatchingFileWithoutDownload(t *testing.T) {
+	want := []byte("pinned kernel v2")
+	srv, hits := countingServer([]byte("should never be served"))
+	defer srv.Close()
+
+	kernelPath := filepath.Join(t.TempDir(), "vmlinux.bin")
+	writeFileOrFail(t, kernelPath, string(want), 0644)
+
+	if err := EnsureKernel(kernelPath, srv.URL, hexSHA256(want)); err != nil {
+		t.Fatalf("EnsureKernel: %v", err)
+	}
+	if got := readFileOrFail(t, kernelPath); got != string(want) {
+		t.Fatalf("kernel content = %q, want it untouched", got)
+	}
+	if n := hits.Load(); n != 0 {
+		t.Fatalf("download requests = %d, want 0 (matching kernel must not hit the network)", n)
+	}
+}
+
+// Baseline: a missing firecracker binary is still downloaded, verified and
+// extracted — and now also stamped with its provenance.
+func TestEnsureFirecrackerDownloadsWhenMissing(t *testing.T) {
+	tgz := fakeFirecrackerTarball(t, "firecracker-binary-v9.9.9")
+	srv, hits := countingServer(tgz)
+	defer srv.Close()
+
+	destPath := filepath.Join(t.TempDir(), "firecracker")
+	if err := EnsureFirecracker(destPath, srv.URL, hexSHA256(tgz)); err != nil {
+		t.Fatalf("EnsureFirecracker: %v", err)
+	}
+	if got := readFileOrFail(t, destPath); got != "firecracker-binary-v9.9.9" {
+		t.Fatalf("firecracker content = %q", got)
+	}
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("download requests = %d, want 1", n)
+	}
+	stamp := readFileOrFail(t, destPath+firecrackerStampSuffix)
+	if !strings.Contains(stamp, hexSHA256(tgz)) {
+		t.Fatalf("stamp = %q, want it to record the pinned tarball digest %s", stamp, hexSHA256(tgz))
+	}
+	if !strings.Contains(stamp, hexSHA256([]byte("firecracker-binary-v9.9.9"))) {
+		t.Fatalf("stamp = %q, want it to record the installed binary digest", stamp)
+	}
+}
+
+// Regression: a firecracker binary whose stamp proves it came from the pinned
+// tarball is accepted without any network I/O.
+func TestEnsureFirecrackerAcceptsStampedBinaryWithoutDownload(t *testing.T) {
+	tgz := fakeFirecrackerTarball(t, "firecracker-binary-v9.9.9")
+	srv, hits := countingServer(tgz)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	destPath := filepath.Join(dir, "firecracker")
+	binary := "firecracker-binary-v9.9.9"
+	writeFileOrFail(t, destPath, binary, 0755)
+	writeFileOrFail(t, destPath+firecrackerStampSuffix, hexSHA256(tgz)+" "+hexSHA256([]byte(binary))+"\n", 0644)
+
+	if err := EnsureFirecracker(destPath, srv.URL, hexSHA256(tgz)); err != nil {
+		t.Fatalf("EnsureFirecracker: %v", err)
+	}
+	if n := hits.Load(); n != 0 {
+		t.Fatalf("download requests = %d, want 0 (verified firecracker must not hit the network)", n)
+	}
+	if got := readFileOrFail(t, destPath); got != binary {
+		t.Fatalf("firecracker content = %q, want it untouched", got)
+	}
+}
+
+// The version-drift case from the audit: the host was provisioned from an older
+// pinned release and the pin has since been bumped. The stamp records the old
+// tarball digest, so the drift is detected and corrected.
+func TestEnsureFirecrackerReprovisionsOnPinDrift(t *testing.T) {
+	oldBinary := "firecracker-binary-v1.15.1"
+	newTgz := fakeFirecrackerTarball(t, "firecracker-binary-v1.16.1")
+	srv, hits := countingServer(newTgz)
+	defer srv.Close()
+
+	destPath := filepath.Join(t.TempDir(), "firecracker")
+	writeFileOrFail(t, destPath, oldBinary, 0755)
+	writeFileOrFail(t, destPath+firecrackerStampSuffix, strings.Repeat("b", 64)+" "+hexSHA256([]byte(oldBinary))+"\n", 0644)
+
+	if err := EnsureFirecracker(destPath, srv.URL, hexSHA256(newTgz)); err != nil {
+		t.Fatalf("EnsureFirecracker: %v", err)
+	}
+	if got := readFileOrFail(t, destPath); got != "firecracker-binary-v1.16.1" {
+		t.Fatalf("firecracker content = %q, want the pinned build", got)
+	}
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("download requests = %d, want 1", n)
+	}
+	stamp := readFileOrFail(t, destPath+firecrackerStampSuffix)
+	if !strings.Contains(stamp, hexSHA256(newTgz)) {
+		t.Fatalf("stamp = %q, want it refreshed to the new pin", stamp)
+	}
+}
+
+// Tamper detection: the stamp names the right pin, but the bytes on disk no
+// longer hash to what was installed.
+func TestEnsureFirecrackerReprovisionsOnTamperedBinary(t *testing.T) {
+	tgz := fakeFirecrackerTarball(t, "firecracker-binary-v9.9.9")
+	srv, hits := countingServer(tgz)
+	defer srv.Close()
+
+	destPath := filepath.Join(t.TempDir(), "firecracker")
+	writeFileOrFail(t, destPath, "tampered-firecracker", 0755)
+	writeFileOrFail(t, destPath+firecrackerStampSuffix,
+		hexSHA256(tgz)+" "+hexSHA256([]byte("firecracker-binary-v9.9.9"))+"\n", 0644)
+
+	if err := EnsureFirecracker(destPath, srv.URL, hexSHA256(tgz)); err != nil {
+		t.Fatalf("EnsureFirecracker: %v", err)
+	}
+	if got := readFileOrFail(t, destPath); got != "firecracker-binary-v9.9.9" {
+		t.Fatalf("firecracker content = %q, want the tampered binary replaced", got)
+	}
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("download requests = %d, want 1", n)
+	}
+}
+
+// A known-bad firecracker that cannot be re-fetched fails closed.
+func TestEnsureFirecrackerFailsClosedOnPinDriftWhenUnreachable(t *testing.T) {
+	destPath := filepath.Join(t.TempDir(), "firecracker")
+	writeFileOrFail(t, destPath, "firecracker-binary-v1.15.1", 0755)
+	writeFileOrFail(t, destPath+firecrackerStampSuffix,
+		strings.Repeat("b", 64)+" "+hexSHA256([]byte("firecracker-binary-v1.15.1"))+"\n", 0644)
+
+	err := EnsureFirecracker(destPath, unreachableURL(), strings.Repeat("c", 64))
+	if err == nil {
+		t.Fatal("EnsureFirecracker returned nil for a known-stale binary that could not be re-provisioned")
+	}
+	if !strings.Contains(err.Error(), strings.Repeat("c", 64)) {
+		t.Fatalf("EnsureFirecracker error = %q, want it to name the pin", err)
+	}
+}
+
+// Legacy install (binary present, no provenance stamp): the daemon cannot prove
+// the binary matches the pin, so it re-provisions from the pinned release.
+func TestEnsureFirecrackerReprovisionsUnstampedBinary(t *testing.T) {
+	tgz := fakeFirecrackerTarball(t, "firecracker-binary-v9.9.9")
+	srv, hits := countingServer(tgz)
+	defer srv.Close()
+
+	destPath := filepath.Join(t.TempDir(), "firecracker")
+	writeFileOrFail(t, destPath, "firecracker-binary-of-unknown-origin", 0755)
+
+	if err := EnsureFirecracker(destPath, srv.URL, hexSHA256(tgz)); err != nil {
+		t.Fatalf("EnsureFirecracker: %v", err)
+	}
+	if got := readFileOrFail(t, destPath); got != "firecracker-binary-v9.9.9" {
+		t.Fatalf("firecracker content = %q, want the pinned build", got)
+	}
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("download requests = %d, want 1", n)
+	}
+	if _, err := os.Stat(destPath + firecrackerStampSuffix); err != nil {
+		t.Fatalf("stat provenance stamp: %v", err)
+	}
+}
+
+// Offline availability: an unstamped binary is *unverified*, not *known bad*.
+// If it cannot be re-provisioned (air-gapped host), the daemon keeps running on
+// the existing binary rather than refusing to boot.
+func TestEnsureFirecrackerKeepsUnstampedBinaryWhenUnreachable(t *testing.T) {
+	destPath := filepath.Join(t.TempDir(), "firecracker")
+	writeFileOrFail(t, destPath, "firecracker-binary-of-unknown-origin", 0755)
+
+	if err := EnsureFirecracker(destPath, unreachableURL(), strings.Repeat("d", 64)); err != nil {
+		t.Fatalf("EnsureFirecracker = %v, want nil (offline host keeps its existing binary)", err)
+	}
+	if got := readFileOrFail(t, destPath); got != "firecracker-binary-of-unknown-origin" {
+		t.Fatalf("firecracker content = %q, want it left in place", got)
 	}
 }

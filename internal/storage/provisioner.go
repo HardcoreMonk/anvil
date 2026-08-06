@@ -839,20 +839,69 @@ func EnsureGooseAgent(binaryPath, projectRoot string) error {
 	return nil
 }
 
-// EnsureKernel downloads the Firecracker kernel binary to kernelPath if it does
-// not exist, verifying its SHA256 against expectedSHA256. The kernel is the
-// trust root of every guest (booted via init=), so it gets the same integrity
-// pin as the Firecracker binary. The download streams to a sibling temp file and
-// is renamed onto kernelPath only after the SHA256 matches, so an unverified or
-// partial vmlinux.bin is never published (a mismatch or write failure leaves the
-// temp file, which the deferred cleanup removes — no bad artifact survives a crash).
+// fileSHA256 returns the hex-encoded SHA256 of the file at path.
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// EnsureKernel makes the kernel at kernelPath match expectedSHA256, downloading it
+// from downloadURL when it is absent or when the bytes on disk are not the pinned
+// ones. The kernel is the trust root of every guest (booted via init=), so the pin
+// is authoritative: an existing vmlinux.bin is hashed and compared on every startup,
+// not merely stat'ed. That closes two holes at once — a tampered kernel on disk, and
+// a pin bump that would otherwise never reach an already-provisioned host.
+//
+// The pin is the digest of the kernel file itself, so a matching artifact is
+// recognised without any network I/O (the release tarballs ship a vmlinux.bin that
+// build_release.sh verifies against this same pin, so normal installs never
+// re-download). A mismatch is known-bad, so it fails closed if it cannot be
+// corrected rather than booting guests on an unpinned kernel.
+//
+// The download streams to a sibling temp file and is renamed onto kernelPath only
+// after the SHA256 matches, so an unverified or partial vmlinux.bin is never
+// published (a mismatch or write failure leaves the temp file, which the deferred
+// cleanup removes — no bad artifact survives a crash).
 func EnsureKernel(kernelPath, downloadURL, expectedSHA256 string) error {
+	mismatch := ""
 	if _, err := os.Stat(kernelPath); err == nil {
-		slog.Warn("kernel found", "path", kernelPath)
-		return nil
+		actual, hashErr := fileSHA256(kernelPath)
+		if hashErr != nil {
+			return fmt.Errorf("failed to hash existing kernel %s: %w", kernelPath, hashErr)
+		}
+		if strings.EqualFold(actual, expectedSHA256) {
+			slog.Warn("kernel found, matches pin", "path", kernelPath, "sha256", actual)
+			return nil
+		}
+		mismatch = fmt.Sprintf("on-disk kernel SHA256 mismatch: expected %s, got %s", expectedSHA256, actual)
+		slog.Error("on-disk kernel does not match the pinned SHA256, re-downloading",
+			"path", kernelPath, "expected", expectedSHA256, "actual", actual)
 	}
 
-	slog.Warn("kernel not found, downloading", "path", kernelPath, "url", downloadURL)
+	if err := downloadPinnedKernel(kernelPath, downloadURL, expectedSHA256); err != nil {
+		if mismatch != "" {
+			return fmt.Errorf("%s, and re-download failed: %w", mismatch, err)
+		}
+		return err
+	}
+
+	slog.Warn("kernel downloaded", "path", kernelPath)
+	return nil
+}
+
+// downloadPinnedKernel fetches downloadURL and installs it at kernelPath only after
+// its SHA256 matches expectedSHA256. It replaces any file already at kernelPath.
+func downloadPinnedKernel(kernelPath, downloadURL, expectedSHA256 string) error {
+	slog.Warn("downloading kernel", "path", kernelPath, "url", downloadURL)
 
 	if err := os.MkdirAll(filepath.Dir(kernelPath), 0755); err != nil {
 		return fmt.Errorf("failed to create kernel directory: %w", err)
@@ -894,20 +943,134 @@ func EnsureKernel(kernelPath, downloadURL, expectedSHA256 string) error {
 		return fmt.Errorf("failed to install kernel file: %w", err)
 	}
 
-	slog.Warn("kernel downloaded", "path", kernelPath)
 	return nil
 }
 
-// EnsureFirecracker downloads the Firecracker release tarball, verifies its SHA256,
-// and extracts the firecracker binary to destPath. A no-op if the binary already exists.
+// firecrackerStampSuffix names the provenance sidecar written beside an installed
+// firecracker binary. Unlike the kernel, firecracker's pin is the digest of the
+// *release tarball*, not of the extracted binary, so the installed binary can never
+// be compared against the pin directly. The stamp closes that gap by recording, on
+// one line, the tarball the binary came from and the digest of the binary that was
+// installed from it: "<tarball-sha256> <binary-sha256>".
+//
+// Deliberately NOT ".sha256". That suffix reads everywhere as "the digest of the
+// file next to me", and goose-agent.sha256 — which is a source-tree hash, not a
+// binary digest — has already been read that way by an auditor and written up as a
+// broken integrity control. This file holds two digests and one of them is not of
+// the adjacent binary, so it gets a name that cannot be mistaken for one.
+const firecrackerStampSuffix = ".pin-state"
+
+// firecrackerPinState describes how the binary already at destPath relates to the pin.
+type firecrackerPinState int
+
+const (
+	// firecrackerPinVerified: the stamp proves this binary was extracted from the
+	// pinned tarball and the bytes on disk are still the ones that were installed.
+	firecrackerPinVerified firecrackerPinState = iota
+	// firecrackerPinUnknown: no usable provenance. Either a host provisioned before
+	// stamping existed, or a release tarball whose artifacts/ carries no stamp.
+	// Unverified is not the same as known-bad, so this state stays recoverable.
+	firecrackerPinUnknown
+	// firecrackerPinMismatch: the stamp exists and disagrees — the binary came from a
+	// different (older) pinned release, or its bytes changed after installation.
+	firecrackerPinMismatch
+)
+
+// firecrackerPinStatus classifies the binary at destPath against expectedSHA256
+// (the pinned release-tarball digest), returning a human-readable detail for logs.
+func firecrackerPinStatus(destPath, expectedSHA256 string) (firecrackerPinState, string) {
+	stampPath := destPath + firecrackerStampSuffix
+	data, err := os.ReadFile(stampPath)
+	if err != nil {
+		return firecrackerPinUnknown, fmt.Sprintf("no provenance stamp at %s", stampPath)
+	}
+
+	fields := strings.Fields(string(data))
+	if len(fields) != 2 {
+		return firecrackerPinUnknown, fmt.Sprintf("provenance stamp %s is malformed", stampPath)
+	}
+
+	if !strings.EqualFold(fields[0], expectedSHA256) {
+		return firecrackerPinMismatch, fmt.Sprintf(
+			"installed firecracker came from release tarball %s, but the pin is %s", fields[0], expectedSHA256)
+	}
+
+	actual, err := fileSHA256(destPath)
+	if err != nil {
+		return firecrackerPinMismatch, fmt.Sprintf("cannot hash installed firecracker %s: %v", destPath, err)
+	}
+	if !strings.EqualFold(fields[1], actual) {
+		return firecrackerPinMismatch, fmt.Sprintf(
+			"firecracker binary SHA256 changed since installation: stamped %s, got %s", fields[1], actual)
+	}
+
+	return firecrackerPinVerified, ""
+}
+
+// EnsureFirecracker makes the firecracker binary at destPath the one the pinned
+// release produces, downloading and extracting the release tarball when it is
+// absent, stale, or unverifiable.
+//
+// An existing binary is no longer trusted on the strength of its existence alone:
+// that let a tampered hypervisor go undetected forever, and it pinned every already-
+// provisioned host to whatever firecracker version it was first installed with, so a
+// pin bump (and the fixes that come with it) never reached those hosts silently.
+//
+// Because the pin is the tarball digest rather than the binary digest, verification
+// goes through the provenance stamp (see firecrackerStampSuffix). The three outcomes
+// are deliberately not treated alike:
+//
+//   - verified: accepted with no network I/O (the common path on every boot).
+//   - mismatch: known-bad — re-provisioned from the pin, and failing closed when that
+//     is impossible, because continuing would run guests on a hypervisor that provably
+//     is not the pinned one.
+//   - unknown: unverifiable, not known-bad — re-provisioned when possible (this is how
+//     a legacy host converges onto the pin and gains a stamp), but if the download
+//     fails the existing binary is kept with a loud warning rather than refusing to
+//     boot. Failing closed here would break every pre-stamp host and every air-gapped
+//     install on upgrade, in exchange for no more safety than the status quo already
+//     had for exactly those hosts.
 func EnsureFirecracker(destPath, downloadURL, expectedSHA256 string) error {
 	if _, err := os.Stat(destPath); err == nil {
-		slog.Warn("firecracker found", "path", destPath)
+		switch state, detail := firecrackerPinStatus(destPath, expectedSHA256); state {
+		case firecrackerPinVerified:
+			slog.Warn("firecracker found, matches pin", "path", destPath)
+			return nil
+
+		case firecrackerPinMismatch:
+			slog.Error("installed firecracker does not match the pinned release, re-provisioning",
+				"path", destPath, "detail", detail)
+			if err := downloadPinnedFirecracker(destPath, downloadURL, expectedSHA256); err != nil {
+				return fmt.Errorf("%s, and re-provisioning failed: %w", detail, err)
+			}
+
+		default: // firecrackerPinUnknown
+			slog.Warn("installed firecracker cannot be verified against the pin, re-provisioning",
+				"path", destPath, "detail", detail)
+			if err := downloadPinnedFirecracker(destPath, downloadURL, expectedSHA256); err != nil {
+				slog.Error("could not re-provision firecracker, keeping the unverified binary in place",
+					"path", destPath, "pin", expectedSHA256, "err", err)
+				return nil
+			}
+		}
+
+		slog.Warn("firecracker re-provisioned from pin", "path", destPath)
 		return nil
 	}
 
 	slog.Warn("firecracker not found, downloading", "path", destPath, "url", downloadURL)
+	if err := downloadPinnedFirecracker(destPath, downloadURL, expectedSHA256); err != nil {
+		return err
+	}
 
+	slog.Warn("firecracker installed", "path", destPath)
+	return nil
+}
+
+// downloadPinnedFirecracker fetches the release tarball, verifies it against
+// expectedSHA256, installs the firecracker binary at destPath and records the
+// provenance stamp that later startups verify against.
+func downloadPinnedFirecracker(destPath, downloadURL, expectedSHA256 string) error {
 	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
@@ -947,7 +1110,15 @@ func EnsureFirecracker(destPath, downloadURL, expectedSHA256 string) error {
 		return fmt.Errorf("failed to extract Firecracker binary: %w", err)
 	}
 
-	slog.Warn("firecracker installed", "path", destPath)
+	binarySHA, err := fileSHA256(destPath)
+	if err != nil {
+		return fmt.Errorf("failed to hash installed Firecracker binary: %w", err)
+	}
+	stamp := fmt.Sprintf("%s %s\n", expectedSHA256, binarySHA)
+	if err := os.WriteFile(destPath+firecrackerStampSuffix, []byte(stamp), 0644); err != nil {
+		return fmt.Errorf("failed to write Firecracker provenance stamp: %w", err)
+	}
+
 	return nil
 }
 
@@ -980,16 +1151,30 @@ func extractFirecrackerBin(tgzPath, dest string) error {
 		if hdr.Typeflag != tar.TypeReg || !strings.HasPrefix(base, "firecracker-") {
 			continue
 		}
-		out, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+		// Stage beside dest and rename into place. Truncating dest directly would
+		// destroy a working (if stale) binary on a partial extraction, and would
+		// fail with ETXTBSY while that binary is executing; rename does neither.
+		out, err := os.CreateTemp(filepath.Dir(dest), ".firecracker-*.tmp")
 		if err != nil {
 			return fmt.Errorf("failed to create binary file: %w", err)
 		}
+		tmpDest := out.Name()
+		defer os.Remove(tmpDest)
+
 		if _, err := io.Copy(out, tr); err != nil {
 			out.Close()
-			os.Remove(dest)
 			return fmt.Errorf("failed to write binary: %w", err)
 		}
-		return out.Close()
+		if err := out.Close(); err != nil {
+			return fmt.Errorf("failed to flush binary: %w", err)
+		}
+		if err := os.Chmod(tmpDest, 0755); err != nil {
+			return fmt.Errorf("failed to set binary mode: %w", err)
+		}
+		if err := os.Rename(tmpDest, dest); err != nil {
+			return fmt.Errorf("failed to install binary: %w", err)
+		}
+		return nil
 	}
 	return fmt.Errorf("firecracker binary not found in archive")
 }
