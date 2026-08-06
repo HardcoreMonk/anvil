@@ -20,8 +20,8 @@ type AuditRecord struct {
 	VMID       string
 	Profile    string
 	Server     string
-	Kind       string // "tool" | "resource" | "prompt"
-	Tool       string // identifier: tool name, resource URI, or prompt name
+	Kind       string // "tool" | "resource" | "prompt" | "list"
+	Tool       string // identifier: tool name, resource URI, prompt name, or list method
 	OK         bool
 	DurationMs int64
 	Err        string
@@ -162,6 +162,34 @@ func (g *Gateway) handleInitialize(w http.ResponseWriter, caller Caller, req rpc
 	slog.Debug("mcp gateway: initialized", "vm", caller.VMID, "profile", caller.Profile)
 }
 
+// fanOut runs one backend leg of a */list method: it draws from the caller's
+// per-(VM, server) budget, times the backend call, and reports the leg to the
+// Observe hook as a metadata-only "list" record — the audit trail for catalog
+// enumeration, which reaches every allowed backend on host-side credentials the
+// VM never sees. It reports whether the leg's result may be used; a throttled or
+// failing leg is skipped, the same degradation an unreachable backend produces.
+func (g *Gateway) fanOut(caller Caller, server, method string, call func() error) bool {
+	rec := AuditRecord{VMID: caller.VMID, Profile: caller.Profile, Server: server, Kind: "list", Tool: method}
+	if !g.limiter.Allow(caller.VMID, server) {
+		rec.Err = "rate limited"
+		g.observe(rec)
+		slog.Warn("mcp gateway: backend list rate limited", "method", method, "server", server, "vm", caller.VMID)
+		return false
+	}
+	start := nowMs()
+	err := call()
+	rec.DurationMs = nowMs() - start
+	if err != nil {
+		rec.Err = err.Error()
+		g.observe(rec)
+		slog.Warn("mcp gateway: backend list failed", "method", method, "server", server, "err", err)
+		return false
+	}
+	rec.OK = true
+	g.observe(rec)
+	return true
+}
+
 // handleToolsList returns the aggregated, namespaced catalog of every tool from
 // the backends the caller's profile may use. A backend that errors is skipped
 // (logged) so one bad server does not blank the whole catalog.
@@ -176,9 +204,11 @@ func (g *Gateway) handleToolsList(w http.ResponseWriter, r *http.Request, caller
 		if !ok {
 			continue
 		}
-		bt, err := b.ListTools(r.Context())
-		if err != nil {
-			slog.Warn("mcp gateway: backend tools/list failed", "server", s.ID, "err", err)
+		var bt []Tool
+		if !g.fanOut(caller, s.ID, "tools/list", func() (err error) {
+			bt, err = b.ListTools(r.Context())
+			return err
+		}) {
 			continue
 		}
 		for _, t := range bt {
@@ -255,9 +285,11 @@ func (g *Gateway) handleResourcesList(w http.ResponseWriter, r *http.Request, ca
 		if !ok {
 			continue
 		}
-		br, err := b.ListResources(r.Context())
-		if err != nil {
-			slog.Warn("mcp gateway: backend resources/list failed", "server", s.ID, "err", err)
+		var br []Resource
+		if !g.fanOut(caller, s.ID, "resources/list", func() (err error) {
+			br, err = b.ListResources(r.Context())
+			return err
+		}) {
 			continue
 		}
 		// Namespace the URI the same way tool names are namespaced, so resources/read
@@ -330,9 +362,11 @@ func (g *Gateway) handlePromptsList(w http.ResponseWriter, r *http.Request, call
 		if !ok {
 			continue
 		}
-		bp, err := b.ListPrompts(r.Context())
-		if err != nil {
-			slog.Warn("mcp gateway: backend prompts/list failed", "server", s.ID, "err", err)
+		var bp []Prompt
+		if !g.fanOut(caller, s.ID, "prompts/list", func() (err error) {
+			bp, err = b.ListPrompts(r.Context())
+			return err
+		}) {
 			continue
 		}
 		for _, pr := range bp {
