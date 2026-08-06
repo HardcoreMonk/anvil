@@ -25,9 +25,22 @@ say()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[warn]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[error]\033[0m %s\n' "$*" >&2; exit 1; }
 
+# Copy preserving mode + timestamps but NOT ownership; see place_files() for why
+# both halves of that matter. -dR reproduces what `cp -a` implied minus the
+# --preserve=ownership that leaked the extracting user into root-run binaries.
+cpres() { cp -dR --preserve=mode,timestamps "$@"; }
+
 # ---------------------------------------------------------------- preflight ----
 preflight() {
 	[ "$(id -u)" -eq 0 ] || die "run as root: sudo ./install.sh"
+
+	# place_files() ends in a recursive chown of $DEST, so a mistyped EPHEMERA_HOME
+	# would no longer just scatter files — it would re-own a system tree. Exact
+	# matches only: /opt/ephemera, /var/lib/ephemera, /srv/ephemera all still pass.
+	case "$DEST" in
+		""|/|/bin|/boot|/dev|/etc|/home|/lib|/lib64|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var)
+			die "EPHEMERA_HOME=$DEST is a system directory; point it at a dedicated subdirectory (default /opt/ephemera)." ;;
+	esac
 	[ "$(uname -m)" = "x86_64" ] || die "Ephemera ships amd64 binaries; this host is $(uname -m). Unsupported."
 	[ -e /dev/kvm ] || die "/dev/kvm not found — enable KVM (or nested virtualization if this host is itself a VM)."
 	[ -w /dev/kvm ] || warn "/dev/kvm is not writable as the current user; the root service should still have access."
@@ -73,16 +86,31 @@ place_files() {
 	say "Installing files into $DEST"
 	install -d -m 755 "$DEST" "$DEST/artifacts" "$DEST/scripts" "$DEST/configs"
 
-	# cp -a preserves mtimes — load-bearing: the daemon treats golden-image.ext4 as
+	# Timestamps stay preserved — load-bearing: the daemon treats golden-image.ext4 as
 	# up to date only while it is newer than its build inputs (goose-agent, micro-init,
 	# build_image.sh, gtwall, gtcall). The release script normalized those mtimes; we
 	# must not reset them here (never use `install`, which stamps mtime=now).
-	cp -a "$SRC/ephemera-daemon" "$DEST/"
-	[ -f "$SRC/ephemera-ctl" ] && cp -a "$SRC/ephemera-ctl" "$DEST/"
-	cp -a "$SRC/artifacts/." "$DEST/artifacts/"
-	cp -a "$SRC/scripts/." "$DEST/scripts/"
-	cp -a "$SRC/configs/goose.yaml.example" "$SRC/configs/goose-secrets.yaml.example" "$DEST/configs/"
-	[ -f "$SRC/uninstall.sh" ] && { cp -a "$SRC/uninstall.sh" "$DEST/"; chmod 755 "$DEST/uninstall.sh"; }
+	#
+	# Ownership is deliberately NOT preserved (`--preserve=mode,timestamps` instead of
+	# the former `-a` = `--preserve=all`). INSTALL.md documents `tar xzf` as an
+	# unprivileged user followed by `sudo ./install.sh`, so the staged files are owned
+	# by the extracting user; `-a` carried that ownership into /opt/ephemera and left
+	# ephemera-daemon, artifacts/firecracker, artifacts/vmlinux.bin and
+	# scripts/build_image.sh — all executed by the root service — writable in place by
+	# an unprivileged account. cpres()'s `-dR` keeps the recursion and no-dereference
+	# behaviour `-a` implied (plain `--preserve=` alone refuses the directory copies).
+	cpres "$SRC/ephemera-daemon" "$DEST/"
+	[ -f "$SRC/ephemera-ctl" ] && cpres "$SRC/ephemera-ctl" "$DEST/"
+	cpres "$SRC/artifacts/." "$DEST/artifacts/"
+	cpres "$SRC/scripts/." "$DEST/scripts/"
+	cpres "$SRC/configs/goose.yaml.example" "$SRC/configs/goose-secrets.yaml.example" "$DEST/configs/"
+	[ -f "$SRC/uninstall.sh" ] && { cpres "$SRC/uninstall.sh" "$DEST/"; chmod 755 "$DEST/uninstall.sh"; }
+
+	# Belt and braces: also normalise anything already under $DEST from an earlier
+	# install that used `cp -a`. chown touches ctime only, never mtime, so the
+	# golden-image staleness check above is unaffected. -h so a symlink is retargeted
+	# as itself rather than through its referent.
+	chown -Rh root:root "$DEST"
 
 	chmod 755 "$DEST/ephemera-daemon" "$DEST/artifacts/firecracker" 2>/dev/null || true
 	if [ -f "$DEST/ephemera-ctl" ]; then

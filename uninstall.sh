@@ -39,6 +39,11 @@ if [ -L /usr/local/bin/ephemera-ctl ]; then
 fi
 
 # Best-effort cleanup of the daemon's runtime scratch (safe now the service is stopped).
+# /tmp/goose-rootfs is a legacy fixed path: scripts/build_image.sh now mounts under an
+# unpredictable mktemp directory that its own EXIT trap unmounts and rmdir's, so nothing
+# new appears there. The line stays to clear leftovers from pre-mktemp installs, and is
+# deliberately NOT widened to a /tmp/goose-rootfs.* glob — a root `rm -rf` over an
+# attacker-plantable /tmp pattern would reintroduce exactly the hazard we just removed.
 say "Cleaning runtime scratch under /tmp"
 rm -rf /tmp/goose-workspaces /tmp/goose-rootfs 2>/dev/null || true
 rm -rf /tmp/goose-mnt-* 2>/dev/null || true

@@ -7,32 +7,70 @@ set -euo pipefail
 # Host dependencies: curl, debootstrap, e2fsprogs, util-linux
 
 IMAGE_NAME="${EPHEMERA_GOLDEN_IMAGE_PATH:-artifacts/golden-image.ext4}"
-MNT_DIR="/tmp/goose-rootfs"
 DEBIAN_SUITE="trixie"
 
-GOOSE_URL="https://github.com/aaif-goose/goose/releases/download/stable/goose-x86_64-unknown-linux-gnu.tar.bz2"
-GOOSE_TARBALL="/tmp/goose.tar.bz2"
+die() { echo "Error: $*" >&2; exit 1; }
+
+# Goose CLI pin — immutable version tag + SHA256, mirroring the kernel/firecracker
+# discipline (constants in cmd/goose-daemon/main.go, `sha256sum -c ... || die` in
+# scripts/build_release.sh). Upstream's `stable` tag is a *rolling* pointer whose
+# assets are re-uploaded in place, so the old `.../download/stable/...` URL handed
+# out different bytes over time with nothing to check them against. This tarball
+# becomes /usr/local/bin/goose in the golden image and runs every VM's LLM
+# workload holding the provider API key — and on SLIM packages this script runs on
+# the end user's host, as root, on first boot. It is pinned and fail-closed verified.
+#
+# To bump the version:
+#   1. pick the new tag from https://github.com/aaif-goose/goose/releases
+#   2. v=vX.Y.Z; curl -fsSL \
+#        "https://github.com/aaif-goose/goose/releases/download/$v/goose-x86_64-unknown-linux-gnu.tar.bz2" \
+#        | sha256sum
+#   3. paste the tag and hash below. Editing this file makes the golden image stale
+#      (EnsureGoldenImage's mtime input list), so the next daemon start rebuilds it.
+GOOSE_VERSION="v1.45.0"
+GOOSE_SHA256="ec5da5f018cf68ea446887d30decf847542035ffcf91536d1d134ed94bb24401"
+GOOSE_URL="https://github.com/aaif-goose/goose/releases/download/${GOOSE_VERSION}/goose-x86_64-unknown-linux-gnu.tar.bz2"
+
+# Scratch paths are created by mktemp below, not hardcoded under /tmp. The former
+# fixed names (/tmp/goose-rootfs, /tmp/goose.tar.bz2) were predictable targets this
+# script writes to as root in a shared, world-writable /tmp (the ephemera unit runs
+# without PrivateTmp on purpose). Sticky /tmp only stops another user from deleting
+# our files; it does not stop them from pre-creating an *absent* name as a symlink
+# in the window before we open it, which would make a root `curl -o` clobber the
+# link target. mktemp creates the name atomically (O_EXCL) and fails otherwise.
+# Same pattern as scripts/build_release.sh:33.
+MNT_DIR=""
+GOOSE_TARBALL=""
 GOOSE_TMP=""
 
 cleanup() {
-    umount "$MNT_DIR/dev/pts" 2>/dev/null || true
-    umount "$MNT_DIR/dev"     2>/dev/null || true
-    umount "$MNT_DIR/sys"     2>/dev/null || true
-    umount "$MNT_DIR/proc"    2>/dev/null || true
-    umount "$MNT_DIR"         2>/dev/null || true
-    rm -f "$GOOSE_TARBALL"
+    if [ -n "$MNT_DIR" ]; then
+        # Deepest mount first; the mount point itself last. Only then rmdir it —
+        # and rmdir, never `rm -rf`: if any umount above failed, rmdir fails
+        # harmlessly on the non-empty mount point, whereas `rm -rf` would recurse
+        # into the still-mounted rootfs and delete the image contents.
+        umount "$MNT_DIR/dev/pts" 2>/dev/null || true
+        umount "$MNT_DIR/dev"     2>/dev/null || true
+        umount "$MNT_DIR/sys"     2>/dev/null || true
+        umount "$MNT_DIR/proc"    2>/dev/null || true
+        umount "$MNT_DIR"         2>/dev/null || true
+        rmdir  "$MNT_DIR"         2>/dev/null || true
+    fi
+    [ -n "$GOOSE_TARBALL" ] && rm -f "$GOOSE_TARBALL"
     [ -n "$GOOSE_TMP" ] && rm -rf "$GOOSE_TMP"
+    # Never let cleanup's own last-command status leak into the script's exit code.
+    return 0
 }
 trap cleanup EXIT
 
 check_host_dependencies() {
     local missing=()
-    for cmd in curl debootstrap fallocate mkfs.ext4 e2fsck resize2fs; do
+    for cmd in curl debootstrap fallocate mkfs.ext4 e2fsck resize2fs mktemp sha256sum; do
         command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
     done
     if [ "${#missing[@]}" -gt 0 ]; then
         echo "Error: missing required tools: ${missing[*]}" >&2
-        echo "Fix: sudo apt-get install -y curl debootstrap util-linux e2fsprogs" >&2
+        echo "Fix: sudo apt-get install -y curl debootstrap util-linux e2fsprogs coreutils" >&2
         exit 1
     fi
 }
@@ -40,12 +78,22 @@ check_host_dependencies() {
 check_host_dependencies
 mkdir -p "$(dirname "$IMAGE_NAME")"
 
+# Unpredictable, atomically created, mode 0600/0700 root-owned scratch (see above).
+GOOSE_TARBALL=$(mktemp "${TMPDIR:-/tmp}/goose-tarball.XXXXXXXXXX") \
+    || die "could not create a temporary file for the Goose download"
+MNT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/goose-rootfs.XXXXXXXXXX") \
+    || die "could not create a temporary rootfs mount point"
+
 echo "==> 1. Downloading Goose binary on host <=="
-# Remove any pre-existing tarball first so a fresh root-owned download cannot be
-# blocked by a leftover at this fixed /tmp path (e.g. a foreign-owned file from
-# manual inspection). Root can unlink it in sticky /tmp regardless of owner.
-rm -f "$GOOSE_TARBALL"
+echo "    ${GOOSE_URL}"
 curl -fL -o "$GOOSE_TARBALL" "$GOOSE_URL"
+# Fail closed: an unverified goose binary must never reach the golden image.
+echo "${GOOSE_SHA256}  ${GOOSE_TARBALL}" | sha256sum -c - >/dev/null \
+    || die "Goose tarball SHA256 mismatch for ${GOOSE_VERSION} — refusing to bake an unverified binary into the golden image.
+       Expected: ${GOOSE_SHA256}
+       Got:      $(sha256sum < "$GOOSE_TARBALL" | cut -d' ' -f1)
+       If the upstream release was legitimately re-published, update GOOSE_VERSION/GOOSE_SHA256 in this script."
+echo "    SHA256 verified (${GOOSE_VERSION})"
 
 echo "==> 2. Creating and formatting image (512M initial; shrunk by resize2fs at the end) <=="
 fallocate -l 1G "$IMAGE_NAME"
@@ -136,6 +184,9 @@ rm -rf \
 echo "==> 7. Unmounting and shrinking image to actual used size <=="
 umount "$MNT_DIR"
 trap - EXIT
+# umount succeeded (set -e would have aborted otherwise), so the mount point is a
+# plain empty directory here — rmdir removes it and never reaches into the image.
+rmdir "$MNT_DIR"
 rm -f "$GOOSE_TARBALL"
 
 e2fsck -f -y "$IMAGE_NAME"
