@@ -103,10 +103,47 @@ type ControlLoopStatus struct {
 	Hosts                    map[string]HostObservation `json:"hosts,omitempty"`
 }
 
+// SnapshotLocationProvenance records HOW the adapter learned that a snapshot
+// lives on a host. The replication sweep learns locations two ways and, without
+// this, cannot tell them apart afterwards -- so a snapshot can reach the replica
+// factor on peer reports alone with nothing to surface that it did.
+//
+// A location carrying NO provenance is a distinct third state ("unknown"), not a
+// synonym for observed: state files written before this field existed decode
+// that way. Callers must not conflate the two (see
+// snapshotSatisfiedByPeerClaimsOnly).
+type SnapshotLocationProvenance string
+
+const (
+	// SnapshotLocationVerified: this adapter placed the snapshot on that host
+	// (replicate/import, or CreateSnapshot) and observed the operation succeed.
+	SnapshotLocationVerified SnapshotLocationProvenance = "verified"
+	// SnapshotLocationObserved: a peer daemon's ListSnapshots reported the
+	// snapshot. The adapter has not confirmed it first-hand.
+	SnapshotLocationObserved SnapshotLocationProvenance = "observed"
+)
+
+// normalizeSnapshotLocationProvenance maps anything that is not an explicit
+// SnapshotLocationVerified to the weaker SnapshotLocationObserved. Provenance is
+// a required argument of SetSnapshotLocation precisely so a call site has to
+// choose; a call site that nonetheless passes the zero value must not thereby
+// claim a verification it does not have.
+func normalizeSnapshotLocationProvenance(provenance SnapshotLocationProvenance) SnapshotLocationProvenance {
+	if provenance == SnapshotLocationVerified {
+		return SnapshotLocationVerified
+	}
+	return SnapshotLocationObserved
+}
+
 type PlacementStoreState struct {
-	Hosts                      map[string]RuntimeHost          `json:"hosts"`
-	VMPlacements               map[string]string               `json:"vm_placements"`
-	SnapshotLocations          map[string][]string             `json:"snapshot_locations"`
+	Hosts             map[string]RuntimeHost `json:"hosts"`
+	VMPlacements      map[string]string      `json:"vm_placements"`
+	SnapshotLocations map[string][]string    `json:"snapshot_locations"`
+	// SnapshotLocationProvenances mirrors SnapshotLocations (snapshot id ->
+	// host -> provenance). Additive and omitempty: a pre-existing state file
+	// has no such map, so every location it carries decodes as unknown.
+	SnapshotLocationProvenances map[string]map[string]SnapshotLocationProvenance `json:"snapshot_location_provenance,omitempty"`
+
 	ConfigManagedHosts         map[string]bool                 `json:"config_managed_hosts,omitempty"`
 	HostObservations           map[string]HostObservation      `json:"host_observations,omitempty"`
 	SuspectVMPlacements        map[string]SuspectVMPlacement   `json:"suspect_vm_placements,omitempty"`
@@ -135,12 +172,13 @@ func NewPlacementStore(path string) *PlacementStore {
 	return &PlacementStore{
 		path: path,
 		state: PlacementStoreState{
-			Hosts:               make(map[string]RuntimeHost),
-			VMPlacements:        make(map[string]string),
-			SnapshotLocations:   make(map[string][]string),
-			ConfigManagedHosts:  make(map[string]bool),
-			HostObservations:    make(map[string]HostObservation),
-			SuspectVMPlacements: make(map[string]SuspectVMPlacement),
+			Hosts:                       make(map[string]RuntimeHost),
+			VMPlacements:                make(map[string]string),
+			SnapshotLocations:           make(map[string][]string),
+			SnapshotLocationProvenances: make(map[string]map[string]SnapshotLocationProvenance),
+			ConfigManagedHosts:          make(map[string]bool),
+			HostObservations:            make(map[string]HostObservation),
+			SuspectVMPlacements:         make(map[string]SuspectVMPlacement),
 			ControlLoopStatus: ControlLoopStatus{
 				Hosts: make(map[string]HostObservation),
 			},
@@ -444,16 +482,20 @@ func (s *PlacementStore) RecordSnapshotReplicationMetrics(obs SnapshotReplicatio
 	return nil
 }
 
-// RecordSnapshotReplicationGauges republishes the two point-in-time gauges the
+// RecordSnapshotReplicationGauges republishes the three point-in-time gauges the
 // reconcile sweep computes each pass. queueDepth = snapshots below the replica
-// factor; givingUp = snapshots with a dial-saturated target. Counters/timestamps
-// are preserved (refreshed from disk first).
-func (s *PlacementStore) RecordSnapshotReplicationGauges(queueDepth, givingUp int64) error {
+// factor; givingUp = snapshots with a dial-saturated target; peerOnlySatisfied =
+// snapshots at the replica factor on peer reports alone. Counters/timestamps are
+// preserved (refreshed from disk first).
+func (s *PlacementStore) RecordSnapshotReplicationGauges(queueDepth, givingUp, peerOnlySatisfied int64) error {
 	if queueDepth < 0 {
 		queueDepth = 0
 	}
 	if givingUp < 0 {
 		givingUp = 0
+	}
+	if peerOnlySatisfied < 0 {
+		peerOnlySatisfied = 0
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -464,6 +506,7 @@ func (s *PlacementStore) RecordSnapshotReplicationGauges(queueDepth, givingUp in
 	previous := clonePlacementStoreState(s.state)
 	s.state.SnapshotReplicationMetrics.QueueDepth = queueDepth
 	s.state.SnapshotReplicationMetrics.GivingUp = givingUp
+	s.state.SnapshotReplicationMetrics.PeerOnlySatisfied = peerOnlySatisfied
 	if err := s.saveLockedRaw(); err != nil {
 		s.state = previous
 		return err
@@ -805,7 +848,11 @@ func (s *PlacementStore) ClearHostSuspectPlacements(hostName string) {
 	}
 }
 
-func (s *PlacementStore) SetSnapshotLocation(snapshotID, hostName string) error {
+// SetSnapshotLocation records that snapshotID lives on hostName. provenance is a
+// required argument rather than a separate "observed" helper so every call site
+// has to state which of the two it is: a future call site that forgets should
+// not silently default to claiming a verification it does not have.
+func (s *PlacementStore) SetSnapshotLocation(snapshotID, hostName string, provenance SnapshotLocationProvenance) error {
 	snapshotID = strings.TrimSpace(snapshotID)
 	hostName = strings.TrimSpace(hostName)
 	if snapshotID == "" {
@@ -832,7 +879,38 @@ func (s *PlacementStore) SetSnapshotLocation(snapshotID, hostName string) error 
 	}
 	sort.Strings(locations)
 	s.state.SnapshotLocations[snapshotID] = locations
+	s.setSnapshotLocationProvenanceLocked(snapshotID, hostName, provenance)
 	return nil
+}
+
+// setSnapshotLocationProvenanceLocked upgrades a location's provenance but never
+// downgrades it. The discovery loop re-reports every peer listing on every
+// sweep, so without this rule the first peer report after a replication would
+// erase the fact that this adapter verified that host. unknown->verified and
+// observed->verified are upgrades; verified->observed is a no-op.
+func (s *PlacementStore) setSnapshotLocationProvenanceLocked(snapshotID, hostName string, provenance SnapshotLocationProvenance) {
+	provenance = normalizeSnapshotLocationProvenance(provenance)
+	byHost := s.state.SnapshotLocationProvenances[snapshotID]
+	if byHost == nil {
+		byHost = make(map[string]SnapshotLocationProvenance, 1)
+		s.state.SnapshotLocationProvenances[snapshotID] = byHost
+	}
+	if byHost[hostName] == SnapshotLocationVerified {
+		return
+	}
+	byHost[hostName] = provenance
+}
+
+// SnapshotLocationProvenance returns how the adapter learned that snapshotID
+// lives on hostName. It returns "" for a location with no recorded provenance
+// (unknown) -- notably every location in a state file written before the
+// provenance map existed.
+func (s *PlacementStore) SnapshotLocationProvenance(snapshotID, hostName string) SnapshotLocationProvenance {
+	snapshotID = strings.TrimSpace(snapshotID)
+	hostName = strings.TrimSpace(hostName)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.state.SnapshotLocationProvenances[snapshotID][hostName]
 }
 
 func (s *PlacementStore) SnapshotHosts(snapshotID string) []string {
@@ -1000,6 +1078,10 @@ func normalizePlacementStoreState(state *PlacementStoreState) {
 	if state.SnapshotLocations == nil {
 		state.SnapshotLocations = make(map[string][]string)
 	}
+	if state.SnapshotLocationProvenances == nil {
+		state.SnapshotLocationProvenances = make(map[string]map[string]SnapshotLocationProvenance)
+	}
+	pruneSnapshotLocationProvenances(state)
 	if state.ConfigManagedHosts == nil {
 		state.ConfigManagedHosts = make(map[string]bool)
 	}
@@ -1036,6 +1118,39 @@ func normalizePlacementStoreState(state *PlacementStoreState) {
 	}
 }
 
+// pruneSnapshotLocationProvenances keeps the provenance map a strict mirror of
+// SnapshotLocations: an entry for a snapshot with no recorded locations, or for a
+// host that is not one of them, is dropped. SnapshotLocations itself is add-only
+// today (replica GC is an explicit non-goal), so this is what bounds the
+// provenance map's growth and stops a stale or hand-edited entry from
+// resurrecting a host that is not a location.
+func pruneSnapshotLocationProvenances(state *PlacementStoreState) {
+	for snapshotID, byHost := range state.SnapshotLocationProvenances {
+		locations := state.SnapshotLocations[snapshotID]
+		if len(locations) == 0 || len(byHost) == 0 {
+			delete(state.SnapshotLocationProvenances, snapshotID)
+			continue
+		}
+		recorded := make(map[string]bool, len(locations))
+		for _, host := range locations {
+			recorded[host] = true
+		}
+		for host, provenance := range byHost {
+			// An empty value is dropped rather than normalized: absence is
+			// how unknown is represented, and a decoded "" means the same
+			// thing as no entry at all.
+			if !recorded[host] || provenance == "" {
+				delete(byHost, host)
+				continue
+			}
+			byHost[host] = normalizeSnapshotLocationProvenance(provenance)
+		}
+		if len(byHost) == 0 {
+			delete(state.SnapshotLocationProvenances, snapshotID)
+		}
+	}
+}
+
 func normalizeVMPlacements(placements map[string]string) map[string]string {
 	normalized := make(map[string]string, len(placements))
 	for vmID, hostName := range placements {
@@ -1051,15 +1166,16 @@ func normalizeVMPlacements(placements map[string]string) map[string]string {
 
 func clonePlacementStoreState(state PlacementStoreState) PlacementStoreState {
 	out := PlacementStoreState{
-		Hosts:                  make(map[string]RuntimeHost, len(state.Hosts)),
-		VMPlacements:           make(map[string]string, len(state.VMPlacements)),
-		SnapshotLocations:      make(map[string][]string, len(state.SnapshotLocations)),
-		ConfigManagedHosts:     make(map[string]bool, len(state.ConfigManagedHosts)),
-		HostObservations:       make(map[string]HostObservation, len(state.HostObservations)),
-		SuspectVMPlacements:    make(map[string]SuspectVMPlacement, len(state.SuspectVMPlacements)),
-		RoutedFlocks:           make(map[string]RoutedFlockRecord, len(state.RoutedFlocks)),
-		RoutedFlockRelayTokens: make(map[string]string, len(state.RoutedFlockRelayTokens)),
-		RoutedFlockCallTokens:  make(map[string]string, len(state.RoutedFlockCallTokens)),
+		Hosts:                       make(map[string]RuntimeHost, len(state.Hosts)),
+		VMPlacements:                make(map[string]string, len(state.VMPlacements)),
+		SnapshotLocations:           make(map[string][]string, len(state.SnapshotLocations)),
+		SnapshotLocationProvenances: make(map[string]map[string]SnapshotLocationProvenance, len(state.SnapshotLocationProvenances)),
+		ConfigManagedHosts:          make(map[string]bool, len(state.ConfigManagedHosts)),
+		HostObservations:            make(map[string]HostObservation, len(state.HostObservations)),
+		SuspectVMPlacements:         make(map[string]SuspectVMPlacement, len(state.SuspectVMPlacements)),
+		RoutedFlocks:                make(map[string]RoutedFlockRecord, len(state.RoutedFlocks)),
+		RoutedFlockRelayTokens:      make(map[string]string, len(state.RoutedFlockRelayTokens)),
+		RoutedFlockCallTokens:       make(map[string]string, len(state.RoutedFlockCallTokens)),
 	}
 	for name, host := range state.Hosts {
 		out.Hosts[name] = cloneRuntimeHost(host)
@@ -1069,6 +1185,13 @@ func clonePlacementStoreState(state PlacementStoreState) PlacementStoreState {
 	}
 	for snapshotID, locations := range state.SnapshotLocations {
 		out.SnapshotLocations[snapshotID] = append([]string(nil), locations...)
+	}
+	for snapshotID, byHost := range state.SnapshotLocationProvenances {
+		cloned := make(map[string]SnapshotLocationProvenance, len(byHost))
+		for host, provenance := range byHost {
+			cloned[host] = provenance
+		}
+		out.SnapshotLocationProvenances[snapshotID] = cloned
 	}
 	for host, managed := range state.ConfigManagedHosts {
 		out.ConfigManagedHosts[host] = managed

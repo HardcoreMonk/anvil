@@ -23,7 +23,7 @@ func TestPlacementStorePersistsHostsVMsAndSnapshotLocations(t *testing.T) {
 	if err := store.SetVMPlacement("vm-1", "host-b"); err != nil {
 		t.Fatalf("SetVMPlacement: %v", err)
 	}
-	if err := store.SetSnapshotLocation("snap-1", "host-b"); err != nil {
+	if err := store.SetSnapshotLocation("snap-1", "host-b", SnapshotLocationVerified); err != nil {
 		t.Fatalf("SetSnapshotLocation: %v", err)
 	}
 	if err := store.Save(); err != nil {

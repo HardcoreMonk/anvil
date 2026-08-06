@@ -263,7 +263,9 @@ func (r *RuntimeRouter) recordSnapshotLocation(snapshotID, targetHost string) er
 	if r.placementStore == nil {
 		return nil
 	}
-	if err := r.placementStore.SetSnapshotLocation(snapshotID, targetHost); err != nil {
+	// Adapter-verified: this adapter drove the replicate/import to targetHost
+	// and saw it succeed before this call is reached.
+	if err := r.placementStore.SetSnapshotLocation(snapshotID, targetHost, SnapshotLocationVerified); err != nil {
 		return err
 	}
 	if err := r.placementStore.Save(); err != nil {
@@ -350,6 +352,33 @@ func isDiffSnapshot(snapshot SnapshotInfo) bool {
 	return strings.EqualFold(strings.TrimSpace(snapshot.SnapshotType), "diff")
 }
 
+// snapshotSatisfiedByPeerClaimsOnly reports whether a snapshot that has already
+// reached snapshotReplicaFactor got there on peer reports alone: at least one of
+// its locations is peer-observed and NONE is adapter-verified. It feeds the
+// peer_only_satisfied gauge and nothing else -- it never gates re-replication.
+//
+// Both halves of the condition matter. Requiring "at least one observed" rather
+// than only "none verified" is what keeps locations that predate provenance
+// tracking out of the count: a state file written before the provenance map
+// existed decodes with no provenance at all, so each of its locations is
+// unknown -- neither verified nor observed. Unknown is a distinct third state,
+// not a synonym for observed. Counting it would make an upgrade light up alerts
+// for data that was in fact fine, and the count would then drain away by itself
+// as the sweep upgraded each location; the gauge would be measuring the rollout
+// rather than the replication.
+func snapshotSatisfiedByPeerClaimsOnly(byHost map[string]SnapshotLocationProvenance, hosts []string) bool {
+	observed := false
+	for _, host := range hosts {
+		switch byHost[host] {
+		case SnapshotLocationVerified:
+			return false
+		case SnapshotLocationObserved:
+			observed = true
+		}
+	}
+	return observed
+}
+
 // reconcileSnapshotReplication converges every observed snapshot toward
 // snapshotReplicaFactor replicas. It is a sibling of reconcileRoutedFlockWalls and
 // runs inside ReconcilePlacements (reconcileMu-serialized), so its in-memory
@@ -367,7 +396,7 @@ func isDiffSnapshot(snapshot SnapshotInfo) bool {
 //     rejection — resp.FailureStage == target and resp.FailureRejected —
 //     is terminal; a source-side or internal failure never excludes the
 //     target, it is a retryable error like a dial failure would be).
-//  4. Republishes the queue_depth / giving_up gauges.
+//  4. Republishes the queue_depth / giving_up / peer_only_satisfied gauges.
 //  5. Sweeps the dial-failure, giving-up, and terminal counters using a
 //     positive-evidence deletion rule: a (snapshot,target) pair's counters are
 //     GC'd only when the snapshot's recorded locations (SnapshotHosts) include
@@ -417,7 +446,12 @@ func (r *RuntimeRouter) reconcileSnapshotReplication(ctx context.Context, probes
 			if _, seen := infoByID[id]; !seen {
 				infoByID[id] = s
 			}
-			if err := r.placementStore.SetSnapshotLocation(id, hostName); err == nil {
+			// Peer-observed: this is the peer's own claim about what it
+			// holds, not something this adapter put there and watched
+			// succeed. SetSnapshotLocation never downgrades a verified
+			// location, so re-running this every sweep cannot erase the
+			// adapter's first-hand knowledge.
+			if err := r.placementStore.SetSnapshotLocation(id, hostName, SnapshotLocationObserved); err == nil {
 				discovered = true
 			}
 		}
@@ -437,7 +471,9 @@ func (r *RuntimeRouter) reconcileSnapshotReplication(ctx context.Context, probes
 	}
 
 	// 3. Heal drift.
-	locations := r.placementStore.State().SnapshotLocations
+	state := r.placementStore.State()
+	locations := state.SnapshotLocations
+	provenance := state.SnapshotLocationProvenances
 	ids := make([]string, 0, len(locations))
 	for id := range locations {
 		ids = append(ids, id)
@@ -445,9 +481,15 @@ func (r *RuntimeRouter) reconcileSnapshotReplication(ctx context.Context, probes
 	sort.Strings(ids)
 	now := time.Now().UTC()
 	var queueDepth int64
+	var peerOnlySatisfied int64
 	for _, id := range ids {
 		hosts := locations[id] // sorted by SetSnapshotLocation
 		if len(hosts) >= snapshotReplicaFactor {
+			// Observability only: whether this snapshot is re-replicated is
+			// decided exactly as before, by the replica count alone.
+			if snapshotSatisfiedByPeerClaimsOnly(provenance[id], hosts) {
+				peerOnlySatisfied++
+			}
 			continue
 		}
 		queueDepth++
@@ -510,7 +552,7 @@ func (r *RuntimeRouter) reconcileSnapshotReplication(ctx context.Context, probes
 			givingUpSnaps[s] = true
 		}
 	}
-	if err := r.placementStore.RecordSnapshotReplicationGauges(queueDepth, int64(len(givingUpSnaps))); err != nil {
+	if err := r.placementStore.RecordSnapshotReplicationGauges(queueDepth, int64(len(givingUpSnaps)), peerOnlySatisfied); err != nil {
 		errs = append(errs, fmt.Errorf("reconcile snapshot replication: recording gauges failed"))
 	}
 

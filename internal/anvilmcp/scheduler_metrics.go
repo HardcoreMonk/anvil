@@ -94,6 +94,7 @@ func renderSnapshotReplicationMetrics(out *strings.Builder, state SnapshotReplic
 
 	writeSchedulerGauge(out, "anvil_scheduler_snapshot_replication_queue_depth", "Snapshots below the desired replica factor.", float64(state.QueueDepth))
 	writeSchedulerGauge(out, "anvil_scheduler_snapshot_replication_giving_up", "Snapshots with a dial-saturated replication target.", float64(state.GivingUp))
+	writeSchedulerGauge(out, "anvil_scheduler_snapshot_replication_peer_only_satisfied", "Snapshots at the desired replica factor whose locations are all peer-reported (none adapter-verified).", float64(state.PeerOnlySatisfied))
 	writeSchedulerGauge(out, "anvil_scheduler_snapshot_replication_last_success_timestamp_seconds", "Unix timestamp of the last successful snapshot replication.", timestampMetric(state.LastSuccessAt))
 	writeSchedulerGauge(out, "anvil_scheduler_snapshot_replication_last_failure_timestamp_seconds", "Unix timestamp of the last failed snapshot replication.", timestampMetric(state.LastFailureAt))
 }

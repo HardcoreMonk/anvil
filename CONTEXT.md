@@ -380,6 +380,8 @@ daemon으로 보내는 outbound Bearer token이다.
   관측될 때만 GC, 복제본 GC/전파 자체는 비목표). metric family
   `anvil_scheduler_snapshot_replication_*`(`attempts_total{outcome,reason}`,
   `latency_seconds{phase="total"만}`, `queue_depth`, `giving_up`,
+  `peer_only_satisfied`(replica factor를 peer 보고만으로 채운 스냅샷 수 —
+  위치 출처를 `verified`/`observed`로 기록하고 `verified`는 강등하지 않는다),
   `last_success`/`last_failure_timestamp_seconds`)가 `PlacementStore`에
   영속되고 scheduler `/metrics`에 노출된다. anvil 경계는 metric 노출 +
   runbook 권장 alert 식까지이며 실 alerting은 zone 대시보드 몫이다. 유닛

@@ -238,7 +238,7 @@ func TestRenderSchedulerMetricsIncludesSnapshotReplicationMetrics(t *testing.T) 
 
 func TestSchedulerServiceMetricsEndpointExposesSnapshotReplication(t *testing.T) {
 	store := NewPlacementStore("")
-	if err := store.RecordSnapshotReplicationGauges(2, 0); err != nil {
+	if err := store.RecordSnapshotReplicationGauges(2, 0, 0); err != nil {
 		t.Fatalf("RecordSnapshotReplicationGauges: %v", err)
 	}
 	service := NewSchedulerService(SchedulerServiceOptions{PlacementStore: store})
