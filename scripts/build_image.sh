@@ -56,9 +56,13 @@ cleanup() {
         umount "$MNT_DIR"         2>/dev/null || true
         rmdir  "$MNT_DIR"         2>/dev/null || true
     fi
-    [ -n "$GOOSE_TARBALL" ] && rm -f "$GOOSE_TARBALL"
-    [ -n "$GOOSE_TMP" ] && rm -rf "$GOOSE_TMP"
-    # Never let cleanup's own last-command status leak into the script's exit code.
+    # `|| true` on the rm itself, not just the trailing `return 0`: under `set -e`
+    # a failing *last* command of an AND list aborts the function on the spot, so
+    # an rm that fails (its containing directory unwritable, say) would exit
+    # cleanup before `return 0` is ever reached and replace the script's real exit
+    # status with the rm's. The return then covers the remaining paths.
+    [ -n "$GOOSE_TARBALL" ] && { rm -f "$GOOSE_TARBALL" || true; }
+    [ -n "$GOOSE_TMP" ] && { rm -rf "$GOOSE_TMP" || true; }
     return 0
 }
 trap cleanup EXIT
