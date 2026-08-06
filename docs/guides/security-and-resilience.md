@@ -377,9 +377,18 @@ In-VM side, `goose-agent`'s vsock listener now dispatches both `CHANGE_IP` (used
 The fan-out is **best-effort**: each VM gets ~4 s (20 attempts × 200 ms, matching the existing `ReconfigureGuestIP` budget) and any per-VM failure is logged but never propagated. The SIGHUP path therefore completes in bounded time regardless of unresponsive VMs. A final log line summarizes results:
 
 ```
-SIGHUP: token reload complete — 1 client(s): alice
-SIGHUP: CP token propagated to 3/3 VM(s)
+level=WARN msg="sighup: token reload complete" client_count=1 clients=ops expired=0 expiring_24h=0
+level=WARN msg="sighup: cp token propagated" ok=0 total=0
 ```
+
+`total=0` is the normal reading, not a failure: a flock member holds its own
+per-flock capability token (ADR-0003), which the daemon did not mint from its
+operator bearer and so has no business rotating, and a plain `POST /vms` VM has
+no control-plane token at all. A non-zero `total` means the host is still
+running VMs spawned before ADR-0003, which keep `cp_token_managed` in their
+persisted state and go on receiving rotations until they are replaced. The line
+is emitted either way — silence would leave an operator unable to tell "nothing
+needed rotating" from "the reload never ran".
 
 **SDK signal forwarding** — `firecracker-go-sdk` v1.0.0 defaults to forwarding `SIGINT/SIGQUIT/SIGTERM/SIGHUP/SIGABRT` from the daemon to every Firecracker child (see `internal/vm/machine.go`'s `setupSignals` reference). The daemon explicitly narrows `firecracker.Config.ForwardSignals` to `SIGQUIT` and `SIGABRT` only. `SIGHUP` is owned by the token-reload + vsock fan-out flow described here; forwarding it would kill every running Firecracker and the fan-out would immediately get `connection refused`. `SIGINT` and `SIGTERM` are also daemon-owned: `Ctrl-C` / `systemctl stop` enter the daemon's graceful teardown and auto-snapshot path, which then stops each child explicitly. `SIGQUIT` and `SIGABRT` stay forwarded because the daemon does not trap those abnormal exits, so forwarding them reduces orphaned Firecracker children.
 
