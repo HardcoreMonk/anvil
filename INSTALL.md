@@ -11,12 +11,15 @@ toolchain or source checkout needed. (Developers building from source: see the
 | OS / arch | Linux on **x86-64 (amd64)**, Ubuntu 22.04 or 24.04 |
 | Virtualization | `/dev/kvm` present and accessible (bare metal, or a VM with nested virtualization) |
 | Privileges | root (the daemon manages KVM, networking, and disk images) |
-| Runtime packages | `iproute2`, `dmsetup`, `iptables` — `ebtables` optional (anti-spoof) |
+| Runtime packages | `iproute2`, `dmsetup`, `iptables` — `ebtables` optional (anti-spoof), `conntrack` optional (clears a torn-down VM's conntrack entries so a recycled guest IP cannot inherit the egress SNI filter's approval mark) |
 | SLIM variant only | also `curl`, `debootstrap`, `e2fsprogs`, `util-linux` (the first boot builds the VM image) |
 
 ```bash
 # Runtime (both variants):
 sudo apt-get install -y iproute2 dmsetup iptables
+# Optional but recommended — each degrades to a warning at startup if absent,
+# and the protection it provides is simply skipped:
+sudo apt-get install -y ebtables conntrack
 # Only if you use the SLIM package (builds the VM image on first boot):
 sudo apt-get install -y curl debootstrap util-linux e2fsprogs
 ```
