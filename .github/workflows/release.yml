@@ -29,6 +29,12 @@ permissions:
 
 jobs:
   release:
+    # Tags only. A dispatch selects any ref, and on a branch GITHUB_REF_NAME is
+    # the branch name — which build_release.sh would stamp into the artifact
+    # names and action-gh-release would take as tag_name, since it defaults to
+    # github.ref_name. That publishes a release named after a branch. Skipping
+    # the job is the right answer: a dispatch on a branch does nothing.
+    if: startsWith(github.ref, 'refs/tags/')
     # Build on the oldest supported host: ephemera-daemon links to this glibc, so
     # building here keeps it runnable on Ubuntu 22.04 and newer.
     runs-on: ubuntu-22.04
@@ -54,11 +60,14 @@ jobs:
       - name: Build release tarballs (FULL + SLIM)
         run: sudo -E env "PATH=$PATH" bash scripts/build_release.sh "${GITHUB_REF_NAME}"
 
-      # Pinned to a commit, not the moving v2 tag: this step holds contents:write
-      # and is the exact shape a retargeted-tag supply-chain attack goes after.
-      # Bump deliberately (the SHA below is v2 as of 2026-08-06).
+      # Pinned to a commit, not a moving major tag: this step holds
+      # contents:write and is the exact shape a retargeted-tag supply-chain
+      # attack goes after. v3 rather than v2 — v2's last release was 2026-04 and
+      # the maintained line has moved on, so pinning a workflow that has never
+      # run to an abandoned major would freeze it there. Bump deliberately (the
+      # SHA below is v3.0.2, 2026-07-13).
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        uses: softprops/action-gh-release@c12583777ecdfd3be55c69cf75464299dc01057e # v3.0.2
         with:
           files: |
             dist/*.tar.gz
