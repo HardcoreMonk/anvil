@@ -22,6 +22,55 @@ import (
 // its own max_agents (v0.4.3). Limits IP pool / TAP exhaustion from a runaway caller.
 const defaultMaxAgentsPerFlock = 20
 
+// Response-body caps for everything this daemon reads back from a LESS trusted
+// peer — an in-guest goose-agent or another host's daemon. Both sit on the far
+// side of a VM/host boundary, so their response length is attacker-influenced:
+// a guest that repoints its agent port at a body-flooding server would otherwise
+// grow the root daemon's heap without bound (io.ReadAll on a network reader has
+// no limit), turning a guest-local capability into a host OOM. Mirrors the caps
+// already applied on the collector (stats_collector.go) and gateway
+// (internal/mcpgateway) read paths.
+//
+// The caps are sized to the largest LEGITIMATE payload of each path, so a cap
+// hit always means "abnormal", never "busy day":
+const (
+	// maxPeerErrorBody bounds a body read purely to quote a peer's refusal back
+	// to the caller. The status code carries the meaning, so these are truncated
+	// rather than escalated; 64 KiB holds any realistic JSON error envelope.
+	maxPeerErrorBody = 64 << 10
+
+	// maxWallMessageBody bounds the single Town Wall Message a home daemon
+	// echoes back for a relayed post. A wall body may be large (agents publish
+	// whole files through gtwall), but the echo can never legitimately exceed
+	// one message; 1 MiB matches goose-agent's own maxWorkloadOutputBytes.
+	maxWallMessageBody = 1 << 20
+
+	// maxWallHistoryBody bounds a relayed /wall/history read — the largest
+	// legitimate cross-daemon payload, since it serializes the whole active
+	// wall. The active log is itself capped by EPHEMERA_TOWNWALL_MAX_MIB
+	// (default 10 MiB), and JSON framing/escaping inflates that by well under
+	// 3x, so 32 MiB clears any honest history while still bounding the read.
+	maxWallHistoryBody = 32 << 20
+
+	// maxAgentResponseBody bounds a goose-agent task result (/tasks) and the
+	// daemon-to-daemon /call hop that wraps one. Matches the 4 MiB ceiling used
+	// for workspace file transfers (maxWorkspaceFileBytes) and the MCP gateway.
+	maxAgentResponseBody = 4 << 20
+)
+
+// readCapped reads at most max bytes from r and reports whether the source had
+// more to give. Callers decide what an over-cap read means: an error-snippet
+// reader may keep the truncated bytes, but a PAYLOAD reader must fail — a
+// silently cut task result or wall record is an integrity failure the receiving
+// caller has no way to detect.
+func readCapped(r io.Reader, max int64) ([]byte, bool, error) {
+	b, err := io.ReadAll(io.LimitReader(r, max+1))
+	if int64(len(b)) > max {
+		return b[:max], true, err
+	}
+	return b, false, err
+}
+
 // flockMax returns a flock's effective agent cap: its own MaxAgents, or the
 // default when unset (0). Recovered flocks with no stored cap also fall back here.
 // agentCount renders an agent count with the grammatically correct noun for Town
@@ -385,8 +434,24 @@ func relayTownWallPost(ctx context.Context, homeAddr, relayToken, flockID, agent
 		return 0, nil, err
 	}
 	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
+	// The echoed record is a payload mirrored verbatim to the guest, so an
+	// over-cap body is an error rather than a silent truncation: a cut JSON
+	// object would reach the caller as a corrupt Message it cannot detect.
+	respBody, truncated, rerr := readCapped(resp.Body, maxWallMessageBody)
+	if rerr != nil {
+		return 0, nil, rerr
+	}
+	if truncated {
+		return 0, nil, fmt.Errorf("home response exceeded %d bytes", maxWallMessageBody)
+	}
 	return resp.StatusCode, respBody, nil
+}
+
+// errReservedWallAuthor is the refusal for a caller trying to post under the
+// control plane's own author label. Shared by the relay and wall-owner paths so
+// both report identically.
+func errReservedWallAuthor() error {
+	return fmt.Errorf("agent_id %q is reserved for the control plane", orchestrator.SystemAuthor)
 }
 
 func (cp *ControlPlane) postToTownWall(w http.ResponseWriter, r *http.Request, flockID string) {
@@ -411,6 +476,16 @@ func (cp *ControlPlane) postToTownWall(w http.ResponseWriter, r *http.Request, f
 			writeJSONError(w, http.StatusBadRequest, fmt.Errorf("agent_id and body required"))
 			return
 		}
+		// Reject a forged control-plane author before the hop, so a member host
+		// never carries one across the wire. Roster membership itself is NOT
+		// checked here: a relay flock owns no wall and has no authoritative
+		// roster (POST /flocks/{id}/relay takes `agents` as optional, and the
+		// deployed member-host registration omits it), so the wall OWNER — home,
+		// which reaches the hub branch below — is the single enforcement point.
+		if req.AgentID == orchestrator.SystemAuthor {
+			writeJSONError(w, http.StatusForbidden, errReservedWallAuthor())
+			return
+		}
 		status, respBody, err := relayTownWallPost(r.Context(), f.HomeAddr, f.RelayToken, flockID, req.AgentID, req.Body)
 		if err != nil {
 			writeJSONError(w, http.StatusBadGateway, fmt.Errorf("town wall relay to home failed for flock %q", flockID))
@@ -428,6 +503,30 @@ func (cp *ControlPlane) postToTownWall(w http.ResponseWriter, r *http.Request, f
 	}
 	if req.AgentID == "" || req.Body == "" {
 		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("agent_id and body required"))
+		return
+	}
+	// AUTHORSHIP CHECK (this is the wall owner: local flock or hub). Reaching
+	// here only proves admission — /flocks/{id}/post is opened by the flock's
+	// relay token, which is the GUEST capability token, so req.AgentID is
+	// attacker-controlled input, not an identity. Two rules, in order:
+	//
+	//  1. SystemAuthor is never assignable by a caller. It labels messages the
+	//     control plane posts on its own behalf (lifecycle events, watchdog
+	//     notices); agents read the wall to decide what to do next, so a forged
+	//     "control-plane" instruction is a direct behavior-manipulation
+	//     primitive. Checked before membership so a roster that happens to carry
+	//     the reserved label cannot unlock it.
+	//  2. The author must be on this flock's roster. Otherwise any flock member
+	//     could publish under a peer's name, or invent one, and the wall would
+	//     record it as genuine — corrupting both live coordination and the audit
+	//     trail that History replays to restarted and late-joining agents.
+	if req.AgentID == orchestrator.SystemAuthor {
+		writeJSONError(w, http.StatusForbidden, errReservedWallAuthor())
+		return
+	}
+	if !f.HasMember(req.AgentID) {
+		slog.Warn("town wall: rejected post from non-member", "flock_id", flockID, "agent_id", req.AgentID)
+		writeJSONError(w, http.StatusForbidden, fmt.Errorf("agent %q is not a member of flock %q", req.AgentID, flockID))
 		return
 	}
 	msg, err := f.TownWall.Post(req.AgentID, req.Body)
@@ -466,7 +565,14 @@ func (cp *ControlPlane) townWallHistory(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 		defer resp.Body.Close()
-		b, _ := io.ReadAll(resp.Body)
+		// Payload (the home's whole history array): fail rather than mirror a
+		// truncated JSON array, which the caller would parse as a short history
+		// and mistake for the complete record.
+		b, truncated, rerr := readCapped(resp.Body, maxWallHistoryBody)
+		if rerr != nil || truncated {
+			writeJSONError(w, http.StatusBadGateway, fmt.Errorf("town wall history relay to home failed for flock %q", flockID))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(b)
@@ -620,7 +726,10 @@ func (cp *ControlPlane) streamTownWallRelay(w http.ResponseWriter, r *http.Reque
 	// status and JSON error body like the post/history relay handlers instead
 	// of stamping SSE headers on a response that carries no event stream.
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
+		// Error snippet, not a payload: truncate and keep mirroring home's status.
+		// The status code is what the caller acts on, so quoting a partial message
+		// beats masking a 401 behind a 502.
+		b, _, _ := readCapped(resp.Body, maxPeerErrorBody)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(b)
@@ -1204,7 +1313,17 @@ func (cp *ControlPlane) dispatchBroadcastTask(ctx context.Context, vmID, prompt 
 	if resp.StatusCode == http.StatusServiceUnavailable {
 		return broadcastResult{Status: "busy"}
 	}
-	raw, _ := io.ReadAll(resp.Body)
+	// Payload (the agent's task result): report the flood as a per-agent failure
+	// instead of returning a truncated output that the caller would read as the
+	// agent's real answer. One misbehaving member must not fail the fan-out, so
+	// this stays a broadcastResult rather than an HTTP error.
+	raw, truncated, rerr := readCapped(resp.Body, maxAgentResponseBody)
+	if rerr != nil {
+		return broadcastResult{Status: "error", Error: rerr.Error()}
+	}
+	if truncated {
+		return broadcastResult{Status: "error", Error: fmt.Sprintf("agent response exceeded %d bytes", maxAgentResponseBody)}
+	}
 	var tr struct {
 		Output string `json:"output"`
 		Error  string `json:"error"`
@@ -1381,7 +1500,15 @@ func forwardFlockCall(ctx context.Context, addr, callToken, flockID string, call
 		return 0, nil, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	// Payload (a remote agent's task result, wrapped by the peer daemon): same
+	// integrity rule as the local dispatch — fail rather than mirror a cut body.
+	body, truncated, rerr := readCapped(resp.Body, maxAgentResponseBody)
+	if rerr != nil {
+		return 0, nil, rerr
+	}
+	if truncated {
+		return 0, nil, fmt.Errorf("peer response exceeded %d bytes", maxAgentResponseBody)
+	}
 	return resp.StatusCode, body, nil
 }
 
@@ -1468,7 +1595,19 @@ func (cp *ControlPlane) dispatchFlockCall(w http.ResponseWriter, r *http.Request
 		return
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
+	// Payload (the agent's task result, mirrored verbatim): a guest that repoints
+	// its agent port at a flooding server is exactly the M4 amplification, so cap
+	// the read and fail closed instead of forwarding a truncated result.
+	raw, truncated, rerr := readCapped(resp.Body, maxAgentResponseBody)
+	if rerr != nil {
+		writeJSONError(w, http.StatusBadGateway, fmt.Errorf("agent response read failed"))
+		return
+	}
+	if truncated {
+		slog.Warn("call: agent response exceeded cap", "vm_id", vmID, "max_bytes", maxAgentResponseBody)
+		writeJSONError(w, http.StatusBadGateway, fmt.Errorf("agent response exceeded %d bytes", maxAgentResponseBody))
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(raw)

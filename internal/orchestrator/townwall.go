@@ -5,6 +5,7 @@ package orchestrator
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,13 @@ import (
 	"sync"
 	"time"
 )
+
+// maxWallLineBytes bounds a single on-disk Town Wall record when reading. A
+// record is now exactly one physical line, so a multi-megabyte message body
+// (agents publish whole files through gtwall) is one long line — well past
+// bufio.Scanner's 64 KiB default token size, which would otherwise abort the
+// whole History read. Mirrors the audit reader's explicit Scanner budget.
+const maxWallLineBytes = 8 << 20
 
 // SystemAuthor is the Town Wall author label for messages the control plane posts
 // on its own behalf — flock lifecycle events (spawn / join / leave / role change /
@@ -24,6 +32,20 @@ const SystemAuthor = "control-plane"
 // starting at 1; subscribers can detect dropped messages by checking for gaps.
 type Message struct {
 	Seq       uint64 `json:"seq"`
+	Timestamp string `json:"timestamp"`
+	AgentID   string `json:"agent_id"`
+	Body      string `json:"body"`
+}
+
+// wallRecord is the on-disk form of a Town Wall entry: one JSON object per
+// line. Field names match Message's tags so the log stays greppable by the same
+// keys the API returns.
+//
+// Seq is deliberately absent. History assigns 1..N in file order, and that
+// stays the canonical assignment (unchanged from the legacy text format, which
+// also stored no seq) so a rotated or hand-edited log can never disagree with
+// itself about numbering.
+type wallRecord struct {
 	Timestamp string `json:"timestamp"`
 	AgentID   string `json:"agent_id"`
 	Body      string `json:"body"`
@@ -89,11 +111,27 @@ func (tw *TownWall) Post(agentID, body string) (Message, error) {
 		AgentID:   agentID,
 		Body:      body,
 	}
+	// Encode BEFORE opening the file so a malformed record never leaves a partial
+	// line behind. json.Marshal escapes \n and \r inside every string field, which
+	// is what makes one Post structurally incapable of producing more than one
+	// record: no agent-supplied byte can close the record or open a new one. The
+	// previous "[%s] <%s> %s\n" writer had no such boundary — a body containing a
+	// newline plus a well-formed header forged additional entries (including ones
+	// attributed to SystemAuthor) that History replayed as genuine.
+	line, merr := json.Marshal(wallRecord{
+		Timestamp: msg.Timestamp,
+		AgentID:   msg.AgentID,
+		Body:      msg.Body,
+	})
+	if merr != nil {
+		return msg, fmt.Errorf("townwall: encode record: %w", merr)
+	}
+	line = append(line, '\n')
 	f, err := os.OpenFile(tw.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		return msg, fmt.Errorf("townwall: open for append: %w", err)
 	}
-	_, werr := fmt.Fprintf(f, "[%s] <%s> %s\n", msg.Timestamp, msg.AgentID, msg.Body)
+	_, werr := f.Write(line)
 	f.Close()
 	if werr != nil {
 		return msg, fmt.Errorf("townwall: append: %w", werr)
@@ -132,6 +170,7 @@ func (tw *TownWall) History() ([]Message, error) {
 	var out []Message
 	var seq uint64
 	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxWallLineBytes)
 	for scanner.Scan() {
 		if m, ok := parseLine(scanner.Text()); ok {
 			seq++
@@ -165,9 +204,25 @@ func (tw *TownWall) Unsubscribe(ch chan Message) {
 	tw.mu.Unlock()
 }
 
-// parseLine extracts a Message from "[ts] <agent> body".
-// Returns (_, false) for any line that does not match the expected shape.
+// parseLine extracts a Message from one on-disk log line.
+//
+// Two record formats coexist, and the leading byte tells them apart with no
+// ambiguity:
+//
+//   - '{' — the current JSON-object format written by Post.
+//   - '[' — the legacy "[ts] <agent> body" text format. Logs written by an
+//     earlier daemon (and their rotated backups) keep reading verbatim after an
+//     upgrade; nothing rewrites them, so their content is never reinterpreted.
+//
+// Returns (_, false) for any line matching neither shape.
 func parseLine(line string) (Message, bool) {
+	if strings.HasPrefix(line, "{") {
+		var rec wallRecord
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			return Message{}, false
+		}
+		return Message{Timestamp: rec.Timestamp, AgentID: rec.AgentID, Body: rec.Body}, true
+	}
 	if !strings.HasPrefix(line, "[") {
 		return Message{}, false
 	}
