@@ -77,13 +77,17 @@ func TestReapplyRecoveredEgressReRegistersSNI(t *testing.T) {
 	}
 	s := storage.VMState{VMID: "vm-sni", GuestIP: "10.0.1.11", TapDevice: "tap-sni", EgressPolicy: "profile", Profile: "sni", TenantID: "t1"}
 
-	if d := loop.decide("10.0.1.11", nil); !(d.Action == sniDrop && d.Reason == "unregistered_source") {
-		t.Fatalf("precondition: guest IP already registered pre-recovery, decide = %+v", d)
+	// decideTCP is the production TCP classifier (decide() has no production
+	// caller); the sport is arbitrary here since a nil payload short-circuits
+	// before any per-flow reassembler is touched, so this remains a pure
+	// registration probe.
+	if d := loop.decideTCP("10.0.1.11", 9001, nil); !(d.Action == sniDrop && d.Reason == "unregistered_source") {
+		t.Fatalf("precondition: guest IP already registered pre-recovery, decideTCP = %+v", d)
 	}
 	if err := cp.reapplyRecoveredEgress(s); err != nil {
 		t.Fatalf("reapply err = %v", err)
 	}
-	if d := loop.decide("10.0.1.11", nil); d.Action == sniDrop && d.Reason == "unregistered_source" {
+	if d := loop.decideTCP("10.0.1.11", 9001, nil); d.Action == sniDrop && d.Reason == "unregistered_source" {
 		t.Fatal("recovery did not re-register guest IP in SNI verdict loop")
 	}
 }

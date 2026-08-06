@@ -128,44 +128,23 @@ func buildQUICInitialForTest(srcIPHint, name string) []byte {
 	return quic.BuildInitialForTest(dcid, 0x00000001, encodeQUICClientHelloHandshake(name))
 }
 
-func TestSNIDecideRouting(t *testing.T) {
-	l := newSNIVerdictLoop(88, "", nil)
-	m, _ := sni.NewMatcher([]string{"api.anthropic.com", "*.example.com"})
-	l.Register("10.0.1.10", sniRegistryEntry{VMID: "vm-1", TenantID: "t1", Profile: "p", Matcher: m})
-
-	// allowed exact
-	if d := l.decide("10.0.1.10", mustHello(t, "api.anthropic.com")); d.Action != sniAcceptMark {
-		t.Fatalf("allowed exact -> %v (%s)", d.Action, d.Reason)
-	}
-	// allowed wildcard
-	if d := l.decide("10.0.1.10", mustHello(t, "cdn.example.com")); d.Action != sniAcceptMark {
-		t.Fatalf("allowed wildcard -> %v", d.Action)
-	}
-	// denied
-	d := l.decide("10.0.1.10", mustHello(t, "evil.test"))
-	if d.Action != sniDrop || d.Reason != "egress_sni_denied" || d.SNI != "evil.test" {
-		t.Fatalf("denied -> action=%v reason=%q sni=%q", d.Action, d.Reason, d.SNI)
-	}
-	// handshake / no application payload -> passthrough
-	if d := l.decide("10.0.1.10", []byte{}); d.Action != sniPassthrough {
-		t.Fatalf("empty payload -> %v, want passthrough", d.Action)
-	}
-	// unregistered source -> fail-closed drop
-	if d := l.decide("10.0.1.99", mustHello(t, "api.anthropic.com")); d.Action != sniDrop {
-		t.Fatalf("unregistered -> %v, want drop", d.Action)
-	}
-	// malformed application payload -> fail-closed drop
-	if d := l.decide("10.0.1.10", []byte{0x16, 0x03, 0x01, 0xff, 0xff, 0x01}); d.Action != sniDrop {
-		t.Fatalf("malformed -> %v, want drop", d.Action)
-	}
-}
-
+// TestSNIDeregisterFailsClosed pins that a deregistered source fails closed.
+// Originally written against a single-packet decide() helper that had no
+// production caller; that helper has since been deleted and every property it
+// covered (allow/deny classification, empty payload, unregistered-source
+// fail-closed, the malformed vector) now lives on decideTCP — the function the
+// data path actually calls — via TestSNIDecideTCPRouting below.
+// This is the one property that test never exercised on decideTCP, so it moves
+// here rather than being dropped.
 func TestSNIDeregisterFailsClosed(t *testing.T) {
 	l := newSNIVerdictLoop(88, "", nil)
 	m, _ := sni.NewMatcher([]string{"api.anthropic.com"})
 	l.Register("10.0.1.10", sniRegistryEntry{VMID: "vm-1", TenantID: "t1", Matcher: m})
 	l.Deregister("10.0.1.10")
-	if d := l.decide("10.0.1.10", mustHello(t, "api.anthropic.com")); d.Action != sniDrop {
+	// decideTCP is the production TCP classifier; the sport is arbitrary here
+	// since the unregistered-source check runs before any per-flow reassembler
+	// is touched.
+	if d := l.decideTCP("10.0.1.10", 9001, mustHello(t, "api.anthropic.com")); d.Action != sniDrop {
 		t.Fatal("deregistered source must fail closed")
 	}
 }
@@ -332,9 +311,9 @@ func splitHelloIntoRecords(rec []byte, n int) [][]byte {
 }
 
 // TestSNIDecideTCPRouting is the routing contract of the function the Start
-// hook's TCP branch actually calls. decide() (above) is a single-packet
-// classifier with NO production caller, so its coverage never touched the real
-// data path — this test does.
+// hook's TCP branch actually calls. It replaces the coverage that used to sit on
+// a single-packet decide() helper with no production caller, whose green never
+// touched the real data path — which is how H3 stayed hidden.
 func TestSNIDecideTCPRouting(t *testing.T) {
 	l := newSNIVerdictLoop(88, "", nil)
 	m, _ := sni.NewMatcher([]string{"api.anthropic.com", "*.example.com"})
@@ -364,6 +343,21 @@ func TestSNIDecideTCPRouting(t *testing.T) {
 	badRec[0] = 0x17 // application_data
 	if d := l.decideTCP("10.0.1.10", 1006, badRec); d.Action != sniDrop || d.Reason != "egress_sni_unparsed" {
 		t.Fatalf("non-handshake record -> %v/%q, want drop/egress_sni_unparsed", d.Action, d.Reason)
+	}
+	// {0x16,0x03,0x01,0xff,0xff,0x01}: a handshake record declaring a 64 KiB
+	// body with only 1 byte buffered. This is the retired decide() test's
+	// "malformed" vector (TestSNIDecideRouting, now removed) — decide()'s
+	// single-shot parser had no way to say "need more bytes", so it fail-closed
+	// on every parse error including ErrIncomplete and pinned this vector to a
+	// drop, a policy the production TCP path never had. decideTCP's reassembler
+	// correctly recognizes a declared length exceeding the buffered bytes as
+	// merely INCOMPLETE, not malformed, and forwards the segment unmarked so the
+	// next one re-queues onto the same flow (egress_sni_incomplete) — this does
+	// not fail open: this branch can never yield an approved connmark (see
+	// decideTCP's doc comment), and a genuinely unparsable record still drops,
+	// as the content_type-0x17 case above proves.
+	if d := l.decideTCP("10.0.1.10", 1007, []byte{0x16, 0x03, 0x01, 0xff, 0xff, 0x01}); d.Action != sniPassthrough || d.Reason != "egress_sni_incomplete" {
+		t.Fatalf("declared-length-exceeds-buffer vector -> %v/%q, want passthrough/egress_sni_incomplete (not a drop; see comment above)", d.Action, d.Reason)
 	}
 }
 

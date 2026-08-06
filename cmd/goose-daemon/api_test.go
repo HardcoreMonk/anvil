@@ -413,13 +413,13 @@ func TestApplyWithProfileRegistersAndDeregistersSNI(t *testing.T) {
 	if err := enforcer.ApplyWithProfile("vm-1", "tap", "10.0.1.10", "profile", "sni", "t1"); err != nil {
 		t.Fatalf("apply err = %v", err)
 	}
-	if d := loop.decide("10.0.1.10", nil); d.Action == sniDrop && d.Reason == "unregistered_source" {
+	if d := loop.decideTCP("10.0.1.10", 9001, nil); d.Action == sniDrop && d.Reason == "unregistered_source" {
 		t.Fatal("apply did not register guest IP in verdict loop")
 	}
 	if err := enforcer.Cleanup("vm-1"); err != nil {
 		t.Fatalf("cleanup err = %v", err)
 	}
-	if d := loop.decide("10.0.1.10", nil); !(d.Action == sniDrop && d.Reason == "unregistered_source") {
+	if d := loop.decideTCP("10.0.1.10", 9001, nil); !(d.Action == sniDrop && d.Reason == "unregistered_source") {
 		t.Fatal("cleanup did not deregister guest IP")
 	}
 }

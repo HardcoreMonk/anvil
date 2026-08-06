@@ -442,6 +442,13 @@ Town Wall message body는 `flocks/<flock_id>/TOWN_WALL.log`와 history 응답에
 남는다. provider token, API key, `agent_token` 같은 secret을 Town Wall에 게시하지
 않는다.
 
+PR #92(main `62c07b9`)부터 `TOWN_WALL.log`는 한 줄 JSON(`{"timestamp":...,
+"agent_id":...,"body":...}`)으로 기록되고, 그 이전에 쓰인 legacy 텍스트 줄
+(`[ts] <agent> body`)도 계속 읽힌다. 이 경계 이전 daemon 바이너리로 롤백할 때
+생기는 판독 트랩(history가 빈 것처럼 보임 — 데이터 손실 아님)은
+[disaster-recovery.md](disaster-recovery.md)의 "Town Wall 로그 다운그레이드 트랩"
+절을 참고한다.
+
 `metadata.json`이 있는 flock은 daemon restart 뒤 registry와 Town Wall log가 복구된다.
 spawn-path member VM은 `vms/<vm_id>/state.json` 기반으로 cold-restart되어 같은 VM ID,
 IP, TAP, MAC, agent token, agent URL을 유지한다. memory state와 진행 중인 task는
