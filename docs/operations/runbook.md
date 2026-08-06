@@ -735,6 +735,17 @@ alerting rule 등록·발화는 zone `project-dashboard`가 scrape해 담당한�
   terminal-소진은 `queue_depth` 지속 + `attempts_total{outcome="terminal_rejected"}`
   증가로만 드러난다. terminal 마크는 adapter(`cmd/anvil-mcp`) 재시작이
   re-arm한다.
+- `anvil_scheduler_snapshot_replication_peer_only_satisfied > 0`
+  **지속**(예: 수 분 이상) — desired 복제본 수(N=2)는 채웠지만 그 위치
+  중 최소 하나가 peer daemon의 `ListSnapshots` 보고로만 기록되고 adapter
+  자신의 replicate/import로 검증된 위치는 하나도 없다는 뜻이다. **page
+  알림 대상이 아니다** — durability 신호이지 보안 경보가 아니며, 이
+  gauge는 observability 전용이라 재-복제 여부(drift 판정)에는 영향을
+  주지 않는다. 조치는 재시작이 아니라 확인이다: 해당 host의 daemon에
+  `GET /snapshots`를 호출해 그 스냅샷을 실제로 보유하고 있는지 먼저
+  본다. #104 이전에 기록된 legacy 위치는 provenance가 없어 unknown으로
+  decode되며 이 gauge에 잡히지 않는다(업그레이드 시 급등을 막기 위한
+  의도적 설계).
 - `time() - anvil_scheduler_snapshot_replication_last_success_timestamp_seconds`
   **staleness** — reconcile 주기 대비 과도하게 크면(예: 여러 주기 연속) sweep
   자체가 멈췄거나(adapter dead) 모든 시도가 실패 중이라는 신호다.
