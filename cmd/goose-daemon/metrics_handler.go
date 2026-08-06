@@ -233,9 +233,12 @@ func (m *daemonMetrics) IncAuthFailure() {
 }
 
 // IncSNIVerdict records one :443 SNI verdict by proto (tcp|udp|unknown) and
-// outcome. The classify path emits "allowed" (accept+mark) and "denied" (policy
-// deny) via recordVerdict; the Start hook's pre-classify fail-closed sites (no
-// payload, unparsable packet, unregistered source) emit "dropped" so the counter
+// outcome. recordVerdict emits "allowed" (accept+mark), "denied" (policy deny)
+// and "incomplete" (a TCP segment forwarded unmarked while its ClientHello is
+// still being reassembled — never an approval, and the one path where bytes
+// leave the host with no policy decision, so it is counted rather than silent);
+// the pre-classify fail-closed sites (no payload, unparsable packet,
+// unregistered source) emit "dropped" so the counter
 // reflects every kernel verdict, not just policy decisions. proto is "unknown"
 // only for the no-payload drop that precedes the tcp/udp branch. Called
 // regardless of tenant availability or audit-append success/failure — the counter
