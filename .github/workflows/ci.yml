@@ -51,7 +51,11 @@ jobs:
       # the firecracker-go-sdk transitive tree does not block the build. Also
       # covers the standard library, which is why go.mod pins a toolchain patch
       # release rather than floating on the `go` directive floor.
+      # Pinned, not @latest: the advisory data is fetched from the vulnerability
+      # database at run time, so pinning the binary costs no detection coverage
+      # while keeping the tool itself out of the mutable-dependency class this
+      # gate exists to catch. Raise the version deliberately.
       - name: Govulncheck
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
           "$(go env GOPATH)/bin/govulncheck" ./...
