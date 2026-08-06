@@ -2,6 +2,15 @@ module ephemera
 
 go 1.25.0
 
+// Pin the build toolchain to a patch release rather than letting CI float on the
+// `go` directive floor above. Both CI and the release workflow resolve their
+// toolchain from this file, so without this line builds track 1.25.0 and ship
+// every standard-library advisory fixed since. The 2026-08-06 security audit
+// measured 14 reachable stdlib vulnerabilities at 1.25.5 (crypto/tls, crypto/x509,
+// net/url, os, net, net/textproto, net/http, archive/tar) and 0 at 1.25.12.
+// Raise this line — do not remove it — when adopting a newer patch release.
+toolchain go1.25.12
+
 require (
 	github.com/firecracker-microvm/firecracker-go-sdk v1.0.0
 	github.com/florianl/go-nfqueue/v2 v2.1.0
