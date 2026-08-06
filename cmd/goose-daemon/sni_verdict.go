@@ -176,8 +176,76 @@ func (l *sniVerdictLoop) Ready() bool {
 	return l.ready
 }
 
+// decideTCP is the pure classification core of the Start hook's TCP branch — the
+// function the hook routes through instead of open-coding its own verdict logic.
+// It is decideQUIC's TCP counterpart and has the same shape: payload is one
+// queued segment's TCP application payload, and srcIP/sport identify the flow,
+// keying the per-flow *sni.Reassembler it drives via reassemblerFor.
+//
+// It exists because the hook's verdict logic previously lived only inside the
+// nfqueue closure, which no unit test can reach (Start needs root + netfilter).
+// The only testable classifier was decide() below, which has NO production
+// caller and implements a DIFFERENT incomplete-segment policy — so the tests
+// pinned a fail-closed rule the data path never had, and the multi-record
+// fail-open (H3) sat untested underneath.
+//
+// Fail-closed contract (byte-for-byte the branch it replaced):
+//   - unregistered srcIP -> sniDrop (unregistered_source). The hook re-checks
+//     this before calling, so in production this branch is unreachable defense
+//     in depth; it keeps the pure core fail-closed on its own terms, exactly as
+//     decideQUIC's unregistered branch does.
+//   - empty payload (bare ACK / TCP handshake) -> sniPassthrough with NO reason.
+//     There are no TLS bytes to classify yet, so the segment is forwarded
+//     unmarked; the empty Reason keeps recordVerdict from counting it, since it
+//     fires on every ACK of every flow and carries no classification signal.
+//   - Feed terminal error -> sniDrop (egress_sni_unparsed) + flow evict.
+//   - Feed incomplete -> sniPassthrough (egress_sni_incomplete): forwarded
+//     unmarked so the next segment re-queues here. This is the one verdict path
+//     that lets bytes leave the host with no policy decision, so unlike the
+//     bare-ACK passthrough it IS counted (see recordVerdict). It cannot be
+//     ridden indefinitely: the reassembler's byte cap turns a never-completing
+//     ClientHello into a terminal drop, and it can never yield an approved
+//     connmark.
+//   - Feed done -> classifyParsedSNI (accept+mark or policy deny) + flow evict.
+//
+// Why TCP forwards an incomplete segment where decideQUIC drops one: TCP's
+// completing segment re-queues here regardless, and a denied ClientHello is
+// DROP+RST at completion so the server never receives a whole one; QUIC instead
+// must make the completing datagram the flow's first accepted packet for its
+// connmark to confirm (see decideQUIC's doc).
+func (l *sniVerdictLoop) decideTCP(srcIP string, sport uint16, payload []byte) sniDecision {
+	entry, ok := l.resolveEntry(srcIP)
+	if !ok {
+		return sniDecision{Action: sniDrop, Reason: "unregistered_source"}
+	}
+	if len(payload) == 0 {
+		return sniDecision{Action: sniPassthrough} // handshake packet, let it through unmarked
+	}
+	flowKey := srcIP + ":" + strconv.Itoa(int(sport))
+	r := l.reassemblerFor(flowKey)
+	name, done, ech, ferr := r.Feed(payload)
+	switch {
+	case ferr != nil:
+		// Terminal parse error (malformed / no-SNI / oversized) -> fail closed.
+		l.evictFlow(flowKey)
+		return sniDecision{Action: sniDrop, Reason: "egress_sni_unparsed"}
+	case !done:
+		return sniDecision{Action: sniPassthrough, Reason: "egress_sni_incomplete"}
+	default:
+		l.evictFlow(flowKey)
+		d := l.classifyParsedSNI(entry, name)
+		d.ECHObserved = ech
+		return d
+	}
+}
+
 // decide is the pure routing core (unit-tested without root). payload is the TCP
 // application payload of one queued packet; srcIP is the packet source address.
+//
+// NOTE: decide is NOT the production TCP path — decideTCP is. decide classifies a
+// single packet with no reassembler, so it cannot express "need more bytes" and
+// fails closed on ErrIncomplete instead (see the deviation note below). Do not
+// read its coverage as coverage of the data path.
 //
 // Fail-closed contract:
 //   - unregistered srcIP        -> sniDrop  (reason unregistered_source)
@@ -192,8 +260,8 @@ func (l *sniVerdictLoop) Ready() bool {
 // {0x16,0x03,0x01,0xff,0xff,0x01} declares a 64 KiB record in a 6-byte buffer and
 // so classifies as ErrIncomplete, yet must DROP; and (2) forwarding an
 // unverifiable single packet is strictly less safe than dropping it. Legitimate
-// multi-segment ClientHellos are reassembled in Start (which owns the "need more
-// bytes" signal via sni.Reassembler) before any decision is taken, so decide
+// multi-segment ClientHellos are reassembled by decideTCP (which owns the "need
+// more bytes" signal via sni.Reassembler) before any decision is taken, so decide
 // never has to say "retry" — the loop, not the classifier, re-queues partials.
 func (l *sniVerdictLoop) decide(srcIP string, payload []byte) sniDecision {
 	entry, ok := l.resolveEntry(srcIP)
@@ -528,32 +596,12 @@ func (l *sniVerdictLoop) Start(ctx context.Context) error {
 			l.metrics.IncSNIVerdict(protoTCP, "dropped") // pre-classify infra drop (distinct from policy denial)
 			return 0
 		}
-		if len(t.payload) == 0 {
-			// Handshake / bare ACK: no TLS bytes yet, pass unmarked so a later
-			// ClientHello segment re-queues (connmark stays unset).
-			l.setAccept(nf, id)
-			return 0
-		}
-
-		flowKey := srcIP + ":" + strconv.Itoa(int(t.sport))
-		r := l.reassemblerFor(flowKey)
-		name, done, ech, ferr := r.Feed(t.payload)
-		switch {
-		case ferr != nil:
-			// Terminal parse error (malformed / no-SNI / oversized) -> fail closed.
-			l.evictFlow(flowKey)
-			l.applyVerdict(nf, id, sniDecision{Action: sniDrop, Reason: "egress_sni_unparsed"}, t, entry)
-		case !done:
-			// Incomplete ClientHello: forward this segment unmarked so the next
-			// segment re-queues here. Bounded by the reassembler's 16 KiB buffer
-			// and the LRU flow cap; it can never yield an approved connmark.
-			l.setAccept(nf, id)
-		default:
-			l.evictFlow(flowKey)
-			d := l.classifyParsedSNI(entry, name)
-			d.ECHObserved = ech
-			l.applyVerdict(nf, id, d, t, entry)
-		}
+		// Per-flow reassembly (TCP segments AND TLS records) plus the
+		// passthrough/accept/drop routing live in decideTCP, so the data path's
+		// verdict logic is a unit-testable pure function instead of closure-only
+		// code no test can reach. The hook body reduces to
+		// parse -> resolve -> decideTCP -> apply, mirroring handleUDPQUIC.
+		l.applyVerdict(nf, id, l.decideTCP(srcIP, t.sport, t.payload), t, entry)
 		return 0
 	}
 
@@ -691,10 +739,30 @@ func (l *sniVerdictLoop) applyVerdictUDP(nf *nfqueue.Nfqueue, id uint32, d sniDe
 // success/failure — a content-free signal never gated on redaction concerns.
 //
 // Audit: only the sniDrop / "egress_sni_denied" case carries a domain worth
-// recording (unregistered_source and egress_sni_unparsed drops have no SNI to
-// audit). See auditDeny for the tenant seam.
+// recording (unregistered_source, egress_sni_unparsed, and the still-unclassified
+// passthroughs have no SNI to audit). See auditDeny for the tenant seam.
 func (l *sniVerdictLoop) recordVerdict(entry sniRegistryEntry, d sniDecision, proto string) {
 	switch d.Action {
+	case sniPassthrough:
+		if d.Reason != "egress_sni_incomplete" {
+			// Bare ACK / TCP handshake passthrough (no reason): fires on every
+			// empty-payload segment of every flow and carries no classification
+			// signal, so it is deliberately not counted.
+			return
+		}
+		// TCP forwarded a segment of a still-incomplete ClientHello UNMARKED —
+		// the only verdict path that lets bytes leave the host with no policy
+		// decision, and previously the only one with no metric and no audit at
+		// all. That silence is what let a ClientHello which could never complete
+		// forward ~16 KiB per flow while every counter read zero (H3). It is
+		// neither an allow nor a policy deny, so it gets its own outcome.
+		//
+		// This does NOT contradict QUIC's egress_sni_incomplete, which is
+		// deliberately uncounted below: that path DROPS the datagram, so nothing
+		// escapes unclassified and the client's retransmit would double-count a
+		// still-in-flight handshake. Here every counted segment is a distinct
+		// segment that actually left the host, retransmissions included.
+		l.metrics.IncSNIVerdict(proto, "incomplete")
 	case sniAcceptMark:
 		l.metrics.IncSNIVerdict(proto, "allowed")
 		if d.ECHObserved {

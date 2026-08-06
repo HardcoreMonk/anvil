@@ -37,7 +37,7 @@ type daemonMetrics struct {
 	cpTokenPropagated *metrics.CounterVec // outcome=ok|fail
 	authTotal         *metrics.CounterVec // outcome=ok|denied|expired (v0.4.1)
 	mcpToolCalls      *metrics.CounterVec // server, outcome=ok|fail|forbidden|rate_limited (v0.6.0)
-	sniVerdictTotal   *metrics.CounterVec // proto=tcp|udp|unknown, outcome=allowed|denied|dropped (egress SNI filter)
+	sniVerdictTotal   *metrics.CounterVec // proto=tcp|udp|unknown, outcome=allowed|denied|dropped|incomplete (egress SNI filter)
 	sniECHObserved    *metrics.CounterVec // proto=tcp|udp — allowed flows whose ClientHello carried an ECH extension (0xfe0d)
 
 	// Histograms (seconds).
@@ -117,7 +117,7 @@ func newDaemonMetrics(cp *ControlPlane) *daemonMetrics {
 		),
 		sniVerdictTotal: r.NewCounterVec(
 			"ephemera_egress_sni_verdict_total",
-			"Total :443 SNI verdicts by proto (tcp|udp|unknown) and outcome (allowed|denied|dropped; dropped = pre-classify infra fail-closed; unknown proto = no-payload drop before the tcp/udp branch).",
+			"Total :443 SNI verdicts by proto (tcp|udp|unknown) and outcome (allowed|denied|dropped|incomplete; dropped = pre-classify infra fail-closed; incomplete = TCP segment forwarded unmarked while the ClientHello is still being reassembled, so it never carries an approval mark; unknown proto = no-payload drop before the tcp/udp branch).",
 			"proto", "outcome",
 		),
 		sniECHObserved: r.NewCounterVec(
