@@ -171,14 +171,18 @@ func (s *PlacementStore) Load() error {
 	return nil
 }
 
+// Save persists the current state. Like SaveRoutedFlockAndPlacements and the
+// other disk-touching mutators, it holds s.mu.Lock() across the entire
+// read-modify-write of the file: releasing the lock before the disk RMW (as
+// this used to do) lets a concurrent SaveRoutedFlockAndPlacements read-
+// modify-write its own flock in the gap, which Save then clobbers with a
+// write based on its earlier read -- a file-level TOCTOU, not a memory race,
+// so -race cannot catch it (see TestPlacementStoreSaveRaceLosesConcurrent-
+// RoutedFlockToken).
 func (s *PlacementStore) Save() error {
-	if strings.TrimSpace(s.path) == "" {
-		return nil
-	}
-	s.mu.RLock()
-	state := clonePlacementStoreState(s.state)
-	s.mu.RUnlock()
-	return savePlacementStoreStatePreserveFlockMetrics(s.path, state)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.saveLockedPreserveFlockMetrics()
 }
 
 func readPlacementStoreState(path string) (PlacementStoreState, bool, error) {
