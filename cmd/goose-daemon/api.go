@@ -917,7 +917,15 @@ func (cp *ControlPlane) propagateCPTokenToVMs(clients []APIClient) {
 	}
 	cp.mu.RUnlock()
 
+	// An empty target set is now the steady state, not an edge case: once a flock
+	// VM carries its own per-flock capability token the daemon has nothing of its
+	// own to rotate into it, and a host running only plain VMs never had anything
+	// either. Log it anyway. SIGHUP is a deliberate, infrequent operator action,
+	// and an operator who rotates a token and sees no line at all cannot tell
+	// "nothing needed rotating" apart from "the reload never happened" — which is
+	// exactly the ambiguity this line exists to remove.
 	if len(targets) == 0 {
+		slog.Warn("sighup: cp token propagated", "ok", 0, "total", 0)
 		return
 	}
 

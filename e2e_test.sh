@@ -1760,8 +1760,18 @@ kill -HUP "$DAEMON_PID"
 sleep 8   # vsock fan-out budget is now 4 s/VM × 1 VM; sleep generously for log flush
 
 # Match the slog form (`msg="sighup: cp token propagated" ok=N total=M`) and
-# verify ok == total >= 1. Plain substring grep on "propagated" would pass
-# even on ok=0 — i.e. silent fan-out failure.
+# verify ok == total. Plain substring grep on "propagated" would pass even when
+# some VM failed — i.e. a silent partial fan-out.
+#
+# total=0 is CORRECT here and is the point of this step. A flock VM now carries
+# its own per-flock capability token, which the daemon did not mint from its
+# operator bearer and therefore has no business rotating, so it is not a fan-out
+# target. What must NOT happen is silence: the line is emitted even at total=0
+# so an operator can tell "nothing needed rotating" from "the reload never ran".
+# The property that used to be proved by a successful fan-out — the guest still
+# works after the operator token rotates — is proved more directly by 58c.iv,
+# and now holds for a stronger reason: the guest's credential never depended on
+# the operator token in the first place.
 PROP_LINE=$(grep -E 'msg="sighup: cp token propagated" ok=[0-9]+ total=[0-9]+' "$LOG" | tail -1 || true)
 if [ -z "$PROP_LINE" ]; then
     fail "Propagation line missing from $LOG"
@@ -1769,8 +1779,8 @@ if [ -z "$PROP_LINE" ]; then
 else
     PROP_OK=$(echo "$PROP_LINE" | sed -E 's|.* ok=([0-9]+) .*|\1|')
     PROP_TOTAL=$(echo "$PROP_LINE" | sed -E 's|.* total=([0-9]+).*|\1|')
-    if [ "$PROP_OK" = "$PROP_TOTAL" ] && [ "$PROP_TOTAL" -ge "1" ]; then
-        ok "vsock fan-out: $PROP_OK/$PROP_TOTAL VMs OK"
+    if [ "$PROP_OK" = "$PROP_TOTAL" ]; then
+        ok "vsock fan-out: $PROP_OK/$PROP_TOTAL VMs OK (0/0 = flock VMs hold capability tokens the daemon does not rotate)"
     else
         fail "vsock fan-out incomplete: $PROP_OK/$PROP_TOTAL (line: $PROP_LINE)"
         echo "    Per-VM failure lines:"
