@@ -48,6 +48,30 @@ sudo ./uninstall.sh --purge                          # 원복
 | anvil core service parity(구 명칭, non-latest) | `anvil-v0.4.0` | upstream ephemera `v0.4.0`-`v0.7.0` runtime/operator 표면(storage/recovery, auth/audit, COW, flock lifecycle, streaming/depth/watchdog, snapshot-restore recovery, operator Web UI/`/config/*`, runtime MCP Gateway, end-user installer/transcript) + IronClaw `anvil_*` MCP 경계 유지 | parity matrix `docs/analysis/11-v0.5.0-v0.7.0-core-service-parity-review.md`; token redaction·tenant/egress·scheduler·audit·IronClaw MCP surface separation 적응; `cmd/anvil-mcp` 불변, `EPHEMERA_MCP_*` gateway는 `ANVIL_MCP_*` adapter를 대체하지 않음. 개발 내역으로 보존, 현행 아님 — 아래 `anvil-v0.7.0` 참고 |
 | anvil ephemera-aligned current(Latest) | `anvil-v0.7.0` | 위 parity 편입에 더해 post-`anvil-v0.4.0` backlog batch와 open-gate closure까지 포함하는 가장 완전한 상태. `anvil-v0.7.0`부터 anvil 버전은 upstream ephemera 버전을 그대로 따른다(2026-07-06 정렬) | `RELEASE_NOTES.md` `# anvil-v0.7.0` 절; tag target `2f367dd`(태그 시점 main) |
 
+## CI 릴리즈 빌드·게시 자동화 (`release.yml`)
+
+`.github/workflows/release.yml`은 원래 trigger glob이 `v*`였다 — anvil release tag는
+`anvil-v*`이고 `v*`는 이 fork가 유지하는 upstream ephemera runtime tag namespace라서, 이
+workflow는 한 번도 실행된 적이 없었다. 그래서 모든 release는 그동안 개발자 머신에서 수동으로
+빌드해 손으로 업로드했다. `anvil-v*` push에 반응하도록 trigger를 고치고(`e1c4e24`,
+`fd1e05f`, 2026-08-06) throwaway tag로 end-to-end 실행까지 검증했다: FULL(~254 MB,
+GitHub-hosted runner에서 debootstrap으로 golden image 생성)과 SLIM(~27 MB) tarball, 그리고
+각각의 `.sha256` sidecar까지 총 네 asset이 모두 정상 빌드되고 release에 첨부됐다.
+
+이제부터는 `anvil-v*` tag를 push하면 CI가 빌드와 게시를 모두 수행한다.
+`softprops/action-gh-release`는 `draft` input이 없으면 asset을 올린 뒤 곧바로 release를
+게시하므로, **tag push 시점에 release가 공개된다** — 별도의 `gh release create`/asset 수동
+업로드 단계가 더는 없다. 즉 뒤에 나오는 "외부 효과 승인" 절의 "Git tag push" 승인이 사실상
+"GitHub Release publish" 승인까지 겸하게 됐다.
+
+CI는 `/dev/kvm`이 없는 GitHub-hosted runner에서 돌기 때문에 **빌드·게시만 하고 런타임 동작은
+검증하지 않는다.** 이 문서의 KVM gate 절차(`e2e_test.sh`, install/uninstall smoke,
+"Release-install 기동 게이트" 등)는 여전히 tag push **이전에** 로컬 KVM host에서 수동으로
+수행한다. 그 안에서 실행하는 `sudo bash scripts/build_release.sh <ver>`도 계속 필요하다 —
+다만 이제 그 실행의 목적은 "게시할 artifact를 만드는 것"이 아니라 "설치본이 실제로 기동하는지
+확인하는 것"으로 바뀌었다. 실제로 게시되는 FULL/SLIM tarball은 CI가 tag push 시점에 따로 새로
+빌드한다.
+
 ## 게시 전 확인 명령
 
 ```bash
@@ -776,6 +800,15 @@ adapter로 그 기능을 IronClaw에 노출한다.
 - Git tag 생성
 - Git tag push
 - GitHub Release publish
+
+**Tag는 한 번 push하면 되돌릴 수 없다.** GitHub Immutable Releases가 켜지면 게시된
+release의 asset은 이후 바꿀 수 없고, **한 번 게시에 쓰인 tag 이름은 release를 삭제해도
+재사용할 수 없다.** 지금(2026-08-06 기준)은 아직 비활성화 상태지만 곧 켤 예정이므로, 이미
+그 계약을 기준으로 움직인다: tag를 만들고 push하기 전에 버전 번호, target commit, release
+본문을 전부 확정해서 보여주고 승인을 받는다. 게시 후 문제를 발견해도 같은 tag를 다시 쓰지
+말고 다음 patch 버전으로 넘어간다. 앞의 "CI 릴리즈 빌드·게시 자동화" 절에서 설명했듯
+`anvil-v*` tag push는 CI가 곧바로 release를 게시하는 방아쇠이므로, 이 확인은 tag push
+승인 시점에 끝나 있어야 한다.
 
 승인 요청 전에는 반드시 다음 값을 먼저 보여 준다.
 
