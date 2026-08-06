@@ -282,7 +282,9 @@ func (r *RuntimeRouter) CreateSnapshot(ctx context.Context, vmID string, req Cre
 		return nil, err
 	}
 	if hostName, ok := r.Placement(vmID); ok && r.placementStore != nil {
-		_ = r.placementStore.SetSnapshotLocation(resp.SnapshotID, hostName)
+		// Adapter-verified: the adapter created the snapshot on that host and
+		// the daemon returned success above.
+		_ = r.placementStore.SetSnapshotLocation(resp.SnapshotID, hostName, SnapshotLocationVerified)
 		_ = r.placementStore.Save()
 	}
 	return resp, nil

@@ -63,7 +63,7 @@ func TestPlacementStoreRecordsSnapshotReplicationDialFailureAsFailureTimestamp(t
 func TestPlacementStoreRecordsSnapshotReplicationGauges(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "placements.json")
 	store := NewPlacementStore(path)
-	if err := store.RecordSnapshotReplicationGauges(4, 1); err != nil {
+	if err := store.RecordSnapshotReplicationGauges(4, 1, 0); err != nil {
 		t.Fatalf("RecordSnapshotReplicationGauges() error = %v", err)
 	}
 	reloaded := NewPlacementStore(path)

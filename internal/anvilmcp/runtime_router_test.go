@@ -2009,7 +2009,7 @@ func TestRuntimeRouterRestoreRecordsRestoredPlacement(t *testing.T) {
 
 func TestRuntimeRouterRestorePrefersSnapshotLocalityHost(t *testing.T) {
 	store := NewPlacementStore("")
-	if err := store.SetSnapshotLocation("snap-1", "host-b"); err != nil {
+	if err := store.SetSnapshotLocation("snap-1", "host-b", SnapshotLocationVerified); err != nil {
 		t.Fatalf("SetSnapshotLocation: %v", err)
 	}
 	hostA := &routerFakeDaemon{}

@@ -45,15 +45,17 @@ type SnapshotReplicationMetricObservation struct {
 }
 
 // SnapshotReplicationMetricsState mirrors FlockPlacementMetricsState (same
-// counter/histogram/timestamp shape) plus two point-in-time gauges the reconcile
-// sweep republishes every pass: QueueDepth (snapshots below the replica factor)
-// and GivingUp (snapshots with a dial-saturated target). It reuses the shared
-// LatencyHistogramState from flock_placement_metrics.go.
+// counter/histogram/timestamp shape) plus three point-in-time gauges the
+// reconcile sweep republishes every pass: QueueDepth (snapshots below the
+// replica factor), GivingUp (snapshots with a dial-saturated target), and
+// PeerOnlySatisfied (snapshots at the replica factor on peer reports alone). It
+// reuses the shared LatencyHistogramState from flock_placement_metrics.go.
 type SnapshotReplicationMetricsState struct {
 	AttemptsByOutcomeReason map[string]int64                 `json:"attempts_by_outcome_reason,omitempty"`
 	LatencyByPhase          map[string]LatencyHistogramState `json:"latency_by_phase,omitempty"`
 	QueueDepth              int64                            `json:"queue_depth,omitempty"`
 	GivingUp                int64                            `json:"giving_up,omitempty"`
+	PeerOnlySatisfied       int64                            `json:"peer_only_satisfied,omitempty"`
 	LastSuccessAt           time.Time                        `json:"last_success_at,omitempty"`
 	LastFailureAt           time.Time                        `json:"last_failure_at,omitempty"`
 }
@@ -129,6 +131,7 @@ func cloneSnapshotReplicationMetricsState(state SnapshotReplicationMetricsState)
 	}
 	out.QueueDepth = state.QueueDepth
 	out.GivingUp = state.GivingUp
+	out.PeerOnlySatisfied = state.PeerOnlySatisfied
 	out.LastSuccessAt = state.LastSuccessAt
 	out.LastFailureAt = state.LastFailureAt
 	return out
