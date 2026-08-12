@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -38,7 +37,6 @@ func sniQueueNum() int {
 
 type egressProfile struct {
 	AllowCIDRs []string `json:"allow_cidrs"`
-	AllowHosts []string `json:"allow_hosts"`
 	AllowSNI   []string `json:"allow_sni"`
 	DNSServers []string `json:"dns_servers"`
 }
@@ -66,35 +64,41 @@ func loadEgressProfile(baseDir, profile string) (egressProfile, bool, error) {
 		}
 		return egressProfile{}, false, fmt.Errorf("read egress profile: %w", err)
 	}
-	var profileConfig egressProfile
-	if err := json.Unmarshal(data, &profileConfig); err != nil {
+	profileConfig, err := decodeEgressProfile(data)
+	if err != nil {
 		return egressProfile{}, false, fmt.Errorf("parse egress profile: %w", err)
 	}
 	if err := validateEgressProfile(profileConfig); err != nil {
 		return egressProfile{}, false, err
 	}
-	if len(profileConfig.AllowHosts) > 0 {
-		// allow_hosts is a deprecated coarse substring matcher superseded by
-		// allow_sni (parsed ClientHello SNI) + allow_cidrs. Warn on every load so
-		// the docs-only deprecation becomes a runtime signal; the field is still
-		// applied (behavior unchanged) and is scheduled for removal in the next
-		// tagged anvil release (ADR-0002 OQ8). Content-free: profile name + count
-		// only, never the host values.
-		slog.Warn("egress profile uses deprecated allow_hosts (coarse packet substring match, fragmentation-evadable); migrate to allow_sni (parsed ClientHello SNI) for domains + allow_cidrs for IPs — allow_hosts will be removed in the next tagged anvil release",
-			"profile", profile, "allow_hosts_count", len(profileConfig.AllowHosts))
-	}
 	return profileConfig, true, nil
+}
+
+func decodeEgressProfile(data []byte) (egressProfile, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return egressProfile{}, err
+	}
+	for key := range raw {
+		// encoding/json matched struct fields case-insensitively while
+		// allow_hosts existed. Reject those legacy spellings too so removing the
+		// field can never turn an old profile into a silently ignored allow rule.
+		if strings.EqualFold(key, "allow_hosts") {
+			return egressProfile{}, fmt.Errorf("egress profile uses removed field allow_hosts; migrate domains to allow_sni and IP addresses or ranges to allow_cidrs")
+		}
+	}
+
+	var profileConfig egressProfile
+	if err := json.Unmarshal(data, &profileConfig); err != nil {
+		return egressProfile{}, err
+	}
+	return profileConfig, nil
 }
 
 func validateEgressProfile(profile egressProfile) error {
 	for _, cidr := range profile.AllowCIDRs {
 		if _, _, err := net.ParseCIDR(strings.TrimSpace(cidr)); err != nil {
 			return fmt.Errorf("invalid allow_cidrs entry %q: %w", cidr, err)
-		}
-	}
-	for _, host := range profile.AllowHosts {
-		if err := validateEgressHost(host); err != nil {
-			return err
 		}
 	}
 	for _, entry := range profile.AllowSNI {
@@ -110,19 +114,9 @@ func validateEgressProfile(profile egressProfile) error {
 	return nil
 }
 
-func validateEgressHost(host string) error {
-	host = strings.TrimSpace(host)
-	if host == "" {
-		return fmt.Errorf("allow_hosts entries must be non-empty")
-	}
-	return validateDomainCharset("allow_hosts", host)
-}
-
-// validateDomainCharset enforces the shared ASCII domain charset (letters,
+// validateDomainCharset enforces the allow_sni ASCII domain charset (letters,
 // digits, '.', '-') on an already-trimmed, non-empty host. field names the JSON
-// key the host came from ("allow_hosts" or "allow_sni") so the error points at
-// the entry the operator actually wrote — validateEgressHost and
-// validateEgressSNI both reuse this so the rule lives in one place.
+// key so validation errors point at the entry the operator actually wrote.
 func validateDomainCharset(field, host string) error {
 	for _, r := range host {
 		if r > 127 {
@@ -203,12 +197,6 @@ func planProfileEgressCommands(vmID, guestIP string, profile egressProfile) ([]e
 		commands = append(commands, egressCommand{
 			Name: "iptables",
 			Args: []string{"-I", "FORWARD", "-s", guestIP, "-d", strings.TrimSpace(cidr), "-j", "ACCEPT", "-m", "comment", "--comment", fmt.Sprintf("%s-cidr-%d", prefix, idx)},
-		})
-	}
-	for idx, host := range profile.AllowHosts {
-		commands = append(commands, egressCommand{
-			Name: "iptables",
-			Args: []string{"-I", "FORWARD", "-s", guestIP, "-m", "string", "--string", strings.TrimSpace(host), "--algo", "bm", "-j", "ACCEPT", "-m", "comment", "--comment", fmt.Sprintf("%s-host-%d", prefix, idx)},
 		})
 	}
 	return commands, nil

@@ -986,6 +986,35 @@ func TestControlPlaneMetricsEndpoint(t *testing.T) {
 	}
 }
 
+func TestCleanupDeletedVMContinuesNetworkReleaseAfterDMSnapshotFailure(t *testing.T) {
+	cp := newTestCP(t)
+	var events []string
+	cp.deleteDMSnapshot = func(info *storage.DMSnapshotInfo) error {
+		events = append(events, "storage:"+info.DMDevice)
+		return errors.New("forced dm teardown failure")
+	}
+	cp.releaseVMNetwork = func(tapDevice, guestIP string) error {
+		events = append(events, "network:"+tapDevice+":"+guestIP)
+		return nil
+	}
+	v := &runningVM{
+		VMInfo: VMInfo{
+			VMID:    "vm-delete-failure",
+			GuestIP: "10.0.1.44",
+		},
+		tapDevice: "tap-delete-failure",
+		dmSnapshot: &storage.DMSnapshotInfo{
+			DMDevice: "cow-vm-delete-failure.cow",
+		},
+	}
+
+	cp.cleanupDeletedVMStorageAndNetwork(v.VMID, v)
+
+	if got, want := strings.Join(events, ","), "storage:cow-vm-delete-failure.cow,network:tap-delete-failure:10.0.1.44"; got != want {
+		t.Fatalf("cleanup events = %q, want %q", got, want)
+	}
+}
+
 func TestControlPlaneMetricsEndpointIncludesDurationsAndQueueDepth(t *testing.T) {
 	cp := newTestCP(t)
 	cp.metrics.ObserveDuration("vm_create", 1500*time.Millisecond)

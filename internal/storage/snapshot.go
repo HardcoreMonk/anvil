@@ -347,16 +347,34 @@ func TeardownDMSnapshotKeepStore(info *DMSnapshotInfo) error {
 	return teardownDMSnapshot(info, true)
 }
 
+type dmSnapshotTeardownOps struct {
+	run    func(name string, args ...string) ([]byte, error)
+	remove func(path string) error
+	now    func() time.Time
+	sleep  func(time.Duration)
+}
+
 // teardownDMSnapshot releases the kernel resources created by SetupDMSnapshot.
 // Uses lazy unmount so any Firecracker fd that was already opened continues to work
 // until the process exits, at which point the underlying inode is freed. When
 // keepStore is true the exception store file is left on disk for a later restore.
 func teardownDMSnapshot(info *DMSnapshotInfo, keepStore bool) error {
+	return teardownDMSnapshotWithOps(info, keepStore, dmSnapshotTeardownOps{
+		run: func(name string, args ...string) ([]byte, error) {
+			return exec.Command(name, args...).CombinedOutput()
+		},
+		remove: os.Remove,
+		now:    time.Now,
+		sleep:  time.Sleep,
+	})
+}
+
+func teardownDMSnapshotWithOps(info *DMSnapshotInfo, keepStore bool, ops dmSnapshotTeardownOps) error {
 	if info == nil {
 		return nil
 	}
 	var errs []error
-	if out, err := exec.Command("umount", "-l", info.MountTarget).CombinedOutput(); err != nil {
+	if out, err := ops.run("umount", "-l", info.MountTarget); err != nil {
 		errs = append(errs, fmt.Errorf("umount -l %s: %w: %s", info.MountTarget, err, strings.TrimSpace(string(out))))
 	}
 
@@ -366,32 +384,34 @@ func teardownDMSnapshot(info *DMSnapshotInfo, keepStore bool) error {
 	// where Firecracker process exit can lag behind the HTTP stop/delete request.
 	removed := false
 	var lastRemoveErr error
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := ops.now().Add(10 * time.Second)
 	for {
-		if out, err := exec.Command("dmsetup", "remove", "--retry", info.DMDevice).CombinedOutput(); err == nil {
+		if out, err := ops.run("dmsetup", "remove", "--retry", info.DMDevice); err == nil {
 			removed = true
 			break
 		} else {
 			lastRemoveErr = fmt.Errorf("dmsetup remove --retry %s: %w: %s", info.DMDevice, err, strings.TrimSpace(string(out)))
 		}
-		if time.Now().After(deadline) {
+		if ops.now().After(deadline) {
 			break
 		}
-		time.Sleep(250 * time.Millisecond)
+		ops.sleep(250 * time.Millisecond)
 	}
 	if !removed {
 		errs = append(errs, lastRemoveErr)
-		return errors.Join(errs...)
 	}
 
-	if out, err := exec.Command("losetup", "-d", info.COWLoopDevice).CombinedOutput(); err != nil {
+	// Continue after a dm removal failure. The still-live dm device may make loop
+	// detach fail too, but skipping these attempts guarantees a leak and hides the
+	// independent failure details from the caller.
+	if out, err := ops.run("losetup", "-d", info.COWLoopDevice); err != nil {
 		errs = append(errs, fmt.Errorf("losetup -d %s: %w: %s", info.COWLoopDevice, err, strings.TrimSpace(string(out))))
 	}
-	if out, err := exec.Command("losetup", "-d", info.LoopDevice).CombinedOutput(); err != nil {
+	if out, err := ops.run("losetup", "-d", info.LoopDevice); err != nil {
 		errs = append(errs, fmt.Errorf("losetup -d %s: %w: %s", info.LoopDevice, err, strings.TrimSpace(string(out))))
 	}
 	if !keepStore {
-		if err := os.Remove(info.ExceptionStore); err != nil && !os.IsNotExist(err) {
+		if err := ops.remove(info.ExceptionStore); err != nil && !os.IsNotExist(err) {
 			errs = append(errs, fmt.Errorf("remove exception store %s: %w", info.ExceptionStore, err))
 		}
 	}

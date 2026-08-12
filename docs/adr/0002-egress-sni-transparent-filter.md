@@ -2,6 +2,7 @@
 
 > **상태:** accepted
 > **날짜:** 2026-07-13
+> **개정:** 2026-08-13 (`allow_hosts` 제거 및 loud legacy-key rejection 완료)
 > **대상:** anvil downstream repository (`cmd/goose-daemon`, `internal/network`)
 
 ---
@@ -125,30 +126,29 @@ verdict 루프가 QUIC Initial을 **복호**해 TLS ClientHello를 얻고 기존
 [design spec](../superpowers/specs/2026-07-14-quic-sni-filter-design.md)에
 보존한다.
 
-### 스키마 확장
+### 현재 스키마
 
-`egressProfile`에 신규 `allow_sni []string` 필드를 추가한다(기존
-`allow_hosts`의 의미 재해석이 아니다):
+`egressProfile`은 `allow_sni []string`으로 domain egress를 표현한다. 2026-08-13
+deprecation cycle을 완료하면서 legacy `allow_hosts` field와 packet substring apply
+path를 제거했다:
 
 ```go
 type egressProfile struct {
     AllowCIDRs []string `json:"allow_cidrs"`
-    AllowHosts []string `json:"allow_hosts"` // legacy: -m string substring (deprecated)
     AllowSNI   []string `json:"allow_sni"`   // parsed ClientHello SNI, default-deny
     DNSServers []string `json:"dns_servers"`
 }
 ```
 
-- **하위호환**: `allow_cidrs`/`allow_hosts`/`dns_servers`만 있는 기존
-  profile은 무변경 동작. `allow_sni`는 opt-in(비어 있으면 :443용 NFQUEUE
-  dispatch 규칙 자체를 생성하지 않는다).
+- **legacy rejection**: JSON에 `allow_hosts` key가 있으면 값이 non-empty, empty,
+  `null` 또는 과거 case-insensitive spelling이어도 profile load가 loud fail-closed로
+  실패한다. error는 host value를 반복하지 않고 `allow_sni`/`allow_cidrs` migration을
+  지시한다. 다른 unknown metadata의 기존 ignore 동작은 유지한다.
+- **opt-in**: `allow_sni`가 비어 있으면 :443용 NFQUEUE dispatch 규칙 자체를 생성하지
+  않는다.
 - **wildcard**: `*.example.com` = 왼쪽 한 개 이상 라벨 매치(leading label만,
   임의 위치 glob은 비지원). exact match가 기본.
-- **검증 재사용**: `validateEgressHost`(ASCII 영숫자/`.`/`-`)를 SNI 항목에도
-  재사용한다 — 알려진 부작용으로 에러 메시지가 `allow_sni` 항목에도
-  `allow_hosts`라는 문자열을 쓴다(cosmetic, 코드 리뷰 triage 항목으로 등재).
-- `allow_hosts`는 **legacy/deprecated**(substring, coarse)로 표기하고 유지한다
-  (OQ8, 아래).
+- **검증**: `allow_sni` exact/wildcard host는 ASCII 영숫자/`.`/`-` contract를 사용한다.
 - profile directory 계약은 변경하지 않는다:
   `configs/profiles/{profile}/egress.json`, `EPHEMERA_EGRESS_PROFILE_DIR`,
   `ANVIL_EGRESS_PROFILE_DIR`.
@@ -197,13 +197,12 @@ verdict 루프를 갖춰야 한다"는 **baseline 요구**로 문서화한다(�
 - **OQ7 (ECH fallback)**: ECH 엔드포인트에 outer-SNI allowlist를 허용하지
   않는다 — **CIDR fallback만** 명시 opt-in으로 허용한다. outer SNI는 신뢰가
   약하다는 판단.
-- **OQ8 (`allow_hosts` 폐기 시점)**: **deprecation cycle 확정(2026-07-18).**
-  release N(지금): profile 로드 시 daemon이 런타임 deprecation 경고를 남긴다
-  (`loadEgressProfile` — 그동안 deprecation은 문서에만 있었다). release N+1(다음
-  tagged anvil 릴리즈): 필드·apply·validate·cleanup·test 제거 + `egressProfile`
-  unmarshal에 `DisallowUnknownFields`(또는 명시 거부)로 잔존 `allow_hosts` profile을
-  loud fail-closed 거부(조용한 drop 방지). 마이그레이션: 도메인 → `allow_sni`,
-  IP → `allow_cidrs`(`docs/operations/runbook.md`).
+- **OQ8 (`allow_hosts` 폐기 시점)**: **deprecation cycle 완료(2026-08-13).**
+  2026-07-18 확정한 runtime warning 단계를 거쳐 field·apply·validate·test를 제거했다.
+  global `DisallowUnknownFields` 확대 대신 explicit legacy-key rejection을 사용해 잔존
+  `allow_hosts`를 loud fail-closed 거부하고, unrelated unknown metadata의 기존 동작은
+  유지한다. 마이그레이션: 도메인 → `allow_sni`, IP/CIDR → `allow_cidrs`
+  (`docs/operations/runbook.md`).
 - **OQ9 (single vs per-VM multi-queue)**: 단일 NFQUEUE(queue 88) + src-IP
   라우팅을 유지한다(per-VM 멀티 큐 아님). **재검토 결과(2026-07-18): YAGNI.**
   established flow는 connmark(`0x534e49`) fast-path로 커널이 바로 ACCEPT하므로
@@ -275,8 +274,8 @@ CIDR로, DNS는 `dns_servers`로 — 세 층은 병렬 additive 계약이다.
   매치에서만 찍힌다) 전달되는 것은 판정 전 ClientHello 앞부분 바이트뿐이라,
   같은 묶음으로 읽으면 위험을 과대 서술하게 된다. 표의 나머지 항목 중
   QUIC/UDP:443과 복구 중 transient egress 창은 이미 구현·해소로 닫혔다.
-- `allow_hosts`(legacy substring)를 당장 제거하지 않아 두 계층(coarse
-  substring + precise SNI)이 당분간 공존한다.
+- legacy packet-substring 계층은 2026-08-13 제거됐다. 현재 domain 계층은 parsed SNI,
+  IP 계층은 CIDR allow contract만 사용한다.
 
 ---
 

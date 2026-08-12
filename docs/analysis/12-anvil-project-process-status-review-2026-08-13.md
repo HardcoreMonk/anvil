@@ -11,6 +11,8 @@
   source-level probe로 재검토. 핵심 판정 승인, 아래 두 항목 정정
   - secret scan 원인은 한 개가 아니라 같은 test file의 OpenAI·Google sentinel 2개
   - PR #109에는 merge 당시 미해결 CodeRabbit documentation comment 2개가 존재
+- 실행 갱신: 같은 날 사용자가 후속 작업 1–7 전체 실행을 승인했다. 원 조사 snapshot은
+  보존하고 §14에 PR #110 merge 이후 gate closure 진행 상태를 추가했다.
 - 문서 목적: 다음 정식 태그 이전에 현재 공정 단계, 증적 공백, release blocker와
   후속 작업을 하나의 기준 보고서로 고정
 - 비밀정보 처리: 실제 credential, 호스트 주소, password, private key는 기록하지 않음
@@ -517,3 +519,55 @@ tag authorization:  hold
 ```
 
 구현 자체보다 릴리스 공정의 강제성·재현성·증적 일치가 현재 가장 큰 프로젝트 위험이다.
+
+## 14. 후속 작업 1–7 실행 갱신
+
+### 14.1 완료 또는 코드상 폐쇄
+
+| 항목 | 결과 | 증거 |
+|---|---|---|
+| PR #110 review/merge | 완료 | exact head `c394f7d...`의 Go CI green, unresolved thread 0에서 merge commit `794d0ae...`로 `main` 병합. CodeRabbit 완료 리뷰는 merge 직후 회수 |
+| strict secret gate | 완료 | tracked tree PASS, scanner allowlist/regex 완화 없음 |
+| KVM release-candidate gate | 완료 | full E2E `All test steps passed`, lifecycle/semantic/flock smoke는 선행 handoff에서 통과 |
+| `allow_hosts` 제거 | 구현·local 검증 완료, PR 대기 | field/validation/iptables string matcher 제거, non-empty/empty/`null`/mixed-case key loud rejection, unrelated unknown metadata 호환 |
+| VM 삭제 실패 cleanup | 구현·local 검증 완료, PR 대기 | CodeRabbit 사후 Major finding. forced dm failure 뒤 양 loop/store/TAP-IP cleanup continuation test, KVM resource inventory clean |
+| npm audit | 폐쇄 | High 2/Moderate 2 → 0, clean install/check/build 통과 |
+| Web/secret CI | 구현 완료, PR 대기 | `web-and-security`, `secret-scan` 독립 job, `contents: read` |
+| version policy | 결정 규칙 확정 | upstream 첫 post-`v0.7.0` tag `vX.Y.Z` → `anvil-vX.Y.Z`; downstream-only 번호 금지 |
+
+### 14.2 PR #110 사후 review disposition
+
+CodeRabbit가 merge 완료 직후 4개 actionable comment를 게시했다.
+
+1. lifecycle 링크 복구 지적: **invalid**. 이 프로젝트 지침은 zone 상대 경로를 사용하며
+   `../../../docs/governance/codex-lifecycle-control-plane.md`는 실제 zone 문서로 해석돼
+   존재한다. changed-document relative-link scan도 통과했다.
+2. named Go build evidence 누락: **valid**, plan/handoff 보정과 실제 세 build 실행.
+3. spec 수용 기준 11 누락: **valid**, plan 완료 조건을 1–11로 보정.
+4. dm remove failure 뒤 loop/store cleanup 중단: **valid Major**, 별도
+   `vm-deletion-failure-cleanup` full lifecycle/TDD로 수정.
+
+### 14.3 아직 열린 blocker
+
+1. **Host A1/A2:** 비밀 주소를 출력하지 않는 재점검에서 A1 endpoint 한 대는 tcp/22에
+   도달하지만 현재 개발 키를 거부하고, 나머지 두 배포 endpoint는 tcp/22 도달 불가였다.
+   password rotation, key rollout, permission remediation을 실행할 인증 경로가 없다.
+2. **Next version number:** upstream latest/main이 계속 `v0.7.0`이라 결정 규칙의 입력이
+   없다. 번호는 의도적으로 미할당이다.
+3. **Remote integration:** `agent/next-release-gates` exact-SHA CI/review/merge가 남았다.
+4. **Branch protection:** 새 CI context가 `main`에 병합된 뒤 적용해야 한다. collaborator가
+   owner 1명뿐이라 admin-enforced approval 1 설정 후 두 번째 reviewer가 필요하다.
+
+### 14.4 갱신 판정
+
+```text
+released baseline:     anvil-v0.7.0 = operate
+main after PR #110:    release-gate evidence merged
+next-gates branch:     code-review -> remote CI/merge
+host security gate:    blocked (access unavailable)
+next version number:   blocked (no post-v0.7.0 upstream tag)
+tag authorization:     hold
+```
+
+코드·CI 측 P0 대부분은 폐쇄됐지만 host security와 upstream version input은 아직 외부
+blocker다. 따라서 후속 작업 7의 “blocker 종료 전 tag 금지”는 계속 유효하다.

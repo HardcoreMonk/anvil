@@ -243,11 +243,11 @@ daemon은 선택된 policy를 VM/snapshot/restore metadata에 보존한다. `den
 host-local `iptables` reject rule로 강제한다. `profile`은
 `configs/profiles/{profile}/egress.json`, `EPHEMERA_EGRESS_PROFILE_DIR` 또는
 `ANVIL_EGRESS_PROFILE_DIR` 아래의
-profile별 policy 파일이 있을 때 allow CIDR, allow host string match(legacy
-`allow_hosts`, substring 기반 deprecated), `allow_sni`(파싱된 ClientHello SNI
-기반 default-deny `:443` 필터 — ADR-0002), DNS server allowlist와 DNS/default
-reject rule을 적용한다. policy 파일이 없으면 기존 profile 동작과 호환되도록
-no-op이다. SNI 필터의 계약·위협 모델·잔여 위험은 ADR-0002가 권위다.
+profile별 policy 파일이 있을 때 allow CIDR, `allow_sni`(파싱된 ClientHello SNI 기반
+default-deny `:443` 필터 — ADR-0002), DNS server allowlist와 DNS/default reject rule을
+적용한다. 제거된 `allow_hosts` key는 profile decode에서 loud fail-closed 거부된다.
+policy 파일이 없으면 기존 profile 동작과 호환되도록 no-op이다. SNI 필터의
+계약·위협 모델·잔여 위험은 ADR-0002가 권위다.
 
 ## 감사 저장소
 

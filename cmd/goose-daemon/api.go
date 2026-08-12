@@ -510,6 +510,7 @@ type ControlPlane struct {
 	startMachine       func(ctx context.Context, cfg vm.VMConfig) (*firecracker.Machine, error)
 	setupDMSnapshot    func(baseDiskPath, exceptionStorePath, mountTargetPath string) (*storage.DMSnapshotInfo, error)
 	teardownDMSnapshot func(info *storage.DMSnapshotInfo)
+	deleteDMSnapshot   func(info *storage.DMSnapshotInfo) error
 	setupBindMount     func(baseDiskPath, newDiskPath, mountTargetPath string) error
 	restoreMachine     func(ctx context.Context, cfg vm.VMConfig, memFilePath, snapshotPath string) (*firecracker.Machine, error)
 	setGuestAgentToken func(vsockPath, token string) error
@@ -1835,10 +1836,20 @@ func (cp *ControlPlane) destroyVMUnderSnapshotLock(vmID string) {
 		os.Remove(v.vsockPath)
 	}
 	cp.cleanupEgressPolicy(vmID)
+	cp.cleanupDeletedVMStorageAndNetwork(vmID, v)
+	cp.metrics.IncVMDelete()
+	slog.Warn("vm destroyed", "vm_id", vmID)
+	cp.metrics.vmDestroyTotal.WithLabelValues("ok").Inc()
+}
 
+func (cp *ControlPlane) cleanupDeletedVMStorageAndNetwork(vmID string, v *runningVM) {
 	if v.dmSnapshot != nil {
 		// COW-restored VM: release dm-snapshot device, loop device, and exception store.
-		if err := storage.TeardownDMSnapshot(v.dmSnapshot); err != nil {
+		teardown := storage.TeardownDMSnapshot
+		if cp.deleteDMSnapshot != nil {
+			teardown = cp.deleteDMSnapshot
+		}
+		if err := teardown(v.dmSnapshot); err != nil {
 			cp.metrics.IncCleanupFailure()
 			log.Printf("Warning: failed to teardown COW resources for VM [%s]: %v", vmID, err)
 		}
@@ -1850,10 +1861,12 @@ func (cp *ControlPlane) destroyVMUnderSnapshotLock(vmID string) {
 			slog.Warn("delete disk failed", "vm_id", vmID, "disk_path", v.diskPath, "err", err)
 		}
 	}
-	cp.netManager.Release(v.tapDevice, v.GuestIP)
-	cp.metrics.IncVMDelete()
-	slog.Warn("vm destroyed", "vm_id", vmID)
-	cp.metrics.vmDestroyTotal.WithLabelValues("ok").Inc()
+	// Network cleanup is independent from storage teardown. Never let a failed
+	// dm/loop/store operation skip TAP and IP lease release.
+	if err := cp.releaseAllocatedVMNetwork(v.tapDevice, v.GuestIP); err != nil {
+		cp.metrics.IncCleanupFailure()
+		slog.Warn("release deleted VM network failed", "vm_id", vmID, "tap_device", v.tapDevice, "guest_ip", v.GuestIP, "err", err)
+	}
 }
 
 // gracefulAgentStop best-effort asks a VM's goose-agent to shut down (POST /stop,

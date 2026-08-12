@@ -129,9 +129,13 @@ pre-release handoff를 만든다.
 1. targeted daemon test
 2. `bash scripts/secret-scan.sh`
 3. Go test/race/build/vet/module/gofmt/govulncheck
-4. Web check/build/audit
-5. bash syntax와 Markdown relative-link scan
-6. `git diff --check`
+4. aggregate build와 별개로 release entrypoint 세 개를 named command로 검증
+   - `go build -o anvil-daemon ./cmd/goose-daemon/`
+   - `go build ./cmd/anvil-mcp`
+   - `go build ./cmd/anvil-scheduler`
+5. Web check/build/audit
+6. bash syntax와 Markdown relative-link scan
+7. `git diff --check`
 
 실패는 코드, dependency, local environment, known warning으로 분류한다.
 
@@ -159,7 +163,11 @@ scripts/anvil-mcp-e2e.sh flock
 
 각 smoke가 독립 daemon lifecycle을 요구하는지 script 계약을 먼저 읽고 안전한 순서로
 실행한다. 실패 시 device/network/provider/runtime 원인을 구분하고 생성 resource cleanup을
-확인한다.
+확인한다. `sudo bash e2e_test.sh`의 삭제 경로와 별도로 forced dm-snapshot 삭제 실패
+unit probe를 실행해 `dmsetup remove --retry` 실패 뒤에도 COW/base loop detach, sparse
+`.cow` store removal, TAP/IP release가 계속 시도되는지 검증한다. E2E 종료 뒤
+TAP/IP resource, bind mount, loop device, dm-snapshot, sparse `.cow` exception-store를
+각각 독립 조회하고, 하나라도 남으면 release gate를 열린 상태로 유지한다.
 
 ## Task 6. Code review와 pre-release handoff
 
@@ -180,7 +188,7 @@ scripts/anvil-mcp-e2e.sh flock
 
 ## 완료 조건
 
-- spec 수용 기준 1-10의 상태가 handoff에 실제 evidence와 함께 기록됨
+- spec 수용 기준 1-11의 상태가 handoff에 실제 evidence와 함께 기록됨
 - report/index/fixture diff가 review됨
 - exact SHA CI와 KVM 결과가 성공 또는 명확한 blocker로 분류됨
 - tag/release가 생성되지 않음

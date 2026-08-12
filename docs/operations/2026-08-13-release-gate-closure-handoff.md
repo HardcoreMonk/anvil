@@ -7,6 +7,7 @@
 - branch: `agent/release-gate-closure`
 - 기준 parent: `main@3033cddac5a6764c5d1cb12221e3a2d88b1928db`
 - draft PR: [#110](https://github.com/HardcoreMonk/anvil/pull/110)
+- merge: 완료, `main@794d0ae4debc02612106b647e680084167922ab5`
 - code-bearing commit: `576165429b1ecee8b25697b103b533e452a9cb98`
 - 설계:
   [`2026-08-13-release-gate-closure-design.md`](../superpowers/specs/2026-08-13-release-gate-closure-design.md)
@@ -54,6 +55,9 @@ scanner allowlist는 추가하지 않았다.
 - `go test ./... -count=1`: 통과
 - `go test -race ./... -count=1`: 통과
 - `go build ./...`: 통과
+- `go build -o anvil-daemon ./cmd/goose-daemon/`: 통과
+- `go build ./cmd/anvil-mcp`: 통과
+- `go build ./cmd/anvil-scheduler`: 통과
 - `go vet ./...`: 통과
 - `go mod verify`: 통과
 - `gofmt -l .`: 출력 없음
@@ -82,6 +86,9 @@ sudo -n env PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr
 ```
 
 결과: `All test steps passed`.
+
+AGENTS의 표준 표기인 `sudo bash e2e_test.sh`와 동형이며, 실제 실행은 sudo secure PATH에
+Go를 명시하기 위해 위 `sudo -n env PATH=... bash e2e_test.sh`를 사용했다.
 
 확인된 주요 경로:
 
@@ -130,10 +137,15 @@ flock prove-broken은 daemon authorship guard가 실제로 roster 밖 author를 
 - scanner 정규식/실패 동작: 불변
 - full E2E 전 삭제 대상 `vms/`, `snapshots/`, `flocks/`, `/tmp/goose-workspaces/`:
   모두 empty 확인
-- E2E/MCP 종료 후 VM·dm-snapshot·loop device는 정리됐으나 root-owned Town Wall log
-  10개와 0-byte workspace placeholder 7개가 남은 것을 사후 probe에서 확인했다. 실행 전
-  empty 상태와 ID를 대조한 뒤 이번 test artifact만 비재귀 삭제했고, `vms/`,
-  `snapshots/`, `flocks/` entry 0 및 `/tmp/goose-workspaces/` 부재를 재확인했다.
+- E2E/MCP 종료 후 resource별 probe: VM state 0, TAP/IP lease 0, project bind mount 0,
+  `cow-vm-*` dm-snapshot 0, anvil workspace-backed loop device 0, sparse `.cow` store 0.
+  root-owned Town Wall log 10개와 0-byte workspace placeholder 7개는 실행 전 empty 상태와
+  ID를 대조한 뒤 이번 test artifact만 비재귀 삭제했고, `vms/`, `snapshots/`, `flocks/`
+  entry 0 및 `/tmp/goose-workspaces/` 부재를 재확인했다.
+- PR #110 사후 CodeRabbit review에서 dm remove failure 뒤 후속 loop/store cleanup이
+  중단되는 source path를 발견했다. 이 정상-path inventory만으로 failure-path invariant를
+  과장하지 않고, `vm-deletion-failure-cleanup` full lifecycle의 forced failure test와
+  수정으로 별도 폐쇄한다. 해당 lifecycle이 green이기 전 release gate는 열린 상태다.
 - tag/release/deployment mutation: 없음
 
 ## Blockers
@@ -178,6 +190,12 @@ adequacy 관점에서 검토했다.
 - 문서: historical ephemera 제목을 보존하고 current anvil 분석만 추가
 - 검증 유효성: secret control은 prove-broken, runtime unit test, independent raw-source scan,
   음성대조를 모두 가짐. MCP flock은 실제 daemon의 roster guard와 history를 관측
+
+CodeRabbit 완료 리뷰는 merge 직후 도착했다. 4건 중 zone-relative lifecycle link 지적은
+실제 target 존재로 invalid 처리했고, named build와 수용 기준 11 누락은 문서 보정했다.
+dm removal failure 뒤 loop/store cleanup 중단 Major finding은 별도
+[`vm-deletion-failure-cleanup`](2026-08-13-vm-deletion-failure-cleanup-handoff.md)
+full lifecycle/TDD로 수정·검증했다.
 
 ## Current Lifecycle Stage
 

@@ -32,7 +32,10 @@ IronClaw 실행 계층으로 통합하는 downstream product fork다. 이 저장
 경로와 기존 API/환경 변수에는 `ephemera` 또는 `goose` 이름이 남아 있다. anvil
 통합 릴리즈는 ephemera runtime tag와 충돌하지 않도록 `anvil-v0.1.0`처럼 별도
 prefix를 사용한다. **`anvil-v0.7.0`부터 anvil 공개 릴리즈 버전은 upstream ephemera
-버전과 동일하게 정렬한다.** 현재 최신(Latest) 릴리즈는 `anvil-v0.7.0`이고 tag
+버전과 동일하게 정렬한다. 다음 공개 version은 upstream의 첫 post-`v0.7.0` 정식 tag를
+`anvil-<upstream-tag>`로 정확히 변환한다. downstream-only patch/minor 번호를 만들지
+않는다. 2026-08-13 현재 upstream latest/main은 `v0.7.0`이므로 다음 version number는
+미할당이며 release blocker다.** 현재 최신(Latest) 릴리즈는 `anvil-v0.7.0`이고 tag
 target은 `2f367dd`(태그 시점 main; parity + release-gate hardening + post-release
 backlog + open-gate 마감; full KVM e2e 343✓, step 59 실 LLM 포함)이며 설치 아티팩트
 (SLIM/FULL tarball + sha256)를 제공한다. 이후 main은 cross-host shared Town
@@ -464,8 +467,8 @@ daemon으로 보내는 outbound Bearer token이다.
   상세: [`docs/operations/2026-07-11-6b-failover-verification-run.md`](docs/operations/2026-07-11-6b-failover-verification-run.md).
 - **egress L7/SNI hardening이 구현 완료됐다**(2026-07-13/14, `feature/egress-sni-filter`,
   최소 3개 릴리즈(`v0.2.x`~`v0.3.1`)에서 이월되던 후속 후보를 해소). `egressProfile`에
-  신규 `allow_sni []string` 필드(기존 `allow_hosts` substring 재해석 아님, 하위호환
-  additive, `*.` leading-label wildcard)를 추가하고, :443 새 흐름의 ClientHello를
+  신규 `allow_sni []string` 필드(`*.` leading-label wildcard)를 추가하고, :443 새
+  흐름의 ClientHello를
   `iptables -j NFQUEUE --queue-num 88`(env `ANVIL_SNI_QUEUE_NUM`)로 goose-daemon
   **in-process** verdict 루프(`github.com/florianl/go-nfqueue/v2` — 이 slice의 유일한
   신규 direct 의존)에 dispatch해 실제 파싱된 SNI를 매칭한다. 허용 흐름은 conntrack
@@ -552,8 +555,11 @@ daemon으로 보내는 outbound Bearer token이다.
   PASS(왕복+경계 3종, 신규 결함 없음).
   [`docs/operations/2026-07-13-mcp-gateway-deployment-verification-run.md`](docs/operations/2026-07-13-mcp-gateway-deployment-verification-run.md).
 - egress SNI 필터 후속(ADR-0002 잔여 위험/설계 한계에서 파생):
-  `allow_hosts` 제거 시점은 **2026-07-18 deprecation cycle 확정**(release N 런타임
-  경고 추가 + release N+1(다음 tagged anvil 릴리즈) 제거·loud fail-closed — OQ8).
+  ~~`allow_hosts` 제거~~는 **2026-08-13 완료**됐다. 2026-07-18에 확정한 deprecation
+  cycle의 release N 경고 단계를 거쳐 field·validation·iptables packet substring apply
+  path를 제거했고, 잔존 `allow_hosts` key는 non-empty/empty/`null` 및 과거
+  case-insensitive spelling 모두 profile decode에서 loud fail-closed로 거부한다(OQ8).
+  마이그레이션은 domain → `allow_sni`, IP/CIDR → `allow_cidrs`다.
   multi-queue per-VM NFQUEUE는 **2026-07-18 분석 후 YAGNI 확정**(단일 queue 88 +
   connmark fast-path가 새 flow ClientHello만 처리해 병목 아님; 공유 reassembler
   LRU 4096은 신뢰-워크로드 모델·실 스케일에 headroom 충분; 재개 트리거 = untrusted
