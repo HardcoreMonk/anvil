@@ -239,6 +239,16 @@ func runFlockSmoke(ctx context.Context, session *mcp.ClientSession) error {
 	if len(spawned.Agents) != 2 {
 		return fmt.Errorf("anvil_spawn_flock returned %d agents, want 2", len(spawned.Agents))
 	}
+	posterAgentID := ""
+	for _, agent := range spawned.Agents {
+		if agent.Role == "orchestrator" {
+			posterAgentID = agent.AgentID
+			break
+		}
+	}
+	if posterAgentID == "" {
+		return fmt.Errorf("anvil_spawn_flock returned no orchestrator roster member")
+	}
 
 	var flocks listFlocksOutput
 	if err := callStructured(ctx, session, "anvil_list_flocks", map[string]any{}, &flocks); err != nil {
@@ -259,14 +269,14 @@ func runFlockSmoke(ctx context.Context, session *mcp.ClientSession) error {
 	var posted townWallMessage
 	if err := callStructured(ctx, session, "anvil_post_townwall", map[string]any{
 		"flock_id": spawned.FlockID,
-		"agent_id": "orchestrator",
+		"agent_id": posterAgentID,
 		"body":     smokeBody,
 	}, &posted); err != nil {
 		return err
 	}
 	fmt.Printf("posted townwall agent_id=%s body=%q\n", posted.AgentID, posted.Body)
-	if posted.AgentID != "orchestrator" {
-		return fmt.Errorf("anvil_post_townwall agent_id = %q, want orchestrator", posted.AgentID)
+	if posted.AgentID != posterAgentID {
+		return fmt.Errorf("anvil_post_townwall agent_id = %q, want %q", posted.AgentID, posterAgentID)
 	}
 	if posted.Body != smokeBody {
 		return fmt.Errorf("anvil_post_townwall body = %q, want %q", posted.Body, smokeBody)
