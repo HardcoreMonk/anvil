@@ -187,9 +187,9 @@ contract, security operations와 dependency blocker가 남아 있어 `release` �
 
 ## Next Action
 
-1. 이 documentation-only handoff update를 push하고 PR #110 latest head CI green 확인
-2. PR review에서 Important finding이 없을 때 merge 가능 상태로 전환
-3. blocker가 남아 있으므로 merge와 별개로 tag는 생성하지 않음
+1. draft PR #110에서 human review를 받고 Important finding을 처리
+2. merge 권한이 확인되면 PR을 ready 상태로 전환해 병합
+3. 아래 Follow-Up blocker가 남아 있으므로 merge와 별개로 tag는 생성하지 않음
 
 ## Follow-Up Tasks
 
