@@ -1,15 +1,15 @@
-# ephemera 분석 문서 색인
+# ephemera 및 anvil 분석 문서 색인
 
 ## 기준 정보
 
-- 분석 대상: `ephemera` runtime
+- 분석 대상: `ephemera` runtime 및 이를 통합하는 `anvil` product
 - anvil 관점: ephemera runtime은 IronClaw 결합 프로젝트의 기반 실행 계층
 - 공식 저장소: `https://github.com/HardcoreMonk/anvil/`
 - 0.1.0 기준 커밋: `157753fb5234679ca7cbebb6658e431c6a748ef6`
 - 0.2.0 기준 커밋: `abcaa86`
-- anvil 현재 sync branch runtime baseline: upstream ephemera `v0.3.6` 병합분
-- upstream latest observed: ephemera `v0.7.0` (2026-07-02 확인, anvil baseline 미병합)
-- 다음 구현 sync 후보: ephemera `v0.4.0`-`v0.4.5` runtime 안정화 변경
+- anvil 현재 runtime baseline: upstream ephemera `v0.7.0` 병합·적응 완료
+- upstream latest observed: ephemera `v0.7.0` (2026-08-13 확인, pending sync 없음)
+- 최신 anvil 공개 release: `anvil-v0.7.0`
 
 ## 0.1.0 문서
 
@@ -50,18 +50,20 @@
   `v0.4.0`-`v0.4.5` storage/recovery, auth/audit, COW default, flock lifecycle,
   streaming task, restored VM recovery 변경의 anvil 예비 분류
 
-## 0.5.x-0.7.x upstream 상태
+## 0.5.x-0.7.x upstream 검토 문서
 
-2026-07-02 기준 upstream ephemera는 `v0.7.0`까지 진행되어 있지만, anvil의 runtime
-baseline은 계속 `v0.3.6`이다. `v0.5.x`-`v0.7.x`는 아직 상세 analysis 문서와 sync
-branch 검증을 거치지 않았으므로 public baseline으로 설명하지 않는다.
+upstream ephemera `v0.5.x`-`v0.7.0`은 anvil의 runtime/operator baseline으로
+병합·적응됐다. ephemera release 제목과 anvil product release는 계속 구분한다.
 
-- `v0.5.x`: product/operator Web UI 계열로 별도 공개 경계 검토가 필요하다.
-- `v0.6.x`: MCP Gateway 계열로 anvil MCP adapter, IronClaw 통합 경계, 권한 모델과
-  충돌하거나 중복될 수 있어 별도 설계 review가 필요하다.
-- `v0.7.0`: installer/transcript/hardening 계열로 보인다. kernel SHA 검증,
-  `waitForAgent` per-probe timeout, `EPHEMERA_HOME`은 선별 backport됐지만 tag 전체를
-  채택한 것은 아니다.
+- `11-v0.5.0-v0.7.0-core-service-parity-review.md`: upstream ephemera
+  `v0.5.0`-`v0.7.0`과 cross-phase parity를 `adopted`/`adapted`/`deferred`/`excluded`로
+  분류하고 anvil 경계를 검증한 최종 review
+
+## anvil 프로젝트 공정 분석
+
+- `12-anvil-project-process-status-review-2026-08-13.md`: Git/fork/upstream,
+  lifecycle 산출물, CI, 로컬 Go/Web 검증, secret gate, 운영 residual risk를 교차검증한
+  현재 공정 상태 보고서
 
 ## 권장 읽기 순서
 
@@ -72,6 +74,11 @@ branch 검증을 거치지 않았으므로 public baseline으로 설명하지 �
 5. upstream sync 검토가 목적이면
    `08-v0.3.2-v0.3.3-upstream-change-review.md`와
    `09-v0.3.6-upstream-change-review.md`,
-   `10-v0.4.0-v0.4.5-runtime-stabilization-adoption.md`
+   `10-v0.4.0-v0.4.5-runtime-stabilization-adoption.md`,
+   `11-v0.5.0-v0.7.0-core-service-parity-review.md`
+6. 현재 프로젝트 공정·release gate 판단이 목적이면
+   `12-anvil-project-process-status-review-2026-08-13.md`
 
-빠른 의사결정이 목적이면 4번 비교 문서와 7번 비기술 보고서를 먼저 보면 된다. 구현에 투입될 개발자는 6번 보고서를 읽은 뒤 5번 소스 분석으로 들어가는 편이 좋다.
+초기 runtime 이해가 목적이면 4번 비교 문서와 7번 비기술 보고서를 먼저 본다. 현재
+release 의사결정은 12번 공정 보고서에서 시작하고, runtime 채택 근거가 필요할 때 11번
+parity review로 내려간다.
