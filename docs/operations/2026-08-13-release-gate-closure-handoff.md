@@ -150,17 +150,15 @@ flock prove-broken은 daemon authorship guard가 실제로 roster 밖 author를 
 
 ## Blockers
 
-1. 다음 anvil version이 확정되지 않음. 현 정책은 upstream ephemera version 정렬이고
-   upstream latest는 여전히 `v0.7.0`이다.
-2. `allow_hosts`는 “다음 tagged anvil release에서 제거” 계약이지만 제거 lifecycle이
-   아직 실행되지 않음.
-3. deployment host credential/key/permission remediation이 완료되지 않음.
-4. npm audit High 2건과 production Moderate 2건의 release disposition이 없음.
+1. 다음 anvil version은 post-`v0.7.0` upstream tag가 없어 의도적으로 미할당이다.
+2. deployment host credential/key/permission remediation은 인증·도달 경로 부재로
+   완료되지 않았다.
 
 ## Warnings
 
-- `main` branch protection/required review가 없음.
-- CI가 Web check/build/audit와 secret scan을 강제하지 않음.
+- strict `main` branch protection은 최종 bootstrap 증적 직후 외부 설정으로 적용한다.
+- owner가 한 명뿐이므로 approval 1/admin enforcement 적용 뒤 두 번째 eligible reviewer가
+  추가될 때까지 새 PR merge가 차단된다.
 - PR #109 merge 당시 actionable documentation review comment 2개가 미해결이었다.
 - `CONTEXT.md` 마지막 문장 절단, `RELEASE_NOTES.md` release workflow 이력 drift,
   Svelte migration spec의 끊어진 ADR 링크가 남아 있다.
@@ -199,21 +197,18 @@ full lifecycle/TDD로 수정·검증했다.
 
 ## Current Lifecycle Stage
 
-local `code-review`와 code-bearing exact SHA remote CI가 완료됐다. version, deprecated
-contract, security operations와 dependency blocker가 남아 있어 `release` 또는 `operate`에
-진입하지 않았다.
+후속 PR #111에서 deprecated contract 제거, dependency/CI 보강, cleanup failure-path 수정이
+`main`에 병합됐고 merge commit CI까지 통과했다. host와 upstream version input blocker가
+남아 있어 public `release` 또는 `operate`에는 진입하지 않았다.
 
 ## Next Action
 
-1. draft PR #110에서 human review를 받고 Important finding을 처리
-2. merge 권한이 확인되면 PR을 ready 상태로 전환해 병합
-3. 아래 Follow-Up blocker가 남아 있으므로 merge와 별개로 tag는 생성하지 않음
+1. strict `main` protection을 적용하고 read-back
+2. host와 upstream version input blocker가 남아 있으므로 tag는 생성하지 않음
 
 ## Follow-Up Tasks
 
-1. `allow_hosts` 제거를 별도 full lifecycle/TDD로 수행
-2. upstream/version 정책 근거가 생긴 뒤 다음 anvil version 확정
-3. deployment host security operations 종료
-4. npm audit disposition 및 Web/secret CI 편입
-5. branch protection/required review 설정
-6. PR #109 documentation comment와 canonical document drift 정리
+1. upstream에 post-`v0.7.0` tag가 생긴 뒤 다음 anvil version 확정
+2. deployment host security operations 종료
+3. branch protection/required review 설정
+4. 두 번째 eligible reviewer 추가
