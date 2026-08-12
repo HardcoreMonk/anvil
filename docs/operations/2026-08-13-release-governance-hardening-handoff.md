@@ -5,6 +5,8 @@
 - 날짜: 2026-08-13
 - topic: `release-governance-hardening`
 - branch: `agent/next-release-gates`
+- PR: [#111](https://github.com/HardcoreMonk/anvil/pull/111)
+- code-bearing commit: `0aec994089459a64d7bf9e8584f59f4bf6243e4e`
 - 설계:
   [`2026-08-13-release-governance-hardening-design.md`](../superpowers/specs/2026-08-13-release-governance-hardening-design.md)
 - 계획:
@@ -50,7 +52,10 @@ patched graph:
 - Go full/race/named builds/vet/gofmt/govulncheck: 통과
 - Markdown relative links 155건, `git diff --check`: PASS
 
-remote exact-SHA 결과와 branch-protection read-back은 PR/merge 후 이 문서에 추가한다.
+PR #111 code-bearing exact SHA의 `build-and-test`, `web-and-security`, `secret-scan`은 모두
+green이다. CodeRabbit status는 service review-rate-limit으로 pass됐지만 실제 review는
+수행되지 않았다. 이를 approval로 세지 않았고 manual actual-diff review에서 blocking
+finding은 없었다. branch-protection read-back은 merge 후 추가한다.
 
 ## Audit
 
@@ -65,7 +70,7 @@ remote exact-SHA 결과와 branch-protection read-back은 PR/merge 후 이 문�
 
 1. next public version number는 post-`v0.7.0` upstream tag 부재로 미할당이다.
 2. deployment host A1/A2는 인증/도달 경로 부재로 미완료다.
-3. 통합 PR CI/review/merge와 merge 후 branch protection 적용이 남았다.
+3. PR #111 merge와 merge 후 branch protection 적용이 남았다.
 
 ## Warnings
 
@@ -82,12 +87,12 @@ remote exact-SHA 결과와 branch-protection read-back은 PR/merge 후 이 문�
 
 ## Current Lifecycle Stage
 
-local implement/verification/code review 완료. PR exact-SHA 검증과 external protection이
-남아 있어 `operate` 미진입이다.
+local implement/verification/code review와 code-bearing exact-SHA remote CI 완료. PR merge와
+external protection이 남아 있어 `operate` 미진입이다.
 
 ## Next Action
 
-통합 PR을 생성하고 CI/CodeRabbit review를 처리해 병합한 뒤 branch protection을 적용한다.
+PR #111 final head CI를 확인해 병합한 뒤 branch protection을 적용한다.
 
 ## Follow-Up Tasks
 
@@ -95,4 +100,3 @@ local implement/verification/code review 완료. PR exact-SHA 검증과 external
 2. `main` protection 적용/read-back
 3. 두 번째 eligible reviewer 추가
 4. host A1/A2와 upstream version input 전 tag 금지
-

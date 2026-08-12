@@ -5,6 +5,8 @@
 - 날짜: 2026-08-13
 - topic: `vm-deletion-failure-cleanup`
 - branch: `agent/next-release-gates`
+- PR: [#111](https://github.com/HardcoreMonk/anvil/pull/111)
+- code-bearing commit: `0aec994089459a64d7bf9e8584f59f4bf6243e4e`
 - trigger: merged PR #110에 대한 CodeRabbit 사후 Major review
 - 설계:
   [`2026-08-13-vm-deletion-failure-cleanup-design.md`](../superpowers/specs/2026-08-13-vm-deletion-failure-cleanup-design.md)
@@ -67,6 +69,7 @@ E2E가 남긴 root-owned Town Wall log 8개와 0-byte rootfs placeholder 7개는
 - Go full/race/named builds/vet/module verify/gofmt: 통과
 - govulncheck reachable 0, tracked secret scan PASS
 - full KVM E2E: 통과
+- PR #111 exact code-bearing SHA Go/Web/secret CI: 통과
 - `git diff --check`: 통과
 
 ## Audit
@@ -79,7 +82,7 @@ E2E가 남긴 root-owned Town Wall log 8개와 0-byte rootfs placeholder 7개는
 
 ## Blockers
 
-- 통합 PR exact-SHA CI와 merge가 남아 있다.
+- PR #111 merge가 남아 있다.
 - 실제 kernel이 resource를 계속 busy로 유지하면 후속 detach도 실패할 수 있다. 이 경우
   error와 metric이 남으며 release gate는 host inventory clean 전까지 열려 있다.
 - deployment host security operations가 미완료다.
@@ -96,16 +99,15 @@ E2E가 남긴 root-owned Town Wall log 8개와 0-byte rootfs placeholder 7개는
 
 ## Current Lifecycle Stage
 
-implement, local verification, code review, release handoff 완료. remote PR 검증 전이므로
-`operate` 미진입이다.
+implement, local/KVM verification, code review, exact code-bearing SHA remote CI, release
+handoff 완료. PR merge 전이므로 `operate` 미진입이다.
 
 ## Next Action
 
-통합 PR에서 exact-SHA CI와 review를 받고 병합한다.
+PR #111 final head CI를 확인하고 병합한다.
 
 ## Follow-Up Tasks
 
 1. branch exact-SHA CI/CodeRabbit review
 2. 배포 전 host resource inventory 재확인
 3. host/security/version blockers 전 tag 금지
-
