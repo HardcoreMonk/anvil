@@ -148,26 +148,22 @@ policy를 VM/snapshot/restore metadata에 보존하고, host-local network rule 
 - `deny_all`: guest IP 기준 `iptables FORWARD` reject rule을 적용한다.
 - `profile`: `configs/profiles/{profile}/egress.json`,
   `EPHEMERA_EGRESS_PROFILE_DIR`, `ANVIL_EGRESS_PROFILE_DIR` 아래의 profile별
-  `egress.json`이 있으면 allow CIDR, allow host string match, `allow_sni`
-  transparent SNI 필터(아래), DNS server allowlist와 default reject rule을
-  적용한다.
+  `egress.json`이 있으면 allow CIDR, `allow_sni` transparent SNI 필터(아래), DNS
+  server allowlist와 default reject rule을 적용한다.
 - `allow_all`: 기존 NAT outbound 동작을 유지한다.
 
 `egress.json`은 secret 저장소가 아니다. provider API key, Bearer token, 내부
-credential을 넣지 않는다. `allow_hosts` rule은 **legacy/deprecated**다 —
-packet string match(`-m string --algo bm`) 기반의 coarse host allowlist이며,
-TLS ClientHello가 여러 TCP 세그먼트로 쪼개지면 매치가 실패하고 SNI가 아닌
-위치의 같은 문자열에도 우연히 매치한다. 신규 profile은 `allow_sni`를 쓴다.
-`allow_sni`가 없고 `allow_hosts`만 있는 기존 profile은 무변경 동작을
-유지한다(하위호환). policy 파일이 없는 `profile`은 기존 profile 호환성을
-위해 no-op이다.
+credential을 넣지 않는다. packet string match(`-m string --algo bm`) 기반이던
+`allow_hosts` rule은 제거됐다. 잔존 key는 값이 empty/`null`이어도 profile load를
+실패시키며 값은 error에 반복하지 않는다. domain은 `allow_sni`, 고정 IP/CIDR은
+`allow_cidrs`로 옮기고 key를 삭제한다. policy 파일이 없는 `profile`은 기존 profile
+호환성을 위해 no-op이다.
 
 ### `allow_sni` — transparent SNI 필터 (ADR-0002)
 
 `allow_sni []string`은 실제 파싱된 TLS ClientHello의 `server_name`
-extension을 :443 새 TCP 흐름 단위로 강제하는 신규·additive 필드다(기존
-`allow_hosts`의 재해석이 아니며, `allow_cidrs`/`dns_servers`와 병렬로
-동작한다). exact match가 기본이고 `*.example.com` 형태로 leading label
+extension을 :443 새 TCP 흐름 단위로 강제하며 `allow_cidrs`/`dns_servers`와 병렬로
+동작한다. exact match가 기본이고 `*.example.com` 형태로 leading label
 wildcard(한 개 이상 라벨)를 지원한다 — 임의 위치 glob은 비지원.
 
 **메커니즘**: :443 새 흐름의 ClientHello 세그먼트가

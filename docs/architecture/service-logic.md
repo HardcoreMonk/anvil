@@ -264,10 +264,11 @@ Runtime audit record는 symlink path append를 거부하고 `0600`으로 저장�
 - `deny_all`: VM guest IP 기준 default reject rule을 적용한다.
 - `profile`: `configs/profiles/{profile}/egress.json`,
   `EPHEMERA_EGRESS_PROFILE_DIR`, `ANVIL_EGRESS_PROFILE_DIR` 아래의 profile별
-  `egress.json`을 읽고 allow CIDR, allow host string match(legacy `allow_hosts`,
-  substring 기반 deprecated), `allow_sni`(파싱된 ClientHello SNI 기반 default-deny
-  `:443` 필터 — ADR-0002), DNS server allowlist와 default reject rule을 적용한다.
-  policy 파일이 없으면 no-op이다.
+  `egress.json`을 읽고 allow CIDR, `allow_sni`(파싱된 ClientHello SNI 기반
+  default-deny `:443` 필터 — ADR-0002), DNS server allowlist와 default reject rule을
+  적용한다. 제거된 `allow_hosts` key가 있으면 값이 empty/`null`이어도 decode 단계에서
+  `allow_sni`/`allow_cidrs` migration error로 loud fail-closed 거부한다. 다른 unknown
+  metadata의 기존 ignore 동작은 유지한다. policy 파일이 없으면 no-op이다.
 - `allow_all`: 기존 NAT outbound 동작을 유지한다.
 
 선택된 policy는 VM/snapshot/restore metadata에 보존된다. host rule cleanup은

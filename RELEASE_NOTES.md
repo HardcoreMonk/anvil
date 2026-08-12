@@ -10,8 +10,9 @@ preflight, [ADR-0002](docs/adr/0002-egress-sni-transparent-filter.md))·
 **UDP:443(QUIC/HTTP3) SNI 필터 확장**(같은 ADR-0002, 신규 패키지
 `internal/network/quic`로 QUIC Initial을 자체 복호해 같은 `allow_sni` 매처를
 UDP에도 적용, post-quantum multi-datagram ClientHello 재조립, 신규 direct 의존
-`golang.org/x/crypto`)·`allow_hosts` deprecation cycle 확정(런타임 경고, 다음
-tagged 릴리즈에서 제거)·egress ECH 관측 metric(`ephemera_egress_sni_ech_observed_total`)·
+`golang.org/x/crypto`)·`allow_hosts` deprecation cycle 완료(2026-08-13 제거,
+잔존 key는 값이 비어 있어도 `allow_sni`/`allow_cidrs` migration error로 loud
+fail-closed 거부)·egress ECH 관측 metric(`ephemera_egress_sni_ech_observed_total`)·
 scheduler aggregate quota metric(`anvil_scheduler_quota_*`)·CI gofmt gate(빌드
 전 `gofmt -l .` 검사)·**보안 하드닝 시리즈**(host-local 파일 권한, listener pre-auth
 한계, adapter/gateway 입력 검증, Town Wall 레코드 무결성, supply chain·release
@@ -21,7 +22,10 @@ workflow, pinned artifact 검증 — PR #91~#99, 아래 「보안/운영 강화�
 KVM/Firecracker resume-race로 확정 → 2026-07-13 **종결**(default plain 유지·COW
 opt-in, fc v1.16.1이 실패율 100%→~15–25%로 최대 완화) — `docs/ADR_INDEX.md` v0.4.2 행
 참조.) anvil 버전은 이제
-upstream ephemera 버전을 따른다. 이 릴리즈는 아래 `anvil-v0.4.0` 절의 parity
+upstream ephemera 버전을 따른다. 다음 public version은 upstream의 첫 post-`v0.7.0`
+정식 tag를 `anvil-<upstream-tag>`로 정확히 변환하며 downstream-only 번호를 만들지
+않는다. 2026-08-13 현재 upstream latest/main이 `v0.7.0`이므로 다음 번호는 미할당
+release blocker다. 이 릴리즈는 아래 `anvil-v0.4.0` 절의 parity
 편입(`v0.4.0`-`v0.7.0`)에 더해, `anvil-v0.4.0`(`de82481`) 이후 main에 반영된
 post-release backlog batch(PR #18 merge `726cbdc`)와 open-gate closure(step 59
 실 LLM e2e 343✓)를 포함한 가장 완전한 상태다. backlog·open-gate 항목은 모두 anvil
@@ -221,6 +225,14 @@ post-release backlog batch(PR #18 merge `726cbdc`)와 open-gate closure(step 59
 
 ## 유지보수
 
+- Web dependency graph의 `esbuild`, `postcss`, `nanoid`를 patched transitive release로
+  override해 `npm audit --audit-level=moderate` 0건으로 닫았다(2026-08-13). CI는 기존
+  Go `build-and-test`와 별도로 Node 22 `web-and-security`(clean install/check/build/audit)와
+  `secret-scan` tracked-tree gate를 실행한다.
+- explicit VM delete에서 `dmsetup remove --retry`가 실패해도 COW/base loop detach,
+  sparse `.cow` unlink와 TAP/IP release를 계속 시도하고 모든 error를 aggregate한다
+  (2026-08-13). forced failure unit test와 KVM 종료 후 resource-type별 inventory로
+  cleanup 불변 조건을 검증한다.
 - web `npm audit` 비파괴 findings 정리(`a0fc935`). non-breaking fix가 없는 remainder는
   breaking major 업그레이드(vite5→8, svelte4→5)뿐이라 별도 upgrade cycle로 defer한다.
 - `cmd/goose-daemon/config_api.go`를 surface별로 분할한다(`a01d8da`, #19, 순수 이동):

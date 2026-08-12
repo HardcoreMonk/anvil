@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bytes"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,7 +15,7 @@ func TestLoadEgressProfileAndPlanAllowlistCommands(t *testing.T) {
 	}
 	if err := os.WriteFile(filepath.Join(profileDir, "egress.json"), []byte(`{
   "allow_cidrs": ["203.0.113.10/32"],
-  "allow_hosts": ["api.anthropic.com"],
+  "allow_sni": ["api.anthropic.com"],
   "dns_servers": ["1.1.1.1"]
 }`), 0600); err != nil {
 		t.Fatalf("write egress profile: %v", err)
@@ -38,7 +36,7 @@ func TestLoadEgressProfileAndPlanAllowlistCommands(t *testing.T) {
 	for _, want := range []string{
 		"iptables -I FORWARD -s 10.0.1.10 -j REJECT -m comment --comment anvil-egress-vm-1-default",
 		"iptables -I FORWARD -s 10.0.1.10 -d 203.0.113.10/32 -j ACCEPT -m comment --comment anvil-egress-vm-1-cidr-0",
-		"iptables -I FORWARD -s 10.0.1.10 -m string --string api.anthropic.com --algo bm -j ACCEPT -m comment --comment anvil-egress-vm-1-host-0",
+		"iptables -I FORWARD -s 10.0.1.10 -p tcp --dport 443 -m connmark ! --mark 0x534e49 -j NFQUEUE --queue-num 88 -m comment --comment anvil-egress-vm-1-sni-nfqueue",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("commands missing %q:\n%s", want, joined)
@@ -209,53 +207,56 @@ func joinCommands(commands []egressCommand) string {
 	return strings.Join(lines, "\n")
 }
 
-func TestLoadEgressProfileWarnsOnDeprecatedAllowHosts(t *testing.T) {
+func TestLoadEgressProfileRejectsRemovedAllowHosts(t *testing.T) {
 	dir := t.TempDir()
-	pd := filepath.Join(dir, "legacy")
-	if err := os.MkdirAll(pd, 0700); err != nil {
-		t.Fatalf("mkdir profile dir: %v", err)
+	tests := map[string]string{
+		"non-empty":  `{"allow_hosts":["private-api.example.com"]}`,
+		"empty":      `{"allow_hosts":[]}`,
+		"null":       `{"allow_hosts":null}`,
+		"mixed-case": `{"ALLOW_HOSTS":["private-api.example.com"]}`,
 	}
-	if err := os.WriteFile(filepath.Join(pd, "egress.json"),
-		[]byte(`{"allow_hosts": ["api.anthropic.com"]}`), 0600); err != nil {
-		t.Fatalf("write egress profile: %v", err)
-	}
-	var buf bytes.Buffer
-	old := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	defer slog.SetDefault(old)
+	for name, body := range tests {
+		t.Run(name, func(t *testing.T) {
+			pd := filepath.Join(dir, name)
+			if err := os.MkdirAll(pd, 0700); err != nil {
+				t.Fatalf("mkdir profile dir: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(pd, "egress.json"), []byte(body), 0600); err != nil {
+				t.Fatalf("write egress profile: %v", err)
+			}
 
-	profile, ok, err := loadEgressProfile(dir, "legacy")
-	if err != nil || !ok {
-		t.Fatalf("loadEgressProfile ok=%v err=%v", ok, err)
-	}
-	// Behavior unchanged: allow_hosts is still parsed/applied.
-	if len(profile.AllowHosts) != 1 || profile.AllowHosts[0] != "api.anthropic.com" {
-		t.Fatalf("allow_hosts must still be parsed unchanged, got %+v", profile.AllowHosts)
-	}
-	if out := buf.String(); !strings.Contains(out, "deprecated allow_hosts") || !strings.Contains(out, "allow_sni") {
-		t.Fatalf("expected a deprecation warning naming the allow_sni migration, got: %q", out)
+			_, ok, err := loadEgressProfile(dir, name)
+			if err == nil || ok {
+				t.Fatalf("loadEgressProfile ok=%v err=%v, want loud removal error", ok, err)
+			}
+			for _, want := range []string{"allow_hosts", "allow_sni", "allow_cidrs"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("error %q missing migration field %q", err, want)
+				}
+			}
+			if strings.Contains(err.Error(), "private-api.example.com") {
+				t.Fatalf("error must not repeat removed field values: %q", err)
+			}
+		})
 	}
 }
 
-func TestLoadEgressProfileNoWarnWithoutAllowHosts(t *testing.T) {
+func TestLoadEgressProfileKeepsUnrelatedUnknownFieldCompatibility(t *testing.T) {
 	dir := t.TempDir()
-	pd := filepath.Join(dir, "sni")
+	pd := filepath.Join(dir, "metadata")
 	if err := os.MkdirAll(pd, 0700); err != nil {
 		t.Fatalf("mkdir profile dir: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(pd, "egress.json"),
-		[]byte(`{"allow_sni": ["api.anthropic.com"]}`), 0600); err != nil {
+		[]byte(`{"allow_sni":["api.anthropic.com"],"operator_note":"kept compatible"}`), 0600); err != nil {
 		t.Fatalf("write egress profile: %v", err)
 	}
-	var buf bytes.Buffer
-	old := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	defer slog.SetDefault(old)
 
-	if _, ok, err := loadEgressProfile(dir, "sni"); err != nil || !ok {
-		t.Fatalf("loadEgressProfile ok=%v err=%v", ok, err)
+	profile, ok, err := loadEgressProfile(dir, "metadata")
+	if err != nil || !ok {
+		t.Fatalf("loadEgressProfile ok=%v err=%v, want unrelated unknown field ignored", ok, err)
 	}
-	if strings.Contains(buf.String(), "deprecated allow_hosts") {
-		t.Fatalf("no allow_hosts warning expected for an allow_sni-only profile, got: %q", buf.String())
+	if len(profile.AllowSNI) != 1 || profile.AllowSNI[0] != "api.anthropic.com" {
+		t.Fatalf("AllowSNI = %#v", profile.AllowSNI)
 	}
 }

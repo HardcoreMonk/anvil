@@ -70,7 +70,9 @@ Web UI 사용법은 [`docs/guides/runtime-usage.md`](docs/guides/runtime-usage.m
   도메인 단위로 강제한다. TCP는 파싱된 TLS ClientHello SNI, QUIC/UDP:443은 자체 구현
   QUIC Initial 복호(HKDF+AES-128-GCM+header protection, QUICv1/v2)로 SNI를 추출해
   goose-daemon in-process NFQUEUE verdict 루프가 fail-closed로 판정한다(허용=conntrack
-  connmark 커널 fast-path, 비허용=DROP). CIDR allow가 SNI보다 상위 계약이다.
+  connmark 커널 fast-path, 비허용=DROP). CIDR allow가 SNI보다 상위 계약이다. 제거된
+  `allow_hosts` key는 값이 비어 있어도 profile load가 실패하며, 도메인은 `allow_sni`,
+  IP/CIDR은 `allow_cidrs`로 마이그레이션해야 한다.
 - **운영 표면** — Operator CLI `ephemera-ctl`, 브라우저 Web UI(`/ui/`, EN/KO),
   control-plane 인증(named token·per-token TTL·SIGHUP hot rotation), Prometheus
   `/metrics`, access audit log, end-user installer(`install.sh`/`uninstall.sh`).
@@ -135,6 +137,9 @@ rewrite 없음). ephemera runtime release tag는 `v*`, anvil product release tag
 [`CONTEXT.md`](CONTEXT.md)). 이후 main은 cross-host routed flock(공유 Town Wall·gtcall·
 home 재선출 failover), snapshot replication 자동화, egress SNI/L7 필터(TCP+QUIC)와 복구
 무결성 하드닝 등 untagged 작업(PR #19 이후)을 더 포함한다. 첫 공개 tag는 `anvil-v0.1.0`이다.
+다음 공개 version은 upstream의 첫 post-`v0.7.0` 정식 tag와 같은 번호만 사용한다
+(`vX.Y.Z` → `anvil-vX.Y.Z`). 2026-08-13 현재 새 upstream tag가 없어 다음 번호는
+미할당이며, downstream-only 번호나 추정 tag는 만들지 않는다.
 
 remote 설정과 upstream sync 절차 전체는
 [`docs/operations/upstream-sync-policy.md`](docs/operations/upstream-sync-policy.md)에 있다.
@@ -150,7 +155,7 @@ anvil main runtime baseline은 upstream ephemera `v0.7.0`까지를 병합·적�
 | 구분 | 현재 기준 | anvil에서의 의미 |
 |---|---|---|
 | ephemera runtime baseline | `v0.7.0` | Firecracker VM lifecycle, cold-restart, flock recovery, token rotation, `/metrics`, `/stats`, `slog`, in-VM `gtcall`, webdev demo, v0.4.0-v0.4.5 runtime 안정화(auth/audit, COW spawn, dynamic flock lifecycle, streaming task, nested depth guard, watchdog status, snapshot-restore auto-recovery), v0.5.0-v0.5.5 operator support(Web UI `/ui/`, `/config/*`, per-VM sizing `1` vCPU/`1024` MiB default), v0.6.0-v0.6.4 runtime MCP Gateway(`EPHEMERA_MCP_*`, anti-spoof/rate-limit/stdio backends), v0.7.0 end-user installer + conversation transcript restore 기반. upstream parity scope(v0.4.0-v0.7.0) 코드 편입 완료 |
-| upstream latest observed | `v0.7.0` (2026-07-02 확인) | 관찰 범위 전체 병합·적응 완료, pending sync 후보 없음 |
+| upstream latest observed | `v0.7.0` (2026-08-13 확인) | upstream main=`v0.7.0`; 관찰 범위 전체 병합·적응 완료, pending sync 후보 없음 |
 | anvil product surface | `anvil_*` MCP tool, scheduler, tenant/egress, workload runner | IronClaw가 직접 사용하는 공개 실행 계약 |
 | namespace policy | `EPHEMERA_*`, `goose-*`, `ephemera_*` 유지 | upstream runtime 호환성. anvil 이름으로 일괄 rename하지 않는다. |
 
@@ -165,6 +170,7 @@ anvil control plane은 named token 인증에 per-token TTL과 SIGHUP hot rotatio
 Prometheus `/metrics`와 access audit log로 운영 가시성을 남긴다. guest egress는 profile
 `allow_sni`로 :443을 도메인 단위 fail-closed로 강제한다(TCP ClientHello + QUIC Initial 자체
 복호, [`docs/adr/0002-egress-sni-transparent-filter.md`](docs/adr/0002-egress-sni-transparent-filter.md)).
+legacy packet-substring `allow_hosts`는 제거됐고 잔존 key는 loud fail-closed로 거부된다.
 보안 모델, 알려진 제약, Resilience·Observability 전체는
 [`docs/guides/security-and-resilience.md`](docs/guides/security-and-resilience.md)에 있다.
 공개 노출, 제어 평면 token, guest agent token, snapshot metadata 반출 정책은
