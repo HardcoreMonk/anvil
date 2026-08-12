@@ -6,6 +6,8 @@
 - topic: `release-gate-closure`
 - branch: `agent/release-gate-closure`
 - 기준 parent: `main@3033cddac5a6764c5d1cb12221e3a2d88b1928db`
+- draft PR: [#110](https://github.com/HardcoreMonk/anvil/pull/110)
+- code-bearing commit: `576165429b1ecee8b25697b103b533e452a9cb98`
 - 설계:
   [`2026-08-13-release-gate-closure-design.md`](../superpowers/specs/2026-08-13-release-gate-closure-design.md)
 - 계획:
@@ -110,7 +112,13 @@ flock prove-broken은 daemon authorship guard가 실제로 roster 밖 author를 
 
 - GitHub CLI auth: 확인됨(`repo`, `workflow` scope)
 - PR #109 과거 실패 원인: hosted runner 통신/할당 실패, code failure 아님
-- 변경 exact SHA CI: **pending — branch commit/push와 draft PR 후 이 절 갱신**
+- PR #110 code-bearing exact SHA: `576165429b1ecee8b25697b103b533e452a9cb98`
+- GitHub Actions:
+  [run 31624693889](https://github.com/HardcoreMonk/anvil/actions/runs/31624693889)
+- 결과: Gofmt, Build, Vet, Test, Govulncheck 전부 통과
+- 이 handoff 증적 추가는 documentation-only 후속 commit이다. 자기 commit SHA를 문서에
+  재귀적으로 고정할 수 없으므로 PR #110의 latest head check를 최종 exact-SHA canonical
+  external evidence로 사용한다. merge/release 전 latest check가 green이어야 한다.
 
 ## Audit
 
@@ -130,13 +138,12 @@ flock prove-broken은 daemon authorship guard가 실제로 roster 밖 author를 
 
 ## Blockers
 
-1. 변경 exact SHA의 GitHub Actions 결과가 아직 없음.
-2. 다음 anvil version이 확정되지 않음. 현 정책은 upstream ephemera version 정렬이고
+1. 다음 anvil version이 확정되지 않음. 현 정책은 upstream ephemera version 정렬이고
    upstream latest는 여전히 `v0.7.0`이다.
-3. `allow_hosts`는 “다음 tagged anvil release에서 제거” 계약이지만 제거 lifecycle이
+2. `allow_hosts`는 “다음 tagged anvil release에서 제거” 계약이지만 제거 lifecycle이
    아직 실행되지 않음.
-4. deployment host credential/key/permission remediation이 완료되지 않음.
-5. npm audit High 2건과 production Moderate 2건의 release disposition이 없음.
+3. deployment host credential/key/permission remediation이 완료되지 않음.
+4. npm audit High 2건과 production Moderate 2건의 release disposition이 없음.
 
 ## Warnings
 
@@ -174,16 +181,15 @@ adequacy 관점에서 검토했다.
 
 ## Current Lifecycle Stage
 
-local `code-review` 완료. exact SHA remote CI와 release blocker가 남아 있어 `release` 또는
-`operate`에 진입하지 않았다.
+local `code-review`와 code-bearing exact SHA remote CI가 완료됐다. version, deprecated
+contract, security operations와 dependency blocker가 남아 있어 `release` 또는 `operate`에
+진입하지 않았다.
 
 ## Next Action
 
-1. actual diff code review
-2. `agent/release-gate-closure` commit/push
-3. draft PR exact SHA GitHub CI 확인
-4. CI 결과와 최종 SHA를 이 handoff에 기록
-5. blocker가 남아 있으므로 tag는 생성하지 않음
+1. 이 documentation-only handoff update를 push하고 PR #110 latest head CI green 확인
+2. PR review에서 Important finding이 없을 때 merge 가능 상태로 전환
+3. blocker가 남아 있으므로 merge와 별개로 tag는 생성하지 않음
 
 ## Follow-Up Tasks
 
