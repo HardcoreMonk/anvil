@@ -7,6 +7,8 @@
 - branch: `agent/next-release-gates`
 - PR: [#111](https://github.com/HardcoreMonk/anvil/pull/111)
 - code-bearing commit: `0aec994089459a64d7bf9e8584f59f4bf6243e4e`
+- evidence commit: `72f721331274101f2ea276f84caebe62f5c147ae`
+- merge commit: `60ce239ce68555a419994f37c431dcb377825e1f`
 - 설계:
   [`2026-08-13-release-governance-hardening-design.md`](../superpowers/specs/2026-08-13-release-governance-hardening-design.md)
 - 계획:
@@ -52,10 +54,21 @@ patched graph:
 - Go full/race/named builds/vet/gofmt/govulncheck: 통과
 - Markdown relative links 155건, `git diff --check`: PASS
 
-PR #111 code-bearing exact SHA의 `build-and-test`, `web-and-security`, `secret-scan`은 모두
-green이다. CodeRabbit status는 service review-rate-limit으로 pass됐지만 실제 review는
-수행되지 않았다. 이를 approval로 세지 않았고 manual actual-diff review에서 blocking
-finding은 없었다. branch-protection read-back은 merge 후 추가한다.
+PR #111 final head `72f721331274101f2ea276f84caebe62f5c147ae`의
+`build-and-test`, `web-and-security`, `secret-scan`은 모두 green이다. CodeRabbit status는
+service review-rate-limit으로 pass됐지만 실제 review는 수행되지 않았다. 이를 approval로
+세지 않았고 manual actual-diff review에서 blocking/Important finding은 없었다. PR은 merge
+commit `60ce239ce68555a419994f37c431dcb377825e1f`로 병합됐다.
+
+merge commit의 GitHub Actions run `31630049807`에서도 다음 세 job이 모두 통과했다.
+
+- `build-and-test`
+- `web-and-security`
+- `secret-scan`
+
+이 문서 갱신은 관리자까지 강제하는 보호 규칙을 활성화하기 직전의 마지막 bootstrap
+commit이다. 최종 외부 설정의 진실 기준은 이 commit 직후 수행하는 GitHub branch
+protection API read-back이다.
 
 ## Audit
 
@@ -70,7 +83,7 @@ finding은 없었다. branch-protection read-back은 merge 후 추가한다.
 
 1. next public version number는 post-`v0.7.0` upstream tag 부재로 미할당이다.
 2. deployment host A1/A2는 인증/도달 경로 부재로 미완료다.
-3. PR #111 merge와 merge 후 branch protection 적용이 남았다.
+3. strict branch protection 적용과 read-back이 남았다.
 
 ## Warnings
 
@@ -87,16 +100,17 @@ finding은 없었다. branch-protection read-back은 merge 후 추가한다.
 
 ## Current Lifecycle Stage
 
-local implement/verification/code review와 code-bearing exact-SHA remote CI 완료. PR merge와
-external protection이 남아 있어 `operate` 미진입이다.
+implement/verification/code review, exact-SHA remote CI, PR merge, merge-commit CI가
+완료됐다. external protection 적용 직전이며 host/version blocker 때문에 public release
+`operate`에는 진입하지 않았다.
 
 ## Next Action
 
-PR #111 final head CI를 확인해 병합한 뒤 branch protection을 적용한다.
+이 bootstrap 문서를 병합한 뒤 `main`에 strict status check, approval 1,
+conversation-resolution, admin enforcement를 적용하고 API로 read-back한다.
 
 ## Follow-Up Tasks
 
-1. exact-SHA remote CI와 review/merge
-2. `main` protection 적용/read-back
-3. 두 번째 eligible reviewer 추가
-4. host A1/A2와 upstream version input 전 tag 금지
+1. `main` protection 적용/read-back
+2. 두 번째 eligible reviewer 추가
+3. host A1/A2와 upstream version input 전 tag 금지

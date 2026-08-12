@@ -529,10 +529,10 @@ tag authorization:  hold
 | PR #110 review/merge | 완료 | exact head `c394f7d...`의 Go CI green, unresolved thread 0에서 merge commit `794d0ae...`로 `main` 병합. CodeRabbit 완료 리뷰는 merge 직후 회수 |
 | strict secret gate | 완료 | tracked tree PASS, scanner allowlist/regex 완화 없음 |
 | KVM release-candidate gate | 완료 | full E2E `All test steps passed`, lifecycle/semantic/flock smoke는 선행 handoff에서 통과 |
-| `allow_hosts` 제거 | 구현·local/remote 검증 완료, PR #111 merge 대기 | field/validation/iptables string matcher 제거, non-empty/empty/`null`/mixed-case key loud rejection, unrelated unknown metadata 호환 |
-| VM 삭제 실패 cleanup | 구현·local/remote 검증 완료, PR #111 merge 대기 | CodeRabbit 사후 Major finding. forced dm failure 뒤 양 loop/store/TAP-IP cleanup continuation test, KVM resource inventory clean |
+| `allow_hosts` 제거 | 완료·`main` 병합 | field/validation/iptables string matcher 제거, non-empty/empty/`null`/mixed-case key loud rejection, unrelated unknown metadata 호환 |
+| VM 삭제 실패 cleanup | 완료·`main` 병합 | CodeRabbit 사후 Major finding. forced dm failure 뒤 양 loop/store/TAP-IP cleanup continuation test, KVM resource inventory clean |
 | npm audit | 폐쇄 | High 2/Moderate 2 → 0, clean install/check/build 통과 |
-| Web/secret CI | 구현 완료, PR 대기 | `web-and-security`, `secret-scan` 독립 job, `contents: read` |
+| Web/secret CI | 완료·`main` 강제 표면 편입 | `web-and-security`, `secret-scan` 독립 job, `contents: read`, merge commit CI green |
 | version policy | 결정 규칙 확정 | upstream 첫 post-`v0.7.0` tag `vX.Y.Z` → `anvil-vX.Y.Z`; downstream-only 번호 금지 |
 
 ### 14.2 PR #110 사후 review disposition
@@ -554,17 +554,20 @@ CodeRabbit가 merge 완료 직후 4개 actionable comment를 게시했다.
    password rotation, key rollout, permission remediation을 실행할 인증 경로가 없다.
 2. **Next version number:** upstream latest/main이 계속 `v0.7.0`이라 결정 규칙의 입력이
    없다. 번호는 의도적으로 미할당이다.
-3. **Remote integration:** PR #111 code-bearing SHA의 Go/Web/secret CI는 green이다.
-   CodeRabbit는 rate limit로 실제 review를 수행하지 못했으며 PR merge가 남았다.
-4. **Branch protection:** 새 CI context가 `main`에 병합된 뒤 적용해야 한다. collaborator가
-   owner 1명뿐이라 admin-enforced approval 1 설정 후 두 번째 reviewer가 필요하다.
+3. **Remote integration:** PR #111은 merge commit `60ce239ce68555a419994f37c431dcb377825e1f`로
+   병합됐다. 해당 merge commit의 CI run `31630049807`에서 Go/Web/secret 3개 job이
+   모두 green이다. CodeRabbit는 rate limit로 실제 review를 수행하지 못해 approval로
+   세지 않았고 별도 manual actual-diff review에서 blocking/Important finding은 없었다.
+4. **Branch protection bootstrap:** 이 최종 증적 commit 직후 strict status checks,
+   approval 1, conversation resolution, admin enforcement를 적용·read-back한다. collaborator가
+   owner 1명뿐이라 적용 후 두 번째 eligible reviewer가 추가될 때까지 새 PR merge는 차단된다.
 
 ### 14.4 갱신 판정
 
 ```text
 released baseline:     anvil-v0.7.0 = operate
-main after PR #110:    release-gate evidence merged
-next-gates branch:     code-review -> remote CI/merge
+main after PR #111:    implementation + release-gate CI merged
+governance bootstrap: protection apply/read-back pending
 host security gate:    blocked (access unavailable)
 next version number:   blocked (no post-v0.7.0 upstream tag)
 tag authorization:     hold

@@ -7,6 +7,7 @@
 - branch: `agent/next-release-gates`
 - PR: [#111](https://github.com/HardcoreMonk/anvil/pull/111)
 - code-bearing commit: `0aec994089459a64d7bf9e8584f59f4bf6243e4e`
+- merge commit: `60ce239ce68555a419994f37c431dcb377825e1f`
 - 설계:
   [`2026-08-13-allow-hosts-removal-design.md`](../superpowers/specs/2026-08-13-allow-hosts-removal-design.md)
 - 계획:
@@ -50,6 +51,7 @@ legacy apply contract가 실제로 살아 있음을 보였다.
 - `git diff --check`: PASS
 - full KVM `e2e_test.sh`: `All test steps passed`
 - PR #111 exact code-bearing SHA CI: Go/Web/secret 3 jobs green
+- `main` merge commit CI run `31630049807`: Go/Web/secret 3 jobs green
 
 ## Audit
 
@@ -62,7 +64,6 @@ legacy apply contract가 실제로 살아 있음을 보였다.
 
 ## Blockers
 
-- PR #111 merge가 아직 남아 있다.
 - 다음 public version number는 upstream post-`v0.7.0` tag 부재로 미할당이다.
 - deployment host credential/key/permission remediation이 외부 접근 부재로 미완료다.
 
@@ -79,15 +80,14 @@ legacy apply contract가 실제로 살아 있음을 보였다.
 
 ## Current Lifecycle Stage
 
-local implement, verification, code review, exact code-bearing SHA remote CI와 release
-handoff 작성이 끝났다. PR merge 전이므로 `operate`에는 진입하지 않았다.
+implement, verification, code review, exact code-bearing SHA remote CI와 `main` 병합이
+끝났다. public tag/deployment는 host/version blocker 때문에 `operate`에 진입하지 않았다.
 
 ## Next Action
 
-PR #111의 final head CI를 확인하고 병합한다.
+배포 전 외부 profile에서 제거된 key가 없는지 확인하고 host/version blocker를 해소한다.
 
 ## Follow-Up Tasks
 
 1. 외부 profile에서 `allow_hosts` key 제거 여부를 배포 전 확인
-2. 통합 PR review/merge
-3. host security blocker와 upstream-derived version blocker 해소 전 tag 금지
+2. host security blocker와 upstream-derived version blocker 해소 전 tag 금지
